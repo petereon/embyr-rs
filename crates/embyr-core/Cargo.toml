@@ -1,0 +1,16 @@
+[package]
+name = "embyr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# embyr-core is pure domain — NO IO crates allowed.
+# Enforced by deny.toml bans.
+[dependencies]
+embyr-proto.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true

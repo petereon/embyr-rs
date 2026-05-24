@@ -1,0 +1,48 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+
+# gRPC / protobuf
+tonic = "0.12"
+prost = "0.13"
+
+# HTTP framework
+axum = "0.7"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros", "migrate", "uuid", "chrono"] }
+
+# Crypto
+argon2 = "0.5"
+blake3 = "1"
+x25519-dalek = "2"
+hkdf = "0.12"
+aes-gcm = "0.10"
+
+# TLS
+rustls = "0.23"
+tokio-rustls = "0.26"
+
+# Utility
+lru = "0.12"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+config = "0.14"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Internal crates
+embyr-proto = { path = "crates/embyr-proto" }
+embyr-core = { path = "crates/embyr-core" }
