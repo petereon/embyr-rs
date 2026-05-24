@@ -641,13 +641,9 @@ dependencies = [
 name = "embyr-core"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "embyr-proto",
+ "async-trait",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
- "tracing",
- "uuid",
 ]
 
 [[package]]
