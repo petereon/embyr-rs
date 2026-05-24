@@ -1,0 +1,313 @@
+syntax = "proto3";
+
+package google.firestore.v1;
+
+import "google/firestore/v1/common.proto";
+import "google/firestore/v1/document.proto";
+import "google/firestore/v1/query.proto";
+import "google/firestore/v1/write.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+import "google/rpc/status.proto";
+
+option java_package = "com.google.firestore.v1";
+
+// Specification of the Firestore API.
+service Firestore {
+  // Gets a single document.
+  rpc GetDocument(GetDocumentRequest) returns (Document);
+
+  // Creates a new document.
+  rpc CreateDocument(CreateDocumentRequest) returns (Document);
+
+  // Updates or inserts a document.
+  rpc UpdateDocument(UpdateDocumentRequest) returns (Document);
+
+  // Deletes a document.
+  rpc DeleteDocument(DeleteDocumentRequest) returns (google.protobuf.Empty);
+
+  // Gets multiple documents.
+  rpc BatchGetDocuments(BatchGetDocumentsRequest) returns (stream BatchGetDocumentsResponse);
+
+  // Starts a new transaction.
+  rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
+
+  // Commits a transaction, while optionally updating documents.
+  rpc Commit(CommitRequest) returns (CommitResponse);
+
+  // Rolls back a transaction.
+  rpc Rollback(RollbackRequest) returns (google.protobuf.Empty);
+
+  // Runs a query.
+  rpc RunQuery(RunQueryRequest) returns (stream RunQueryResponse);
+
+  // Listens to changes. This method is only available via gRPC or WebChannel
+  // (not REST).
+  rpc Listen(stream ListenRequest) returns (stream ListenResponse);
+}
+
+// A request for [Firestore.GetDocument][google.firestore.v1.Firestore.GetDocument].
+message GetDocumentRequest {
+  // Required. The resource name of the Document to get. In the format:
+  // `projects/{project_id}/databases/{database_id}/documents/{document_path}`.
+  string name = 1;
+
+  // The fields to return. If not set, returns all fields.
+  DocumentMask mask = 2;
+
+  oneof consistency_selector {
+    // Reads the document in a transaction.
+    bytes transaction = 3;
+
+    // Reads the version of the document at the given time.
+    google.protobuf.Timestamp read_time = 5;
+  }
+}
+
+// A request for [Firestore.CreateDocument][google.firestore.v1.Firestore.CreateDocument].
+message CreateDocumentRequest {
+  // Required. The parent resource.
+  string parent = 1;
+
+  // Required. The collection ID, relative to `parent`, to list.
+  string collection_id = 2;
+
+  // The client-assigned document ID to use for this document.
+  string document_id = 3;
+
+  // Required. The document to create.
+  Document document = 4;
+
+  // The fields to return. If not set, returns all fields.
+  DocumentMask mask = 5;
+}
+
+// A request for [Firestore.UpdateDocument][google.firestore.v1.Firestore.UpdateDocument].
+message UpdateDocumentRequest {
+  // Required. The updated document.
+  Document document = 1;
+
+  // The fields to update.
+  DocumentMask update_mask = 2;
+
+  // The fields to return. If not set, returns all fields.
+  DocumentMask mask = 3;
+
+  // An optional precondition on the document.
+  Precondition current_document = 4;
+}
+
+// A request for [Firestore.DeleteDocument][google.firestore.v1.Firestore.DeleteDocument].
+message DeleteDocumentRequest {
+  // Required. The resource name of the Document to delete.
+  string name = 1;
+
+  // An optional precondition on the document.
+  Precondition current_document = 2;
+}
+
+// The request for [Firestore.BatchGetDocuments][google.firestore.v1.Firestore.BatchGetDocuments].
+message BatchGetDocumentsRequest {
+  // Required. The database name. In the format:
+  // `projects/{project_id}/databases/{database_id}`.
+  string database = 1;
+
+  // The names of the documents to retrieve. In the format:
+  // `projects/{project_id}/databases/{database_id}/documents/{document_path}`.
+  repeated string documents = 2;
+
+  // The fields to return. If not set, returns all fields.
+  DocumentMask mask = 3;
+
+  oneof consistency_selector {
+    // Reads documents in a transaction.
+    bytes transaction = 4;
+
+    // Starts a new transaction as part of the read.
+    TransactionOptions new_transaction = 5;
+
+    // Reads documents as they were at the given time.
+    google.protobuf.Timestamp read_time = 7;
+  }
+}
+
+// The streamed response for [Firestore.BatchGetDocuments][google.firestore.v1.Firestore.BatchGetDocuments].
+message BatchGetDocumentsResponse {
+  oneof result {
+    // A document that was requested.
+    Document found = 1;
+
+    // A document name that was requested but does not exist.
+    string missing = 2;
+  }
+
+  // The transaction that was started as part of this request.
+  bytes transaction = 3;
+
+  // The time at which the document was read.
+  google.protobuf.Timestamp read_time = 4;
+}
+
+// The request for [Firestore.RunQuery][google.firestore.v1.Firestore.RunQuery].
+message RunQueryRequest {
+  // Required. The parent resource name.
+  string parent = 1;
+
+  oneof query_type {
+    // A structured query.
+    StructuredQuery structured_query = 2;
+  }
+
+  oneof consistency_selector {
+    // Reads documents in a transaction.
+    bytes transaction = 5;
+
+    // Starts a new transaction as part of the query.
+    TransactionOptions new_transaction = 6;
+
+    // Reads documents as they were at the given time.
+    google.protobuf.Timestamp read_time = 7;
+  }
+}
+
+// The response for [Firestore.RunQuery][google.firestore.v1.Firestore.RunQuery].
+message RunQueryResponse {
+  // The transaction that was started as part of this request.
+  bytes transaction = 2;
+
+  // A query result, not set when reporting partial progress.
+  Document document = 1;
+
+  // The time at which the document was read.
+  google.protobuf.Timestamp read_time = 3;
+
+  // The number of results that have been skipped due to an offset between
+  // the last response and the current response.
+  int32 skipped_results = 4;
+
+  oneof continuation_selector {
+    // If true, there are no more results.
+    bool done = 6;
+  }
+}
+
+// A request for [Firestore.Listen][google.firestore.v1.Firestore.Listen]
+message ListenRequest {
+  // Required. The database name.
+  string database = 1;
+
+  oneof target_change {
+    // A target to add to this stream.
+    Target add_target = 2;
+
+    // The ID of a target to remove from this stream.
+    int32 remove_target = 3;
+  }
+
+  // Labels associated with this target change.
+  map<string, string> labels = 4;
+}
+
+// The response for [Firestore.Listen][google.firestore.v1.Firestore.Listen].
+message ListenResponse {
+  oneof response_type {
+    // Targets have changed.
+    TargetChange target_change = 2;
+
+    // A [Document][google.firestore.v1.Document] has changed.
+    DocumentChange document_change = 3;
+
+    // A [Document][google.firestore.v1.Document] has been deleted.
+    DocumentDelete document_delete = 4;
+
+    // A [Document][google.firestore.v1.Document] has been removed from a target.
+    DocumentRemove document_remove = 6;
+
+    // A filter to apply to the stream.
+    ExistenceFilter filter = 5;
+  }
+}
+
+// A target specified by a document name.
+message Target {
+  oneof target_type {
+    // A target specified by a query.
+    QueryTarget query = 2;
+
+    // A target specified by a set of document names.
+    DocumentsTarget documents = 3;
+  }
+
+  oneof resume_type {
+    // A resume token from a prior [TargetChange][google.firestore.v1.TargetChange] for an identical target.
+    bytes resume_token = 4;
+
+    // Start listening after a specific `read_time`.
+    google.protobuf.Timestamp read_time = 11;
+  }
+
+  // The target ID that identifies the target on the stream.
+  int32 target_id = 5;
+
+  // If the target should be removed once it is current and consistent.
+  bool once = 6;
+
+  // A target specified by a query.
+  message QueryTarget {
+    // The parent resource name.
+    string parent = 1;
+
+    oneof query_type {
+      // A structured query.
+      StructuredQuery structured_query = 2;
+    }
+  }
+
+  // A target specified by a set of documents.
+  message DocumentsTarget {
+    // The names of the documents to retrieve.
+    repeated string documents = 2;
+  }
+}
+
+// Targets being watched have changed.
+message TargetChange {
+  // The type of change.
+  TargetChangeType target_change_type = 1;
+
+  // The target IDs of targets that have changed.
+  repeated int32 target_ids = 2;
+
+  // The error that resulted in this change, if applicable.
+  google.rpc.Status cause = 3;
+
+  // A token that can be used to resume the stream for the given `target_ids`,
+  // or all targets if `target_ids` is empty.
+  bytes resume_token = 4;
+
+  // The consistent `read_time` for the given `target_ids` (omitted when the
+  // target_ids are not at a consistent snapshot).
+  google.protobuf.Timestamp read_time = 6;
+
+  // The type of change.
+  enum TargetChangeType {
+    NO_CHANGE = 0;
+    ADD = 1;
+    REMOVE = 2;
+    CURRENT = 3;
+    RESET = 4;
+  }
+}
+
+// A [Document][google.firestore.v1.Document] has changed.
+message DocumentChange {
+  // The new state of the [Document][google.firestore.v1.Document].
+  Document document = 1;
+
+  // A set of target IDs of targets that match this document.
+  repeated int32 target_ids = 5;
+
+  // A set of target IDs for targets that no longer match this document.
+  repeated int32 removed_target_ids = 6;
+}

@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package google.firestore.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option java_package = "com.google.firestore.v1";
+
+// A set of field paths on a document.
+message DocumentMask {
+  // The list of field paths in the mask.
+  repeated string field_paths = 1;
+}
+
+// A precondition on a document, used for conditional operations.
+message Precondition {
+  oneof condition_type {
+    // When set to `true`, the target document must exist.
+    bool exists = 1;
+
+    // When set, the target document must exist and have been last updated at
+    // that time.
+    google.protobuf.Timestamp update_time = 2;
+  }
+}
+
+// Options for a transaction that can be used to read and write documents.
+message TransactionOptions {
+  // The mode of the transaction.
+  oneof mode {
+    // The transaction can only be used for read operations.
+    ReadOnly read_only = 2;
+
+    // The transaction can be used for both read and write operations.
+    ReadWrite read_write = 3;
+  }
+
+  // Options for a transaction that can only be used to read documents.
+  message ReadOnly {
+    oneof consistency_selector {
+      // Reads documents at the given time.
+      google.protobuf.Timestamp read_time = 2;
+    }
+  }
+
+  // Options for a transaction that can be used to read and write documents.
+  message ReadWrite {
+    // An optional transaction to retry.
+    bytes retry_transaction = 1;
+  }
+}

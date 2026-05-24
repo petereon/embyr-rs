@@ -1,0 +1,252 @@
+syntax = "proto3";
+
+package embyr.agent.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+option java_package = "com.embyr.agent.v1";
+
+// StorageAgent provides document storage operations for the embyr agent layer.
+// This service defines its own message types that mirror Firestore semantics
+// to avoid cross-proto package dependencies.
+service StorageAgent {
+  // Gets a single document by name.
+  rpc GetDocument(GetDocumentRequest) returns (Document);
+
+  // Creates a new document.
+  rpc CreateDocument(CreateDocumentRequest) returns (Document);
+
+  // Updates or inserts a document.
+  rpc UpdateDocument(UpdateDocumentRequest) returns (Document);
+
+  // Deletes a document.
+  rpc DeleteDocument(DeleteDocumentRequest) returns (google.protobuf.Empty);
+
+  // Runs a query.
+  rpc RunQuery(RunQueryRequest) returns (stream RunQueryResponse);
+
+  // Starts a new transaction.
+  rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
+
+  // Commits a transaction.
+  rpc Commit(CommitRequest) returns (CommitResponse);
+
+  // Rolls back a transaction.
+  rpc Rollback(RollbackRequest) returns (google.protobuf.Empty);
+}
+
+// A document stored in the agent storage.
+message Document {
+  // The resource name of the document.
+  string name = 1;
+
+  // The document's fields.
+  map<string, Value> fields = 2;
+
+  // Output only. The time at which the document was created.
+  google.protobuf.Timestamp create_time = 3;
+
+  // Output only. The time at which the document was last changed.
+  google.protobuf.Timestamp update_time = 4;
+}
+
+// A message that can hold any of the supported value types.
+message Value {
+  oneof value_type {
+    // A null value.
+    NullValue null_value = 11;
+
+    // A boolean value.
+    bool boolean_value = 1;
+
+    // An integer value.
+    int64 integer_value = 2;
+
+    // A double value.
+    double double_value = 3;
+
+    // A timestamp value.
+    google.protobuf.Timestamp timestamp_value = 10;
+
+    // A string value.
+    string string_value = 17;
+
+    // A bytes value.
+    bytes bytes_value = 18;
+
+    // A reference to a document.
+    string reference_value = 5;
+
+    // An array value.
+    ArrayValue array_value = 9;
+
+    // A map value.
+    MapValue map_value = 6;
+  }
+}
+
+// A null value indicator.
+enum NullValue {
+  NULL_VALUE = 0;
+}
+
+// An array value.
+message ArrayValue {
+  repeated Value values = 1;
+}
+
+// A map value.
+message MapValue {
+  map<string, Value> fields = 1;
+}
+
+// A set of field paths on a document.
+message DocumentMask {
+  repeated string field_paths = 1;
+}
+
+// A precondition on a document.
+message Precondition {
+  oneof condition_type {
+    bool exists = 1;
+    google.protobuf.Timestamp update_time = 2;
+  }
+}
+
+// Options for a transaction.
+message TransactionOptions {
+  oneof mode {
+    ReadOnly read_only = 2;
+    ReadWrite read_write = 3;
+  }
+
+  message ReadOnly {
+    oneof consistency_selector {
+      google.protobuf.Timestamp read_time = 2;
+    }
+  }
+
+  message ReadWrite {
+    bytes retry_transaction = 1;
+  }
+}
+
+// The result of applying a write.
+message WriteResult {
+  google.protobuf.Timestamp update_time = 1;
+}
+
+// A request to get a document.
+message GetDocumentRequest {
+  // The resource name of the Document to get.
+  string name = 1;
+
+  // The fields to return. If not set, returns all fields.
+  DocumentMask mask = 2;
+
+  oneof consistency_selector {
+    bytes transaction = 3;
+    google.protobuf.Timestamp read_time = 5;
+  }
+}
+
+// A request to create a document.
+message CreateDocumentRequest {
+  string parent = 1;
+  string collection_id = 2;
+  string document_id = 3;
+  Document document = 4;
+  DocumentMask mask = 5;
+}
+
+// A request to update a document.
+message UpdateDocumentRequest {
+  Document document = 1;
+  DocumentMask update_mask = 2;
+  DocumentMask mask = 3;
+  Precondition current_document = 4;
+}
+
+// A request to delete a document.
+message DeleteDocumentRequest {
+  string name = 1;
+  Precondition current_document = 2;
+}
+
+// A request to run a query.
+message RunQueryRequest {
+  string parent = 1;
+
+  oneof query_type {
+    StructuredQuery structured_query = 2;
+  }
+
+  oneof consistency_selector {
+    bytes transaction = 5;
+    google.protobuf.Timestamp read_time = 7;
+  }
+}
+
+// A structured query.
+message StructuredQuery {
+  repeated CollectionSelector from = 2;
+
+  message CollectionSelector {
+    string collection_id = 2;
+    bool all_descendants = 3;
+  }
+}
+
+// The response to a RunQuery.
+message RunQueryResponse {
+  bytes transaction = 2;
+  Document document = 1;
+  google.protobuf.Timestamp read_time = 3;
+  int32 skipped_results = 4;
+
+  oneof continuation_selector {
+    bool done = 6;
+  }
+}
+
+// A request to begin a transaction.
+message BeginTransactionRequest {
+  string database = 1;
+  TransactionOptions options = 2;
+}
+
+// The response to BeginTransaction.
+message BeginTransactionResponse {
+  bytes transaction = 1;
+}
+
+// A write operation on a document.
+message Write {
+  oneof operation {
+    Document update = 1;
+    string delete = 2;
+  }
+  DocumentMask update_mask = 3;
+  Precondition current_document = 4;
+}
+
+// A request to commit a transaction.
+message CommitRequest {
+  string database = 1;
+  repeated Write writes = 2;
+  bytes transaction = 3;
+}
+
+// The response to Commit.
+message CommitResponse {
+  repeated WriteResult write_results = 1;
+  google.protobuf.Timestamp commit_time = 2;
+}
+
+// A request to roll back a transaction.
+message RollbackRequest {
+  string database = 1;
+  bytes transaction = 2;
+}

@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package google.firestore.v1;
+
+import "google/firestore/v1/common.proto";
+import "google/firestore/v1/document.proto";
+import "google/protobuf/timestamp.proto";
+
+option java_package = "com.google.firestore.v1";
+
+// A request for [Firestore.Commit][google.firestore.v1.Firestore.Commit].
+message CommitRequest {
+  // Required. The database name. In the format:
+  // `projects/{project_id}/databases/{database_id}`.
+  string database = 1;
+
+  // The writes to apply.
+  repeated Write writes = 2;
+
+  // If set, applies all writes in this transaction, and commits it.
+  bytes transaction = 3;
+}
+
+// The response for [Firestore.Commit][google.firestore.v1.Firestore.Commit].
+message CommitResponse {
+  // The result of applying the writes.
+  repeated WriteResult write_results = 1;
+
+  // The time at which the commit occurred.
+  google.protobuf.Timestamp commit_time = 2;
+}
+
+// A request for [Firestore.Rollback][google.firestore.v1.Firestore.Rollback].
+message RollbackRequest {
+  // Required. The database name. In the format:
+  // `projects/{project_id}/databases/{database_id}`.
+  string database = 1;
+
+  // Required. The transaction to roll back.
+  bytes transaction = 2;
+}
+
+// A request for [Firestore.BeginTransaction][google.firestore.v1.Firestore.BeginTransaction].
+message BeginTransactionRequest {
+  // Required. The database name. In the format:
+  // `projects/{project_id}/databases/{database_id}`.
+  string database = 1;
+
+  // The options for the transaction.
+  TransactionOptions options = 2;
+}
+
+// The response for [Firestore.BeginTransaction][google.firestore.v1.Firestore.BeginTransaction].
+message BeginTransactionResponse {
+  // The transaction that was started.
+  bytes transaction = 1;
+}

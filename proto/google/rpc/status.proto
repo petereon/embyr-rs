@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package google.rpc;
+
+option java_package = "com.google.rpc";
+option java_outer_classname = "StatusProto";
+
+// The `Status` type defines a logical error model that is suitable for
+// different programming environments, including REST APIs and RPC APIs.
+message Status {
+  // The status code, which should be an enum value of [google.rpc.Code][google.rpc.Code].
+  int32 code = 1;
+
+  // A developer-facing error message, which should be in English.
+  string message = 2;
+
+  // A list of messages that carry the error details.
+  // Using bytes to avoid google.protobuf.Any dependency.
+  repeated bytes details = 3;
+}

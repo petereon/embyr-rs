@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package google.protobuf;
+
+option java_package = "com.google.protobuf";
+option java_outer_classname = "WrappersProto";
+
+// Wrapper message for `double`.
+message DoubleValue {
+  double value = 1;
+}
+
+// Wrapper message for `float`.
+message FloatValue {
+  float value = 1;
+}
+
+// Wrapper message for `int64`.
+message Int64Value {
+  int64 value = 1;
+}
+
+// Wrapper message for `uint64`.
+message UInt64Value {
+  uint64 value = 1;
+}
+
+// Wrapper message for `int32`.
+message Int32Value {
+  int32 value = 1;
+}
+
+// Wrapper message for `uint32`.
+message UInt32Value {
+  uint32 value = 1;
+}
+
+// Wrapper message for `bool`.
+message BoolValue {
+  bool value = 1;
+}
+
+// Wrapper message for `string`.
+message StringValue {
+  string value = 1;
+}
+
+// Wrapper message for `bytes`.
+message BytesValue {
+  bytes value = 1;
+}
