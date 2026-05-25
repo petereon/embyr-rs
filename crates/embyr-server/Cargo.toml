@@ -53,6 +53,10 @@ path = "../../tests/acceptance/us_01_configure_sdk.rs"
 name = "us_02_write_document"
 path = "../../tests/acceptance/us_02_write_document.rs"
 
+[[test]]
+name = "us_03_read_document"
+path = "../../tests/acceptance/us_03_read_document.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
