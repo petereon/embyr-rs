@@ -3,6 +3,7 @@
 // Real-Time Delivery (BC-3).
 // NO IO crates (tokio, sqlx, tonic, axum) — enforced by deny.toml.
 
+pub mod auth;
 pub mod domain;
 pub mod error;
 pub mod storage;

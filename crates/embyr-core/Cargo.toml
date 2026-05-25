@@ -10,3 +10,10 @@ license.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+argon2 = { workspace = true, features = ["password-hash"] }
+blake3.workspace = true
+x25519-dalek = { workspace = true, features = ["static_secrets"] }
+hkdf.workspace = true
+aes-gcm = { workspace = true, features = ["aes"] }
+rand_core.workspace = true
+sha2.workspace = true
