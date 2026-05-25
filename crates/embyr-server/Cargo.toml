@@ -45,6 +45,10 @@ async-trait.workspace = true
 name = "walking_skeleton"
 path = "../../tests/acceptance/walking_skeleton.rs"
 
+[[test]]
+name = "us_01_configure_sdk"
+path = "../../tests/acceptance/us_01_configure_sdk.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
@@ -52,4 +56,5 @@ testcontainers.workspace = true
 testcontainers-modules.workspace = true
 sqlx.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

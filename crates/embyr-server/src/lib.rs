@@ -9,13 +9,15 @@ use std::sync::Arc;
 use adapters::{credential_cache::CredentialCache, system_db::SystemDb};
 use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
+use grpc::healthz::healthz_handler;
 
-/// Handle to an in-process test server bound on an ephemeral port.
+/// Handle to an in-process test server bound on ephemeral ports.
 ///
-/// Sending a message on the shutdown channel (via `Drop`) causes the
-/// tonic server to perform graceful shutdown.
+/// Holds both the gRPC and REST addresses.  Sending on the shutdown channel
+/// (via `Drop`) causes both servers to stop.
 pub struct TestServer {
     pub grpc_addr: std::net::SocketAddr,
+    pub rest_addr: std::net::SocketAddr,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -27,17 +29,22 @@ impl Drop for TestServer {
     }
 }
 
-/// Start an in-process tonic server on an ephemeral port.
+/// Start an in-process server exposing both gRPC (tonic) and REST (axum) on
+/// ephemeral ports.
 ///
-/// Binds a `TcpListener` on `:0`, hands it directly to tonic via
-/// `serve_with_incoming_shutdown` to avoid "address already in use" races,
-/// and returns a `TestServer` handle.  The server shuts down when the
-/// `TestServer` is dropped.
+/// Both servers share a single shutdown signal: dropping the returned
+/// `TestServer` sends a `()` on the oneshot channel, which the `tokio::select!`
+/// in the spawned task handles.
 pub async fn start_test_server(system_db: Arc<SystemDb>) -> TestServer {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind to ephemeral port");
-    let addr = listener.local_addr().expect("get local addr");
+        .expect("bind gRPC ephemeral port");
+    let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind REST ephemeral port");
+
+    let grpc_addr = grpc_listener.local_addr().expect("get gRPC local addr");
+    let rest_addr = rest_listener.local_addr().expect("get REST local addr");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -47,23 +54,32 @@ pub async fn start_test_server(system_db: Arc<SystemDb>) -> TestServer {
         credential_cache: cache,
     };
 
+    let rest_app = axum::Router::new()
+        .route("/healthz", axum::routing::get(healthz_handler));
+
     tokio::spawn(async move {
-        let incoming =
-            tokio_stream::wrappers::TcpListenerStream::new(listener);
-        tonic::transport::Server::builder()
+        let grpc_incoming =
+            tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
+
+        let grpc_fut = tonic::transport::Server::builder()
             .add_service(FirestoreServer::new(service))
-            .serve_with_incoming_shutdown(incoming, async {
-                let _ = shutdown_rx.await;
-            })
-            .await
-            .expect("tonic server error");
+            .serve_with_incoming(grpc_incoming);
+
+        let rest_fut = axum::serve(rest_listener, rest_app);
+
+        tokio::select! {
+            _ = grpc_fut => {},
+            _ = rest_fut => {},
+            _ = async { let _ = shutdown_rx.await; } => {},
+        }
     });
 
-    // Brief yield to let the server reach its accept loop before returning.
+    // Brief yield to let both servers reach their accept loops before returning.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     TestServer {
-        grpc_addr: addr,
+        grpc_addr,
+        rest_addr,
         shutdown_tx: Some(shutdown_tx),
     }
 }
