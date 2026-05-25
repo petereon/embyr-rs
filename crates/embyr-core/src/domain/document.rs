@@ -35,4 +35,6 @@ pub struct FirestoreDocument {
 pub struct WriteResult {
     /// (seconds, nanos) commit timestamp of the write.
     pub update_time: (i64, i32),
+    /// (seconds, nanos) creation timestamp — Some for create operations, None for updates.
+    pub create_time: Option<(i64, i32)>,
 }

@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use sqlx::PgPool;
 
+use chrono::{DateTime, TimeZone, Utc};
 use embyr_core::{
     domain::{
         document::{CollectionPath, DocumentPath, FirestoreDocument, WriteResult},
@@ -12,7 +13,7 @@ use embyr_core::{
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
-    storage::backend_adapter::{BackendAdapter, Write},
+    storage::backend_adapter::{BackendAdapter, Write, WritePrecondition},
 };
 
 /// Customer-DB backend adapter — one instance per customer database URL.
@@ -41,6 +42,18 @@ impl PostgresBackendAdapter {
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
     }
+}
+
+/// Convert (seconds, nanos) to `chrono::DateTime<Utc>`.
+fn to_datetime(seconds: i64, nanos: i32) -> DateTime<Utc> {
+    Utc.timestamp_opt(seconds, nanos as u32)
+        .single()
+        .expect("valid timestamp")
+}
+
+/// Convert `chrono::DateTime<Utc>` to (seconds, nanos).
+fn from_datetime(dt: DateTime<Utc>) -> (i64, i32) {
+    (dt.timestamp(), dt.timestamp_subsec_nanos() as i32)
 }
 
 #[async_trait]
@@ -113,27 +126,238 @@ impl BackendAdapter for PostgresBackendAdapter {
 
     async fn create_document(
         &self,
-        _path: &DocumentPath,
-        _fields: BTreeMap<String, FieldValue>,
+        path: &DocumentPath,
+        fields: BTreeMap<String, FieldValue>,
     ) -> Result<WriteResult, CoreError> {
-        todo!("step 03-01")
+        use sqlx::Row;
+
+        let fields_json = crate::encoding::field_value::fields_to_json(&fields);
+
+        let result = sqlx::query(
+            "INSERT INTO documents \
+             (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+             VALUES ($1, $2, $3, $4::jsonb, 1, NOW(), NOW()) \
+             RETURNING version, create_time, update_time",
+        )
+        .bind(path.project_id.as_str())
+        .bind(&path.collection_path)
+        .bind(&path.document_id)
+        .bind(&fields_json)
+        .fetch_one(&self.pool)
+        .await;
+
+        match result {
+            Ok(row) => {
+                let create_time: DateTime<Utc> = row
+                    .try_get("create_time")
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                let update_time: DateTime<Utc> = row
+                    .try_get("update_time")
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                Ok(WriteResult {
+                    update_time: from_datetime(update_time),
+                    create_time: Some(from_datetime(create_time)),
+                })
+            }
+            Err(sqlx::Error::Database(db_err))
+                if db_err.code().as_deref() == Some("23505") =>
+            {
+                Err(CoreError::AlreadyExists(path.document_id.clone()))
+            }
+            Err(e) => Err(CoreError::BackendUnavailable(e.to_string())),
+        }
     }
 
     async fn update_document(
         &self,
-        _path: &DocumentPath,
-        _fields: BTreeMap<String, FieldValue>,
-        _version: Option<i64>,
+        path: &DocumentPath,
+        fields: BTreeMap<String, FieldValue>,
+        precondition: Option<WritePrecondition>,
     ) -> Result<WriteResult, CoreError> {
-        todo!("step 03-01")
+        use sqlx::Row;
+
+        let fields_json = crate::encoding::field_value::fields_to_json(&fields);
+
+        match precondition {
+            None => {
+                // Upsert — insert or update regardless of existing state.
+                let row = sqlx::query(
+                    "INSERT INTO documents \
+                     (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+                     VALUES ($1, $2, $3, $4::jsonb, 1, NOW(), NOW()) \
+                     ON CONFLICT (project_id, collection_path, document_id) \
+                     DO UPDATE SET fields = EXCLUDED.fields, \
+                                   version = documents.version + 1, \
+                                   update_time = NOW(), \
+                                   deleted = false \
+                     RETURNING version, update_time",
+                )
+                .bind(path.project_id.as_str())
+                .bind(&path.collection_path)
+                .bind(&path.document_id)
+                .bind(&fields_json)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+                let update_time: DateTime<Utc> = row
+                    .try_get("update_time")
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                Ok(WriteResult { update_time: from_datetime(update_time), create_time: None })
+            }
+
+            Some(WritePrecondition::UpdateTime(s, n)) => {
+                // OCC: update only if update_time matches.
+                let precondition_dt = to_datetime(s, n);
+                let row_opt = sqlx::query(
+                    "UPDATE documents \
+                     SET fields = $4::jsonb, version = version + 1, \
+                         update_time = NOW(), deleted = false \
+                     WHERE project_id = $1 \
+                       AND collection_path = $2 \
+                       AND document_id = $3 \
+                       AND update_time = $5 \
+                       AND NOT deleted \
+                     RETURNING version, update_time",
+                )
+                .bind(path.project_id.as_str())
+                .bind(&path.collection_path)
+                .bind(&path.document_id)
+                .bind(&fields_json)
+                .bind(precondition_dt)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+                if let Some(row) = row_opt {
+                    let update_time: DateTime<Utc> = row
+                        .try_get("update_time")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                    return Ok(WriteResult {
+                        update_time: from_datetime(update_time),
+                        create_time: None,
+                    });
+                }
+
+                // 0 rows — determine if OCC conflict or missing doc.
+                let exists: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM documents \
+                     WHERE project_id = $1 \
+                       AND collection_path = $2 \
+                       AND document_id = $3 \
+                       AND NOT deleted",
+                )
+                .bind(path.project_id.as_str())
+                .bind(&path.collection_path)
+                .bind(&path.document_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+                if exists > 0 {
+                    Err(CoreError::OccConflict)
+                } else {
+                    Err(CoreError::DocumentNotFound(path.document_id.clone()))
+                }
+            }
+
+            Some(WritePrecondition::MustExist) => {
+                // Update only if document exists.
+                let row_opt = sqlx::query(
+                    "UPDATE documents \
+                     SET fields = $4::jsonb, version = version + 1, \
+                         update_time = NOW(), deleted = false \
+                     WHERE project_id = $1 \
+                       AND collection_path = $2 \
+                       AND document_id = $3 \
+                       AND NOT deleted \
+                     RETURNING version, update_time",
+                )
+                .bind(path.project_id.as_str())
+                .bind(&path.collection_path)
+                .bind(&path.document_id)
+                .bind(&fields_json)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+                match row_opt {
+                    Some(row) => {
+                        let update_time: DateTime<Utc> = row
+                            .try_get("update_time")
+                            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                        Ok(WriteResult {
+                            update_time: from_datetime(update_time),
+                            create_time: None,
+                        })
+                    }
+                    None => Err(CoreError::DocumentNotFound(path.document_id.clone())),
+                }
+            }
+
+            Some(WritePrecondition::MustNotExist) => {
+                // Same as create — insert, fail on conflict.
+                let result = sqlx::query(
+                    "INSERT INTO documents \
+                     (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+                     VALUES ($1, $2, $3, $4::jsonb, 1, NOW(), NOW()) \
+                     RETURNING version, update_time",
+                )
+                .bind(path.project_id.as_str())
+                .bind(&path.collection_path)
+                .bind(&path.document_id)
+                .bind(&fields_json)
+                .fetch_one(&self.pool)
+                .await;
+
+                match result {
+                    Ok(row) => {
+                        let update_time: DateTime<Utc> = row
+                            .try_get("update_time")
+                            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                        Ok(WriteResult {
+                            update_time: from_datetime(update_time),
+                            create_time: None,
+                        })
+                    }
+                    Err(sqlx::Error::Database(db_err))
+                        if db_err.code().as_deref() == Some("23505") =>
+                    {
+                        Err(CoreError::AlreadyExists(path.document_id.clone()))
+                    }
+                    Err(e) => Err(CoreError::BackendUnavailable(e.to_string())),
+                }
+            }
+        }
     }
 
     async fn delete_document(
         &self,
-        _path: &DocumentPath,
-        _version: Option<i64>,
+        path: &DocumentPath,
+        precondition: Option<WritePrecondition>,
     ) -> Result<(), CoreError> {
-        todo!("step 03-01")
+        let _ = precondition; // MustExist handled by checking rows returned
+
+        let rows_affected = sqlx::query(
+            "UPDATE documents \
+             SET deleted = true, version = version + 1, update_time = NOW() \
+             WHERE project_id = $1 \
+               AND collection_path = $2 \
+               AND document_id = $3 \
+               AND NOT deleted",
+        )
+        .bind(path.project_id.as_str())
+        .bind(&path.collection_path)
+        .bind(&path.document_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?
+        .rows_affected();
+
+        if rows_affected == 0 {
+            return Err(CoreError::DocumentNotFound(path.document_id.clone()));
+        }
+        Ok(())
     }
 
     async fn run_query(

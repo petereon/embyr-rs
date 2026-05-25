@@ -13,6 +13,17 @@ use crate::{
     error::CoreError,
 };
 
+/// Precondition for write operations, matching Firestore protocol semantics.
+#[derive(Debug, Clone)]
+pub enum WritePrecondition {
+    /// Document must exist (applies to updates/deletes).
+    MustExist,
+    /// Document must NOT exist (prevents overwrite).
+    MustNotExist,
+    /// Document's update_time must equal this value for OCC (seconds, nanos).
+    UpdateTime(i64, i32),
+}
+
 /// Field-level server-side transform to apply at commit time.
 #[derive(Debug, Clone)]
 pub enum FieldTransform {
@@ -60,13 +71,13 @@ pub trait BackendAdapter: Send + Sync {
         &self,
         path: &DocumentPath,
         fields: BTreeMap<String, FieldValue>,
-        version: Option<i64>,
+        precondition: Option<WritePrecondition>,
     ) -> Result<WriteResult, CoreError>;
 
     async fn delete_document(
         &self,
         path: &DocumentPath,
-        version: Option<i64>,
+        precondition: Option<WritePrecondition>,
     ) -> Result<(), CoreError>;
 
     async fn run_query(

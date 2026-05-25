@@ -7,6 +7,9 @@ pub enum CoreError {
     #[error("document not found: {0}")]
     DocumentNotFound(String),
 
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+
     #[error("optimistic concurrency conflict")]
     OccConflict,
 

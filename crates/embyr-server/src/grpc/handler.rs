@@ -1,17 +1,20 @@
 use std::sync::Arc;
 
+use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
 use embyr_core::{
     auth::{argon2, blake3, ecies},
     domain::project::CredentialCacheKey,
     error::CoreError,
+    storage::backend_adapter::WritePrecondition,
 };
 use embyr_proto::firestore::{
-    firestore_server::Firestore, BatchGetDocumentsRequest, BatchGetDocumentsResponse,
-    BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
-    CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest, ListenRequest,
-    ListenResponse, RollbackRequest, RunQueryRequest, RunQueryResponse, UpdateDocumentRequest,
+    firestore_server::Firestore, precondition::ConditionType, BatchGetDocumentsRequest,
+    BatchGetDocumentsResponse, BeginTransactionRequest, BeginTransactionResponse, CommitRequest,
+    CommitResponse, CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
+    ListenRequest, ListenResponse, RollbackRequest, RunQueryRequest, RunQueryResponse,
+    UpdateDocumentRequest,
 };
 
 use crate::{
@@ -20,7 +23,7 @@ use crate::{
         postgres_backend::PostgresBackendAdapter,
         system_db::SystemDb,
     },
-    encoding::firestore_proto::document_to_proto,
+    encoding::firestore_proto::{document_to_proto, fields_to_proto, proto_fields_to_domain},
 };
 
 pub struct FirestoreService {
@@ -174,6 +177,40 @@ impl FirestoreService {
 
         Ok((shared, row.status))
     }
+
+    /// Convert a proto `Precondition` to a domain `WritePrecondition`.
+    fn convert_precondition(
+        p: Option<embyr_proto::firestore::Precondition>,
+    ) -> Option<WritePrecondition> {
+        let p = p?;
+        match p.condition_type? {
+            ConditionType::Exists(true) => Some(WritePrecondition::MustExist),
+            ConditionType::Exists(false) => Some(WritePrecondition::MustNotExist),
+            ConditionType::UpdateTime(ts) => {
+                Some(WritePrecondition::UpdateTime(ts.seconds, ts.nanos))
+            }
+        }
+    }
+
+    /// Build a proto `Document` from path, fields, create_time, and update_time.
+    fn build_document_response(
+        path: &embyr_core::domain::document::DocumentPath,
+        fields: &std::collections::BTreeMap<String, embyr_core::domain::field_value::FieldValue>,
+        create_time: (i64, i32),
+        update_time: (i64, i32),
+    ) -> Document {
+        Document {
+            name: format!(
+                "projects/{}/databases/(default)/documents/{}/{}",
+                path.project_id.as_str(),
+                path.collection_path,
+                path.document_id,
+            ),
+            fields: fields_to_proto(fields),
+            create_time: Some(Timestamp { seconds: create_time.0, nanos: create_time.1 }),
+            update_time: Some(Timestamp { seconds: update_time.0, nanos: update_time.1 }),
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -205,23 +242,125 @@ impl Firestore for FirestoreService {
 
     async fn create_document(
         &self,
-        _: Request<CreateDocumentRequest>,
+        request: Request<CreateDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
-        Err(Status::unimplemented("implemented in step 03-01"))
+        let req = request.get_ref();
+
+        // Parse project_id from parent: "projects/{pid}/databases/(default)/documents"
+        let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let (adapter, status) = self.authenticate(&project_id_str, &api_key).await?;
+        if status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let document_id = if req.document_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            req.document_id.clone()
+        };
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let path = embyr_core::domain::document::DocumentPath {
+            project_id,
+            collection_path: req.collection_id.clone(),
+            document_id: document_id.clone(),
+        };
+
+        let fields = req
+            .document
+            .as_ref()
+            .map(|d| {
+                proto_fields_to_domain(&d.fields)
+                    .ok_or_else(|| Status::invalid_argument("invalid field value"))
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        let write_result = adapter
+            .create_document(&path, fields.clone())
+            .await
+            .map_err(core_error_to_status)?;
+
+        let create_time = write_result.create_time.unwrap_or(write_result.update_time);
+        let update_time = write_result.update_time;
+
+        Ok(Response::new(Self::build_document_response(
+            &path,
+            &fields,
+            create_time,
+            update_time,
+        )))
     }
 
     async fn update_document(
         &self,
-        _: Request<UpdateDocumentRequest>,
+        request: Request<UpdateDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
-        Err(Status::unimplemented("implemented in step 03-01"))
+        let req = request.get_ref();
+
+        let doc = req
+            .document
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("document is required"))?;
+
+        let path = Self::parse_document_path(&doc.name)?;
+        let project_id_str = path.project_id.as_str().to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let (adapter, status) = self.authenticate(&project_id_str, &api_key).await?;
+        if status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let fields = proto_fields_to_domain(&doc.fields)
+            .ok_or_else(|| Status::invalid_argument("invalid field value"))?;
+
+        let precondition = Self::convert_precondition(req.current_document.clone());
+
+        let write_result = adapter
+            .update_document(&path, fields.clone(), precondition)
+            .await
+            .map_err(core_error_to_status)?;
+
+        let update_time = write_result.update_time;
+        // For updates, create_time not returned by the write op; use update_time as fallback.
+        let create_time = write_result.create_time.unwrap_or(update_time);
+
+        Ok(Response::new(Self::build_document_response(
+            &path,
+            &fields,
+            create_time,
+            update_time,
+        )))
     }
 
     async fn delete_document(
         &self,
-        _: Request<DeleteDocumentRequest>,
+        request: Request<DeleteDocumentRequest>,
     ) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("implemented in step 03-01"))
+        let req = request.get_ref();
+
+        let path = Self::parse_document_path(&req.name)?;
+        let project_id_str = path.project_id.as_str().to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let (adapter, status) = self.authenticate(&project_id_str, &api_key).await?;
+        if status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let precondition = Self::convert_precondition(req.current_document.clone());
+
+        adapter
+            .delete_document(&path, precondition)
+            .await
+            .map_err(core_error_to_status)?;
+
+        Ok(Response::new(()))
     }
 
     type BatchGetDocumentsStream =
@@ -274,6 +413,7 @@ impl Firestore for FirestoreService {
 fn core_error_to_status(e: CoreError) -> Status {
     match e {
         CoreError::DocumentNotFound(_) => Status::not_found(e.to_string()),
+        CoreError::AlreadyExists(_) => Status::already_exists(e.to_string()),
         CoreError::Unauthenticated => Status::unauthenticated(e.to_string()),
         CoreError::PermissionDenied(_) => Status::permission_denied(e.to_string()),
         CoreError::InvalidArgument(_) => Status::invalid_argument(e.to_string()),

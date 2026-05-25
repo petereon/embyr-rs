@@ -49,6 +49,10 @@ path = "../../tests/acceptance/walking_skeleton.rs"
 name = "us_01_configure_sdk"
 path = "../../tests/acceptance/us_01_configure_sdk.rs"
 
+[[test]]
+name = "us_02_write_document"
+path = "../../tests/acceptance/us_02_write_document.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

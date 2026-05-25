@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use embyr_core::domain::{document::FirestoreDocument, field_value::FieldValue};
 use embyr_proto::firestore::{value::ValueType, ArrayValue, Document, MapValue, Value};
@@ -37,6 +37,47 @@ pub fn fields_to_proto(
     fields
         .iter()
         .map(|(k, v)| (k.clone(), field_value_to_proto(v)))
+        .collect()
+}
+
+/// Convert a proto `Value` to a domain `FieldValue`.
+///
+/// Returns `None` if the value type is unrecognised or structurally invalid.
+pub fn proto_value_to_field_value(v: &Value) -> Option<FieldValue> {
+    match v.value_type.as_ref()? {
+        ValueType::NullValue(_) => Some(FieldValue::Null),
+        ValueType::BooleanValue(b) => Some(FieldValue::Boolean(*b)),
+        ValueType::IntegerValue(i) => Some(FieldValue::Integer(*i)),
+        ValueType::DoubleValue(d) => Some(FieldValue::Double(*d)),
+        ValueType::StringValue(s) => Some(FieldValue::String(s.clone())),
+        ValueType::BytesValue(b) => Some(FieldValue::Bytes(b.to_vec())),
+        ValueType::ReferenceValue(r) => Some(FieldValue::Reference(r.clone())),
+        ValueType::TimestampValue(ts) => Some(FieldValue::Timestamp(ts.seconds, ts.nanos)),
+        ValueType::ArrayValue(arr) => {
+            let vals: Option<Vec<_>> =
+                arr.values.iter().map(proto_value_to_field_value).collect();
+            Some(FieldValue::Array(vals?))
+        }
+        ValueType::MapValue(mv) => {
+            let mut map = BTreeMap::new();
+            for (k, v) in &mv.fields {
+                map.insert(k.clone(), proto_value_to_field_value(v)?);
+            }
+            Some(FieldValue::Map(map))
+        }
+        ValueType::GeoPointValue(_) => None,
+    }
+}
+
+/// Convert a proto field map (`HashMap<String, Value>`) to domain field map.
+///
+/// Returns `None` if any value fails conversion.
+pub fn proto_fields_to_domain(
+    fields: &HashMap<String, Value>,
+) -> Option<BTreeMap<String, FieldValue>> {
+    fields
+        .iter()
+        .map(|(k, v)| proto_value_to_field_value(v).map(|fv| (k.clone(), fv)))
         .collect()
 }
 
