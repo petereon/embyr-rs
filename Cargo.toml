@@ -49,6 +49,10 @@ config = "0.14"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+# Testing (dev-only)
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.9", features = ["postgres"] }
+
 # Internal crates
 embyr-proto = { path = "crates/embyr-proto" }
 embyr-core = { path = "crates/embyr-core" }

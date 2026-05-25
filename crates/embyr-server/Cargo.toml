@@ -31,3 +31,8 @@ tracing-subscriber.workspace = true
 config.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
