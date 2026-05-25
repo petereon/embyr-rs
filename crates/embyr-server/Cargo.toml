@@ -57,6 +57,10 @@ path = "../../tests/acceptance/us_02_write_document.rs"
 name = "us_03_read_document"
 path = "../../tests/acceptance/us_03_read_document.rs"
 
+[[test]]
+name = "us_04_query_collection"
+path = "../../tests/acceptance/us_04_query_collection.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

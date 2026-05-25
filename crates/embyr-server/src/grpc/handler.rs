@@ -5,7 +5,14 @@ use tonic::{Request, Response, Status};
 
 use embyr_core::{
     auth::{argon2, blake3, ecies},
-    domain::project::CredentialCacheKey,
+    domain::{
+        document::CollectionPath,
+        field_value::FieldValue,
+        project::CredentialCacheKey,
+        query::{
+            Cursor, FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter, StructuredQuery,
+        },
+    },
     error::CoreError,
     storage::backend_adapter::WritePrecondition,
 };
@@ -15,6 +22,13 @@ use embyr_proto::firestore::{
     CommitResponse, CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
     ListenRequest, ListenResponse, RollbackRequest, RunQueryRequest, RunQueryResponse,
     UpdateDocumentRequest,
+    run_query_request::QueryType,
+    structured_query::{
+        composite_filter::Operator as CompositeOp,
+        field_filter::Operator as FieldOp,
+        Direction,
+        filter::FilterType,
+    },
 };
 
 use crate::{
@@ -395,9 +409,116 @@ impl Firestore for FirestoreService {
 
     async fn run_query(
         &self,
-        _: Request<RunQueryRequest>,
+        request: Request<RunQueryRequest>,
     ) -> Result<Response<Self::RunQueryStream>, Status> {
-        Err(Status::unimplemented("implemented in step 04-01"))
+        let req = request.get_ref();
+
+        // Extract project_id from parent: "projects/{pid}/databases/(default)/documents"
+        let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let (adapter, status_str) = self.authenticate(&project_id_str, &api_key).await?;
+        if status_str == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        // Extract the structured query from the request
+        let sq_proto = match &req.query_type {
+            Some(QueryType::StructuredQuery(sq)) => sq,
+            None => return Err(Status::invalid_argument("query_type is required")),
+        };
+
+        // Parse collection from from[0]
+        let collection_id = sq_proto
+            .from
+            .first()
+            .map(|cs| cs.collection_id.clone())
+            .unwrap_or_default();
+        let all_descendants = sq_proto
+            .from
+            .first()
+            .map(|cs| cs.all_descendants)
+            .unwrap_or(false);
+
+        // Translate proto filter → domain QueryFilter
+        let filter = sq_proto
+            .r#where
+            .as_ref()
+            .and_then(|f| translate_filter(f))
+            .transpose()
+            .map_err(|e| Status::invalid_argument(e))?;
+
+        // Translate proto order_by → domain OrderBy
+        let order_by: Vec<OrderBy> = sq_proto
+            .order_by
+            .iter()
+            .filter_map(|o| {
+                let field_path = o.field.as_ref()?.field_path.clone();
+                let direction = match Direction::try_from(o.direction).unwrap_or(Direction::Unspecified) {
+                    Direction::Descending => OrderDirection::Descending,
+                    _ => OrderDirection::Ascending,
+                };
+                Some(OrderBy { field_path, direction })
+            })
+            .collect();
+
+        // Translate proto limit → domain
+        let limit = sq_proto.limit;
+
+        // Translate proto cursor → domain Cursor
+        let start_at = sq_proto.start_at.as_ref().and_then(|c| {
+            let values: Option<Vec<FieldValue>> = c
+                .values
+                .iter()
+                .map(|v| crate::encoding::firestore_proto::proto_value_to_field_value(v))
+                .collect();
+            values.map(|vals| Cursor { values: vals, before: c.before })
+        });
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let collection = CollectionPath {
+            project_id,
+            collection_path: collection_id,
+        };
+
+        let domain_query = StructuredQuery {
+            collection_id: collection.collection_path.clone(),
+            all_descendants,
+            filter,
+            order_by,
+            limit,
+            offset: if sq_proto.offset > 0 { Some(sq_proto.offset) } else { None },
+            start_at,
+            end_at: None,
+        };
+
+        let docs = adapter
+            .run_query(&collection, &domain_query, None)
+            .await
+            .map_err(core_error_to_status)?;
+
+        // Build response stream
+        let mut responses: Vec<Result<RunQueryResponse, Status>> = docs
+            .into_iter()
+            .map(|doc| {
+                Ok(RunQueryResponse {
+                    document: Some(crate::encoding::firestore_proto::document_to_proto(doc)),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        // Final done=true message
+        responses.push(Ok(RunQueryResponse {
+            continuation_selector: Some(
+                embyr_proto::firestore::run_query_response::ContinuationSelector::Done(true),
+            ),
+            ..Default::default()
+        }));
+
+        Ok(Response::new(Box::pin(tokio_stream::iter(responses))))
     }
 
     type ListenStream = tonic::codegen::BoxStream<ListenResponse>;
@@ -407,6 +528,58 @@ impl Firestore for FirestoreService {
         _: Request<tonic::Streaming<ListenRequest>>,
     ) -> Result<Response<Self::ListenStream>, Status> {
         Err(Status::unimplemented("implemented in step 05-01"))
+    }
+}
+
+/// Translate a proto `Filter` to a domain `QueryFilter`.
+fn translate_filter(
+    f: &embyr_proto::firestore::structured_query::Filter,
+) -> Option<Result<QueryFilter, String>> {
+    match f.filter_type.as_ref()? {
+        FilterType::FieldFilter(ff) => {
+            let field_path = ff.field.as_ref()?.field_path.clone();
+            let op = translate_field_op(FieldOp::try_from(ff.op).ok()?)?;
+            let value =
+                crate::encoding::firestore_proto::proto_value_to_field_value(ff.value.as_ref()?)?;
+            Some(Ok(QueryFilter::Field(FieldFilter { field_path, op, value })))
+        }
+        FilterType::CompositeFilter(cf) => {
+            match CompositeOp::try_from(cf.op).unwrap_or(CompositeOp::Unspecified) {
+                CompositeOp::And | CompositeOp::Unspecified => {
+                    let mut filters = Vec::new();
+                    for sub in &cf.filters {
+                        match translate_filter(sub) {
+                            Some(Ok(qf)) => filters.push(qf),
+                            Some(Err(e)) => return Some(Err(e)),
+                            None => {}
+                        }
+                    }
+                    Some(Ok(QueryFilter::Composite(filters)))
+                }
+                _ => Some(Err("unsupported composite operator".into())),
+            }
+        }
+        FilterType::UnaryFilter(_) => {
+            // Unary filters (IS_NAN, IS_NULL) handled in step 04-02
+            Some(Err("unary filter not supported in step 04-01".into()))
+        }
+    }
+}
+
+/// Translate a proto `FieldFilter.Operator` to a domain `FilterOp`.
+fn translate_field_op(op: FieldOp) -> Option<FilterOp> {
+    match op {
+        FieldOp::LessThan => Some(FilterOp::LessThan),
+        FieldOp::LessThanOrEqual => Some(FilterOp::LessThanOrEqual),
+        FieldOp::GreaterThan => Some(FilterOp::GreaterThan),
+        FieldOp::GreaterThanOrEqual => Some(FilterOp::GreaterThanOrEqual),
+        FieldOp::Equal => Some(FilterOp::Equal),
+        FieldOp::NotEqual => Some(FilterOp::NotEqual),
+        FieldOp::ArrayContains => Some(FilterOp::ArrayContains),
+        FieldOp::In => Some(FilterOp::In),
+        FieldOp::ArrayContainsAny => Some(FilterOp::ArrayContainsAny),
+        FieldOp::NotIn => Some(FilterOp::NotIn),
+        FieldOp::Unspecified => None,
     }
 }
 

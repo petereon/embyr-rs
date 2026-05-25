@@ -362,11 +362,135 @@ impl BackendAdapter for PostgresBackendAdapter {
 
     async fn run_query(
         &self,
-        _collection: &CollectionPath,
-        _query: &StructuredQuery,
+        collection: &CollectionPath,
+        query: &StructuredQuery,
         _transaction_id: Option<&TransactionId>,
     ) -> Result<Vec<FirestoreDocument>, CoreError> {
-        todo!("step 04-01")
+        use sqlx::QueryBuilder;
+        use crate::encoding::query::{append_filter, order_by_expr};
+
+        let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "SELECT project_id, collection_path, document_id, fields, version, create_time, update_time \
+             FROM documents WHERE project_id = ",
+        );
+        qb.push_bind(collection.project_id.as_str());
+        qb.push(" AND collection_path = ");
+        qb.push_bind(&collection.collection_path);
+        qb.push(" AND NOT deleted");
+
+        // WHERE filter
+        if let Some(filter) = &query.filter {
+            qb.push(" AND ");
+            append_filter(&mut qb, filter);
+        }
+
+        // startAfter cursor — single-field orderBy only (step 04-01)
+        if let (Some(cursor), false) = (&query.start_at, query.order_by.is_empty()) {
+            if !cursor.values.is_empty() {
+                let ob = &query.order_by[0];
+                let op = if cursor.before { ">=" } else { ">" };
+                match &cursor.values[0] {
+                    embyr_core::domain::field_value::FieldValue::Integer(v) => {
+                        qb.push(format!(
+                            " AND (fields->'{}'->>'v')::bigint {} ",
+                            ob.field_path, op
+                        ));
+                        qb.push_bind(*v);
+                    }
+                    embyr_core::domain::field_value::FieldValue::String(s) => {
+                        qb.push(format!(
+                            " AND fields->'{}'->>'v' {} ",
+                            ob.field_path, op
+                        ));
+                        qb.push_bind(s.clone());
+                    }
+                    embyr_core::domain::field_value::FieldValue::Double(d) => {
+                        qb.push(format!(
+                            " AND (fields->'{}'->>'v')::float8 {} ",
+                            ob.field_path, op
+                        ));
+                        qb.push_bind(*d);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // ORDER BY
+        if !query.order_by.is_empty() {
+            qb.push(" ORDER BY ");
+            for (i, ob) in query.order_by.iter().enumerate() {
+                if i > 0 {
+                    qb.push(", ");
+                }
+                qb.push(order_by_expr(ob));
+            }
+        }
+
+        // LIMIT
+        if let Some(limit) = query.limit {
+            qb.push(" LIMIT ");
+            qb.push_bind(limit as i64);
+        }
+
+        let rows = qb
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let mut docs = Vec::with_capacity(rows.len());
+        for row in rows {
+            use sqlx::Row;
+
+            let project_id_str: String = row
+                .try_get("project_id")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+            let coll_path: String = row
+                .try_get("collection_path")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+            let doc_id: String = row
+                .try_get("document_id")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+            let fields_json: serde_json::Value = row
+                .try_get("fields")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+            let version: i64 = row
+                .try_get("version")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+            let create_time: chrono::DateTime<chrono::Utc> = row
+                .try_get("create_time")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+            let update_time: chrono::DateTime<chrono::Utc> = row
+                .try_get("update_time")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+            let project_id = ProjectId::new(&project_id_str)
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+            let fields = crate::encoding::field_value::json_to_fields(&fields_json)
+                .ok_or_else(|| {
+                    CoreError::BackendUnavailable("failed to decode fields JSON".into())
+                })?;
+
+            docs.push(FirestoreDocument {
+                path: DocumentPath {
+                    project_id,
+                    collection_path: coll_path,
+                    document_id: doc_id,
+                },
+                fields,
+                create_time: (
+                    create_time.timestamp(),
+                    create_time.timestamp_subsec_nanos() as i32,
+                ),
+                update_time: (
+                    update_time.timestamp(),
+                    update_time.timestamp_subsec_nanos() as i32,
+                ),
+                version,
+            });
+        }
+        Ok(docs)
     }
 
     async fn begin_transaction(
