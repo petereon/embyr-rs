@@ -24,7 +24,24 @@ pub fn append_filter(qb: &mut QueryBuilder<Postgres>, filter: &QueryFilter) {
 /// Append a single field comparison predicate.
 ///
 /// Values are bound via `push_bind` — never interpolated — to prevent SQL injection.
+/// IS_NAN uses string sentinel equality: `fields->'f'->>'v' = 'NaN'`.
 pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
+    // Handle IS_NAN and IS_NOT_NAN as special cases (no value binding required).
+    match f.op {
+        FilterOp::IsNan => {
+            qb.push(format!("fields->'{}'->>'v' = 'NaN'", f.field_path));
+            return;
+        }
+        FilterOp::IsNotNan => {
+            qb.push(format!(
+                "(fields->'{fp}' IS NULL OR fields->'{fp}'->>'v' != 'NaN')",
+                fp = f.field_path
+            ));
+            return;
+        }
+        _ => {}
+    }
+
     let op = match f.op {
         FilterOp::LessThan => "<",
         FilterOp::LessThanOrEqual => "<=",
@@ -32,7 +49,7 @@ pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
         FilterOp::GreaterThanOrEqual => ">=",
         FilterOp::Equal => "=",
         FilterOp::NotEqual => "!=",
-        _ => panic!("unsupported filter op in step 04-01: {:?}", f.op),
+        _ => panic!("unsupported filter op: {:?}", f.op),
     };
     match &f.value {
         FieldValue::Integer(v) => {
@@ -51,7 +68,7 @@ pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
             qb.push(format!("(fields->'{}'->>'v')::boolean {} ", f.field_path, op));
             qb.push_bind(*b);
         }
-        _ => panic!("unsupported filter value type in step 04-01: {:?}", f.value),
+        _ => panic!("unsupported filter value type: {:?}", f.value),
     }
 }
 

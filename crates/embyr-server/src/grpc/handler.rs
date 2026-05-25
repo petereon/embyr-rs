@@ -26,6 +26,7 @@ use embyr_proto::firestore::{
     structured_query::{
         composite_filter::Operator as CompositeOp,
         field_filter::Operator as FieldOp,
+        unary_filter::Operator as UnaryOp,
         Direction,
         filter::FilterType,
     },
@@ -34,6 +35,7 @@ use embyr_proto::firestore::{
 use crate::{
     adapters::{
         credential_cache::{CachedEntry, CredentialCache, SharedBackendAdapter},
+        index_manager::IndexManager,
         postgres_backend::PostgresBackendAdapter,
         system_db::SystemDb,
     },
@@ -43,6 +45,7 @@ use crate::{
 pub struct FirestoreService {
     pub system_db: Arc<SystemDb>,
     pub credential_cache: Arc<CredentialCache>,
+    pub index_manager: Arc<IndexManager>,
 }
 
 impl FirestoreService {
@@ -202,6 +205,34 @@ impl FirestoreService {
             ConditionType::Exists(false) => Some(WritePrecondition::MustNotExist),
             ConditionType::UpdateTime(ts) => {
                 Some(WritePrecondition::UpdateTime(ts.seconds, ts.nanos))
+            }
+        }
+    }
+
+    /// Return `true` if the query requires a composite index.
+    ///
+    /// A composite index is required when there is at least one field filter
+    /// AND at least one orderBy on a field that differs from the filtered field.
+    fn requires_composite_index(query: &StructuredQuery) -> bool {
+        let Some(filter) = &query.filter else { return false };
+        if query.order_by.is_empty() {
+            return false;
+        }
+        // Collect filtered field paths.
+        let filter_fields = Self::collect_filter_fields(filter);
+        // If any orderBy field is NOT in the filter fields, composite index required.
+        query
+            .order_by
+            .iter()
+            .any(|ob| !filter_fields.contains(&ob.field_path.as_str()))
+    }
+
+    /// Collect all field paths referenced by a filter (recursively).
+    fn collect_filter_fields<'a>(filter: &'a QueryFilter) -> Vec<&'a str> {
+        match filter {
+            QueryFilter::Field(ff) => vec![ff.field_path.as_str()],
+            QueryFilter::Composite(sub) => {
+                sub.iter().flat_map(Self::collect_filter_fields).collect()
             }
         }
     }
@@ -494,6 +525,20 @@ impl Firestore for FirestoreService {
             end_at: None,
         };
 
+        // Composite index check: filter on field X + orderBy field Y (where Y != X)
+        // requires a READY composite index in the system DB.
+        let requires_index = Self::requires_composite_index(&domain_query);
+        if requires_index
+            && !self
+                .index_manager
+                .is_index_ready(&project_id_str, &collection.collection_path)
+                .await
+        {
+            return Err(Status::failed_precondition(
+                "query requires a composite index; create the index before running this query",
+            ));
+        }
+
         let docs = adapter
             .run_query(&collection, &domain_query, None)
             .await
@@ -559,9 +604,26 @@ fn translate_filter(
                 _ => Some(Err("unsupported composite operator".into())),
             }
         }
-        FilterType::UnaryFilter(_) => {
-            // Unary filters (IS_NAN, IS_NULL) handled in step 04-02
-            Some(Err("unary filter not supported in step 04-01".into()))
+        FilterType::UnaryFilter(uf) => {
+            let field_path = uf
+                .operand_type
+                .as_ref()
+                .and_then(|op| match op {
+                    embyr_proto::firestore::structured_query::unary_filter::OperandType::Field(
+                        fr,
+                    ) => Some(fr.field_path.clone()),
+                })?;
+            let op = match UnaryOp::try_from(uf.op).ok()? {
+                UnaryOp::IsNan => FilterOp::IsNan,
+                UnaryOp::IsNotNan => FilterOp::IsNotNan,
+                _ => return Some(Err(format!("unsupported unary filter op: {}", uf.op))),
+            };
+            // IS_NAN and IS_NOT_NAN use no value; provide a sentinel Null value.
+            Some(Ok(QueryFilter::Field(FieldFilter {
+                field_path,
+                op,
+                value: FieldValue::Null,
+            })))
         }
     }
 }

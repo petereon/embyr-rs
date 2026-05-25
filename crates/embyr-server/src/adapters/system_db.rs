@@ -77,6 +77,13 @@ impl SystemDb {
         }))
     }
 
+    /// Expose the raw pool for adapters that share the system DB connection.
+    ///
+    /// Use sparingly — prefer going through SystemDb's typed query methods.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Verify DB is reachable and expected schema tables exist.
     pub async fn probe(&self) -> Result<(), CoreError> {
         sqlx::query("SELECT 1")

@@ -11,7 +11,15 @@ pub fn field_value_to_json(fv: &FieldValue) -> Value {
         FieldValue::Null => json!({"t": "N"}),
         FieldValue::Boolean(b) => json!({"t": "B", "v": b}),
         FieldValue::Integer(i) => json!({"t": "I", "v": i}),
-        FieldValue::Double(d) => json!({"t": "D", "v": d}),
+        FieldValue::Double(d) => {
+            if d.is_nan() {
+                json!({"t": "D", "v": "NaN"})
+            } else if d.is_infinite() {
+                json!({"t": "D", "v": if *d > 0.0 { "Inf" } else { "-Inf" }})
+            } else {
+                json!({"t": "D", "v": d})
+            }
+        }
         FieldValue::String(s) => json!({"t": "S", "v": s}),
         FieldValue::Bytes(b) => json!({"t": "BY", "v": STANDARD.encode(b)}),
         FieldValue::Reference(r) => json!({"t": "R", "v": r}),
@@ -39,7 +47,19 @@ pub fn json_to_field_value(v: &Value) -> Option<FieldValue> {
         "N" => Some(FieldValue::Null),
         "B" => Some(FieldValue::Boolean(v.get("v")?.as_bool()?)),
         "I" => Some(FieldValue::Integer(v.get("v")?.as_i64()?)),
-        "D" => Some(FieldValue::Double(v.get("v")?.as_f64()?)),
+        "D" => {
+            let val = v.get("v")?;
+            if let Some(s) = val.as_str() {
+                match s {
+                    "NaN" => Some(FieldValue::Double(f64::NAN)),
+                    "Inf" => Some(FieldValue::Double(f64::INFINITY)),
+                    "-Inf" => Some(FieldValue::Double(f64::NEG_INFINITY)),
+                    _ => None,
+                }
+            } else {
+                Some(FieldValue::Double(val.as_f64()?))
+            }
+        }
         "S" => Some(FieldValue::String(v.get("v")?.as_str()?.to_string())),
         "R" => Some(FieldValue::Reference(v.get("v")?.as_str()?.to_string())),
         "BY" => {

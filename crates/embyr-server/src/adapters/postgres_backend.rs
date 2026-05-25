@@ -374,8 +374,17 @@ impl BackendAdapter for PostgresBackendAdapter {
              FROM documents WHERE project_id = ",
         );
         qb.push_bind(collection.project_id.as_str());
-        qb.push(" AND collection_path = ");
-        qb.push_bind(&collection.collection_path);
+        if query.all_descendants {
+            // Collection group: match collection_path exactly OR as a nested sub-collection.
+            qb.push(" AND (collection_path = ");
+            qb.push_bind(&collection.collection_path);
+            qb.push(" OR collection_path LIKE ");
+            qb.push_bind(format!("%/{}", collection.collection_path));
+            qb.push(")");
+        } else {
+            qb.push(" AND collection_path = ");
+            qb.push_bind(&collection.collection_path);
+        }
         qb.push(" AND NOT deleted");
 
         // WHERE filter

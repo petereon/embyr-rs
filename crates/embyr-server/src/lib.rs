@@ -6,7 +6,7 @@ pub mod middleware;
 
 use std::sync::Arc;
 
-use adapters::{credential_cache::CredentialCache, system_db::SystemDb};
+use adapters::{credential_cache::CredentialCache, index_manager::IndexManager, system_db::SystemDb};
 use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
 use grpc::healthz::healthz_handler;
@@ -49,9 +49,11 @@ pub async fn start_test_server(system_db: Arc<SystemDb>) -> TestServer {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let cache = Arc::new(CredentialCache::new(256));
+    let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
     let service = FirestoreService {
         system_db,
         credential_cache: cache,
+        index_manager: idx_mgr,
     };
 
     let rest_app = axum::Router::new()

@@ -12,8 +12,10 @@ use embyr_proto::firestore::{
     firestore_client::FirestoreClient,
     run_query_request::QueryType,
     structured_query::{
-        field_filter::Operator as FieldOp, CollectionSelector, Direction, FieldFilter, FieldReference,
-        Filter, Order,
+        field_filter::Operator as FieldOp,
+        unary_filter::Operator as UnaryOp,
+        CollectionSelector, Direction, FieldFilter, FieldReference,
+        Filter, Order, UnaryFilter,
         filter::FilterType,
     },
     value::ValueType,
@@ -43,6 +45,7 @@ async fn start_postgres() -> (ContainerAsync<Postgres>, String) {
 struct TestEnv {
     _sys_container: ContainerAsync<Postgres>,
     _cust_container: ContainerAsync<Postgres>,
+    sys_pool: sqlx::PgPool,
     cust_pool: sqlx::PgPool,
     project_id: String,
     api_key: String,
@@ -84,6 +87,7 @@ async fn setup(api_key: &str, project_id: &str) -> TestEnv {
     TestEnv {
         _sys_container,
         _cust_container,
+        sys_pool,
         cust_pool,
         project_id: project_id.to_string(),
         api_key: api_key.to_string(),
@@ -404,9 +408,65 @@ async fn start_after_cursor_skips_cursor_document() {
 /// When:   a RunQuery with IS_NAN filter on the score field is executed
 /// Then:   only the document with NaN score is returned
 #[tokio::test]
-#[ignore = "us-04 AC-04e — RED scaffold, not yet implemented"]
 async fn is_nan_filter_returns_only_nan_documents() {
-    panic!("RED scaffold — not yet implemented");
+    let env = setup("test-sk-us04-nan-01", "us04-nan-project-01").await;
+
+    // Seed docs directly via SQL — NaN cannot be represented in JSON, so we
+    // insert the sentinel {"t":"D","v":"NaN"} directly for the NaN document.
+    let fields_normal_1 = serde_json::json!({"score": {"t": "D", "v": 1.0}});
+    let fields_nan = serde_json::json!({"score": {"t": "D", "v": "NaN"}});
+    let fields_normal_2 = serde_json::json!({"score": {"t": "D", "v": 2.0}});
+
+    let project_id = &env.project_id;
+    sqlx::query(
+        "INSERT INTO documents (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+         VALUES ($1, 'scores', 'score-1', $2::jsonb, 1, NOW(), NOW()), \
+                ($1, 'scores', 'score-nan', $3::jsonb, 1, NOW(), NOW()), \
+                ($1, 'scores', 'score-2', $4::jsonb, 1, NOW(), NOW())",
+    )
+    .bind(project_id.as_str())
+    .bind(&fields_normal_1)
+    .bind(&fields_nan)
+    .bind(&fields_normal_2)
+    .execute(&env.cust_pool)
+    .await
+    .expect("seed NaN documents");
+
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let parent = format!("projects/{project_id}/databases/(default)/documents");
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: "scores".to_string(),
+            all_descendants: false,
+        }],
+        r#where: Some(Filter {
+            filter_type: Some(FilterType::UnaryFilter(UnaryFilter {
+                op: UnaryOp::IsNan as i32,
+                operand_type: Some(
+                    embyr_proto::firestore::structured_query::unary_filter::OperandType::Field(
+                        FieldReference { field_path: "score".to_string() },
+                    ),
+                ),
+            })),
+        }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest {
+            parent,
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    assert_eq!(docs.len(), 1, "expected exactly 1 NaN document, got {}", docs.len());
+    let name = &docs[0].name;
+    assert!(name.ends_with("score-nan"), "expected score-nan document, got {name}");
 }
 
 /// AC-04f (error path): query requiring composite index returns FAILED_PRECONDITION when no READY index
@@ -416,9 +476,58 @@ async fn is_nan_filter_returns_only_nan_documents() {
 /// When:   a RunQuery with where("category","==","A").orderBy("score","desc") is executed
 /// Then:   the response returns status FAILED_PRECONDITION
 #[tokio::test]
-#[ignore = "us-04 AC-04f — RED scaffold, not yet implemented"]
 async fn query_without_ready_index_returns_failed_precondition() {
-    panic!("RED scaffold — not yet implemented");
+    let env = setup("test-sk-us04-idx-01", "us04-idx-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Seed a document with category and score fields
+    let mut fields = HashMap::new();
+    fields.insert("category".to_string(), string_value("A"));
+    fields.insert("score".to_string(), integer_value(100));
+    seed_document(&mut client, &env.project_id, &env.api_key, "products", "prod-1", fields).await;
+
+    // Query: filter on "category" == "A", orderBy "score" DESC — requires composite index
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: "products".to_string(),
+            all_descendants: false,
+        }],
+        r#where: Some(Filter {
+            filter_type: Some(FilterType::FieldFilter(FieldFilter {
+                field: Some(field_ref("category")),
+                op: FieldOp::Equal as i32,
+                value: Some(string_value("A")),
+            })),
+        }),
+        order_by: vec![Order {
+            field: Some(field_ref("score")),
+            direction: Direction::Descending as i32,
+        }],
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest {
+            parent,
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+
+    let result = client.run_query(req).await;
+    match result {
+        Err(status) => {
+            assert_eq!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "expected FAILED_PRECONDITION, got {:?}: {}",
+                status.code(),
+                status.message()
+            );
+        }
+        Ok(_) => panic!("expected FAILED_PRECONDITION error but query succeeded"),
+    }
 }
 
 /// AC-04g: same query succeeds after index is created and reaches READY status
@@ -428,9 +537,60 @@ async fn query_without_ready_index_returns_failed_precondition() {
 /// When:   the same query from AC-04f is re-executed
 /// Then:   the query returns results successfully
 #[tokio::test]
-#[ignore = "us-04 AC-04g — RED scaffold, not yet implemented"]
 async fn query_succeeds_after_index_reaches_ready_status() {
-    panic!("RED scaffold — not yet implemented");
+    let env = setup("test-sk-us04-idx-02", "us04-idx-project-02").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Seed a document with category and score fields
+    let mut fields = HashMap::new();
+    fields.insert("category".to_string(), string_value("B"));
+    fields.insert("score".to_string(), integer_value(200));
+    seed_document(&mut client, &env.project_id, &env.api_key, "products", "prod-2", fields).await;
+
+    // Insert a READY composite index into the system DB for this project+collection
+    sqlx::query(
+        "INSERT INTO composite_indexes (project_id, collection_path, fields, status) \
+         VALUES ($1, $2, $3::jsonb, 'ready')",
+    )
+    .bind(&env.project_id)
+    .bind("products")
+    .bind(serde_json::json!([{"field": "category", "order": "ASC"}, {"field": "score", "order": "DESC"}]))
+    .execute(&env.sys_pool)
+    .await
+    .expect("insert ready composite index");
+
+    // Same query as AC-04f — should now succeed with a READY index
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: "products".to_string(),
+            all_descendants: false,
+        }],
+        r#where: Some(Filter {
+            filter_type: Some(FilterType::FieldFilter(FieldFilter {
+                field: Some(field_ref("category")),
+                op: FieldOp::Equal as i32,
+                value: Some(string_value("B")),
+            })),
+        }),
+        order_by: vec![Order {
+            field: Some(field_ref("score")),
+            direction: Direction::Descending as i32,
+        }],
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest {
+            parent,
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+
+    let stream = client.run_query(req).await.expect("query with READY index should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+    assert!(!docs.is_empty(), "expected at least one document returned by indexed query");
 }
 
 /// AC-04h: collection group query returns documents from all sub-collections with matching name
@@ -439,7 +599,55 @@ async fn query_succeeds_after_index_reaches_ready_status() {
 /// When:   a collection group query for "events" is executed
 /// Then:   both e1 and e2 appear in the results
 #[tokio::test]
-#[ignore = "us-04 AC-04h — RED scaffold, not yet implemented"]
 async fn collection_group_query_returns_documents_from_all_matching_subcollections() {
-    panic!("RED scaffold — not yet implemented");
+    let env = setup("test-sk-us04-cg-01", "us04-cg-project-01").await;
+
+    let project_id = &env.project_id;
+
+    // Seed two documents in nested sub-collections of "events" via direct SQL insert
+    let fields_e1 = serde_json::json!({"kind": {"t": "S", "v": "click"}});
+    let fields_e2 = serde_json::json!({"kind": {"t": "S", "v": "view"}});
+
+    sqlx::query(
+        "INSERT INTO documents \
+         (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+         VALUES \
+         ($1, 'users/alice/events', 'e1', $2::jsonb, 1, NOW(), NOW()), \
+         ($1, 'teams/beta/events',  'e2', $3::jsonb, 1, NOW(), NOW())",
+    )
+    .bind(project_id.as_str())
+    .bind(&fields_e1)
+    .bind(&fields_e2)
+    .execute(&env.cust_pool)
+    .await
+    .expect("seed collection group documents");
+
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Collection group query: all_descendants=true, collection_id="events"
+    let parent = format!("projects/{project_id}/databases/(default)/documents");
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: "events".to_string(),
+            all_descendants: true,
+        }],
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest {
+            parent,
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+
+    let stream = client.run_query(req).await.expect("collection group query should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    assert_eq!(docs.len(), 2, "expected both e1 and e2 documents, got {}", docs.len());
+
+    let doc_ids: Vec<String> = docs.iter().map(|d| d.name.split('/').last().unwrap_or("").to_string()).collect();
+    assert!(doc_ids.contains(&"e1".to_string()), "e1 missing from results: {doc_ids:?}");
+    assert!(doc_ids.contains(&"e2".to_string()), "e2 missing from results: {doc_ids:?}");
 }
