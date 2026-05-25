@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 
 # gRPC / protobuf
 tonic = "0.12"

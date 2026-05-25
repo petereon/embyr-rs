@@ -1,5 +1,16 @@
 use embyr_core::error::CoreError;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+
+/// Project row returned for credential verification.
+#[derive(Debug)]
+pub struct ProjectAuthRow {
+    pub id: String,
+    pub status: String,
+    pub backend_mode: String,
+    pub api_key_hash_current: String,
+    pub api_key_hash_previous: Option<String>,
+    pub ecies_encrypted_dsn: Option<Vec<u8>>,
+}
 
 #[derive(Debug)]
 pub struct SystemDb {
@@ -23,6 +34,47 @@ impl SystemDb {
             .run(&self.pool)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
+    }
+
+    /// Fetch project row for authentication.
+    pub async fn get_project_for_auth(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectAuthRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT id, status, backend_mode, api_key_hash_current, \
+             api_key_hash_previous, ecies_encrypted_dsn \
+             FROM projects WHERE id = $1 AND status != 'deleted'",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(ProjectAuthRow {
+            id: r
+                .try_get("id")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            status: r
+                .try_get("status")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            backend_mode: r
+                .try_get("backend_mode")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            api_key_hash_current: r
+                .try_get("api_key_hash_current")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            api_key_hash_previous: r
+                .try_get("api_key_hash_previous")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            ecies_encrypted_dsn: r
+                .try_get::<Option<Vec<u8>>, _>("ecies_encrypted_dsn")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
     }
 
     /// Verify DB is reachable and expected schema tables exist.
