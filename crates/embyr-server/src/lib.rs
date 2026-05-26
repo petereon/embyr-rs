@@ -3,6 +3,7 @@ pub mod adapters;
 pub mod encoding;
 pub mod grpc;
 pub mod middleware;
+pub mod realtime;
 
 use std::sync::Arc;
 
@@ -29,13 +30,14 @@ impl Drop for TestServer {
     }
 }
 
-/// Start an in-process server exposing both gRPC (tonic) and REST (axum) on
-/// ephemeral ports.
+/// Start an in-process server with a configurable Listen keep-alive interval.
 ///
-/// Both servers share a single shutdown signal: dropping the returned
-/// `TestServer` sends a `()` on the oneshot channel, which the `tokio::select!`
-/// in the spawned task handles.
-pub async fn start_test_server(system_db: Arc<SystemDb>) -> TestServer {
+/// Use this variant in tests that exercise the keep-alive path — pass a short
+/// duration (e.g. `Duration::from_millis(500)`) so tests complete quickly.
+pub async fn start_test_server_with_keepalive(
+    system_db: Arc<SystemDb>,
+    keepalive: std::time::Duration,
+) -> TestServer {
     let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind gRPC ephemeral port");
@@ -54,6 +56,7 @@ pub async fn start_test_server(system_db: Arc<SystemDb>) -> TestServer {
         system_db,
         credential_cache: cache,
         index_manager: idx_mgr,
+        keepalive_interval: keepalive,
     };
 
     let rest_app = axum::Router::new()
@@ -84,4 +87,12 @@ pub async fn start_test_server(system_db: Arc<SystemDb>) -> TestServer {
         rest_addr,
         shutdown_tx: Some(shutdown_tx),
     }
+}
+
+/// Start an in-process server with the production keep-alive interval (30s).
+///
+/// Both servers share a single shutdown signal: dropping the returned
+/// `TestServer` sends a `()` on the oneshot channel.
+pub async fn start_test_server(system_db: Arc<SystemDb>) -> TestServer {
+    start_test_server_with_keepalive(system_db, std::time::Duration::from_secs(30)).await
 }

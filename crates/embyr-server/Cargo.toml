@@ -61,6 +61,10 @@ path = "../../tests/acceptance/us_03_read_document.rs"
 name = "us_04_query_collection"
 path = "../../tests/acceptance/us_04_query_collection.rs"
 
+[[test]]
+name = "us_05_listen_realtime"
+path = "../../tests/acceptance/us_05_listen_realtime.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
@@ -69,4 +73,5 @@ testcontainers-modules.workspace = true
 sqlx.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "time"] }
+tokio-stream = { workspace = true }

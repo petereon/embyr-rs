@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod domain;
 pub mod error;
+pub mod realtime;
 pub mod storage;
 
 // ---------------------------------------------------------------------------

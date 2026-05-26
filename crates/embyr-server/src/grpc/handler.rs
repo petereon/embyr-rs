@@ -31,6 +31,7 @@ use embyr_proto::firestore::{
         filter::FilterType,
     },
 };
+use tokio_stream::StreamExt as _;
 
 use crate::{
     adapters::{
@@ -46,6 +47,9 @@ pub struct FirestoreService {
     pub system_db: Arc<SystemDb>,
     pub credential_cache: Arc<CredentialCache>,
     pub index_manager: Arc<IndexManager>,
+    /// Interval between NO_CHANGE keep-alive messages on idle Listen streams.
+    /// Default: 30s for production. Tests use a shorter interval (e.g. 500ms).
+    pub keepalive_interval: std::time::Duration,
 }
 
 impl FirestoreService {
@@ -570,9 +574,59 @@ impl Firestore for FirestoreService {
 
     async fn listen(
         &self,
-        _: Request<tonic::Streaming<ListenRequest>>,
+        request: Request<tonic::Streaming<ListenRequest>>,
     ) -> Result<Response<Self::ListenStream>, Status> {
-        Err(Status::unimplemented("implemented in step 05-01"))
+        let api_key = Self::extract_api_key(&request)?;
+        let mut in_stream = request.into_inner();
+
+        // Read first message to get the AddTarget + project_id for auth.
+        let first_msg = in_stream
+            .next()
+            .await
+            .ok_or_else(|| Status::invalid_argument("empty listen stream"))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let project_id = extract_project_id_from_listen_request(&first_msg)?;
+        let (adapter, status) = self.authenticate(&project_id, &api_key).await?;
+        if status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ListenResponse, Status>>(128);
+        let keepalive = self.keepalive_interval;
+
+        tokio::spawn(async move {
+            if let Err(e) = crate::realtime::listen_handler::handle_add_target(
+                &first_msg,
+                &adapter,
+                &tx,
+                keepalive,
+            )
+            .await
+            {
+                let _ = tx.send(Err(Status::internal(e))).await;
+            }
+            // Drain remaining client messages (RemoveTarget etc.) for future steps.
+            while (in_stream.next().await).is_some() {}
+        });
+
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+}
+
+/// Extract `project_id` from the `database` field of a `ListenRequest`.
+///
+/// Format: `projects/{pid}/databases/(default)`
+fn extract_project_id_from_listen_request(msg: &ListenRequest) -> Result<String, Status> {
+    let db = &msg.database;
+    let mut parts = db.splitn(5, '/');
+    match (parts.next(), parts.next()) {
+        (Some("projects"), Some(pid)) if !pid.is_empty() => Ok(pid.to_string()),
+        _ => Err(Status::invalid_argument(format!(
+            "invalid database path in ListenRequest: {db}"
+        ))),
     }
 }
 
