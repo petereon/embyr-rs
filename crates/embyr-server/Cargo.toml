@@ -65,6 +65,10 @@ path = "../../tests/acceptance/us_04_query_collection.rs"
 name = "us_05_listen_realtime"
 path = "../../tests/acceptance/us_05_listen_realtime.rs"
 
+[[test]]
+name = "us_06_transactions"
+path = "../../tests/acceptance/us_06_transactions.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

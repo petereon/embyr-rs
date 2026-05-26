@@ -12,9 +12,10 @@ use embyr_core::{
         query::{
             Cursor, FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter, StructuredQuery,
         },
+        transaction::TransactionOptions,
     },
     error::CoreError,
-    storage::backend_adapter::WritePrecondition,
+    storage::backend_adapter::{Write as DomainWrite, WritePrecondition},
 };
 use embyr_proto::firestore::{
     firestore_server::Firestore, precondition::ConditionType, BatchGetDocumentsRequest,
@@ -434,20 +435,137 @@ impl Firestore for FirestoreService {
 
     async fn begin_transaction(
         &self,
-        _: Request<BeginTransactionRequest>,
+        request: Request<BeginTransactionRequest>,
     ) -> Result<Response<BeginTransactionResponse>, Status> {
-        Err(Status::unimplemented("implemented in step 06-01"))
+        let req = request.get_ref();
+        let project_id_str = Self::extract_project_id(&req.database)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let options = match req.options.as_ref().and_then(|o| o.mode.as_ref()) {
+            Some(embyr_proto::firestore::transaction_options::Mode::ReadOnly(_)) => {
+                TransactionOptions::ReadOnly
+            }
+            _ => TransactionOptions::ReadWrite,
+        };
+
+        let txn_id = adapter
+            .begin_transaction(&project_id, options)
+            .await
+            .map_err(core_error_to_status)?;
+
+        Ok(Response::new(BeginTransactionResponse {
+            transaction: txn_id.0,
+        }))
     }
 
     async fn commit(
         &self,
-        _: Request<CommitRequest>,
+        request: Request<CommitRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
-        Err(Status::unimplemented("implemented in step 06-01"))
+        let req = request.get_ref();
+        let project_id_str = Self::extract_project_id(&req.database)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let txn_id = embyr_core::domain::transaction::TransactionId(req.transaction.clone());
+
+        // Translate proto writes to domain writes
+        let mut domain_writes = Vec::with_capacity(req.writes.len());
+        for proto_write in &req.writes {
+            let precondition = Self::convert_precondition(proto_write.current_document.clone());
+            match &proto_write.operation {
+                Some(embyr_proto::firestore::write::Operation::Update(doc)) => {
+                    let path = Self::parse_document_path(&doc.name)?;
+                    let fields = proto_fields_to_domain(&doc.fields)
+                        .ok_or_else(|| Status::invalid_argument("invalid field value in write"))?;
+                    domain_writes.push(DomainWrite::Update {
+                        path,
+                        fields,
+                        version: None,
+                        precondition,
+                    });
+                }
+                Some(embyr_proto::firestore::write::Operation::Delete(doc_name)) => {
+                    let path = Self::parse_document_path(doc_name)?;
+                    domain_writes.push(DomainWrite::Delete {
+                        path,
+                        version: None,
+                        precondition,
+                    });
+                }
+                Some(embyr_proto::firestore::write::Operation::Transform(dt)) => {
+                    let path = Self::parse_document_path(&dt.document)?;
+                    domain_writes.push(DomainWrite::Transform {
+                        path,
+                        transforms: vec![],
+                    });
+                }
+                None => {}
+            }
+        }
+
+        let write_results = adapter
+            .commit_transaction(&project_id, &txn_id, domain_writes)
+            .await
+            .map_err(core_error_to_status)?;
+
+        let now = chrono::Utc::now();
+        let proto_results: Vec<embyr_proto::firestore::WriteResult> = write_results
+            .into_iter()
+            .map(|wr| embyr_proto::firestore::WriteResult {
+                update_time: Some(Timestamp {
+                    seconds: wr.update_time.0,
+                    nanos: wr.update_time.1,
+                }),
+                transform_results: vec![],
+            })
+            .collect();
+
+        Ok(Response::new(CommitResponse {
+            write_results: proto_results,
+            commit_time: Some(Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            }),
+        }))
     }
 
-    async fn rollback(&self, _: Request<RollbackRequest>) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("implemented in step 06-01"))
+    async fn rollback(&self, request: Request<RollbackRequest>) -> Result<Response<()>, Status> {
+        let req = request.get_ref();
+        let project_id_str = Self::extract_project_id(&req.database)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let txn_id = embyr_core::domain::transaction::TransactionId(req.transaction.clone());
+
+        adapter
+            .rollback_transaction(&project_id, &txn_id)
+            .await
+            .map_err(core_error_to_status)?;
+
+        Ok(Response::new(()))
     }
 
     type RunQueryStream = tonic::codegen::BoxStream<RunQueryResponse>;
@@ -764,6 +882,8 @@ fn core_error_to_status(e: CoreError) -> Status {
         CoreError::PermissionDenied(_) => Status::permission_denied(e.to_string()),
         CoreError::InvalidArgument(_) => Status::invalid_argument(e.to_string()),
         CoreError::OccConflict => Status::aborted(e.to_string()),
+        CoreError::TransactionAborted => Status::aborted(e.to_string()),
+        CoreError::TransactionNotFound => Status::not_found(e.to_string()),
         CoreError::ResourceExhausted(_) => Status::resource_exhausted(e.to_string()),
         CoreError::FailedPrecondition(_) => Status::failed_precondition(e.to_string()),
         _ => Status::internal(e.to_string()),

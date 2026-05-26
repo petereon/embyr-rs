@@ -39,11 +39,15 @@ pub enum Write {
         fields: BTreeMap<String, FieldValue>,
         /// If `Some(v)`, only succeeds when document version == v (OCC).
         version: Option<i64>,
+        /// Optional precondition for the write (e.g. UpdateTime for OCC).
+        precondition: Option<WritePrecondition>,
     },
     Delete {
         path: DocumentPath,
         /// If `Some(v)`, only succeeds when document version == v (OCC).
         version: Option<i64>,
+        /// Optional precondition for the write.
+        precondition: Option<WritePrecondition>,
     },
     Transform {
         path: DocumentPath,

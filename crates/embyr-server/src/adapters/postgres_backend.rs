@@ -17,6 +17,7 @@ use embyr_core::{
     error::CoreError,
     storage::backend_adapter::{BackendAdapter, Write, WritePrecondition},
 };
+use uuid;
 
 /// Customer-DB backend adapter — one instance per customer database URL.
 ///
@@ -541,28 +542,216 @@ impl BackendAdapter for PostgresBackendAdapter {
 
     async fn begin_transaction(
         &self,
-        _project_id: &ProjectId,
+        project_id: &ProjectId,
         _options: TransactionOptions,
     ) -> Result<TransactionId, CoreError> {
-        todo!("step 06-01")
+        let txn_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO transactions (transaction_id, project_id) VALUES ($1, $2)",
+        )
+        .bind(txn_id)
+        .bind(project_id.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        Ok(TransactionId(txn_id.as_bytes().to_vec()))
     }
 
     async fn commit_transaction(
         &self,
-        _project_id: &ProjectId,
-        _transaction_id: &TransactionId,
-        _writes: Vec<Write>,
+        project_id: &ProjectId,
+        transaction_id: &TransactionId,
+        writes: Vec<Write>,
     ) -> Result<Vec<WriteResult>, CoreError> {
-        todo!("step 06-01")
+        let txn_uuid = uuid_from_bytes(&transaction_id.0)?;
+
+        // Check transaction status and expiry (60s window)
+        let row: Option<(String, DateTime<Utc>)> = sqlx::query_as(
+            "SELECT status, started_at FROM transactions \
+             WHERE transaction_id = $1 AND project_id = $2",
+        )
+        .bind(txn_uuid)
+        .bind(project_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let (status, started_at) =
+            row.ok_or(CoreError::TransactionNotFound)?;
+
+        if status != "active" {
+            return Err(CoreError::TransactionNotFound);
+        }
+
+        if Utc::now() - started_at > chrono::Duration::seconds(60) {
+            sqlx::query(
+                "UPDATE transactions SET status = 'expired' WHERE transaction_id = $1",
+            )
+            .bind(txn_uuid)
+            .execute(&self.pool)
+            .await
+            .ok();
+            return Err(CoreError::TransactionNotFound);
+        }
+
+        // Begin Postgres transaction for atomic commit + OCC
+        let mut pg_txn = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        // OCC: verify UpdateTime preconditions for all writes
+        for write in &writes {
+            let (path, expected_secs, expected_nanos) = match write {
+                Write::Update {
+                    path,
+                    precondition: Some(WritePrecondition::UpdateTime(s, n)),
+                    ..
+                } => (path, *s, *n),
+                Write::Delete {
+                    path,
+                    precondition: Some(WritePrecondition::UpdateTime(s, n)),
+                    ..
+                } => (path, *s, *n),
+                _ => continue,
+            };
+
+            let expected_dt = to_datetime(expected_secs, expected_nanos);
+            // Use FOR UPDATE to serialize concurrent OCC checks on the same document row.
+            let row: Option<(DateTime<Utc>,)> = sqlx::query_as(
+                "SELECT update_time FROM documents \
+                 WHERE project_id = $1 \
+                   AND collection_path = $2 \
+                   AND document_id = $3 \
+                   AND NOT deleted \
+                 FOR UPDATE",
+            )
+            .bind(path.project_id.as_str())
+            .bind(&path.collection_path)
+            .bind(&path.document_id)
+            .fetch_optional(&mut *pg_txn)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+            match row {
+                Some((actual,)) if actual == expected_dt => {}
+                _ => return Err(CoreError::TransactionAborted),
+            }
+        }
+
+        // Also run version-based OCC for writes with version field
+        crate::transactions::occ::verify_versions(
+            &mut pg_txn,
+            project_id.as_str(),
+            &writes,
+        )
+        .await?;
+
+        let now = Utc::now();
+        let mut results = Vec::with_capacity(writes.len());
+
+        for write in &writes {
+            match write {
+                Write::Update { path, fields, .. } => {
+                    let fields_json = crate::encoding::field_value::fields_to_json(fields);
+                    sqlx::query(
+                        "INSERT INTO documents \
+                         (project_id, collection_path, document_id, fields, version, \
+                          create_time, update_time, deleted) \
+                         VALUES ($1, $2, $3, $4::jsonb, 1, $5, $5, false) \
+                         ON CONFLICT (project_id, collection_path, document_id) DO UPDATE \
+                         SET fields = $4::jsonb, version = documents.version + 1, \
+                             update_time = $5, deleted = false",
+                    )
+                    .bind(path.project_id.as_str())
+                    .bind(&path.collection_path)
+                    .bind(&path.document_id)
+                    .bind(&fields_json)
+                    .bind(now)
+                    .execute(&mut *pg_txn)
+                    .await
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                    results.push(WriteResult {
+                        update_time: from_datetime(now),
+                        create_time: None,
+                    });
+                }
+                Write::Delete { path, .. } => {
+                    sqlx::query(
+                        "UPDATE documents \
+                         SET deleted = true, version = version + 1, update_time = $4 \
+                         WHERE project_id = $1 \
+                           AND collection_path = $2 \
+                           AND document_id = $3",
+                    )
+                    .bind(path.project_id.as_str())
+                    .bind(&path.collection_path)
+                    .bind(&path.document_id)
+                    .bind(now)
+                    .execute(&mut *pg_txn)
+                    .await
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                    results.push(WriteResult { update_time: from_datetime(now), create_time: None });
+                }
+                Write::Transform { .. } => {
+                    // ServerTimestamp transforms are handled as timestamp write
+                    results.push(WriteResult { update_time: from_datetime(now), create_time: None });
+                }
+            }
+        }
+
+        // Mark the transaction committed inside the same Postgres transaction
+        sqlx::query(
+            "UPDATE transactions SET status = 'committed' WHERE transaction_id = $1",
+        )
+        .bind(txn_uuid)
+        .execute(&mut *pg_txn)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        pg_txn
+            .commit()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        Ok(results)
     }
 
     async fn rollback_transaction(
         &self,
-        _project_id: &ProjectId,
-        _transaction_id: &TransactionId,
+        project_id: &ProjectId,
+        transaction_id: &TransactionId,
     ) -> Result<(), CoreError> {
-        todo!("step 06-01")
+        let txn_uuid = uuid_from_bytes(&transaction_id.0)?;
+
+        let rows_affected = sqlx::query(
+            "UPDATE transactions SET status = 'rolled_back' \
+             WHERE transaction_id = $1 AND project_id = $2 AND status = 'active'",
+        )
+        .bind(txn_uuid)
+        .bind(project_id.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?
+        .rows_affected();
+
+        if rows_affected == 0 {
+            return Err(CoreError::TransactionNotFound);
+        }
+        Ok(())
     }
+}
+
+/// Parse a 16-byte slice as a UUID.
+fn uuid_from_bytes(bytes: &[u8]) -> Result<uuid::Uuid, CoreError> {
+    if bytes.len() != 16 {
+        return Err(CoreError::InvalidArgument(
+            "invalid transaction ID length".into(),
+        ));
+    }
+    let arr: [u8; 16] = bytes.try_into().unwrap();
+    Ok(uuid::Uuid::from_bytes(arr))
 }
 
 #[cfg(test)]

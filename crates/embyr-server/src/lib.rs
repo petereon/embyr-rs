@@ -4,6 +4,7 @@ pub mod encoding;
 pub mod grpc;
 pub mod middleware;
 pub mod realtime;
+pub mod transactions;
 
 use std::sync::Arc;
 
