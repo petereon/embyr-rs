@@ -10,7 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 embyr-core.workspace = true
+embyr-proto.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+sqlx.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 x25519-dalek.workspace = true
