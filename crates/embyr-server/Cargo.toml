@@ -39,6 +39,7 @@ config.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 base64.workspace = true
+rand_core.workspace = true
 async-trait.workspace = true
 
 [[test]]
@@ -68,6 +69,10 @@ path = "../../tests/acceptance/us_05_listen_realtime.rs"
 [[test]]
 name = "us_06_transactions"
 path = "../../tests/acceptance/us_06_transactions.rs"
+
+[[test]]
+name = "us_07_provision_project"
+path = "../../tests/acceptance/us_07_provision_project.rs"
 
 [dev-dependencies]
 embyr-proto.workspace = true

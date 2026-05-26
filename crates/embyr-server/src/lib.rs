@@ -1,5 +1,6 @@
 // embyr-server: composition root and gRPC adapter layer.
 pub mod adapters;
+pub mod admin;
 pub mod encoding;
 pub mod grpc;
 pub mod middleware;
@@ -16,11 +17,12 @@ use realtime::listen_registry::ListenRegistry;
 
 /// Handle to an in-process test server bound on ephemeral ports.
 ///
-/// Holds both the gRPC and REST addresses.  Sending on the shutdown channel
-/// (via `Drop`) causes both servers to stop.
+/// Holds both the gRPC, REST, and admin addresses.  Sending on the shutdown
+/// channel (via `Drop`) causes all servers to stop.
 pub struct TestServer {
     pub grpc_addr: std::net::SocketAddr,
     pub rest_addr: std::net::SocketAddr,
+    pub admin_addr: std::net::SocketAddr,
     /// Shared listen registry — exposed for test-only overflow simulation.
     pub listen_registry: Arc<realtime::listen_registry::ListenRegistry>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -48,9 +50,13 @@ pub async fn start_test_server_with_keepalive(
     let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind REST ephemeral port");
+    let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind admin ephemeral port");
 
     let grpc_addr = grpc_listener.local_addr().expect("get gRPC local addr");
     let rest_addr = rest_listener.local_addr().expect("get REST local addr");
+    let admin_addr = admin_listener.local_addr().expect("get admin local addr");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -60,7 +66,7 @@ pub async fn start_test_server_with_keepalive(
     let listen_registry_clone = Arc::clone(&listen_registry);
     let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let service = FirestoreService {
-        system_db,
+        system_db: Arc::clone(&system_db),
         credential_cache: cache,
         index_manager: idx_mgr,
         keepalive_interval: keepalive,
@@ -71,6 +77,8 @@ pub async fn start_test_server_with_keepalive(
     let rest_app = axum::Router::new()
         .route("/healthz", axum::routing::get(healthz_handler));
 
+    let admin_app = admin::router::build(system_db, "test-admin-key-secret".to_string());
+
     tokio::spawn(async move {
         let grpc_incoming =
             tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
@@ -80,20 +88,23 @@ pub async fn start_test_server_with_keepalive(
             .serve_with_incoming(grpc_incoming);
 
         let rest_fut = axum::serve(rest_listener, rest_app);
+        let admin_fut = axum::serve(admin_listener, admin_app);
 
         tokio::select! {
             _ = grpc_fut => {},
             _ = rest_fut => {},
+            _ = admin_fut => {},
             _ = async { let _ = shutdown_rx.await; } => {},
         }
     });
 
-    // Brief yield to let both servers reach their accept loops before returning.
+    // Brief yield to let all servers reach their accept loops before returning.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     TestServer {
         grpc_addr,
         rest_addr,
+        admin_addr,
         listen_registry: listen_registry_clone,
         shutdown_tx: Some(shutdown_tx),
     }
