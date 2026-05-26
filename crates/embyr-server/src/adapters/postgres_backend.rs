@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use sqlx::PgPool;
 
+use crate::adapters::postgres_notify_listener::notify_channel;
+
 use chrono::{DateTime, TimeZone, Utc};
 use embyr_core::{
     domain::{
@@ -41,6 +43,25 @@ impl PostgresBackendAdapter {
             .run(&self.pool)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
+    }
+
+    /// Send a Postgres NOTIFY on the project's channel after a write.
+    ///
+    /// The payload is `{collection_path}/{document_id}`.
+    /// Failure is non-fatal — NOTIFY is best-effort for real-time delivery.
+    pub async fn send_notify(&self, path: &DocumentPath) {
+        let channel = notify_channel(path.project_id.as_str());
+        let payload = format!("{}/{}", path.collection_path, path.document_id);
+        let _ = sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(&channel)
+            .bind(&payload)
+            .execute(&self.pool)
+            .await;
+    }
+
+    /// Expose the internal pool for use by `PostgresNotifyListener`.
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 }
 
@@ -154,6 +175,8 @@ impl BackendAdapter for PostgresBackendAdapter {
                 let update_time: DateTime<Utc> = row
                     .try_get("update_time")
                     .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                // Send NOTIFY after successful write — non-fatal if it fails.
+                self.send_notify(path).await;
                 Ok(WriteResult {
                     update_time: from_datetime(update_time),
                     create_time: Some(from_datetime(create_time)),
@@ -203,6 +226,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                 let update_time: DateTime<Utc> = row
                     .try_get("update_time")
                     .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                self.send_notify(path).await;
                 Ok(WriteResult { update_time: from_datetime(update_time), create_time: None })
             }
 
@@ -233,6 +257,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                     let update_time: DateTime<Utc> = row
                         .try_get("update_time")
                         .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                    self.send_notify(path).await;
                     return Ok(WriteResult {
                         update_time: from_datetime(update_time),
                         create_time: None,
@@ -286,6 +311,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                         let update_time: DateTime<Utc> = row
                             .try_get("update_time")
                             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                        self.send_notify(path).await;
                         Ok(WriteResult {
                             update_time: from_datetime(update_time),
                             create_time: None,
@@ -315,6 +341,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                         let update_time: DateTime<Utc> = row
                             .try_get("update_time")
                             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                        self.send_notify(path).await;
                         Ok(WriteResult {
                             update_time: from_datetime(update_time),
                             create_time: None,
@@ -357,6 +384,8 @@ impl BackendAdapter for PostgresBackendAdapter {
         if rows_affected == 0 {
             return Err(CoreError::DocumentNotFound(path.document_id.clone()));
         }
+        // Send NOTIFY after successful delete — non-fatal if it fails.
+        self.send_notify(path).await;
         Ok(())
     }
 

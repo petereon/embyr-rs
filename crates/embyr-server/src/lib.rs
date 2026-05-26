@@ -11,6 +11,7 @@ use adapters::{credential_cache::CredentialCache, index_manager::IndexManager, s
 use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
 use grpc::healthz::healthz_handler;
+use realtime::listen_registry::ListenRegistry;
 
 /// Handle to an in-process test server bound on ephemeral ports.
 ///
@@ -19,6 +20,8 @@ use grpc::healthz::healthz_handler;
 pub struct TestServer {
     pub grpc_addr: std::net::SocketAddr,
     pub rest_addr: std::net::SocketAddr,
+    /// Shared listen registry — exposed for test-only overflow simulation.
+    pub listen_registry: Arc<realtime::listen_registry::ListenRegistry>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -52,11 +55,16 @@ pub async fn start_test_server_with_keepalive(
 
     let cache = Arc::new(CredentialCache::new(256));
     let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
+    let listen_registry = ListenRegistry::new();
+    let listen_registry_clone = Arc::clone(&listen_registry);
+    let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let service = FirestoreService {
         system_db,
         credential_cache: cache,
         index_manager: idx_mgr,
         keepalive_interval: keepalive,
+        listen_registry,
+        active_listeners,
     };
 
     let rest_app = axum::Router::new()
@@ -85,6 +93,7 @@ pub async fn start_test_server_with_keepalive(
     TestServer {
         grpc_addr,
         rest_addr,
+        listen_registry: listen_registry_clone,
         shutdown_tx: Some(shutdown_tx),
     }
 }

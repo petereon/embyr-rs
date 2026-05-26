@@ -1,5 +1,5 @@
-/// Handle an AddTarget Listen session: initial snapshot + keep-alive loop.
-use std::time::Duration;
+/// Handle an AddTarget Listen session: initial snapshot + keep-alive + NOTIFY fan-out.
+use std::{sync::Arc, time::Duration};
 
 use embyr_core::domain::{
     document::CollectionPath,
@@ -10,24 +10,31 @@ use embyr_proto::firestore::{
     listen_request, listen_response,
     target::TargetType,
     target_change::TargetChangeType,
-    DocumentChange, ListenRequest, ListenResponse, TargetChange,
+    DocumentChange, DocumentDelete, ListenRequest, ListenResponse, TargetChange,
 };
-use tonic::{Status};
+use tonic::Status;
 use tokio::sync::mpsc;
 
 use crate::{
     adapters::credential_cache::SharedBackendAdapter,
     encoding::firestore_proto::document_to_proto,
+    realtime::listen_registry::{ListenEvent, ListenRegistry},
 };
 
-/// Process an AddTarget message: run the initial snapshot query, send
-/// `DocumentChange` events for each doc, send `TargetChange(CURRENT)`,
-/// then loop sending `TargetChange(NO_CHANGE)` every `keepalive` interval.
+/// Process an AddTarget message: register subscriber, run the initial snapshot query,
+/// send `DocumentChange` events for each doc, send `TargetChange(CURRENT)`,
+/// then loop on keepalive timer, registry receiver, and RESET notifier.
+///
+/// Slow consumer detection: if fan_out detects the subscriber channel is full,
+/// it fires `reset_notify`. The handler responds by sending `TargetChange(RESET)`
+/// and closing the stream.
 pub async fn handle_add_target(
     first_msg: &ListenRequest,
     adapter: &SharedBackendAdapter,
     tx: &mpsc::Sender<Result<ListenResponse, Status>>,
     keepalive: Duration,
+    registry: Arc<ListenRegistry>,
+    channel: &str,
 ) -> Result<(), String> {
     // Extract AddTarget from the first message.
     let add_target = match &first_msg.target_change {
@@ -64,6 +71,12 @@ pub async fn handle_add_target(
         end_at: None,
     };
 
+    // Register subscriber BEFORE running the initial snapshot to avoid missing
+    // concurrent writes.
+    let handle = registry.register(channel).await;
+    let mut event_rx = handle.event_rx;
+    let reset_notify = handle.reset_notify;
+
     // Run the initial snapshot query.
     let docs = adapter
         .run_query(&collection, &domain_query, None)
@@ -93,19 +106,79 @@ pub async fn handle_add_target(
     };
     tx.send(Ok(current)).await.map_err(|_| "channel closed".to_string())?;
 
-    // Keep-alive loop: send NO_CHANGE on each tick.
+    // Main loop: keepalive + NOTIFY events + RESET signal.
     loop {
-        tokio::time::sleep(keepalive).await;
-        let no_change = ListenResponse {
-            response_type: Some(listen_response::ResponseType::TargetChange(TargetChange {
-                target_change_type: TargetChangeType::NoChange as i32,
-                target_ids: vec![],
-                ..Default::default()
-            })),
-        };
-        if tx.send(Ok(no_change)).await.is_err() {
-            // Client disconnected — end the loop gracefully.
-            break;
+        tokio::select! {
+            _ = tokio::time::sleep(keepalive) => {
+                let no_change = ListenResponse {
+                    response_type: Some(listen_response::ResponseType::TargetChange(TargetChange {
+                        target_change_type: TargetChangeType::NoChange as i32,
+                        target_ids: vec![],
+                        ..Default::default()
+                    })),
+                };
+                if tx.send(Ok(no_change)).await.is_err() {
+                    // Client disconnected.
+                    break;
+                }
+            }
+            event = event_rx.recv() => {
+                match event {
+                    Some(ListenEvent::Changed(doc)) => {
+                        let proto_doc = document_to_proto(doc);
+                        let response = ListenResponse {
+                            response_type: Some(listen_response::ResponseType::DocumentChange(DocumentChange {
+                                document: Some(proto_doc),
+                                target_ids: vec![target_id],
+                                removed_target_ids: vec![],
+                            })),
+                        };
+                        if tx.send(Ok(response)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(ListenEvent::Removed(path)) => {
+                        let doc_name = format!(
+                            "projects/{}/databases/(default)/documents/{}/{}",
+                            path.project_id.as_str(),
+                            path.collection_path,
+                            path.document_id,
+                        );
+                        let response = ListenResponse {
+                            response_type: Some(listen_response::ResponseType::DocumentDelete(
+                                DocumentDelete {
+                                    document: doc_name,
+                                    removed_target_ids: vec![target_id],
+                                    read_time: None,
+                                },
+                            )),
+                        };
+                        if tx.send(Ok(response)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        // Registry channel closed unexpectedly.
+                        break;
+                    }
+                }
+            }
+            _ = reset_notify.notified() => {
+                // Slow consumer detected by fan_out — send RESET.
+                let reset = ListenResponse {
+                    response_type: Some(listen_response::ResponseType::TargetChange(
+                        TargetChange {
+                            target_change_type: TargetChangeType::Reset as i32,
+                            target_ids: vec![target_id],
+                            ..Default::default()
+                        },
+                    )),
+                };
+                // Use try_send; if the client's gRPC channel is also full, the
+                // RESET may be lost, but the stream will close momentarily anyway.
+                let _ = tx.send(Ok(reset)).await;
+                break;
+            }
         }
     }
 

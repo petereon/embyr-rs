@@ -12,6 +12,9 @@ pub type SharedBackendAdapter = Arc<dyn BackendAdapter + Send + Sync>;
 pub struct CachedEntry {
     pub adapter: SharedBackendAdapter,
     pub project_status: String,
+    /// Decrypted customer DSN — stored so the Listen handler can start
+    /// `PostgresNotifyListener` without re-decrypting on each stream open.
+    pub dsn: String,
 }
 
 /// LRU credential cache — maps (project_id, BLAKE3(api_key)) → backend adapter.
@@ -28,15 +31,15 @@ impl CredentialCache {
         }
     }
 
-    /// Returns `(SharedBackendAdapter, project_status)` if present, promoting it in LRU order.
+    /// Returns `(SharedBackendAdapter, project_status, dsn)` if present, promoting it in LRU order.
     pub async fn get(
         &self,
         key: &CredentialCacheKey,
-    ) -> Option<(SharedBackendAdapter, String)> {
+    ) -> Option<(SharedBackendAdapter, String, String)> {
         let mut guard = self.inner.lock().await;
         guard
             .get(key)
-            .map(|e| (Arc::clone(&e.adapter), e.project_status.clone()))
+            .map(|e| (Arc::clone(&e.adapter), e.project_status.clone(), e.dsn.clone()))
     }
 
     /// Insert or replace the entry for `key`.

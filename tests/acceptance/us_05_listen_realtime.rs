@@ -15,10 +15,16 @@ use embyr_proto::firestore::{
     listen_request, listen_response,
     target::{self, query_target},
     structured_query::CollectionSelector,
-    CreateDocumentRequest, Document, ListenRequest, StructuredQuery, Target,
+    CreateDocumentRequest, DeleteDocumentRequest, Document, ListenRequest, StructuredQuery, Target,
     target_change::TargetChangeType,
 };
-use embyr_server::{adapters::system_db::SystemDb, start_test_server_with_keepalive};
+use embyr_server::{
+    adapters::{
+        postgres_notify_listener::notify_channel,
+        system_db::SystemDb,
+    },
+    start_test_server_with_keepalive,
+};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -261,9 +267,79 @@ async fn current_marker_arrives_after_last_initial_document() {
 /// Then:   the Listen stream delivers a DocumentChange(Modified) event
 /// And:    the event arrives within 2000 milliseconds of the write completing
 #[tokio::test]
-#[ignore = "us-05 AC-05c — RED scaffold, not yet implemented"]
 async fn write_triggers_listen_callback_within_two_seconds() {
-    panic!("RED scaffold — not yet implemented");
+    let env = setup(
+        "test-sk-us05-listen-04",
+        "us05-listen-project-04",
+        Duration::from_secs(30), // long keepalive — test must not rely on it
+    )
+    .await;
+
+    let mut listener_client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+    let mut writer_client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Open Listen stream for empty "counters" collection.
+    let req_stream = tokio_stream::once(add_target_request(&env.project_id, "counters"));
+    let mut listen_req = tonic::Request::new(req_stream);
+    listen_req
+        .metadata_mut()
+        .insert("authorization", format!("bearer {}", env.api_key).parse().unwrap());
+
+    let mut listen_stream = listener_client
+        .listen(listen_req)
+        .await
+        .expect("listen should succeed")
+        .into_inner();
+
+    // Drain until CURRENT (empty snapshot — 0 docs).
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), listen_stream.next())
+            .await
+            .expect("timed out waiting for CURRENT")
+            .expect("stream ended before CURRENT")
+            .expect("stream error before CURRENT");
+        if let Some(listen_response::ResponseType::TargetChange(tc)) = msg.response_type {
+            let change_type = TargetChangeType::try_from(tc.target_change_type)
+                .unwrap_or(TargetChangeType::NoChange);
+            if change_type == TargetChangeType::Current {
+                break;
+            }
+        }
+    }
+
+    // Write a new document from the second client.
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let mut write_req = tonic::Request::new(CreateDocumentRequest {
+        parent,
+        collection_id: "counters".to_string(),
+        document_id: "counter-1".to_string(),
+        document: Some(Document { name: String::new(), fields: HashMap::new(), ..Default::default() }),
+        ..Default::default()
+    });
+    write_req.metadata_mut().insert(
+        "authorization",
+        format!("bearer {}", env.api_key).parse().unwrap(),
+    );
+    writer_client
+        .create_document(write_req)
+        .await
+        .expect("write should succeed");
+
+    // Expect a DocumentChange event within 2 seconds.
+    let received = tokio::time::timeout(Duration::from_millis(2000), async {
+        loop {
+            let msg = listen_stream.next().await?.ok()?;
+            if let Some(listen_response::ResponseType::DocumentChange(_)) = msg.response_type {
+                return Some(());
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        received.is_ok() && received.unwrap().is_some(),
+        "expected DocumentChange within 2 seconds of write"
+    );
 }
 
 /// AC-05d: delete triggers a REMOVED change event on the listener
@@ -273,9 +349,82 @@ async fn write_triggers_listen_callback_within_two_seconds() {
 /// Then:   the Listen stream delivers a DocumentChange(Removed) event for that document
 /// And:    a subsequent GetDocument for the path returns exists=false
 #[tokio::test]
-#[ignore = "us-05 AC-05d — RED scaffold, not yet implemented"]
 async fn delete_triggers_removed_change_event_on_listener() {
-    panic!("RED scaffold — not yet implemented");
+    let env = setup(
+        "test-sk-us05-listen-05",
+        "us05-listen-project-05",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Seed 1 document in "tasks".
+    seed_document(&mut client, &env.project_id, &env.api_key, "tasks", "task-1").await;
+
+    // Open Listen stream for "tasks".
+    let req_stream = tokio_stream::once(add_target_request(&env.project_id, "tasks"));
+    let mut listen_req = tonic::Request::new(req_stream);
+    listen_req
+        .metadata_mut()
+        .insert("authorization", format!("bearer {}", env.api_key).parse().unwrap());
+
+    let mut listen_stream = client
+        .listen(listen_req)
+        .await
+        .expect("listen should succeed")
+        .into_inner();
+
+    // Drain until CURRENT (initial snapshot with 1 doc).
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), listen_stream.next())
+            .await
+            .expect("timed out waiting for CURRENT")
+            .expect("stream ended before CURRENT")
+            .expect("stream error before CURRENT");
+        if let Some(listen_response::ResponseType::TargetChange(tc)) = msg.response_type {
+            let change_type = TargetChangeType::try_from(tc.target_change_type)
+                .unwrap_or(TargetChangeType::NoChange);
+            if change_type == TargetChangeType::Current {
+                break;
+            }
+        }
+    }
+
+    // Delete the document from a second client connection.
+    let mut delete_client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/tasks/task-1",
+        env.project_id
+    );
+    let mut delete_req = tonic::Request::new(DeleteDocumentRequest {
+        name: doc_name,
+        ..Default::default()
+    });
+    delete_req.metadata_mut().insert(
+        "authorization",
+        format!("bearer {}", env.api_key).parse().unwrap(),
+    );
+    delete_client
+        .delete_document(delete_req)
+        .await
+        .expect("delete should succeed");
+
+    // Expect a DocumentDelete event within 2 seconds.
+    let received = tokio::time::timeout(Duration::from_millis(2000), async {
+        loop {
+            let msg = listen_stream.next().await?.ok()?;
+            if let Some(listen_response::ResponseType::DocumentDelete(_)) = msg.response_type {
+                return Some(());
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        received.is_ok() && received.unwrap().is_some(),
+        "expected DocumentDelete within 2 seconds of delete"
+    );
 }
 
 /// AC-05e: reconnecting with resume token delivers only the delta (not a full re-snapshot)
@@ -312,9 +461,73 @@ async fn stale_resume_token_triggers_full_resnapshot_not_error() {
 /// Then:   the server sends a TargetChange(RESET)
 /// And:    subsequent AddTarget from the client causes a fresh full snapshot
 #[tokio::test]
-#[ignore = "us-05 error — RED scaffold, not yet implemented"]
 async fn slow_consumer_overflow_triggers_reset() {
-    panic!("RED scaffold — not yet implemented");
+    let env = setup(
+        "test-sk-us05-listen-06",
+        "us05-listen-project-06",
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let mut listener_client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Open Listen stream for "overflow-col".
+    let req_stream = tokio_stream::once(add_target_request(&env.project_id, "overflow-col"));
+    let mut listen_req = tonic::Request::new(req_stream);
+    listen_req
+        .metadata_mut()
+        .insert("authorization", format!("bearer {}", env.api_key).parse().unwrap());
+
+    let mut listen_stream = listener_client
+        .listen(listen_req)
+        .await
+        .expect("listen should succeed")
+        .into_inner();
+
+    // Drain until CURRENT (empty snapshot).
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), listen_stream.next())
+            .await
+            .expect("timed out waiting for CURRENT")
+            .expect("stream ended before CURRENT")
+            .expect("stream error");
+        if let Some(listen_response::ResponseType::TargetChange(tc)) = msg.response_type {
+            let change_type = TargetChangeType::try_from(tc.target_change_type)
+                .unwrap_or(TargetChangeType::NoChange);
+            if change_type == TargetChangeType::Current {
+                break;
+            }
+        }
+    }
+
+    // Simulate overflow directly via the registry — this is more reliable than
+    // trying to saturate the channel via timing under async scheduling.
+    // The capacity-based overflow (for production use) is tested by the unit
+    // mechanism in listen_registry; here we verify the end-to-end RESET delivery.
+    let channel = notify_channel(&env.project_id);
+    // Give the listen handler a moment to register the subscriber.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    env.server.listen_registry.simulate_overflow(&channel).await;
+
+    // Drain the stream — the RESET should arrive within a short window.
+    let found_reset = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = listen_stream.next().await?.ok()?;
+            if let Some(listen_response::ResponseType::TargetChange(tc)) = msg.response_type {
+                let change_type = TargetChangeType::try_from(tc.target_change_type)
+                    .unwrap_or(TargetChangeType::NoChange);
+                if change_type == TargetChangeType::Reset {
+                    return Some(());
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        found_reset.is_ok() && found_reset.unwrap().is_some(),
+        "expected TargetChange(RESET) when subscriber channel overflows"
+    );
 }
 
 /// Property: listen latency p99 <= 2 seconds under 100 concurrent listeners

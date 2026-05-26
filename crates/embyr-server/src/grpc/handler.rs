@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
@@ -38,9 +38,11 @@ use crate::{
         credential_cache::{CachedEntry, CredentialCache, SharedBackendAdapter},
         index_manager::IndexManager,
         postgres_backend::PostgresBackendAdapter,
+        postgres_notify_listener::{notify_channel, PostgresNotifyListener},
         system_db::SystemDb,
     },
     encoding::firestore_proto::{document_to_proto, fields_to_proto, proto_fields_to_domain},
+    realtime::listen_registry::ListenRegistry,
 };
 
 pub struct FirestoreService {
@@ -50,6 +52,11 @@ pub struct FirestoreService {
     /// Interval between NO_CHANGE keep-alive messages on idle Listen streams.
     /// Default: 30s for production. Tests use a shorter interval (e.g. 500ms).
     pub keepalive_interval: std::time::Duration,
+    /// Shared fan-out registry for real-time Listen subscribers.
+    pub listen_registry: Arc<ListenRegistry>,
+    /// Active `PostgresNotifyListener` handles, keyed by project_id.
+    /// Started on first Listen stream for each project.
+    pub active_listeners: Arc<tokio::sync::Mutex<HashMap<String, PostgresNotifyListener>>>,
 }
 
 impl FirestoreService {
@@ -116,11 +123,13 @@ impl FirestoreService {
     ///
     /// Checks the credential cache first; on miss performs Argon2id verification
     /// and ECIES DSN decryption before building a new adapter.
+    ///
+    /// Returns `(adapter, project_status, dsn)`.
     async fn authenticate(
         &self,
         project_id_str: &str,
         api_key: &str,
-    ) -> Result<(SharedBackendAdapter, String), Status> {
+    ) -> Result<(SharedBackendAdapter, String, String), Status> {
         let api_key_blake3 = blake3::derive_cache_key(api_key.as_bytes());
         let project_id = embyr_core::domain::project::ProjectId::new(project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -192,11 +201,12 @@ impl FirestoreService {
                 CachedEntry {
                     adapter: Arc::clone(&shared),
                     project_status: row.status.clone(),
+                    dsn: dsn.clone(),
                 },
             )
             .await;
 
-        Ok((shared, row.status))
+        Ok((shared, row.status, dsn))
     }
 
     /// Convert a proto `Precondition` to a domain `WritePrecondition`.
@@ -272,7 +282,7 @@ impl Firestore for FirestoreService {
         let project_id = Self::extract_project_id(&name)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let (adapter, status) = self.authenticate(&project_id, &api_key).await?;
+        let (adapter, status, _dsn) = self.authenticate(&project_id, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -299,7 +309,7 @@ impl Firestore for FirestoreService {
         let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let (adapter, status) = self.authenticate(&project_id_str, &api_key).await?;
+        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -360,7 +370,7 @@ impl Firestore for FirestoreService {
         let project_id_str = path.project_id.as_str().to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let (adapter, status) = self.authenticate(&project_id_str, &api_key).await?;
+        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -397,7 +407,7 @@ impl Firestore for FirestoreService {
         let project_id_str = path.project_id.as_str().to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let (adapter, status) = self.authenticate(&project_id_str, &api_key).await?;
+        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -452,7 +462,7 @@ impl Firestore for FirestoreService {
         let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let (adapter, status_str) = self.authenticate(&project_id_str, &api_key).await?;
+        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -587,13 +597,42 @@ impl Firestore for FirestoreService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let project_id = extract_project_id_from_listen_request(&first_msg)?;
-        let (adapter, status) = self.authenticate(&project_id, &api_key).await?;
+        let (adapter, status, dsn) = self.authenticate(&project_id, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ListenResponse, Status>>(128);
+        // Ensure a PostgresNotifyListener is running for this project.
+        let channel = notify_channel(&project_id);
+        {
+            let mut listeners = self.active_listeners.lock().await;
+            if !listeners.contains_key(&project_id) {
+                // We need the pool from the adapter. The adapter is a SharedBackendAdapter
+                // (dyn BackendAdapter) so we can't downcast. Instead, build a new pool
+                // from the DSN specifically for the listener's fetch queries.
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(2)
+                    .connect(&dsn)
+                    .await
+                    .map_err(|e| Status::internal(format!("notify listener pool: {e}")))?;
+                let listener = PostgresNotifyListener::start(
+                    &dsn,
+                    &project_id,
+                    Arc::clone(&self.listen_registry),
+                    pool,
+                )
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                listeners.insert(project_id.clone(), listener);
+            }
+        }
+
+        // Channel capacity 64 — matching the subscriber registry capacity.
+        // When a slow consumer stops draining, try_send fails at 64 buffered
+        // events → handler sends TargetChange(RESET).
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ListenResponse, Status>>(64);
         let keepalive = self.keepalive_interval;
+        let registry = Arc::clone(&self.listen_registry);
 
         tokio::spawn(async move {
             if let Err(e) = crate::realtime::listen_handler::handle_add_target(
@@ -601,6 +640,8 @@ impl Firestore for FirestoreService {
                 &adapter,
                 &tx,
                 keepalive,
+                registry,
+                &channel,
             )
             .await
             {
