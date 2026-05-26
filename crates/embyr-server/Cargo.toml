@@ -51,6 +51,7 @@ rand_core.workspace = true
 async-trait.workspace = true
 aws-config.workspace = true
 aws-sdk-secretsmanager.workspace = true
+reqwest.workspace = true
 
 [[test]]
 name = "us_13_browser_transport"
@@ -104,6 +105,10 @@ path = "../../tests/acceptance/us_12_agent_backend.rs"
 name = "us_10_aws_secrets"
 path = "../../tests/acceptance/us_10_aws_secrets.rs"
 
+[[test]]
+name = "us_11_gcp_secrets"
+path = "../../tests/acceptance/us_11_gcp_secrets.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
@@ -124,3 +129,4 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-secretsmanager = { workspace = true }
+base64 = { workspace = true }

@@ -39,6 +39,7 @@ use crate::{
         agent_backend::AgentBackendAdapter,
         aws_secret_fetcher::AwsSecretFetcher,
         credential_cache::{CachedEntry, CredentialCache, SharedBackendAdapter},
+        gcp_secret_fetcher::GcpSecretFetcher,
         index_manager::IndexManager,
         metrics_adapter::MetricsAdapter,
         postgres_backend::PostgresBackendAdapter,
@@ -66,6 +67,8 @@ pub struct FirestoreService {
     pub active_listeners: Arc<tokio::sync::Mutex<HashMap<String, PostgresNotifyListener>>>,
     /// AWS Secrets Manager fetcher — Some for servers configured with aws_secret support.
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
+    /// GCP Secret Manager fetcher — Some for servers configured with gcp_secret support.
+    pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
 }
 
 impl FirestoreService {
@@ -211,6 +214,24 @@ impl FirestoreService {
                 .get_dsn(&arn)
                 .await
                 .map_err(|e| Status::internal(format!("aws secret fetch failed: {e}")))?;
+            let adapter = PostgresBackendAdapter::new(&dsn)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let shared: SharedBackendAdapter = Arc::new(adapter);
+            (shared, dsn)
+        } else if row.backend_mode == "gcp_secret" {
+            // GCP Secret Manager mode: fetch DSN via the fetcher, create PostgresBackendAdapter.
+            let resource_name = row
+                .backend_secret_gcp
+                .ok_or_else(|| Status::internal("gcp_secret project missing backend_secret_gcp"))?;
+            let fetcher = self
+                .gcp_secret_fetcher
+                .as_ref()
+                .ok_or_else(|| Status::internal("gcp_secret_fetcher not configured on this server"))?;
+            let dsn = fetcher
+                .get_dsn(&resource_name)
+                .await
+                .map_err(|e| Status::internal(format!("gcp secret fetch failed: {e}")))?;
             let adapter = PostgresBackendAdapter::new(&dsn)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;

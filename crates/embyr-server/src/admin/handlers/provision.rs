@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::adapters::{
     aws_secret_fetcher::{AwsSecretError, AwsSecretFetcher},
     credential_cache::CredentialCache,
+    gcp_secret_fetcher::{GcpSecretError, GcpSecretFetcher},
     system_db::SystemDb,
 };
 
@@ -24,6 +25,9 @@ pub struct AdminState {
     /// Injected AWS Secrets Manager fetcher. None when the server is started
     /// without AWS support (e.g., standard direct_pg/agent tests).
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
+    /// Injected GCP Secret Manager fetcher. None when the server is started
+    /// without GCP support (e.g., standard direct_pg/aws/agent tests).
+    pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +41,10 @@ pub struct ProvisionRequest {
     /// AWS Secrets Manager ARN — required for backend_mode=aws_secret.
     #[serde(default)]
     pub secret_arn: Option<String>,
+    /// GCP Secret Manager resource name — required for backend_mode=gcp_secret.
+    /// Format: "projects/{project}/secrets/{secret}"
+    #[serde(default)]
+    pub gcp_resource_name: Option<String>,
     /// Agent gRPC endpoint (host:port) — required for backend_mode=agent.
     #[serde(default)]
     pub agent_endpoint: Option<String>,
@@ -179,6 +187,58 @@ pub async fn provision(
         .bind(&req.project_id)
         .bind(&hash)
         .bind(arn)
+        .execute(state.system_db.pool())
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    } else if req.backend_mode == "gcp_secret" {
+        // GCP Secret Manager mode: fetch DSN from resource_name via REST API,
+        // probe customer DB, apply migrations, store only the resource_name (never the DSN).
+        let resource_name = req
+            .gcp_resource_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "gcp_resource_name_required"))?;
+
+        let fetcher = state
+            .gcp_secret_fetcher
+            .as_ref()
+            .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "gcp_secret_fetcher_not_configured"))?;
+
+        let dsn = fetcher.fetch_fresh(resource_name).await.map_err(|e| match e {
+            GcpSecretError::AccessDenied => err(StatusCode::BAD_REQUEST, "backend_secret_fetch_failed"),
+            GcpSecretError::NotFound => err(StatusCode::BAD_REQUEST, "backend_secret_fetch_failed"),
+            GcpSecretError::FormatInvalid(_) => err(StatusCode::BAD_REQUEST, "backend_secret_format_invalid"),
+            GcpSecretError::Http(_) => err(StatusCode::BAD_REQUEST, "backend_secret_fetch_failed"),
+        })?;
+
+        // Probe customer DSN
+        let customer_pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(&dsn)
+            .await
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+
+        sqlx::query("SELECT 1")
+            .execute(&customer_pool)
+            .await
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+
+        // Apply customer migrations
+        sqlx::migrate!("../../migrations/customer")
+            .run(&customer_pool)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        // Insert project row: store resource_name only, ecies_encrypted_dsn stays NULL
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, status, backend_mode, api_key_hash_current, backend_secret_gcp) \
+             VALUES ($1, 'active', 'gcp_secret', $2, $3)",
+        )
+        .bind(&req.project_id)
+        .bind(&hash)
+        .bind(resource_name)
         .execute(state.system_db.pool())
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;

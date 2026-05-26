@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::adapters::{
     aws_secret_fetcher::AwsSecretFetcher,
     credential_cache::CredentialCache,
+    gcp_secret_fetcher::GcpSecretFetcher,
     system_db::SystemDb,
 };
 
@@ -28,11 +29,31 @@ pub fn build_with_aws(
     credential_cache: Arc<CredentialCache>,
     aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
 ) -> Router {
+    build_with_secret_fetchers(system_db, admin_key, credential_cache, aws_secret_fetcher, None)
+}
+
+pub fn build_with_gcp(
+    system_db: Arc<SystemDb>,
+    admin_key: String,
+    credential_cache: Arc<CredentialCache>,
+    gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+) -> Router {
+    build_with_secret_fetchers(system_db, admin_key, credential_cache, None, gcp_secret_fetcher)
+}
+
+pub fn build_with_secret_fetchers(
+    system_db: Arc<SystemDb>,
+    admin_key: String,
+    credential_cache: Arc<CredentialCache>,
+    aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
+    gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+) -> Router {
     let state = AdminState {
         system_db,
         admin_key,
         credential_cache,
         aws_secret_fetcher,
+        gcp_secret_fetcher,
     };
 
     Router::new()

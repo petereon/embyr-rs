@@ -16,6 +16,8 @@ pub struct ProjectAuthRow {
     pub agent_tls_bundle_enc: Option<Vec<u8>>,
     /// For aws_secret-mode projects: the ARN of the AWS Secrets Manager secret.
     pub backend_secret_arn: Option<String>,
+    /// For gcp_secret-mode projects: the GCP Secret Manager resource name.
+    pub backend_secret_gcp: Option<String>,
 }
 
 #[derive(Debug)]
@@ -50,7 +52,8 @@ impl SystemDb {
         let row_opt = sqlx::query(
             "SELECT id, status, backend_mode, api_key_hash_current, \
              api_key_hash_previous, ecies_encrypted_dsn, \
-             backend_agent_endpoint, agent_tls_bundle_enc, backend_secret_arn \
+             backend_agent_endpoint, agent_tls_bundle_enc, backend_secret_arn, \
+             backend_secret_gcp \
              FROM projects WHERE id = $1",
         )
         .bind(project_id)
@@ -89,6 +92,9 @@ impl SystemDb {
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
             backend_secret_arn: r
                 .try_get::<Option<String>, _>("backend_secret_arn")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            backend_secret_gcp: r
+                .try_get::<Option<String>, _>("backend_secret_gcp")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
     }
