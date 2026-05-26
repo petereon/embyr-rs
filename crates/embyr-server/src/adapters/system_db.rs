@@ -14,6 +14,8 @@ pub struct ProjectAuthRow {
     pub backend_agent_endpoint: Option<String>,
     /// For agent-mode projects: ECIES-encrypted JSON TLS bundle (ca_pem, client_cert_pem, client_key_pem).
     pub agent_tls_bundle_enc: Option<Vec<u8>>,
+    /// For aws_secret-mode projects: the ARN of the AWS Secrets Manager secret.
+    pub backend_secret_arn: Option<String>,
 }
 
 #[derive(Debug)]
@@ -48,7 +50,7 @@ impl SystemDb {
         let row_opt = sqlx::query(
             "SELECT id, status, backend_mode, api_key_hash_current, \
              api_key_hash_previous, ecies_encrypted_dsn, \
-             backend_agent_endpoint, agent_tls_bundle_enc \
+             backend_agent_endpoint, agent_tls_bundle_enc, backend_secret_arn \
              FROM projects WHERE id = $1",
         )
         .bind(project_id)
@@ -84,6 +86,9 @@ impl SystemDb {
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
             agent_tls_bundle_enc: r
                 .try_get::<Option<Vec<u8>>, _>("agent_tls_bundle_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            backend_secret_arn: r
+                .try_get::<Option<String>, _>("backend_secret_arn")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
     }

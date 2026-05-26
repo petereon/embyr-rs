@@ -10,13 +10,20 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 
-use crate::adapters::{credential_cache::CredentialCache, system_db::SystemDb};
+use crate::adapters::{
+    aws_secret_fetcher::{AwsSecretError, AwsSecretFetcher},
+    credential_cache::CredentialCache,
+    system_db::SystemDb,
+};
 
 #[derive(Clone)]
 pub struct AdminState {
     pub system_db: Arc<SystemDb>,
     pub admin_key: String,
     pub credential_cache: Arc<CredentialCache>,
+    /// Injected AWS Secrets Manager fetcher. None when the server is started
+    /// without AWS support (e.g., standard direct_pg/agent tests).
+    pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
 }
 
 #[derive(Deserialize)]
@@ -27,6 +34,9 @@ pub struct ProvisionRequest {
     pub dsn: Option<String>,
     #[serde(default = "default_backend_mode")]
     pub backend_mode: String,
+    /// AWS Secrets Manager ARN — required for backend_mode=aws_secret.
+    #[serde(default)]
+    pub secret_arn: Option<String>,
     /// Agent gRPC endpoint (host:port) — required for backend_mode=agent.
     #[serde(default)]
     pub agent_endpoint: Option<String>,
@@ -120,7 +130,59 @@ pub async fn provision(
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    if req.backend_mode == "agent" {
+    if req.backend_mode == "aws_secret" {
+        // AWS Secrets Manager mode: fetch DSN from ARN, probe customer DB,
+        // apply migrations, store only the ARN (never the DSN).
+        let arn = req
+            .secret_arn
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "secret_arn_required"))?;
+
+        let fetcher = state
+            .aws_secret_fetcher
+            .as_ref()
+            .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "aws_secret_fetcher_not_configured"))?;
+
+        let dsn = fetcher.fetch_fresh(arn).await.map_err(|e| match e {
+            AwsSecretError::AccessDenied => err(StatusCode::BAD_REQUEST, "backend_secret_fetch_failed"),
+            AwsSecretError::NotFound => err(StatusCode::BAD_REQUEST, "backend_secret_fetch_failed"),
+            AwsSecretError::FormatInvalid(_) => err(StatusCode::BAD_REQUEST, "backend_secret_format_invalid"),
+            AwsSecretError::Sdk(_) => err(StatusCode::BAD_REQUEST, "backend_secret_fetch_failed"),
+        })?;
+
+        // Probe customer DSN
+        let customer_pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(&dsn)
+            .await
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+
+        sqlx::query("SELECT 1")
+            .execute(&customer_pool)
+            .await
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+
+        // Apply customer migrations
+        sqlx::migrate!("../../migrations/customer")
+            .run(&customer_pool)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        // Insert project row: store ARN only, ecies_encrypted_dsn stays NULL
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, status, backend_mode, api_key_hash_current, backend_secret_arn) \
+             VALUES ($1, 'active', 'aws_secret', $2, $3)",
+        )
+        .bind(&req.project_id)
+        .bind(&hash)
+        .bind(arn)
+        .execute(state.system_db.pool())
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    } else if req.backend_mode == "agent" {
         // Agent-mode: store endpoint + mTLS bundle (ECIES-encrypted); DSN must be NULL.
         let endpoint = req
             .agent_endpoint

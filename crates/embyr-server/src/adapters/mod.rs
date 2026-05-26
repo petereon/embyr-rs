@@ -1,4 +1,5 @@
 pub mod agent_backend;
+pub mod aws_secret_fetcher;
 pub mod credential_cache;
 pub mod index_manager;
 pub mod metrics_adapter;

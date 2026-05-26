@@ -37,6 +37,7 @@ use tokio_stream::StreamExt as _;
 use crate::{
     adapters::{
         agent_backend::AgentBackendAdapter,
+        aws_secret_fetcher::AwsSecretFetcher,
         credential_cache::{CachedEntry, CredentialCache, SharedBackendAdapter},
         index_manager::IndexManager,
         metrics_adapter::MetricsAdapter,
@@ -63,6 +64,8 @@ pub struct FirestoreService {
     /// Active `PostgresNotifyListener` handles, keyed by project_id.
     /// Started on first Listen stream for each project.
     pub active_listeners: Arc<tokio::sync::Mutex<HashMap<String, PostgresNotifyListener>>>,
+    /// AWS Secrets Manager fetcher — Some for servers configured with aws_secret support.
+    pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
 }
 
 impl FirestoreService {
@@ -195,7 +198,25 @@ impl FirestoreService {
         }
 
         // Build adapter based on backend_mode.
-        let (shared, dsn) = if row.backend_mode == "agent" {
+        let (shared, dsn) = if row.backend_mode == "aws_secret" {
+            // AWS Secrets Manager mode: fetch DSN via the fetcher, create PostgresBackendAdapter.
+            let arn = row
+                .backend_secret_arn
+                .ok_or_else(|| Status::internal("aws_secret project missing backend_secret_arn"))?;
+            let fetcher = self
+                .aws_secret_fetcher
+                .as_ref()
+                .ok_or_else(|| Status::internal("aws_secret_fetcher not configured on this server"))?;
+            let dsn = fetcher
+                .get_dsn(&arn)
+                .await
+                .map_err(|e| Status::internal(format!("aws secret fetch failed: {e}")))?;
+            let adapter = PostgresBackendAdapter::new(&dsn)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let shared: SharedBackendAdapter = Arc::new(adapter);
+            (shared, dsn)
+        } else if row.backend_mode == "agent" {
             // Agent-mode: decrypt TLS bundle and create AgentBackendAdapter.
             let endpoint = row
                 .backend_agent_endpoint

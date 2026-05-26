@@ -4,7 +4,11 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::adapters::{credential_cache::CredentialCache, system_db::SystemDb};
+use crate::adapters::{
+    aws_secret_fetcher::AwsSecretFetcher,
+    credential_cache::CredentialCache,
+    system_db::SystemDb,
+};
 
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
@@ -15,10 +19,20 @@ pub fn build(
     admin_key: String,
     credential_cache: Arc<CredentialCache>,
 ) -> Router {
+    build_with_aws(system_db, admin_key, credential_cache, None)
+}
+
+pub fn build_with_aws(
+    system_db: Arc<SystemDb>,
+    admin_key: String,
+    credential_cache: Arc<CredentialCache>,
+    aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
+) -> Router {
     let state = AdminState {
         system_db,
         admin_key,
         credential_cache,
+        aws_secret_fetcher,
     };
 
     Router::new()
