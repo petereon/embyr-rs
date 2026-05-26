@@ -9,7 +9,12 @@ pub mod transactions;
 
 use std::sync::Arc;
 
-use adapters::{credential_cache::CredentialCache, index_manager::IndexManager, system_db::SystemDb};
+use adapters::{
+    credential_cache::CredentialCache,
+    index_manager::IndexManager,
+    metrics_adapter::MetricsAdapter,
+    system_db::SystemDb,
+};
 use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
 use grpc::healthz::healthz_handler;
@@ -62,6 +67,7 @@ pub async fn start_test_server_with_keepalive(
 
     let cache = Arc::new(CredentialCache::new(256));
     let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
+    let metrics = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
     let listen_registry = ListenRegistry::new();
     let listen_registry_clone = Arc::clone(&listen_registry);
     let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -69,6 +75,7 @@ pub async fn start_test_server_with_keepalive(
         system_db: Arc::clone(&system_db),
         credential_cache: cache,
         index_manager: idx_mgr,
+        metrics_adapter: metrics,
         keepalive_interval: keepalive,
         listen_registry,
         active_listeners,

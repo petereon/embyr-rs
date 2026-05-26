@@ -74,6 +74,10 @@ path = "../../tests/acceptance/us_06_transactions.rs"
 name = "us_07_provision_project"
 path = "../../tests/acceptance/us_07_provision_project.rs"
 
+[[test]]
+name = "us_08_monitor_project"
+path = "../../tests/acceptance/us_08_monitor_project.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

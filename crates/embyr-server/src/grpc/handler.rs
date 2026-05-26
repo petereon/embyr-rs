@@ -38,6 +38,7 @@ use crate::{
     adapters::{
         credential_cache::{CachedEntry, CredentialCache, SharedBackendAdapter},
         index_manager::IndexManager,
+        metrics_adapter::MetricsAdapter,
         postgres_backend::PostgresBackendAdapter,
         postgres_notify_listener::{notify_channel, PostgresNotifyListener},
         system_db::SystemDb,
@@ -50,6 +51,8 @@ pub struct FirestoreService {
     pub system_db: Arc<SystemDb>,
     pub credential_cache: Arc<CredentialCache>,
     pub index_manager: Arc<IndexManager>,
+    /// Records per-project daily operation counts in the system DB.
+    pub metrics_adapter: Arc<MetricsAdapter>,
     /// Interval between NO_CHANGE keep-alive messages on idle Listen streams.
     /// Default: 30s for production. Tests use a shorter interval (e.g. 500ms).
     pub keepalive_interval: std::time::Duration,
@@ -287,6 +290,9 @@ impl Firestore for FirestoreService {
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
+
+        // Record read operation — best-effort, fire-and-forget.
+        self.metrics_adapter.record_read(&project_id, 1).await;
 
         let path = Self::parse_document_path(&name)?;
         let doc_opt = adapter
