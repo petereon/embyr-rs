@@ -14,11 +14,19 @@ tokio-stream = { version = "0.1", features = ["net"] }
 
 # gRPC / protobuf
 tonic = "0.12"
+tonic-web = "0.12"
 prost = "0.13"
 prost-types = "0.13"
 
 # HTTP framework
 axum = "0.7"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+http-body-util = "0.1"
+http = "1"
+http-body = "1"
+tower = { version = "0.5", features = ["util"] }
+bytes = "1"
 
 # Database
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros", "migrate", "uuid", "chrono"] }

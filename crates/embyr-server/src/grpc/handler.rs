@@ -47,6 +47,7 @@ use crate::{
     realtime::listen_registry::ListenRegistry,
 };
 
+#[derive(Clone)]
 pub struct FirestoreService {
     pub system_db: Arc<SystemDb>,
     pub credential_cache: Arc<CredentialCache>,

@@ -18,6 +18,14 @@ embyr-proto.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
+tonic-web.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
+http-body.workspace = true
+tower.workspace = true
+bytes.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 axum.workspace = true
@@ -41,6 +49,10 @@ chrono.workspace = true
 base64.workspace = true
 rand_core.workspace = true
 async-trait.workspace = true
+
+[[test]]
+name = "us_13_browser_transport"
+path = "../../tests/acceptance/us_13_browser_transport.rs"
 
 [[test]]
 name = "walking_skeleton"
@@ -90,5 +102,7 @@ testcontainers-modules.workspace = true
 sqlx.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
+prost.workspace = true
+prost-types.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "time"] }
 tokio-stream = { workspace = true }

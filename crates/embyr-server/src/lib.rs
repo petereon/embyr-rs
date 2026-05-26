@@ -5,6 +5,7 @@ pub mod encoding;
 pub mod grpc;
 pub mod middleware;
 pub mod realtime;
+pub mod rest;
 pub mod transactions;
 
 use std::sync::Arc;
@@ -19,6 +20,8 @@ use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
 use grpc::healthz::healthz_handler;
 use realtime::listen_registry::ListenRegistry;
+use rest::browser_channel::{BrowserChannelState, browser_channel_get, browser_channel_post};
+use rest::grpc_web::spawn_hybrid_server;
 
 /// Handle to an in-process test server bound on ephemeral ports.
 ///
@@ -82,8 +85,22 @@ pub async fn start_test_server_with_keepalive(
         active_listeners,
     };
 
-    let rest_app = axum::Router::new()
-        .route("/healthz", axum::routing::get(healthz_handler));
+    // Clone the service for the gRPC-Web port (:8081).
+    let service_for_rest = service.clone();
+
+    // Build the axum portion of the REST app (healthz + BrowserChannel).
+    // The hybrid server dispatches gRPC-Web requests to tonic and all other
+    // requests to this axum router.
+    let bc_state = BrowserChannelState::new();
+    let axum_app = axum::Router::new()
+        .route("/healthz", axum::routing::get(healthz_handler))
+        .route(
+            "/channel",
+            axum::routing::get(browser_channel_get).post(browser_channel_post),
+        )
+        .with_state(bc_state);
+
+    let rest_task = spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
 
     let admin_app = admin::router::build(
         system_db,
@@ -99,12 +116,11 @@ pub async fn start_test_server_with_keepalive(
             .add_service(FirestoreServer::new(service))
             .serve_with_incoming(grpc_incoming);
 
-        let rest_fut = axum::serve(rest_listener, rest_app);
         let admin_fut = axum::serve(admin_listener, admin_app);
 
         tokio::select! {
             _ = grpc_fut => {},
-            _ = rest_fut => {},
+            _ = rest_task => {},
             _ = admin_fut => {},
             _ = async { let _ = shutdown_rx.await; } => {},
         }
