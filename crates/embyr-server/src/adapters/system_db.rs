@@ -10,6 +10,10 @@ pub struct ProjectAuthRow {
     pub api_key_hash_current: String,
     pub api_key_hash_previous: Option<String>,
     pub ecies_encrypted_dsn: Option<Vec<u8>>,
+    /// For agent-mode projects: the gRPC endpoint (host:port) of the agent.
+    pub backend_agent_endpoint: Option<String>,
+    /// For agent-mode projects: ECIES-encrypted JSON TLS bundle (ca_pem, client_cert_pem, client_key_pem).
+    pub agent_tls_bundle_enc: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -43,7 +47,8 @@ impl SystemDb {
     ) -> Result<Option<ProjectAuthRow>, CoreError> {
         let row_opt = sqlx::query(
             "SELECT id, status, backend_mode, api_key_hash_current, \
-             api_key_hash_previous, ecies_encrypted_dsn \
+             api_key_hash_previous, ecies_encrypted_dsn, \
+             backend_agent_endpoint, agent_tls_bundle_enc \
              FROM projects WHERE id = $1",
         )
         .bind(project_id)
@@ -73,6 +78,12 @@ impl SystemDb {
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
             ecies_encrypted_dsn: r
                 .try_get::<Option<Vec<u8>>, _>("ecies_encrypted_dsn")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            backend_agent_endpoint: r
+                .try_get::<Option<String>, _>("backend_agent_endpoint")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            agent_tls_bundle_enc: r
+                .try_get::<Option<Vec<u8>>, _>("agent_tls_bundle_enc")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
     }

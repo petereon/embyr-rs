@@ -36,6 +36,7 @@ use tokio_stream::StreamExt as _;
 
 use crate::{
     adapters::{
+        agent_backend::AgentBackendAdapter,
         credential_cache::{CachedEntry, CredentialCache, SharedBackendAdapter},
         index_manager::IndexManager,
         metrics_adapter::MetricsAdapter,
@@ -193,20 +194,59 @@ impl FirestoreService {
             return Err(Status::unauthenticated("invalid api key"));
         }
 
-        // Decrypt DSN via ECIES.
-        let encrypted_dsn = row
-            .ecies_encrypted_dsn
-            .ok_or_else(|| Status::internal("project has no stored DSN"))?;
-        let dsn_bytes = ecies::decrypt(api_key.as_bytes(), &encrypted_dsn)
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let dsn =
-            String::from_utf8(dsn_bytes).map_err(|_| Status::internal("DSN is not valid UTF-8"))?;
+        // Build adapter based on backend_mode.
+        let (shared, dsn) = if row.backend_mode == "agent" {
+            // Agent-mode: decrypt TLS bundle and create AgentBackendAdapter.
+            let endpoint = row
+                .backend_agent_endpoint
+                .ok_or_else(|| Status::internal("agent project missing backend_agent_endpoint"))?;
+            let encrypted_bundle = row
+                .agent_tls_bundle_enc
+                .ok_or_else(|| Status::internal("agent project missing agent_tls_bundle_enc"))?;
+            let bundle_bytes = ecies::decrypt(api_key.as_bytes(), &encrypted_bundle)
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let bundle_str = String::from_utf8(bundle_bytes)
+                .map_err(|_| Status::internal("TLS bundle is not valid UTF-8"))?;
+            let bundle: serde_json::Value = serde_json::from_str(&bundle_str)
+                .map_err(|e| Status::internal(format!("TLS bundle JSON parse error: {e}")))?;
+            let ca_pem = bundle["ca_pem"]
+                .as_str()
+                .ok_or_else(|| Status::internal("TLS bundle missing ca_pem"))?
+                .as_bytes()
+                .to_vec();
+            let client_cert_pem = bundle["client_cert_pem"]
+                .as_str()
+                .ok_or_else(|| Status::internal("TLS bundle missing client_cert_pem"))?
+                .as_bytes()
+                .to_vec();
+            let client_key_pem = bundle["client_key_pem"]
+                .as_str()
+                .ok_or_else(|| Status::internal("TLS bundle missing client_key_pem"))?
+                .as_bytes()
+                .to_vec();
 
-        // Build adapter and cache.
-        let adapter = PostgresBackendAdapter::new(&dsn)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let shared: SharedBackendAdapter = Arc::new(adapter);
+            let adapter =
+                AgentBackendAdapter::new(&endpoint, &ca_pem, &client_cert_pem, &client_key_pem)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            let shared: SharedBackendAdapter = Arc::new(adapter);
+            (shared, String::new())
+        } else {
+            // Direct-PG mode: decrypt DSN via ECIES and create PostgresBackendAdapter.
+            let encrypted_dsn = row
+                .ecies_encrypted_dsn
+                .ok_or_else(|| Status::internal("project has no stored DSN"))?;
+            let dsn_bytes = ecies::decrypt(api_key.as_bytes(), &encrypted_dsn)
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let dsn = String::from_utf8(dsn_bytes)
+                .map_err(|_| Status::internal("DSN is not valid UTF-8"))?;
+
+            let adapter = PostgresBackendAdapter::new(&dsn)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let shared: SharedBackendAdapter = Arc::new(adapter);
+            (shared, dsn)
+        };
 
         self.credential_cache
             .insert(

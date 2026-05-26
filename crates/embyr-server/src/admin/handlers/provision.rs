@@ -10,20 +10,35 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 
-use crate::adapters::system_db::SystemDb;
+use crate::adapters::{credential_cache::CredentialCache, system_db::SystemDb};
 
 #[derive(Clone)]
 pub struct AdminState {
     pub system_db: Arc<SystemDb>,
     pub admin_key: String,
+    pub credential_cache: Arc<CredentialCache>,
 }
 
 #[derive(Deserialize)]
 pub struct ProvisionRequest {
     pub project_id: String,
-    pub dsn: String,
+    /// Customer DB DSN — required for backend_mode=direct_pg, absent for backend_mode=agent.
+    #[serde(default)]
+    pub dsn: Option<String>,
     #[serde(default = "default_backend_mode")]
     pub backend_mode: String,
+    /// Agent gRPC endpoint (host:port) — required for backend_mode=agent.
+    #[serde(default)]
+    pub agent_endpoint: Option<String>,
+    /// PEM-encoded CA cert that signed the agent server cert.
+    #[serde(default)]
+    pub agent_ca_pem: Option<String>,
+    /// PEM-encoded client certificate for SaaS→agent mTLS.
+    #[serde(default)]
+    pub agent_client_cert_pem: Option<String>,
+    /// PEM-encoded client private key for SaaS→agent mTLS.
+    #[serde(default)]
+    pub agent_client_key_pem: Option<String>,
 }
 
 fn default_backend_mode() -> String {
@@ -57,7 +72,7 @@ fn valid_project_id(id: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
+pub fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -69,8 +84,7 @@ pub async fn provision(
     State(state): State<AdminState>,
     Json(req): Json<ProvisionRequest>,
 ) -> ApiResult<(StatusCode, Json<ProvisionResponse>)> {
-    // Auth check — constant-time compare is sufficient for test keys;
-    // for production a subtle::ConstantTimeEq would be preferred.
+    // Auth check
     let token = extract_bearer(&headers)
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing_auth"))?;
     if token != state.admin_key {
@@ -92,28 +106,10 @@ pub async fn provision(
         return Err(err(StatusCode::CONFLICT, "project_already_exists"));
     }
 
-    // Probe customer DSN — connect with short timeout
-    let customer_pool = PgPoolOptions::new()
-        .max_connections(2)
-        .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(&req.dsn)
-        .await
-        .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
-
-    sqlx::query("SELECT 1")
-        .execute(&customer_pool)
-        .await
-        .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
-
     // Generate API key: 32 random bytes, base64url-encoded without padding
     let mut key_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut key_bytes);
     let api_key = URL_SAFE_NO_PAD.encode(key_bytes);
-
-    // ECIES encrypt DSN using api_key bytes as the seed
-    let pubkey = ecies::derive_public_key(api_key.as_bytes());
-    let encrypted_dsn = ecies::encrypt(&pubkey, req.dsn.as_bytes())
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     // Argon2id hash API key — offload to blocking thread (heavy CPU op)
     let api_key_for_hash = api_key.clone();
@@ -124,25 +120,101 @@ pub async fn provision(
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    // Insert project row
-    sqlx::query(
-        "INSERT INTO projects \
-         (id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
-         VALUES ($1, 'active', $2, $3, $4)",
-    )
-    .bind(&req.project_id)
-    .bind(&req.backend_mode)
-    .bind(&hash)
-    .bind(&encrypted_dsn)
-    .execute(state.system_db.pool())
-    .await
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    if req.backend_mode == "agent" {
+        // Agent-mode: store endpoint + mTLS bundle (ECIES-encrypted); DSN must be NULL.
+        let endpoint = req
+            .agent_endpoint
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "agent_endpoint_required"))?;
 
-    // Apply customer migrations
-    sqlx::migrate!("../../migrations/customer")
-        .run(&customer_pool)
+        let ca_pem = req
+            .agent_ca_pem
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "agent_ca_pem_required"))?;
+        let client_cert_pem = req
+            .agent_client_cert_pem
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "agent_client_cert_pem_required"))?;
+        let client_key_pem = req
+            .agent_client_key_pem
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "agent_client_key_pem_required"))?;
+
+        // Encrypt TLS bundle as JSON with ECIES using api_key bytes as seed.
+        let tls_bundle = serde_json::json!({
+            "ca_pem": ca_pem,
+            "client_cert_pem": client_cert_pem,
+            "client_key_pem": client_key_pem,
+        })
+        .to_string();
+        let pubkey = ecies::derive_public_key(api_key.as_bytes());
+        let encrypted_bundle = ecies::encrypt(&pubkey, tls_bundle.as_bytes())
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        // Insert agent-mode project row — backend_pg_creds_enc stays NULL.
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, status, backend_mode, api_key_hash_current, \
+              backend_agent_endpoint, agent_tls_bundle_enc) \
+             VALUES ($1, 'active', 'agent', $2, $3, $4)",
+        )
+        .bind(&req.project_id)
+        .bind(&hash)
+        .bind(endpoint)
+        .bind(&encrypted_bundle)
+        .execute(state.system_db.pool())
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    } else {
+        // Direct-PG mode: existing behavior.
+        let dsn = req
+            .dsn
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "dsn_required"))?;
+
+        // Probe customer DSN — connect with short timeout
+        let customer_pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(dsn)
+            .await
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+
+        sqlx::query("SELECT 1")
+            .execute(&customer_pool)
+            .await
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+
+        // ECIES encrypt DSN using api_key bytes as the seed
+        let pubkey = ecies::derive_public_key(api_key.as_bytes());
+        let encrypted_dsn = ecies::encrypt(&pubkey, dsn.as_bytes())
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        // Insert project row
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
+             VALUES ($1, 'active', $2, $3, $4)",
+        )
+        .bind(&req.project_id)
+        .bind(&req.backend_mode)
+        .bind(&hash)
+        .bind(&encrypted_dsn)
+        .execute(state.system_db.pool())
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        // Apply customer migrations
+        sqlx::migrate!("../../migrations/customer")
+            .run(&customer_pool)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
 
     Ok((
         StatusCode::CREATED,
