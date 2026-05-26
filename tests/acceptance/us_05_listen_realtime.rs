@@ -436,9 +436,144 @@ async fn delete_triggers_removed_change_event_on_listener() {
 /// Then:   only the 3 new DocumentChange events are delivered (delta)
 /// And:    the full initial snapshot is NOT re-sent
 #[tokio::test]
-#[ignore = "us-05 AC-05e — RED scaffold, not yet implemented"]
 async fn reconnect_with_resume_token_delivers_only_delta() {
-    panic!("RED scaffold — not yet implemented");
+    let env = setup(
+        "test-sk-us05-listen-07",
+        "us05-listen-project-07",
+        Duration::from_millis(200),
+    )
+    .await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Step a: Write doc "delta-1" to collection "resume-col"
+    seed_document(&mut client, &env.project_id, &env.api_key, "resume-col", "delta-1").await;
+
+    // Step b: Open first Listen stream for "resume-col", drain until CURRENT
+    let req_stream = tokio_stream::once(add_target_request(&env.project_id, "resume-col"));
+    let mut request = tonic::Request::new(req_stream);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("bearer {}", env.api_key).parse().unwrap(),
+    );
+    let mut first_stream = client.listen(request).await.expect("listen should succeed").into_inner();
+
+    // Drain until CURRENT
+    let mut initial_doc_count = 0usize;
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), first_stream.next())
+            .await
+            .expect("timed out waiting for CURRENT")
+            .expect("stream ended before CURRENT")
+            .expect("stream error");
+        match msg.response_type {
+            Some(listen_response::ResponseType::DocumentChange(_)) => {
+                initial_doc_count += 1;
+            }
+            Some(listen_response::ResponseType::TargetChange(tc)) => {
+                let change_type = TargetChangeType::try_from(tc.target_change_type)
+                    .unwrap_or(TargetChangeType::NoChange);
+                if change_type == TargetChangeType::Current {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(initial_doc_count, 1, "expected exactly 1 doc in initial snapshot");
+
+    // Step c: Read next message — should be NO_CHANGE with resume_token bytes
+    let resume_token_bytes = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let msg = first_stream.next().await?.ok()?;
+            if let Some(listen_response::ResponseType::TargetChange(tc)) = msg.response_type {
+                let change_type = TargetChangeType::try_from(tc.target_change_type)
+                    .unwrap_or(TargetChangeType::Add);
+                if change_type == TargetChangeType::NoChange && !tc.resume_token.is_empty() {
+                    return Some(tc.resume_token);
+                }
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for NO_CHANGE with resume token")
+    .expect("expected NO_CHANGE with resume token bytes");
+
+    // Wait 1100ms to ensure the next writes land in a different second than the token timestamp
+    // (resume token stores second-precision timestamps; delta filter uses date_trunc('second')).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    // Step d: Write 3 more docs
+    for doc_id in ["delta-2", "delta-3", "delta-4"] {
+        seed_document(&mut client, &env.project_id, &env.api_key, "resume-col", doc_id).await;
+    }
+
+    // Step e: Drop the first stream (let it go out of scope)
+    drop(first_stream);
+
+    // Step f: Open NEW Listen stream, pass saved resume_token in AddTarget
+    let resume_request = ListenRequest {
+        database: format!("projects/{}/databases/(default)", env.project_id),
+        target_change: Some(listen_request::TargetChange::AddTarget(Target {
+            target_id: 1,
+            resume_type: Some(embyr_proto::firestore::target::ResumeType::ResumeToken(
+                resume_token_bytes,
+            )),
+            target_type: Some(embyr_proto::firestore::target::TargetType::Query(
+                embyr_proto::firestore::target::QueryTarget {
+                    parent: format!("projects/{}/databases/(default)/documents", env.project_id),
+                    query_type: Some(embyr_proto::firestore::target::query_target::QueryType::StructuredQuery(
+                        StructuredQuery {
+                            from: vec![CollectionSelector {
+                                collection_id: "resume-col".to_string(),
+                                all_descendants: false,
+                            }],
+                            ..Default::default()
+                        },
+                    )),
+                },
+            )),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    let req_stream2 = tokio_stream::once(resume_request);
+    let mut request2 = tonic::Request::new(req_stream2);
+    request2.metadata_mut().insert(
+        "authorization",
+        format!("bearer {}", env.api_key).parse().unwrap(),
+    );
+    let mut second_stream = client.listen(request2).await.expect("second listen should succeed").into_inner();
+
+    // Step g: Drain second stream: collect DocumentChange events until CURRENT
+    let mut delta_doc_names: Vec<String> = Vec::new();
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), second_stream.next())
+            .await
+            .expect("timed out waiting for CURRENT on second stream")
+            .expect("stream ended before CURRENT")
+            .expect("stream error");
+        match msg.response_type {
+            Some(listen_response::ResponseType::DocumentChange(dc)) => {
+                if let Some(doc) = dc.document {
+                    delta_doc_names.push(doc.name);
+                }
+            }
+            Some(listen_response::ResponseType::TargetChange(tc)) => {
+                let change_type = TargetChangeType::try_from(tc.target_change_type)
+                    .unwrap_or(TargetChangeType::NoChange);
+                if change_type == TargetChangeType::Current {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Assert: exactly 3 DocumentChange events; delta-1 NOT present
+    assert_eq!(delta_doc_names.len(), 3, "expected exactly 3 delta DocumentChange events, got: {:?}", delta_doc_names);
+    let contains_delta1 = delta_doc_names.iter().any(|n| n.contains("delta-1"));
+    assert!(!contains_delta1, "delta-1 should NOT be in delta delivery, got: {:?}", delta_doc_names);
 }
 
 /// AC-05f (error path): resume token older than 24 hours triggers full re-snapshot, no error
@@ -449,9 +584,87 @@ async fn reconnect_with_resume_token_delivers_only_delta() {
 /// And:    no error status is returned to the client
 /// And:    the client eventually receives a new fresh resume token in a NO_CHANGE response
 #[tokio::test]
-#[ignore = "us-05 AC-05f — RED scaffold, not yet implemented"]
 async fn stale_resume_token_triggers_full_resnapshot_not_error() {
-    panic!("RED scaffold — not yet implemented");
+    use chrono::Utc;
+
+    let env = setup(
+        "test-sk-us05-listen-08",
+        "us05-listen-project-08",
+        Duration::from_millis(200),
+    )
+    .await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Write "all-1" and "all-2" to "stale-col"
+    seed_document(&mut client, &env.project_id, &env.api_key, "stale-col", "all-1").await;
+    seed_document(&mut client, &env.project_id, &env.api_key, "stale-col", "all-2").await;
+
+    // Build stale token: 8-byte i64 BE of (Utc::now() - 25 hours).timestamp(), then 32 zero bytes
+    let stale_ts = (Utc::now() - chrono::Duration::hours(25)).timestamp();
+    let mut stale_token = Vec::with_capacity(40);
+    stale_token.extend_from_slice(&stale_ts.to_be_bytes());
+    stale_token.extend_from_slice(&[0u8; 32]);
+
+    // Open Listen stream with stale token in AddTarget
+    let stale_request = ListenRequest {
+        database: format!("projects/{}/databases/(default)", env.project_id),
+        target_change: Some(listen_request::TargetChange::AddTarget(Target {
+            target_id: 1,
+            resume_type: Some(embyr_proto::firestore::target::ResumeType::ResumeToken(
+                stale_token,
+            )),
+            target_type: Some(embyr_proto::firestore::target::TargetType::Query(
+                embyr_proto::firestore::target::QueryTarget {
+                    parent: format!("projects/{}/databases/(default)/documents", env.project_id),
+                    query_type: Some(embyr_proto::firestore::target::query_target::QueryType::StructuredQuery(
+                        StructuredQuery {
+                            from: vec![CollectionSelector {
+                                collection_id: "stale-col".to_string(),
+                                all_descendants: false,
+                            }],
+                            ..Default::default()
+                        },
+                    )),
+                },
+            )),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    let req_stream = tokio_stream::once(stale_request);
+    let mut request = tonic::Request::new(req_stream);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("bearer {}", env.api_key).parse().unwrap(),
+    );
+    let mut listen_stream = client.listen(request).await.expect("listen should succeed with stale token").into_inner();
+
+    // Drain until CURRENT, collect DocumentChange events
+    let mut doc_count = 0usize;
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(10), listen_stream.next())
+            .await
+            .expect("timed out waiting for CURRENT")
+            .expect("stream ended before CURRENT")
+            .expect("stream error — no error status expected for stale token");
+        match msg.response_type {
+            Some(listen_response::ResponseType::DocumentChange(_)) => {
+                doc_count += 1;
+            }
+            Some(listen_response::ResponseType::TargetChange(tc)) => {
+                let change_type = TargetChangeType::try_from(tc.target_change_type)
+                    .unwrap_or(TargetChangeType::NoChange);
+                if change_type == TargetChangeType::Current {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Assert: 2 DocumentChange events (full snapshot); no error
+    assert_eq!(doc_count, 2, "expected 2 DocumentChange events for full snapshot after stale token");
 }
 
 /// Error path: slow consumer buffer overflow triggers RESET
@@ -538,9 +751,104 @@ async fn slow_consumer_overflow_triggers_reset() {
 ///
 /// Note: this is an invariant test — the KPI from feature-delta.md
 #[tokio::test]
-#[ignore = "us-05 property kpi — RED scaffold, not yet implemented"]
 async fn listen_latency_p99_under_2_seconds_with_100_concurrent_listeners() {
-    panic!("RED scaffold — not yet implemented");
+    let env = std::sync::Arc::new(
+        setup(
+            "test-sk-us05-listen-09",
+            "us05-listen-project-09",
+            Duration::from_secs(30),
+        )
+        .await,
+    );
+
+    let num_listeners = 100usize;
+    let addr = env.server.grpc_addr;
+    let project_id = env.project_id.clone();
+    let api_key = env.api_key.clone();
+
+    // Open 100 Listen streams, one per collection col-0..col-99
+    let mut streams = Vec::with_capacity(num_listeners);
+    for i in 0..num_listeners {
+        let collection = format!("col-{i}");
+        let req_stream = tokio_stream::once(add_target_request(&project_id, &collection));
+        let mut request = tonic::Request::new(req_stream);
+        request.metadata_mut().insert(
+            "authorization",
+            format!("bearer {api_key}").parse().unwrap(),
+        );
+        let mut client = FirestoreClient::new(make_channel(addr));
+        let listen_stream = client.listen(request).await.expect("listen should succeed").into_inner();
+        streams.push((client, listen_stream, collection));
+    }
+
+    // Drain all streams until CURRENT (empty snapshot)
+    for (_client, stream, _coll) in &mut streams {
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                .await
+                .expect("timed out waiting for CURRENT")
+                .expect("stream ended before CURRENT")
+                .expect("stream error");
+            if let Some(listen_response::ResponseType::TargetChange(tc)) = msg.response_type {
+                let change_type = TargetChangeType::try_from(tc.target_change_type)
+                    .unwrap_or(TargetChangeType::NoChange);
+                if change_type == TargetChangeType::Current {
+                    break;
+                }
+            }
+        }
+    }
+
+    // For each of the 100 collections: write a doc and measure latency
+    let mut write_client = FirestoreClient::new(make_channel(addr));
+    let mut latencies_ms: Vec<u128> = Vec::with_capacity(num_listeners);
+
+    for (i, (_client, stream, collection)) in streams.iter_mut().enumerate() {
+        let doc_id = format!("lat-doc-{i}");
+        let write_start = std::time::Instant::now();
+
+        // Write document
+        let parent = format!("projects/{project_id}/databases/(default)/documents");
+        let mut write_req = tonic::Request::new(CreateDocumentRequest {
+            parent,
+            collection_id: collection.clone(),
+            document_id: doc_id,
+            document: Some(Document { name: String::new(), fields: HashMap::new(), ..Default::default() }),
+            ..Default::default()
+        });
+        write_req.metadata_mut().insert(
+            "authorization",
+            format!("bearer {api_key}").parse().unwrap(),
+        );
+        write_client.create_document(write_req).await.expect("write should succeed");
+
+        // Wait for DocumentChange event on this stream
+        let received = tokio::time::timeout(Duration::from_millis(2500), async {
+            loop {
+                let msg = stream.next().await?.ok()?;
+                if let Some(listen_response::ResponseType::DocumentChange(_)) = msg.response_type {
+                    return Some(());
+                }
+            }
+        })
+        .await;
+
+        let elapsed = write_start.elapsed().as_millis();
+        assert!(
+            received.is_ok() && received.unwrap().is_some(),
+            "collection {collection}: DocumentChange not received within 2500ms"
+        );
+        latencies_ms.push(elapsed);
+    }
+
+    // Sort and assert p99 <= 2000ms
+    latencies_ms.sort_unstable();
+    let p99 = latencies_ms[98]; // 99th element (0-indexed 98) = p99 for 100 samples
+    assert!(
+        p99 <= 2000,
+        "p99 latency {p99}ms exceeds 2000ms limit; all latencies: {:?}",
+        &latencies_ms[90..]
+    );
 }
 
 /// Keep-alive: idle stream receives NO_CHANGE every 30 seconds

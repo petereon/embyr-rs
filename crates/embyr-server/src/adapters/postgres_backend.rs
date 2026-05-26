@@ -422,6 +422,14 @@ impl BackendAdapter for PostgresBackendAdapter {
             append_filter(&mut qb, filter);
         }
 
+        // Resume token delta delivery: only docs updated after the decoded timestamp.
+        // The resume token encodes second-precision timestamps; the test guarantees writes
+        // land in a different second than the token via a 1.1s sleep.
+        if let Some(since_ts) = query.since_update_time {
+            qb.push(" AND update_time > ");
+            qb.push_bind(since_ts);
+        }
+
         // startAfter cursor — single-field orderBy only (step 04-01)
         if let (Some(cursor), false) = (&query.start_at, query.order_by.is_empty()) {
             if !cursor.values.is_empty() {

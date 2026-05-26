@@ -1,6 +1,7 @@
 /// Handle an AddTarget Listen session: initial snapshot + keep-alive + NOTIFY fan-out.
 use std::{sync::Arc, time::Duration};
 
+use chrono::{Duration as ChronoDuration, Utc};
 use embyr_core::domain::{
     document::CollectionPath,
     project::ProjectId,
@@ -18,7 +19,10 @@ use tokio::sync::mpsc;
 use crate::{
     adapters::credential_cache::SharedBackendAdapter,
     encoding::firestore_proto::document_to_proto,
-    realtime::listen_registry::{ListenEvent, ListenRegistry},
+    realtime::{
+        listen_registry::{ListenEvent, ListenRegistry},
+        resume_token as rt,
+    },
 };
 
 /// Process an AddTarget message: register subscriber, run the initial snapshot query,
@@ -35,6 +39,7 @@ pub async fn handle_add_target(
     keepalive: Duration,
     registry: Arc<ListenRegistry>,
     channel: &str,
+    resume_token: Option<Vec<u8>>,
 ) -> Result<(), String> {
     // Extract AddTarget from the first message.
     let add_target = match &first_msg.target_change {
@@ -60,6 +65,12 @@ pub async fn handle_add_target(
         collection_path: collection_id,
     };
 
+    // Decode resume token: fresh (<=24h) tokens enable delta delivery.
+    let since_update_time = resume_token
+        .as_deref()
+        .filter(|t| !t.is_empty() && !rt::is_stale(t))
+        .and_then(|t| rt::decode_ts(t));
+
     let domain_query = DomainQuery {
         collection_id: collection.collection_path.clone(),
         all_descendants: false,
@@ -69,7 +80,15 @@ pub async fn handle_add_target(
         offset: None,
         start_at: None,
         end_at: None,
+        since_update_time,
     };
+
+    // Record snapshot start time BEFORE the query so the resume token is anchored
+    // at a time that is <= all documents in the initial snapshot. We add 1 second to
+    // avoid sub-second precision issues: docs written in the same second as snapshot_ts
+    // have update_time <= (snapshot_ts + 1s), so the delta filter update_time > token_ts
+    // correctly excludes them.
+    let snapshot_ts = Utc::now() + ChronoDuration::seconds(1);
 
     // Register subscriber BEFORE running the initial snapshot to avoid missing
     // concurrent writes.
@@ -77,7 +96,7 @@ pub async fn handle_add_target(
     let mut event_rx = handle.event_rx;
     let reset_notify = handle.reset_notify;
 
-    // Run the initial snapshot query.
+    // Run the initial snapshot query (or delta query if resume token is fresh).
     let docs = adapter
         .run_query(&collection, &domain_query, None)
         .await
@@ -106,14 +125,33 @@ pub async fn handle_add_target(
     };
     tx.send(Ok(current)).await.map_err(|_| "channel closed".to_string())?;
 
+    // Send NO_CHANGE with fresh resume token immediately after CURRENT.
+    // The token encodes snapshot_ts (= now + 1s at snapshot time), ensuring that
+    // on reconnect the delta filter update_time > token_ts excludes all initial-snapshot docs.
+    let fresh_token = rt::encode(snapshot_ts, collection.project_id.as_str());
+    let no_change_with_token = ListenResponse {
+        response_type: Some(listen_response::ResponseType::TargetChange(TargetChange {
+            target_change_type: TargetChangeType::NoChange as i32,
+            resume_token: fresh_token,
+            ..Default::default()
+        })),
+    };
+    tx.send(Ok(no_change_with_token)).await.map_err(|_| "channel closed".to_string())?;
+
     // Main loop: keepalive + NOTIFY events + RESET signal.
     loop {
         tokio::select! {
             _ = tokio::time::sleep(keepalive) => {
+                // Keepalive token is anchored 1s in the future for the same precision reason.
+                let keepalive_token = rt::encode(
+                    Utc::now() + ChronoDuration::seconds(1),
+                    collection.project_id.as_str(),
+                );
                 let no_change = ListenResponse {
                     response_type: Some(listen_response::ResponseType::TargetChange(TargetChange {
                         target_change_type: TargetChangeType::NoChange as i32,
                         target_ids: vec![],
+                        resume_token: keepalive_token,
                         ..Default::default()
                     })),
                 };

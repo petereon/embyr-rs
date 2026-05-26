@@ -1,3 +1,5 @@
+use chrono::{DateTime, Utc};
+
 use super::field_value::FieldValue;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +60,9 @@ pub struct StructuredQuery {
     pub offset: Option<i32>,
     pub start_at: Option<Cursor>,
     pub end_at: Option<Cursor>,
+    /// When set, only return documents with update_time > since_update_time.
+    /// Used for resume-token delta delivery in Listen streams (step 05-03).
+    pub since_update_time: Option<DateTime<Utc>>,
 }
 
 /// Opaque byte token for resuming a listen stream.

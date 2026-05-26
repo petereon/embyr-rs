@@ -537,6 +537,7 @@ impl Firestore for FirestoreService {
             offset: if sq_proto.offset > 0 { Some(sq_proto.offset) } else { None },
             start_at,
             end_at: None,
+            since_update_time: None,
         };
 
         // Composite index check: filter on field X + orderBy field Y (where Y != X)
@@ -627,6 +628,20 @@ impl Firestore for FirestoreService {
             }
         }
 
+        // Extract resume token from AddTarget if present.
+        let resume_token: Option<Vec<u8>> = match &first_msg.target_change {
+            Some(embyr_proto::firestore::listen_request::TargetChange::AddTarget(t)) => {
+                use embyr_proto::firestore::target::ResumeType;
+                match &t.resume_type {
+                    Some(ResumeType::ResumeToken(bytes)) if !bytes.is_empty() => {
+                        Some(bytes.clone())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
         // Channel capacity 64 — matching the subscriber registry capacity.
         // When a slow consumer stops draining, try_send fails at 64 buffered
         // events → handler sends TargetChange(RESET).
@@ -642,6 +657,7 @@ impl Firestore for FirestoreService {
                 keepalive,
                 registry,
                 &channel,
+                resume_token,
             )
             .await
             {
