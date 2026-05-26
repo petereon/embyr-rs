@@ -66,6 +66,7 @@ pub async fn start_test_server_with_keepalive(
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let cache = Arc::new(CredentialCache::new(256));
+    let cache_for_admin = Arc::clone(&cache);
     let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
     let metrics = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
     let listen_registry = ListenRegistry::new();
@@ -84,7 +85,11 @@ pub async fn start_test_server_with_keepalive(
     let rest_app = axum::Router::new()
         .route("/healthz", axum::routing::get(healthz_handler));
 
-    let admin_app = admin::router::build(system_db, "test-admin-key-secret".to_string());
+    let admin_app = admin::router::build(
+        system_db,
+        "test-admin-key-secret".to_string(),
+        cache_for_admin,
+    );
 
     tokio::spawn(async move {
         let grpc_incoming =

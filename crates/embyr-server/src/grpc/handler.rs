@@ -147,6 +147,9 @@ impl FirestoreService {
             if cached.1 == "suspended" {
                 return Err(Status::permission_denied("project is suspended"));
             }
+            if cached.1 == "deleted" {
+                return Err(Status::not_found("project not found"));
+            }
             return Ok(cached);
         }
 
@@ -157,6 +160,15 @@ impl FirestoreService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::unauthenticated("project not found"))?;
+
+        // Fast-path status checks before the expensive Argon2id verification.
+        // Suspended/deleted projects are rejected immediately without CPU cost.
+        if row.status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+        if row.status == "deleted" {
+            return Err(Status::not_found("project not found"));
+        }
 
         // Argon2id verification is CPU-intensive; run on blocking thread pool.
         let api_key_bytes = api_key.as_bytes().to_vec();
@@ -178,10 +190,6 @@ impl FirestoreService {
 
         if !verified {
             return Err(Status::unauthenticated("invalid api key"));
-        }
-
-        if row.status == "suspended" {
-            return Err(Status::permission_denied("project is suspended"));
         }
 
         // Decrypt DSN via ECIES.

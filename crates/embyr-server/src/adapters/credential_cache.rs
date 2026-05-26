@@ -46,4 +46,20 @@ impl CredentialCache {
     pub async fn insert(&self, key: CredentialCacheKey, entry: CachedEntry) {
         self.inner.lock().await.put(key, entry);
     }
+
+    /// Remove all cache entries for a given project_id.
+    ///
+    /// Called when project status changes (suspend/activate/delete) so the next
+    /// SDK call performs a DB lookup and observes the new status immediately.
+    pub async fn evict_project(&self, project_id: &str) {
+        let mut guard = self.inner.lock().await;
+        let keys_to_remove: Vec<CredentialCacheKey> = guard
+            .iter()
+            .filter(|(k, _)| k.project_id.as_str() == project_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in keys_to_remove {
+            guard.pop(&k);
+        }
+    }
 }

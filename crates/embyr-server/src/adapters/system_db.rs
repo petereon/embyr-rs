@@ -44,7 +44,7 @@ impl SystemDb {
         let row_opt = sqlx::query(
             "SELECT id, status, backend_mode, api_key_hash_current, \
              api_key_hash_previous, ecies_encrypted_dsn \
-             FROM projects WHERE id = $1 AND status != 'deleted'",
+             FROM projects WHERE id = $1",
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
