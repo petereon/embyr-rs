@@ -8,12 +8,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use embyr_core::domain::{document::DocumentPath, field_value::FieldValue, project::ProjectId};
+use embyr_core::domain::transaction::{TransactionId, TransactionOptions};
 use embyr_core::error::CoreError;
-use embyr_core::storage::backend_adapter::{BackendAdapter, WritePrecondition};
+use embyr_core::storage::backend_adapter::{BackendAdapter, Write as DomainWrite, WritePrecondition};
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
 use embyr_proto::agent::{
     precondition::ConditionType,
     storage_agent_server::{StorageAgent, StorageAgentServer},
+    write::Operation,
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
     PingRequest, PingResponse, Precondition, RollbackRequest, RunQueryRequest, RunQueryResponse,
@@ -94,6 +96,23 @@ fn proto_fields_to_domain(
         .into_iter()
         .map(|(k, v)| (k, proto_value_to_field_value(&v)))
         .collect()
+}
+
+/// Translate a proto `Write` message to a domain `Write` variant.
+fn proto_write_to_domain(w: embyr_proto::agent::Write, project_id_str: &str) -> Result<DomainWrite, Status> {
+    let precondition = parse_precondition(w.current_document);
+    match w.operation {
+        Some(Operation::Update(doc)) => {
+            let path = parse_document_name(&doc.name, project_id_str)?;
+            let fields = proto_fields_to_domain(doc.fields);
+            Ok(DomainWrite::Update { path, fields, version: None, precondition })
+        }
+        Some(Operation::Delete(name)) => {
+            let path = parse_document_name(&name, project_id_str)?;
+            Ok(DomainWrite::Delete { path, version: None, precondition })
+        }
+        None => Err(Status::invalid_argument("write operation required")),
+    }
 }
 
 #[tonic::async_trait]
@@ -286,21 +305,63 @@ impl StorageAgent for StorageAgentService {
         &self,
         _request: Request<BeginTransactionRequest>,
     ) -> Result<Response<BeginTransactionResponse>, Status> {
-        Err(Status::unimplemented("not implemented — step 03-01"))
+        let pid = ProjectId::new(&self.project_id)
+            .map_err(|e| Status::internal(format!("{e}")))?;
+        match self.storage.begin_transaction(&pid, TransactionOptions::ReadWrite).await {
+            Ok(txn_id) => Ok(Response::new(BeginTransactionResponse { transaction: txn_id.0 })),
+            Err(e) => Err(core_error_to_status(e)),
+        }
     }
 
     async fn commit(
         &self,
-        _request: Request<CommitRequest>,
+        request: Request<CommitRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
-        Err(Status::unimplemented("not implemented — step 03-01"))
+        let req = request.into_inner();
+        let pid = ProjectId::new(&self.project_id)
+            .map_err(|e| Status::internal(format!("{e}")))?;
+        let txn_id = TransactionId(req.transaction);
+
+        let writes: Vec<DomainWrite> = req.writes
+            .into_iter()
+            .map(|w| proto_write_to_domain(w, &self.project_id))
+            .collect::<Result<Vec<_>, Status>>()?;
+
+        let now = chrono::Utc::now();
+        match self.storage.commit_transaction(&pid, &txn_id, writes).await {
+            Ok(_results) => Ok(Response::new(CommitResponse {
+                commit_time: Some(prost_types::Timestamp {
+                    seconds: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos() as i32,
+                }),
+                ..Default::default()
+            })),
+            Err(CoreError::TransactionNotFound) => {
+                Err(Status::not_found("transaction not found or expired"))
+            }
+            Err(CoreError::TransactionAborted) => {
+                Err(Status::aborted("transaction aborted: OCC conflict"))
+            }
+            Err(e) => Err(core_error_to_status(e)),
+        }
     }
 
     async fn rollback(
         &self,
-        _request: Request<RollbackRequest>,
+        request: Request<RollbackRequest>,
     ) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("not implemented — step 03-01"))
+        let req = request.into_inner();
+        let pid = ProjectId::new(&self.project_id)
+            .map_err(|e| Status::internal(format!("{e}")))?;
+        let txn_id = TransactionId(req.transaction);
+
+        match self.storage.rollback_transaction(&pid, &txn_id).await {
+            Ok(()) => Ok(Response::new(())),
+            Err(CoreError::TransactionNotFound) => {
+                Err(Status::not_found("transaction not found or already committed"))
+            }
+            Err(e) => Err(core_error_to_status(e)),
+        }
     }
 
     async fn ping(
