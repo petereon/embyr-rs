@@ -8,6 +8,10 @@ license.workspace = true
 name = "embyr-agent"
 path = "src/main.rs"
 
+[lib]
+name = "embyr_agent"
+path = "src/lib.rs"
+
 [dependencies]
 embyr-core.workspace = true
 embyr-proto.workspace = true

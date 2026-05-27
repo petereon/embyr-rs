@@ -1,9 +1,7 @@
 // embyr-agent: statically linked customer-VPC binary (Linux musl target).
 // Connects from the customer VPC to the embyr-server.
 
-mod config;
-mod server;
-
+use embyr_agent::{config, server};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]

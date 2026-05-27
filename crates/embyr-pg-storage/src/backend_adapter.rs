@@ -38,10 +38,26 @@ impl PostgresBackendAdapter {
         Ok(Self { pool })
     }
 
+    /// Construct from an already-connected pool (used by test harnesses).
+    pub fn new_from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
     /// Apply customer schema migrations from `migrations/customer/`.
     pub async fn migrate(&self) -> Result<(), CoreError> {
         sqlx::migrate!("../../migrations/customer")
             .run(&self.pool)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
+    }
+
+    /// Run customer schema migrations against the given pool.
+    ///
+    /// Convenience for test harnesses that need to migrate before constructing
+    /// the adapter.
+    pub async fn run_migrations(pool: &PgPool) -> Result<(), CoreError> {
+        sqlx::migrate!("../../migrations/customer")
+            .run(pool)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
     }
