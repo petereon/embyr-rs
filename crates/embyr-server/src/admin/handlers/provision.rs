@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use embyr_core::auth::{argon2, ecies};
+use embyr_core::{auth::{argon2, ecies}, domain::project::ProjectId};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -75,21 +75,6 @@ fn err(code: StatusCode, error: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": error })))
 }
 
-fn valid_project_id(id: &str) -> bool {
-    if id.is_empty() || id.len() > 63 {
-        return false;
-    }
-    let mut chars = id.chars();
-    let first = match chars.next() {
-        Some(c) => c,
-        None => return false,
-    };
-    if !first.is_ascii_lowercase() {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
 pub fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("authorization")
@@ -109,8 +94,8 @@ pub async fn provision(
         return Err(err(StatusCode::UNAUTHORIZED, "invalid_auth"));
     }
 
-    // Validate project_id
-    if !valid_project_id(&req.project_id) {
+    // Validate project_id using the domain rule (same regex as ProjectId::new).
+    if ProjectId::new(&req.project_id).is_err() {
         return Err(err(StatusCode::BAD_REQUEST, "invalid_project_id_format"));
     }
 

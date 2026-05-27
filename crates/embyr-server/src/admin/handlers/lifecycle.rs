@@ -10,9 +10,8 @@ pub async fn suspend_project(
     headers: HeaderMap,
     State(state): State<AdminState>,
 ) -> StatusCode {
-    let token = match extract_bearer(&headers) {
-        Some(t) => t,
-        None => return StatusCode::UNAUTHORIZED,
+    let Some(token) = extract_bearer(&headers) else {
+        return StatusCode::UNAUTHORIZED;
     };
     if token != state.admin_key {
         return StatusCode::UNAUTHORIZED;
@@ -42,9 +41,8 @@ pub async fn activate_project(
     headers: HeaderMap,
     State(state): State<AdminState>,
 ) -> StatusCode {
-    let token = match extract_bearer(&headers) {
-        Some(t) => t,
-        None => return StatusCode::UNAUTHORIZED,
+    let Some(token) = extract_bearer(&headers) else {
+        return StatusCode::UNAUTHORIZED;
     };
     if token != state.admin_key {
         return StatusCode::UNAUTHORIZED;
@@ -74,9 +72,8 @@ pub async fn delete_project(
     headers: HeaderMap,
     State(state): State<AdminState>,
 ) -> StatusCode {
-    let token = match extract_bearer(&headers) {
-        Some(t) => t,
-        None => return StatusCode::UNAUTHORIZED,
+    let Some(token) = extract_bearer(&headers) else {
+        return StatusCode::UNAUTHORIZED;
     };
     if token != state.admin_key {
         return StatusCode::UNAUTHORIZED;
