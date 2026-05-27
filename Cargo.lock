@@ -1263,14 +1263,20 @@ dependencies = [
  "chrono",
  "config",
  "embyr-core",
+ "embyr-pg-storage",
  "embyr-proto",
  "hkdf",
  "prost",
  "prost-types",
+ "rcgen",
  "rustls 0.23.40",
+ "rustls-pemfile 2.2.0",
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
+ "testcontainers 0.23.1",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -1300,6 +1306,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "embyr-pg-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "chrono",
+ "embyr-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "testcontainers 0.23.1",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "embyr-proto"
 version = "0.1.0"
 dependencies = [
@@ -1326,6 +1352,7 @@ dependencies = [
  "chrono",
  "config",
  "embyr-core",
+ "embyr-pg-storage",
  "embyr-proto",
  "hkdf",
  "http 1.4.0",

@@ -15,6 +15,7 @@ path = "src/lib.rs"
 [dependencies]
 embyr-core.workspace = true
 embyr-proto.workspace = true
+embyr-pg-storage.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true

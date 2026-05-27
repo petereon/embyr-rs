@@ -75,3 +75,4 @@ serial_test = "3"
 # Internal crates
 embyr-proto = { path = "crates/embyr-proto" }
 embyr-core = { path = "crates/embyr-core" }
+embyr-pg-storage = { path = "crates/embyr-pg-storage" }

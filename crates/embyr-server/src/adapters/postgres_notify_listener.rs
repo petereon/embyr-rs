@@ -13,16 +13,8 @@ use embyr_core::domain::{
 
 use crate::realtime::listen_registry::{ListenEvent, ListenRegistry};
 
-/// Compute the Postgres notify channel name for a project.
-///
-/// Format: `dc_<16 lowercase hex chars>` — BLAKE3 hash of project_id, first 8 bytes.
-/// Total length: 19 chars (well within Postgres 63-char identifier limit).
-pub fn notify_channel(project_id: &str) -> String {
-    let hash = blake3::hash(project_id.as_bytes());
-    let bytes = hash.as_bytes();
-    let hex: String = bytes[..8].iter().map(|b| format!("{b:02x}")).collect();
-    format!("dc_{hex}")
-}
+// notify_channel is now provided by embyr-pg-storage.
+pub use embyr_pg_storage::notify_listener::notify_channel;
 
 /// Background LISTEN/NOTIFY task handle.
 ///

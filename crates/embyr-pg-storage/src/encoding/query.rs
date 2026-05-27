@@ -1,0 +1,90 @@
+use embyr_core::domain::{
+    field_value::FieldValue,
+    query::{FilterOp, FieldFilter, OrderBy, OrderDirection, QueryFilter},
+};
+use sqlx::{Postgres, QueryBuilder};
+
+/// Append a `QueryFilter` to the builder as a SQL predicate.
+///
+/// Composite (AND) filters are expanded recursively.
+pub fn append_filter(qb: &mut QueryBuilder<Postgres>, filter: &QueryFilter) {
+    match filter {
+        QueryFilter::Field(f) => append_field_filter(qb, f),
+        QueryFilter::Composite(filters) => {
+            for (i, f) in filters.iter().enumerate() {
+                if i > 0 {
+                    qb.push(" AND ");
+                }
+                append_filter(qb, f);
+            }
+        }
+    }
+}
+
+/// Append a single field comparison predicate.
+///
+/// Values are bound via `push_bind` — never interpolated — to prevent SQL injection.
+/// IS_NAN uses string sentinel equality: `fields->'f'->>'v' = 'NaN'`.
+pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
+    // Handle IS_NAN and IS_NOT_NAN as special cases (no value binding required).
+    match f.op {
+        FilterOp::IsNan => {
+            qb.push(format!("fields->'{}'->>'v' = 'NaN'", f.field_path));
+            return;
+        }
+        FilterOp::IsNotNan => {
+            qb.push(format!(
+                "(fields->'{fp}' IS NULL OR fields->'{fp}'->>'v' != 'NaN')",
+                fp = f.field_path
+            ));
+            return;
+        }
+        _ => {}
+    }
+
+    let op = match f.op {
+        FilterOp::LessThan => "<",
+        FilterOp::LessThanOrEqual => "<=",
+        FilterOp::GreaterThan => ">",
+        FilterOp::GreaterThanOrEqual => ">=",
+        FilterOp::Equal => "=",
+        FilterOp::NotEqual => "!=",
+        _ => panic!("unsupported filter op: {:?}", f.op),
+    };
+    match &f.value {
+        FieldValue::Integer(v) => {
+            qb.push(format!("(fields->'{}'->>'v')::bigint {} ", f.field_path, op));
+            qb.push_bind(*v);
+        }
+        FieldValue::String(s) => {
+            qb.push(format!("fields->'{}'->>'v' {} ", f.field_path, op));
+            qb.push_bind(s.clone());
+        }
+        FieldValue::Double(d) => {
+            qb.push(format!("(fields->'{}'->>'v')::float8 {} ", f.field_path, op));
+            qb.push_bind(*d);
+        }
+        FieldValue::Boolean(b) => {
+            qb.push(format!("(fields->'{}'->>'v')::boolean {} ", f.field_path, op));
+            qb.push_bind(*b);
+        }
+        _ => panic!("unsupported filter value type: {:?}", f.value),
+    }
+}
+
+/// Return a raw SQL ORDER BY expression for a single `OrderBy` clause.
+///
+/// This string is pushed as raw SQL (no bind parameter), since ORDER BY
+/// expressions cannot be parameterised in Postgres.
+pub fn order_by_expr(ob: &OrderBy) -> String {
+    let dir = match ob.direction {
+        OrderDirection::Ascending => "ASC",
+        OrderDirection::Descending => "DESC",
+    };
+    format!("fields->'{}'->>'v' {}", ob.field_path, dir)
+}
+
+/// Return a raw SQL ORDER BY expression with explicit bigint cast (for integer fields).
+pub fn order_by_expr_bigint(field_path: &str, dir: &str) -> String {
+    format!("(fields->'{}'->>'v')::bigint {}", field_path, dir)
+}
