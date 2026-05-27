@@ -61,6 +61,9 @@ message Document {
 
   // Output only. The time at which the document was last changed.
   google.protobuf.Timestamp update_time = 4;
+
+  // The document's generation (version counter). Starts at 1, increments on each write.
+  int64 generation = 5;
 }
 
 // A message that can hold any of the supported value types.

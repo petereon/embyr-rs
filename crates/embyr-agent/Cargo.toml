@@ -35,6 +35,7 @@ tracing-subscriber.workspace = true
 config.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+rand_core.workspace = true
 rustls-pemfile.workspace = true
 x509-parser.workspace = true
 

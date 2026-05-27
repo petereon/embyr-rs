@@ -3,17 +3,20 @@
 //! Implements StorageAgent backed by PostgresBackendAdapter.
 //! Exposes `serve()` for in-process test starts and `run()` for the binary.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use embyr_core::domain::{document::DocumentPath, project::ProjectId};
-use embyr_core::storage::backend_adapter::BackendAdapter;
+use embyr_core::domain::{document::DocumentPath, field_value::FieldValue, project::ProjectId};
+use embyr_core::error::CoreError;
+use embyr_core::storage::backend_adapter::{BackendAdapter, WritePrecondition};
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
 use embyr_proto::agent::{
+    precondition::ConditionType,
     storage_agent_server::{StorageAgent, StorageAgentServer},
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
-    PingRequest, PingResponse, RollbackRequest, RunQueryRequest, RunQueryResponse,
+    PingRequest, PingResponse, Precondition, RollbackRequest, RunQueryRequest, RunQueryResponse,
     UpdateDocumentRequest,
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
@@ -24,7 +27,7 @@ use tonic::{
 use tracing::info;
 
 use crate::config::AgentConfig;
-use crate::encoding::domain_doc_to_proto;
+use crate::encoding::{domain_doc_to_proto, proto_value_to_field_value};
 
 /// StorageAgent gRPC service backed by PostgresBackendAdapter.
 pub struct StorageAgentService {
@@ -37,6 +40,60 @@ impl StorageAgentService {
     pub fn new(project_id: String, storage: Arc<PostgresBackendAdapter>) -> Self {
         Self { project_id, storage }
     }
+}
+
+/// Map a `CoreError` to a gRPC `Status`.
+fn core_error_to_status(e: CoreError) -> Status {
+    match e {
+        CoreError::DocumentNotFound(msg) => Status::not_found(msg),
+        CoreError::AlreadyExists(msg) => Status::already_exists(msg),
+        CoreError::OccConflict => Status::failed_precondition("optimistic concurrency conflict"),
+        CoreError::FailedPrecondition(msg) => Status::failed_precondition(msg),
+        CoreError::InvalidArgument(msg) => Status::invalid_argument(msg),
+        CoreError::BackendUnavailable(msg) => Status::internal(msg),
+        CoreError::TransactionNotFound => Status::not_found("transaction not found or expired"),
+        CoreError::TransactionAborted => Status::aborted("transaction aborted"),
+        CoreError::ProjectNotFound(msg) => Status::not_found(msg),
+        CoreError::PermissionDenied(msg) => Status::permission_denied(msg),
+        CoreError::Unauthenticated => Status::unauthenticated("unauthenticated"),
+        CoreError::ResourceExhausted(msg) => Status::resource_exhausted(msg),
+    }
+}
+
+/// Parse a `Precondition` proto into a `WritePrecondition`.
+fn parse_precondition(p: Option<Precondition>) -> Option<WritePrecondition> {
+    match p.and_then(|p| p.condition_type) {
+        None => None,
+        Some(ConditionType::Exists(true)) => Some(WritePrecondition::MustExist),
+        Some(ConditionType::Exists(false)) => Some(WritePrecondition::MustNotExist),
+        Some(ConditionType::UpdateTime(ts)) => {
+            Some(WritePrecondition::UpdateTime(ts.seconds, ts.nanos))
+        }
+    }
+}
+
+/// Generate a 20-character Firestore-compatible alphanumeric document ID.
+fn generate_document_id() -> String {
+    use rand_core::{OsRng, RngCore};
+    let chars: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = OsRng;
+    let mut id = String::with_capacity(20);
+    for _ in 0..20 {
+        let idx = (rng.next_u32() as usize) % chars.len();
+        id.push(chars[idx] as char);
+    }
+    id
+}
+
+/// Convert proto fields map to domain `BTreeMap<String, FieldValue>`.
+fn proto_fields_to_domain(
+    fields: std::collections::HashMap<String, embyr_proto::agent::Value>,
+) -> BTreeMap<String, FieldValue> {
+    fields
+        .into_iter()
+        .map(|(k, v)| (k, proto_value_to_field_value(&v)))
+        .collect()
 }
 
 #[tonic::async_trait]
@@ -72,23 +129,128 @@ impl StorageAgent for StorageAgentService {
 
     async fn create_document(
         &self,
-        _request: Request<CreateDocumentRequest>,
+        request: Request<CreateDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
-        Err(Status::unimplemented("not implemented — step 03-01"))
+        let req = request.into_inner();
+
+        // Validate parent
+        if req.parent.is_empty() {
+            return Err(Status::invalid_argument("parent is required"));
+        }
+        if req.collection_id.is_empty() {
+            return Err(Status::invalid_argument("collection_id is required"));
+        }
+
+        // Parse project_id from parent: "projects/{project_id}/databases/(default)/documents[/...]"
+        let project_id_str = parse_project_id_from_parent(&req.parent)?;
+
+        // Build collection_path: parent suffix (after "documents") + "/" + collection_id
+        // Parent may be "projects/{pid}/databases/(default)/documents" (root)
+        // or "projects/{pid}/databases/(default)/documents/subcoll" (nested).
+        let collection_path = build_collection_path(&req.parent, &req.collection_id)?;
+
+        // Auto-generate document_id if empty
+        let document_id = if req.document_id.is_empty() {
+            generate_document_id()
+        } else {
+            req.document_id.clone()
+        };
+
+        // Extract fields from the request document
+        let fields = req
+            .document
+            .map(|d| proto_fields_to_domain(d.fields))
+            .unwrap_or_default();
+
+        let pid = ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(format!("invalid project_id: {e}")))?;
+
+        let path = DocumentPath {
+            project_id: pid,
+            collection_path,
+            document_id,
+        };
+
+        self.storage
+            .create_document(&path, fields)
+            .await
+            .map_err(core_error_to_status)?;
+
+        // Fetch the created document to return with timestamps and generation
+        match self.storage.get_document(&path).await {
+            Ok(Some(doc)) => Ok(Response::new(domain_doc_to_proto(doc))),
+            Ok(None) => Err(Status::internal("document not found after creation")),
+            Err(e) => Err(core_error_to_status(e)),
+        }
     }
 
     async fn update_document(
         &self,
-        _request: Request<UpdateDocumentRequest>,
+        request: Request<UpdateDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
-        Err(Status::unimplemented("not implemented — step 03-01"))
+        let req = request.into_inner();
+
+        let doc = req.document.ok_or_else(|| Status::invalid_argument("document is required"))?;
+
+        if doc.name.is_empty() {
+            return Err(Status::invalid_argument("document.name is required"));
+        }
+
+        let path = parse_document_name(&doc.name, &self.project_id)?;
+        let precondition = parse_precondition(req.current_document);
+
+        // Build the final field set — apply field mask if present
+        let final_fields = if let Some(mask) = req.update_mask {
+            if !mask.field_paths.is_empty() {
+                // Read-modify-write: fetch current doc, merge masked fields
+                let current_doc = self
+                    .storage
+                    .get_document(&path)
+                    .await
+                    .map_err(core_error_to_status)?
+                    .ok_or_else(|| {
+                        Status::not_found(format!("document not found: {}", doc.name))
+                    })?;
+
+                let update_fields = proto_fields_to_domain(doc.fields);
+                let mut merged = current_doc.fields.clone();
+
+                for field_path in &mask.field_paths {
+                    match update_fields.get(field_path) {
+                        Some(v) => {
+                            merged.insert(field_path.clone(), v.clone());
+                        }
+                        None => {
+                            merged.remove(field_path);
+                        }
+                    }
+                }
+                merged
+            } else {
+                proto_fields_to_domain(doc.fields)
+            }
+        } else {
+            proto_fields_to_domain(doc.fields)
+        };
+
+        self.storage
+            .update_document(&path, final_fields, precondition)
+            .await
+            .map_err(core_error_to_status)?;
+
+        // Fetch the updated document to return with timestamps and generation
+        match self.storage.get_document(&path).await {
+            Ok(Some(updated_doc)) => Ok(Response::new(domain_doc_to_proto(updated_doc))),
+            Ok(None) => Err(Status::internal("document not found after update")),
+            Err(e) => Err(core_error_to_status(e)),
+        }
     }
 
     async fn delete_document(
         &self,
         _request: Request<DeleteDocumentRequest>,
     ) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("not implemented — step 03-01"))
+        Err(Status::unimplemented("not implemented — step 03-02"))
     }
 
     type RunQueryStream = ReceiverStream<Result<RunQueryResponse, Status>>;
@@ -173,6 +335,42 @@ fn parse_document_name(name: &str, _expected_project_id: &str) -> Result<Documen
         collection_path: collection_path.to_string(),
         document_id: document_id.to_string(),
     })
+}
+
+/// Extract project_id from a parent path like:
+/// `projects/{project_id}/databases/(default)/documents[/...]`
+fn parse_project_id_from_parent(parent: &str) -> Result<String, Status> {
+    let prefix = "projects/";
+    if !parent.starts_with(prefix) {
+        return Err(Status::invalid_argument(format!("invalid parent: {parent}")));
+    }
+    let rest = &parent[prefix.len()..];
+    let slash_pos = rest
+        .find('/')
+        .ok_or_else(|| Status::invalid_argument("missing project_id in parent"))?;
+    Ok(rest[..slash_pos].to_string())
+}
+
+/// Build the collection path from a parent and collection_id.
+///
+/// Parent formats:
+///   `projects/{pid}/databases/(default)/documents` → collection_path = collection_id
+///   `projects/{pid}/databases/(default)/documents/a/b` → collection_path = "a/b/{collection_id}"
+fn build_collection_path(parent: &str, collection_id: &str) -> Result<String, Status> {
+    let doc_marker = "databases/(default)/documents";
+    let marker_pos = parent
+        .find(doc_marker)
+        .ok_or_else(|| Status::invalid_argument("parent missing databases/(default)/documents"))?;
+    let after_documents = &parent[marker_pos + doc_marker.len()..];
+
+    if after_documents.is_empty() {
+        // Root: collection_path = collection_id
+        Ok(collection_id.to_string())
+    } else {
+        // Nested path: strip leading slash, append collection_id
+        let nested = after_documents.trim_start_matches('/');
+        Ok(format!("{nested}/{collection_id}"))
+    }
 }
 
 /// Start the agent server in-process, binding to `listen_addr`.
