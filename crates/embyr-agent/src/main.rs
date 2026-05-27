@@ -11,15 +11,22 @@ async fn main() {
     // feature flag selects one automatically.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Default to INFO level if RUST_LOG is not set.
+    // Load config before tracing init so we can use cfg.log_level.
+    let cfg = match config::AgentConfig::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("embyr-agent: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Default to cfg.log_level; RUST_LOG overrides if set.
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
-
-    let cfg = config::AgentConfig::from_env();
 
     if let Err(err) = server::run(cfg).await {
         eprintln!("embyr-agent: fatal error: {err}");

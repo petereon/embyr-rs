@@ -190,7 +190,10 @@ pub async fn serve(
 /// 2. Reads TLS cert/key/CA from the paths in config.
 /// 3. Starts tonic with `ServerTlsConfig` requiring client certificates.
 pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let pool = sqlx::PgPool::connect(&config.db_dsn).await?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(config.max_conns)
+        .connect(&config.db_dsn)
+        .await?;
     info!("connected to Postgres");
 
     let cert_pem = std::fs::read_to_string(&config.cert_path)?;
@@ -202,14 +205,9 @@ pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + 
 
     let tls = ServerTlsConfig::new().identity(identity).client_ca_root(ca_cert);
 
-    let project_id = std::env::var("EMBYR_AGENT_PROJECT_ID")
-        .unwrap_or_else(|_| "default".to_string());
+    let storage = Arc::new(PostgresBackendAdapter::new_from_pool(pool));
 
-    let storage = Arc::new(
-        PostgresBackendAdapter::new_from_pool(pool)
-    );
-
-    let addr = serve(project_id, storage, tls, &config.listen_addr).await?;
+    let addr = serve(config.project_id, storage, tls, &config.listen_addr).await?;
     info!("listening on {addr}");
 
     // Keep the binary alive indefinitely; SIGTERM is handled by the container runtime.

@@ -110,13 +110,19 @@ async fn agent_exits_without_binding_port_when_storage_unreachable() {
 ///   When  the agent process starts
 ///   Then  exit code is 1; stderr names the missing configuration item; no port bound
 #[tokio::test]
-#[ignore = "requires embyr-agent binary — unskip in S06A delivery"]
 async fn agent_exits_when_required_storage_config_is_absent() {
-    // Run agent binary without EMBYR_AGENT_DB_DSN set
-    // Assert exit code == 1
-    // Assert stderr contains "EMBYR_AGENT_DB_DSN"
-    // Assert :9191 is not bound
-    panic!("Not yet implemented — RED scaffold");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_embyr-agent"))
+        .env_clear()
+        .env("EMBYR_AGENT_PROJECT_ID", "test-project")
+        .env("EMBYR_AGENT_CERT", "/nonexistent/cert.pem")
+        .env("EMBYR_AGENT_KEY", "/nonexistent/key.pem")
+        .env("EMBYR_AGENT_CA", "/nonexistent/ca.pem")
+        // EMBYR_AGENT_DB_DSN intentionally absent
+        .output()
+        .expect("run agent binary");
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("EMBYR_AGENT_DB_DSN"), "stderr: {stderr}");
 }
 
 /// @driving_port @us_a06 @real_io @error
@@ -126,11 +132,17 @@ async fn agent_exits_when_required_storage_config_is_absent() {
 ///   When  the agent process starts
 ///   Then  exit code is 1; stderr names the missing configuration item; no port bound
 #[tokio::test]
-#[ignore = "requires embyr-agent binary — unskip in S06A delivery"]
 async fn agent_exits_when_required_project_identifier_is_absent() {
-    // Run agent binary without EMBYR_AGENT_PROJECT_ID set
-    // Assert exit code == 1
-    // Assert stderr contains "EMBYR_AGENT_PROJECT_ID"
-    // Assert :9191 is not bound
-    panic!("Not yet implemented — RED scaffold");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_embyr-agent"))
+        .env_clear()
+        .env("EMBYR_AGENT_DB_DSN", "postgres://x:y@127.0.0.1:1/db")
+        .env("EMBYR_AGENT_CERT", "/nonexistent/cert.pem")
+        .env("EMBYR_AGENT_KEY", "/nonexistent/key.pem")
+        .env("EMBYR_AGENT_CA", "/nonexistent/ca.pem")
+        // EMBYR_AGENT_PROJECT_ID intentionally absent
+        .output()
+        .expect("run agent binary");
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("EMBYR_AGENT_PROJECT_ID"), "stderr: {stderr}");
 }
