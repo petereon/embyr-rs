@@ -24,7 +24,7 @@ async fn main() {
     let cfg = config::AgentConfig::from_env();
 
     if let Err(err) = server::run(cfg).await {
-        eprintln!("embyr-agent: fatal error: {}", err);
+        eprintln!("embyr-agent: fatal error: {err}");
         std::process::exit(1);
     }
 }

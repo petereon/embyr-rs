@@ -16,15 +16,13 @@ use adapters::{
     gcp_secret_fetcher::GcpSecretFetcher,
     index_manager::IndexManager,
     metrics_adapter::MetricsAdapter,
+    postgres_notify_listener::PostgresNotifyListener,
     system_db::SystemDb,
 };
 use middleware::rate_limit::RateLimiter;
 use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
-use grpc::healthz::healthz_handler;
 use realtime::listen_registry::ListenRegistry;
-use rest::browser_channel::{BrowserChannelState, browser_channel_get, browser_channel_post};
-use rest::grpc_web::spawn_hybrid_server;
 
 /// Handle to an in-process test server bound on ephemeral ports.
 ///
@@ -49,14 +47,30 @@ impl Drop for TestServer {
     }
 }
 
-/// Start an in-process server with a configurable Listen keep-alive interval.
-///
-/// Use this variant in tests that exercise the keep-alive path — pass a short
-/// duration (e.g. `Duration::from_millis(500)`) so tests complete quickly.
-pub async fn start_test_server_with_keepalive(
-    system_db: Arc<SystemDb>,
-    keepalive: std::time::Duration,
-) -> TestServer {
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Shared wiring allocated by every test server variant.
+struct TestComponents {
+    grpc_listener: tokio::net::TcpListener,
+    rest_listener: tokio::net::TcpListener,
+    admin_listener: tokio::net::TcpListener,
+    grpc_addr: std::net::SocketAddr,
+    rest_addr: std::net::SocketAddr,
+    admin_addr: std::net::SocketAddr,
+    cache: Arc<CredentialCache>,
+    cache_for_admin: Arc<CredentialCache>,
+    idx_mgr: Arc<IndexManager>,
+    metrics: Arc<MetricsAdapter>,
+    listen_registry: Arc<ListenRegistry>,
+    active_listeners: Arc<tokio::sync::Mutex<std::collections::HashMap<String, PostgresNotifyListener>>>,
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Bind three ephemeral TCP listeners and allocate shared service components.
+async fn alloc_test_components(system_db: &Arc<SystemDb>) -> TestComponents {
     let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind gRPC ephemeral port");
@@ -78,50 +92,54 @@ pub async fn start_test_server_with_keepalive(
     let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
     let metrics = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
     let listen_registry = ListenRegistry::new();
-    let listen_registry_clone = Arc::clone(&listen_registry);
     let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    let rate_limiter = RateLimiter::new(1000.0, 1000.0);
-    let rate_limiter_clone = Arc::clone(&rate_limiter);
-    let service = FirestoreService {
-        system_db: Arc::clone(&system_db),
-        credential_cache: cache,
-        index_manager: idx_mgr,
-        metrics_adapter: metrics,
-        keepalive_interval: keepalive,
+
+    TestComponents {
+        grpc_listener,
+        rest_listener,
+        admin_listener,
+        grpc_addr,
+        rest_addr,
+        admin_addr,
+        cache,
+        cache_for_admin,
+        idx_mgr,
+        metrics,
         listen_registry,
         active_listeners,
-        aws_secret_fetcher: None,
-        gcp_secret_fetcher: None,
-        rate_limiter,
-    };
+        shutdown_tx,
+        shutdown_rx,
+    }
+}
 
-    // Clone the service for the gRPC-Web port (:8081).
+/// Spawn the gRPC, REST hybrid, and admin servers.
+///
+/// All three share a single `shutdown_rx` oneshot; dropping the returned
+/// `TestServer` sends the shutdown signal.
+fn spawn_all_servers(
+    grpc_listener: tokio::net::TcpListener,
+    rest_listener: tokio::net::TcpListener,
+    admin_listener: tokio::net::TcpListener,
+    service: FirestoreService,
+    admin_app: axum::Router,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
     let service_for_rest = service.clone();
 
-    // Build the axum portion of the REST app (healthz + BrowserChannel).
-    // The hybrid server dispatches gRPC-Web requests to tonic and all other
-    // requests to this axum router.
-    let bc_state = BrowserChannelState::new();
+    let bc_state = rest::browser_channel::BrowserChannelState::new();
     let axum_app = axum::Router::new()
-        .route("/healthz", axum::routing::get(healthz_handler))
+        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
         .route(
             "/channel",
-            axum::routing::get(browser_channel_get).post(browser_channel_post),
+            axum::routing::get(rest::browser_channel::browser_channel_get)
+                .post(rest::browser_channel::browser_channel_post),
         )
         .with_state(bc_state);
 
-    let rest_task = spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
-
-    let admin_app = admin::router::build_with_aws(
-        system_db,
-        "test-admin-key-secret".to_string(),
-        cache_for_admin,
-        None,
-    );
+    let rest_task = rest::grpc_web::spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
 
     tokio::spawn(async move {
-        let grpc_incoming =
-            tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
+        let grpc_incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
 
         let grpc_fut = tonic::transport::Server::builder()
             .add_service(FirestoreServer::new(service))
@@ -136,17 +154,60 @@ pub async fn start_test_server_with_keepalive(
             _ = async { let _ = shutdown_rx.await; } => {},
         }
     });
+}
 
-    // Brief yield to let all servers reach their accept loops before returning.
+// ---------------------------------------------------------------------------
+// Public test server constructors
+// ---------------------------------------------------------------------------
+
+/// Start an in-process server with a configurable Listen keep-alive interval.
+///
+/// Use this variant in tests that exercise the keep-alive path — pass a short
+/// duration (e.g. `Duration::from_millis(500)`) so tests complete quickly.
+pub async fn start_test_server_with_keepalive(
+    system_db: Arc<SystemDb>,
+    keepalive: std::time::Duration,
+) -> TestServer {
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
+
+    let rate_limiter = RateLimiter::new(1000.0, 1000.0);
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
+    let service = FirestoreService {
+        system_db: Arc::clone(&system_db),
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
+        keepalive_interval: keepalive,
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
+        aws_secret_fetcher: None,
+        gcp_secret_fetcher: None,
+        rate_limiter,
+    };
+
+    let admin_app = admin::router::build_with_aws(
+        system_db,
+        "test-admin-key-secret".to_string(),
+        c.cache_for_admin,
+        None,
+    );
+
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx,
+    );
+
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     TestServer {
-        grpc_addr,
-        rest_addr,
-        admin_addr,
-        listen_registry: listen_registry_clone,
-        rate_limiter: rate_limiter_clone,
-        shutdown_tx: Some(shutdown_tx),
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
     }
 }
 
@@ -164,92 +225,46 @@ pub async fn start_test_server_with_aws_fetcher(
     keepalive: std::time::Duration,
     aws_fetcher: Arc<AwsSecretFetcher>,
 ) -> TestServer {
-    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind gRPC ephemeral port");
-    let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind REST ephemeral port");
-    let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind admin ephemeral port");
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
 
-    let grpc_addr = grpc_listener.local_addr().expect("get gRPC local addr");
-    let rest_addr = rest_listener.local_addr().expect("get REST local addr");
-    let admin_addr = admin_listener.local_addr().expect("get admin local addr");
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let cache = Arc::new(CredentialCache::new(256));
-    let cache_for_admin = Arc::clone(&cache);
-    let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
-    let metrics = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
-    let listen_registry = ListenRegistry::new();
-    let listen_registry_clone = Arc::clone(&listen_registry);
-    let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let rate_limiter = RateLimiter::new(1000.0, 1000.0);
-    let rate_limiter_clone = Arc::clone(&rate_limiter);
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
     let service = FirestoreService {
         system_db: Arc::clone(&system_db),
-        credential_cache: cache,
-        index_manager: idx_mgr,
-        metrics_adapter: metrics,
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
         keepalive_interval: keepalive,
-        listen_registry,
-        active_listeners,
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
         aws_secret_fetcher: Some(Arc::clone(&aws_fetcher)),
         gcp_secret_fetcher: None,
         rate_limiter,
     };
 
-    let service_for_rest = service.clone();
-
-    let bc_state = rest::browser_channel::BrowserChannelState::new();
-    let axum_app = axum::Router::new()
-        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
-        .route(
-            "/channel",
-            axum::routing::get(rest::browser_channel::browser_channel_get)
-                .post(rest::browser_channel::browser_channel_post),
-        )
-        .with_state(bc_state);
-
-    let rest_task = rest::grpc_web::spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
-
     let admin_app = admin::router::build_with_aws(
         system_db,
         "test-admin-key-secret".to_string(),
-        cache_for_admin,
+        c.cache_for_admin,
         Some(aws_fetcher),
     );
 
-    tokio::spawn(async move {
-        let grpc_incoming =
-            tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
-
-        let grpc_fut = tonic::transport::Server::builder()
-            .add_service(embyr_proto::firestore::firestore_server::FirestoreServer::new(service))
-            .serve_with_incoming(grpc_incoming);
-
-        let admin_fut = axum::serve(admin_listener, admin_app);
-
-        tokio::select! {
-            _ = grpc_fut => {},
-            _ = rest_task => {},
-            _ = admin_fut => {},
-            _ = async { let _ = shutdown_rx.await; } => {},
-        }
-    });
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx,
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     TestServer {
-        grpc_addr,
-        rest_addr,
-        admin_addr,
-        listen_registry: listen_registry_clone,
-        rate_limiter: rate_limiter_clone,
-        shutdown_tx: Some(shutdown_tx),
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
     }
 }
 
@@ -259,92 +274,46 @@ pub async fn start_test_server_with_gcp_fetcher(
     keepalive: std::time::Duration,
     gcp_fetcher: Arc<GcpSecretFetcher>,
 ) -> TestServer {
-    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind gRPC ephemeral port");
-    let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind REST ephemeral port");
-    let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind admin ephemeral port");
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
 
-    let grpc_addr = grpc_listener.local_addr().expect("get gRPC local addr");
-    let rest_addr = rest_listener.local_addr().expect("get REST local addr");
-    let admin_addr = admin_listener.local_addr().expect("get admin local addr");
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let cache = Arc::new(CredentialCache::new(256));
-    let cache_for_admin = Arc::clone(&cache);
-    let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
-    let metrics = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
-    let listen_registry = realtime::listen_registry::ListenRegistry::new();
-    let listen_registry_clone = Arc::clone(&listen_registry);
-    let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let rate_limiter = RateLimiter::new(1000.0, 1000.0);
-    let rate_limiter_clone = Arc::clone(&rate_limiter);
-    let service = grpc::handler::FirestoreService {
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
+    let service = FirestoreService {
         system_db: Arc::clone(&system_db),
-        credential_cache: cache,
-        index_manager: idx_mgr,
-        metrics_adapter: metrics,
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
         keepalive_interval: keepalive,
-        listen_registry,
-        active_listeners,
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
         aws_secret_fetcher: None,
         gcp_secret_fetcher: Some(Arc::clone(&gcp_fetcher)),
         rate_limiter,
     };
 
-    let service_for_rest = service.clone();
-
-    let bc_state = rest::browser_channel::BrowserChannelState::new();
-    let axum_app = axum::Router::new()
-        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
-        .route(
-            "/channel",
-            axum::routing::get(rest::browser_channel::browser_channel_get)
-                .post(rest::browser_channel::browser_channel_post),
-        )
-        .with_state(bc_state);
-
-    let rest_task = rest::grpc_web::spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
-
     let admin_app = admin::router::build_with_gcp(
         system_db,
         "test-admin-key-secret".to_string(),
-        cache_for_admin,
+        c.cache_for_admin,
         Some(gcp_fetcher),
     );
 
-    tokio::spawn(async move {
-        let grpc_incoming =
-            tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
-
-        let grpc_fut = tonic::transport::Server::builder()
-            .add_service(embyr_proto::firestore::firestore_server::FirestoreServer::new(service))
-            .serve_with_incoming(grpc_incoming);
-
-        let admin_fut = axum::serve(admin_listener, admin_app);
-
-        tokio::select! {
-            _ = grpc_fut => {},
-            _ = rest_task => {},
-            _ = admin_fut => {},
-            _ = async { let _ = shutdown_rx.await; } => {},
-        }
-    });
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx,
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     TestServer {
-        grpc_addr,
-        rest_addr,
-        admin_addr,
-        listen_registry: listen_registry_clone,
-        rate_limiter: rate_limiter_clone,
-        shutdown_tx: Some(shutdown_tx),
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
     }
 }
 
@@ -359,95 +328,49 @@ pub async fn start_test_server_with_rate_limit(
     refill_rate: f64,
     enabled: bool,
 ) -> TestServer {
-    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind gRPC ephemeral port");
-    let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind REST ephemeral port");
-    let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind admin ephemeral port");
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
 
-    let grpc_addr = grpc_listener.local_addr().expect("get gRPC local addr");
-    let rest_addr = rest_listener.local_addr().expect("get REST local addr");
-    let admin_addr = admin_listener.local_addr().expect("get admin local addr");
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-    let cache = Arc::new(CredentialCache::new(256));
-    let cache_for_admin = Arc::clone(&cache);
-    let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
-    let metrics = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
-    let listen_registry = ListenRegistry::new();
-    let listen_registry_clone = Arc::clone(&listen_registry);
-    let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let rate_limiter = if enabled {
         RateLimiter::new(capacity, refill_rate)
     } else {
         RateLimiter::disabled()
     };
-    let rate_limiter_clone = Arc::clone(&rate_limiter);
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
     let service = FirestoreService {
         system_db: Arc::clone(&system_db),
-        credential_cache: cache,
-        index_manager: idx_mgr,
-        metrics_adapter: metrics,
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
         keepalive_interval: std::time::Duration::from_secs(30),
-        listen_registry,
-        active_listeners,
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
         aws_secret_fetcher: None,
         gcp_secret_fetcher: None,
         rate_limiter,
     };
 
-    let service_for_rest = service.clone();
-
-    let bc_state = rest::browser_channel::BrowserChannelState::new();
-    let axum_app = axum::Router::new()
-        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
-        .route(
-            "/channel",
-            axum::routing::get(rest::browser_channel::browser_channel_get)
-                .post(rest::browser_channel::browser_channel_post),
-        )
-        .with_state(bc_state);
-
-    let rest_task = rest::grpc_web::spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
-
     let admin_app = admin::router::build_with_aws(
         system_db,
         "test-admin-key-secret".to_string(),
-        cache_for_admin,
+        c.cache_for_admin,
         None,
     );
 
-    tokio::spawn(async move {
-        let grpc_incoming =
-            tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
-
-        let grpc_fut = tonic::transport::Server::builder()
-            .add_service(FirestoreServer::new(service))
-            .serve_with_incoming(grpc_incoming);
-
-        let admin_fut = axum::serve(admin_listener, admin_app);
-
-        tokio::select! {
-            _ = grpc_fut => {},
-            _ = rest_task => {},
-            _ = admin_fut => {},
-            _ = async { let _ = shutdown_rx.await; } => {},
-        }
-    });
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx,
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     TestServer {
-        grpc_addr,
-        rest_addr,
-        admin_addr,
-        listen_registry: listen_registry_clone,
-        rate_limiter: rate_limiter_clone,
-        shutdown_tx: Some(shutdown_tx),
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
     }
 }

@@ -117,7 +117,7 @@ pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error>> 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     let actual_addr = listener.local_addr()?;
 
-    info!("listening on {}", actual_addr);
+    info!("listening on {actual_addr}");
 
     tonic::transport::Server::builder()
         .tls_config(tls)?

@@ -45,7 +45,7 @@ fn require_env(name: &str) -> String {
     match std::env::var(name) {
         Ok(val) if !val.is_empty() => val,
         _ => {
-            eprintln!("embyr-agent: missing required environment variable: {}", name);
+            eprintln!("embyr-agent: missing required environment variable: {name}");
             std::process::exit(1);
         }
     }
