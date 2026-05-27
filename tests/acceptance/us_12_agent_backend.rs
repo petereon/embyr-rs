@@ -163,8 +163,8 @@ use embyr_proto::agent::{
     storage_agent_server::{StorageAgent, StorageAgentServer},
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, Document as AgentDocument,
-    GetDocumentRequest, RollbackRequest, RunQueryRequest, RunQueryResponse,
-    UpdateDocumentRequest,
+    GetDocumentRequest, PingRequest, PingResponse, RollbackRequest, RunQueryRequest,
+    RunQueryResponse, UpdateDocumentRequest,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
@@ -323,6 +323,20 @@ impl StorageAgent for MockAgentServer {
     ) -> Result<Response<()>, Status> {
         self.calls.lock().unwrap().push("rollback".to_string());
         Ok(Response::new(()))
+    }
+
+    async fn ping(
+        &self,
+        _request: Request<PingRequest>,
+    ) -> Result<Response<PingResponse>, Status> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        Ok(Response::new(PingResponse {
+            server_time: Some(prost_types::Timestamp {
+                seconds: now.as_secs() as i64,
+                nanos: now.subsec_nanos() as i32,
+            }),
+        }))
     }
 }
 
