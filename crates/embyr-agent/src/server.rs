@@ -248,9 +248,29 @@ impl StorageAgent for StorageAgentService {
 
     async fn delete_document(
         &self,
-        _request: Request<DeleteDocumentRequest>,
+        request: Request<DeleteDocumentRequest>,
     ) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("not implemented — step 03-02"))
+        let req = request.into_inner();
+        if req.name.is_empty() {
+            return Err(Status::invalid_argument("name is required"));
+        }
+        let path = parse_document_name(&req.name, &self.project_id)?;
+        let precondition = parse_precondition(req.current_document);
+
+        let must_exist = matches!(precondition, Some(WritePrecondition::MustExist));
+
+        match self.storage.delete_document(&path, precondition).await {
+            Ok(()) => Ok(Response::new(())),
+            // Firestore no-op semantics: absent doc delete succeeds unless MustExist precondition
+            Err(CoreError::DocumentNotFound(msg)) => {
+                if must_exist {
+                    Err(Status::not_found(format!("document not found: {msg}")))
+                } else {
+                    Ok(Response::new(()))
+                }
+            }
+            Err(e) => Err(core_error_to_status(e)),
+        }
     }
 
     type RunQueryStream = ReceiverStream<Result<RunQueryResponse, Status>>;

@@ -172,7 +172,15 @@ async fn updating_with_mask_preserves_unmentioned_fields() {
 #[ignore = "requires Docker — unskip in S02A delivery"]
 async fn removing_absent_document_succeeds_without_error() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+    // This document was never created — delete should succeed (Firestore no-op semantics)
+    let result = client
+        .delete_document(DeleteDocumentRequest {
+            name: "projects/finops-prod/databases/(default)/documents/orders/nonexistent-123"
+                .to_string(),
+            ..Default::default()
+        })
+        .await;
+    assert!(result.is_ok(), "delete of absent doc should succeed: {:?}", result);
 }
 
 /// @driving_port @us_a02 @real_io
@@ -186,7 +194,32 @@ async fn removing_absent_document_succeeds_without_error() {
 #[ignore = "requires Docker — unskip in S02A delivery"]
 async fn removing_document_leaves_deletion_record() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+
+    // Create the document first
+    let doc_name = "projects/finops-prod/databases/(default)/documents/orders/to-delete";
+    let mut fields = HashMap::new();
+    fields.insert("status".to_string(), str_val("pending"));
+    create_doc(&mut client, "orders", "to-delete", fields).await;
+
+    // Delete it — must succeed
+    client
+        .delete_document(DeleteDocumentRequest {
+            name: doc_name.to_string(),
+            ..Default::default()
+        })
+        .await
+        .expect("delete doc");
+
+    // Verify GetDocument returns NotFound
+    let get_result = client
+        .get_document(GetDocumentRequest { name: doc_name.to_string(), ..Default::default() })
+        .await;
+    assert!(get_result.is_err(), "document should not be found after deletion");
+    assert_eq!(
+        get_result.unwrap_err().code(),
+        tonic::Code::NotFound,
+        "should return NOT_FOUND after delete"
+    );
 }
 
 /// @driving_port @us_a02 @real_io
