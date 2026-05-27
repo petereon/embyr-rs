@@ -47,6 +47,7 @@ use crate::{
         system_db::SystemDb,
     },
     encoding::firestore_proto::{document_to_proto, fields_to_proto, proto_fields_to_domain},
+    middleware::rate_limit::RateLimiter,
     realtime::listen_registry::ListenRegistry,
 };
 
@@ -69,6 +70,8 @@ pub struct FirestoreService {
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     /// GCP Secret Manager fetcher — Some for servers configured with gcp_secret support.
     pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+    /// Per-project token bucket rate limiter. Applied after authentication.
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 impl FirestoreService {
@@ -381,6 +384,9 @@ impl Firestore for FirestoreService {
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
+        if self.rate_limiter.check(&project_id).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
+        }
 
         // Record read operation — best-effort, fire-and-forget.
         self.metrics_adapter.record_read(&project_id, 1).await;
@@ -410,6 +416,9 @@ impl Firestore for FirestoreService {
         let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
+        }
+        if self.rate_limiter.check(&project_id_str).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         let document_id = if req.document_id.is_empty() {
@@ -472,6 +481,9 @@ impl Firestore for FirestoreService {
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
+        if self.rate_limiter.check(&project_id_str).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
+        }
 
         let fields = proto_fields_to_domain(&doc.fields)
             .ok_or_else(|| Status::invalid_argument("invalid field value"))?;
@@ -509,6 +521,9 @@ impl Firestore for FirestoreService {
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
+        if self.rate_limiter.check(&project_id_str).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
+        }
 
         let precondition = Self::convert_precondition(req.current_document.clone());
 
@@ -542,6 +557,9 @@ impl Firestore for FirestoreService {
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
+        if self.rate_limiter.check(&project_id_str).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
+        }
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -574,6 +592,9 @@ impl Firestore for FirestoreService {
         let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
+        }
+        if self.rate_limiter.check(&project_id_str).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
@@ -651,6 +672,9 @@ impl Firestore for FirestoreService {
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
+        if self.rate_limiter.check(&project_id_str).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
+        }
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -680,6 +704,9 @@ impl Firestore for FirestoreService {
         let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
+        }
+        if self.rate_limiter.check(&project_id_str).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         // Extract the structured query from the request
@@ -816,6 +843,9 @@ impl Firestore for FirestoreService {
         let (adapter, status, dsn) = self.authenticate(&project_id, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
+        }
+        if self.rate_limiter.check(&project_id).await.is_err() {
+            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         // Ensure a PostgresNotifyListener is running for this project.

@@ -109,6 +109,10 @@ path = "../../tests/acceptance/us_10_aws_secrets.rs"
 name = "us_11_gcp_secrets"
 path = "../../tests/acceptance/us_11_gcp_secrets.rs"
 
+[[test]]
+name = "us_14_rate_limiting"
+path = "../../tests/acceptance/us_14_rate_limiting.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
@@ -130,3 +134,4 @@ uuid = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-secretsmanager = { workspace = true }
 base64 = { workspace = true }
+serial_test = { workspace = true }

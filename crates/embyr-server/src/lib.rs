@@ -18,6 +18,7 @@ use adapters::{
     metrics_adapter::MetricsAdapter,
     system_db::SystemDb,
 };
+use middleware::rate_limit::RateLimiter;
 use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
 use grpc::healthz::healthz_handler;
@@ -35,6 +36,8 @@ pub struct TestServer {
     pub admin_addr: std::net::SocketAddr,
     /// Shared listen registry — exposed for test-only overflow simulation.
     pub listen_registry: Arc<realtime::listen_registry::ListenRegistry>,
+    /// Shared rate limiter — exposed for test inspection.
+    pub rate_limiter: Arc<RateLimiter>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -77,6 +80,8 @@ pub async fn start_test_server_with_keepalive(
     let listen_registry = ListenRegistry::new();
     let listen_registry_clone = Arc::clone(&listen_registry);
     let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let rate_limiter = RateLimiter::new(1000.0, 1000.0);
+    let rate_limiter_clone = Arc::clone(&rate_limiter);
     let service = FirestoreService {
         system_db: Arc::clone(&system_db),
         credential_cache: cache,
@@ -87,6 +92,7 @@ pub async fn start_test_server_with_keepalive(
         active_listeners,
         aws_secret_fetcher: None,
         gcp_secret_fetcher: None,
+        rate_limiter,
     };
 
     // Clone the service for the gRPC-Web port (:8081).
@@ -139,6 +145,7 @@ pub async fn start_test_server_with_keepalive(
         rest_addr,
         admin_addr,
         listen_registry: listen_registry_clone,
+        rate_limiter: rate_limiter_clone,
         shutdown_tx: Some(shutdown_tx),
     }
 }
@@ -180,6 +187,8 @@ pub async fn start_test_server_with_aws_fetcher(
     let listen_registry = ListenRegistry::new();
     let listen_registry_clone = Arc::clone(&listen_registry);
     let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let rate_limiter = RateLimiter::new(1000.0, 1000.0);
+    let rate_limiter_clone = Arc::clone(&rate_limiter);
     let service = FirestoreService {
         system_db: Arc::clone(&system_db),
         credential_cache: cache,
@@ -190,6 +199,7 @@ pub async fn start_test_server_with_aws_fetcher(
         active_listeners,
         aws_secret_fetcher: Some(Arc::clone(&aws_fetcher)),
         gcp_secret_fetcher: None,
+        rate_limiter,
     };
 
     let service_for_rest = service.clone();
@@ -238,6 +248,7 @@ pub async fn start_test_server_with_aws_fetcher(
         rest_addr,
         admin_addr,
         listen_registry: listen_registry_clone,
+        rate_limiter: rate_limiter_clone,
         shutdown_tx: Some(shutdown_tx),
     }
 }
@@ -271,6 +282,8 @@ pub async fn start_test_server_with_gcp_fetcher(
     let listen_registry = realtime::listen_registry::ListenRegistry::new();
     let listen_registry_clone = Arc::clone(&listen_registry);
     let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let rate_limiter = RateLimiter::new(1000.0, 1000.0);
+    let rate_limiter_clone = Arc::clone(&rate_limiter);
     let service = grpc::handler::FirestoreService {
         system_db: Arc::clone(&system_db),
         credential_cache: cache,
@@ -281,6 +294,7 @@ pub async fn start_test_server_with_gcp_fetcher(
         active_listeners,
         aws_secret_fetcher: None,
         gcp_secret_fetcher: Some(Arc::clone(&gcp_fetcher)),
+        rate_limiter,
     };
 
     let service_for_rest = service.clone();
@@ -329,6 +343,111 @@ pub async fn start_test_server_with_gcp_fetcher(
         rest_addr,
         admin_addr,
         listen_registry: listen_registry_clone,
+        rate_limiter: rate_limiter_clone,
+        shutdown_tx: Some(shutdown_tx),
+    }
+}
+
+/// Start an in-process server with a configurable rate limiter (for US-14 tests).
+///
+/// - `capacity`: token bucket capacity (burst size)
+/// - `refill_rate`: tokens per second replenishment rate
+/// - `enabled`: if false, rate limiting is disabled entirely
+pub async fn start_test_server_with_rate_limit(
+    system_db: Arc<SystemDb>,
+    capacity: f64,
+    refill_rate: f64,
+    enabled: bool,
+) -> TestServer {
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gRPC ephemeral port");
+    let rest_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind REST ephemeral port");
+    let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind admin ephemeral port");
+
+    let grpc_addr = grpc_listener.local_addr().expect("get gRPC local addr");
+    let rest_addr = rest_listener.local_addr().expect("get REST local addr");
+    let admin_addr = admin_listener.local_addr().expect("get admin local addr");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let cache = Arc::new(CredentialCache::new(256));
+    let cache_for_admin = Arc::clone(&cache);
+    let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
+    let metrics = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
+    let listen_registry = ListenRegistry::new();
+    let listen_registry_clone = Arc::clone(&listen_registry);
+    let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let rate_limiter = if enabled {
+        RateLimiter::new(capacity, refill_rate)
+    } else {
+        RateLimiter::disabled()
+    };
+    let rate_limiter_clone = Arc::clone(&rate_limiter);
+    let service = FirestoreService {
+        system_db: Arc::clone(&system_db),
+        credential_cache: cache,
+        index_manager: idx_mgr,
+        metrics_adapter: metrics,
+        keepalive_interval: std::time::Duration::from_secs(30),
+        listen_registry,
+        active_listeners,
+        aws_secret_fetcher: None,
+        gcp_secret_fetcher: None,
+        rate_limiter,
+    };
+
+    let service_for_rest = service.clone();
+
+    let bc_state = rest::browser_channel::BrowserChannelState::new();
+    let axum_app = axum::Router::new()
+        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
+        .route(
+            "/channel",
+            axum::routing::get(rest::browser_channel::browser_channel_get)
+                .post(rest::browser_channel::browser_channel_post),
+        )
+        .with_state(bc_state);
+
+    let rest_task = rest::grpc_web::spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
+
+    let admin_app = admin::router::build_with_aws(
+        system_db,
+        "test-admin-key-secret".to_string(),
+        cache_for_admin,
+        None,
+    );
+
+    tokio::spawn(async move {
+        let grpc_incoming =
+            tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
+
+        let grpc_fut = tonic::transport::Server::builder()
+            .add_service(FirestoreServer::new(service))
+            .serve_with_incoming(grpc_incoming);
+
+        let admin_fut = axum::serve(admin_listener, admin_app);
+
+        tokio::select! {
+            _ = grpc_fut => {},
+            _ = rest_task => {},
+            _ = admin_fut => {},
+            _ = async { let _ = shutdown_rx.await; } => {},
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    TestServer {
+        grpc_addr,
+        rest_addr,
+        admin_addr,
+        listen_registry: listen_registry_clone,
+        rate_limiter: rate_limiter_clone,
         shutdown_tx: Some(shutdown_tx),
     }
 }
