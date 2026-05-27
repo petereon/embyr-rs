@@ -4,7 +4,7 @@
 //! appear in the system DB. The SaaS connects to the agent via mTLS gRPC and the
 //! agent manages its own Postgres connection in the customer VPC.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use embyr_core::{
@@ -185,7 +185,7 @@ fn agent_doc_to_domain(doc: AgentDocument) -> Option<FirestoreDocument> {
     })
 }
 
-fn fields_to_agent_map(fields: &BTreeMap<String, FieldValue>) -> std::collections::HashMap<String, AgentValue> {
+fn fields_to_agent_map(fields: &BTreeMap<String, FieldValue>) -> HashMap<String, AgentValue> {
     fields
         .iter()
         .map(|(k, v)| (k.clone(), field_value_to_agent_value(v)))
@@ -227,7 +227,7 @@ fn precondition_to_agent(p: &WritePrecondition) -> AgentPrecondition {
 }
 
 fn grpc_err(e: tonic::Status) -> CoreError {
-    CoreError::BackendUnavailable(format!("agent gRPC error: {}", e))
+    CoreError::BackendUnavailable(format!("agent gRPC error: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -475,9 +475,8 @@ impl BackendAdapter for AgentBackendAdapter {
         // Probe: attempt a GetDocument on a sentinel path. The agent must be reachable.
         // NotFound is acceptable (the path may not exist) — only transport errors fail.
         let req = GetDocumentRequest {
-            name: format!(
-                "projects/__probe__/databases/(default)/documents/__probe__/__probe__"
-            ),
+            name: "projects/__probe__/databases/(default)/documents/__probe__/__probe__"
+                .to_string(),
             ..Default::default()
         };
         let mut client = self.client.clone();
@@ -485,10 +484,7 @@ impl BackendAdapter for AgentBackendAdapter {
             Ok(_) => Ok(()),
             Err(s) if s.code() == tonic::Code::NotFound => Ok(()),
             Err(s) if s.code() == tonic::Code::Unimplemented => Ok(()),
-            Err(s) => Err(CoreError::BackendUnavailable(format!(
-                "agent probe failed: {}",
-                s
-            ))),
+            Err(s) => Err(CoreError::BackendUnavailable(format!("agent probe failed: {s}"))),
         }
     }
 }

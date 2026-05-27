@@ -362,9 +362,8 @@ impl BackendAdapter for PostgresBackendAdapter {
     async fn delete_document(
         &self,
         path: &DocumentPath,
-        precondition: Option<WritePrecondition>,
+        _precondition: Option<WritePrecondition>,
     ) -> Result<(), CoreError> {
-        let _ = precondition; // MustExist handled by checking rows returned
 
         let rows_affected = sqlx::query(
             "UPDATE documents \

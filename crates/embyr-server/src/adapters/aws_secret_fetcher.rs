@@ -82,7 +82,7 @@ impl AwsSecretFetcher {
             .secret_id(arn)
             .send()
             .await
-            .map_err(|err| Self::map_sdk_error(err))?;
+            .map_err(Self::map_sdk_error)?;
 
         let secret_str = resp
             .secret_string()
