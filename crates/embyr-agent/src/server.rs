@@ -13,7 +13,8 @@ use embyr_proto::agent::{
     storage_agent_server::{StorageAgent, StorageAgentServer},
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
-    RollbackRequest, RunQueryRequest, RunQueryResponse, UpdateDocumentRequest,
+    PingRequest, PingResponse, RollbackRequest, RunQueryRequest, RunQueryResponse,
+    UpdateDocumentRequest,
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{
@@ -119,6 +120,22 @@ impl StorageAgent for StorageAgentService {
     ) -> Result<Response<()>, Status> {
         Err(Status::unimplemented("not implemented — step 03-01"))
     }
+
+    async fn ping(
+        &self,
+        _request: Request<PingRequest>,
+    ) -> Result<Response<PingResponse>, Status> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| Status::internal(format!("system time error: {e}")))?;
+        Ok(Response::new(PingResponse {
+            server_time: Some(prost_types::Timestamp {
+                seconds: now.as_secs() as i64,
+                nanos: now.subsec_nanos() as i32,
+            }),
+        }))
+    }
 }
 
 /// Parse a Firestore resource name into a `DocumentPath`.
@@ -186,11 +203,12 @@ pub async fn serve(
 
 /// Start the mTLS gRPC server from environment config.
 ///
-/// 1. Connects to Postgres and logs readiness.
+/// 1. Connects to Postgres (probe logs "connected to Postgres" before this is called).
 /// 2. Reads TLS cert/key/CA from the paths in config.
 /// 3. Starts tonic with `ServerTlsConfig` requiring client certificates.
+/// 4. Listens for SIGTERM; on receipt, drains in-flight RPCs, logs "shutdown complete",
+///    and exits with code 0.
 pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Note: "connected to Postgres" is logged by StartupProbe before run() is called.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(config.max_conns)
         .connect(&config.db_dsn)
@@ -206,12 +224,28 @@ pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + 
     let tls = ServerTlsConfig::new().identity(identity).client_ca_root(ca_cert);
 
     let storage = Arc::new(PostgresBackendAdapter::new_from_pool(pool));
+    let service = StorageAgentService::new(config.project_id, storage);
 
-    let addr = serve(config.project_id, storage, tls, &config.listen_addr).await?;
+    let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
+    let addr = listener.local_addr()?;
     info!("listening on {addr}");
 
-    // Keep the binary alive indefinitely; SIGTERM is handled by the container runtime.
-    std::future::pending::<()>().await;
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
+    )?;
 
+    tonic::transport::Server::builder()
+        .tls_config(tls)?
+        .add_service(StorageAgentServer::new(service))
+        .serve_with_incoming_shutdown(
+            TcpListenerStream::new(listener),
+            async move {
+                sigterm.recv().await;
+                tracing::info!("received SIGTERM — initiating graceful shutdown");
+            },
+        )
+        .await?;
+
+    info!("shutdown complete");
     Ok(())
 }

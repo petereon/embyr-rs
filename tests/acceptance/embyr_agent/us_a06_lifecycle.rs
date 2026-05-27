@@ -70,6 +70,7 @@ async fn agent_logs_storage_readiness_before_accepting_connections() {
         .env("EMBYR_AGENT_KEY", &key_path)
         .env("EMBYR_AGENT_CA", &ca_path)
         .env("EMBYR_AGENT_LOG_LEVEL", "info")
+        .env("EMBYR_AGENT_LISTEN_ADDR", "127.0.0.1:0")
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn embyr-agent");
@@ -142,10 +143,104 @@ async fn agent_logs_storage_readiness_before_accepting_connections() {
 ///   Then  new connections are rejected; in-flight RPC completes; exit code is 0
 ///   And   the log contains "shutdown complete"
 #[tokio::test]
-#[ignore = "requires Docker + embyr-agent binary — unskip in S06A delivery"]
 async fn agent_completes_in_flight_work_before_exiting_on_shutdown_signal() {
     let (_pg, db_url) = start_test_postgres().await;
-    panic!("Not yet implemented — RED scaffold");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, ca_path) = write_test_certs(tmp.path());
+
+    // Spawn the agent binary with piped stderr so we can inspect logs.
+    // Use port 0 so the OS assigns a free port, avoiding conflicts when tests run in parallel.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_embyr-agent"))
+        .env_clear()
+        .env("EMBYR_AGENT_DB_DSN", &db_url)
+        .env("EMBYR_AGENT_PROJECT_ID", "test-project")
+        .env("EMBYR_AGENT_CERT", &cert_path)
+        .env("EMBYR_AGENT_KEY", &key_path)
+        .env("EMBYR_AGENT_CA", &ca_path)
+        .env("EMBYR_AGENT_LISTEN_ADDR", "127.0.0.1:0")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn embyr-agent");
+
+    // Wait for "listening on" in stderr — agent is ready for RPCs.
+    let stderr_handle = child.stderr.take().expect("stderr piped");
+    let mut reader = BufReader::new(stderr_handle);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut startup_lines: Vec<String> = Vec::new();
+    let mut ready = false;
+
+    while std::time::Instant::now() < deadline {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim_end().to_string();
+                startup_lines.push(trimmed.clone());
+                if trimmed.contains("listening on") {
+                    ready = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        ready,
+        "agent never logged 'listening on' within 60s. Output:\n{}",
+        startup_lines.join("\n")
+    );
+
+    // Send SIGTERM to the agent process.
+    let pid = child.id();
+    std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .expect("send SIGTERM");
+
+    // Drain remaining stderr into a buffer.
+    let mut remaining_lines: Vec<String> = Vec::new();
+    for line in reader.lines() {
+        match line {
+            Ok(l) => remaining_lines.push(l),
+            Err(_) => break,
+        }
+    }
+
+    // Wait for the process to exit with a 30s timeout.
+    let output = tokio::task::spawn_blocking(move || {
+        child.wait_with_output().expect("wait for output")
+    })
+    .await
+    .expect("join wait_with_output");
+
+    let shutdown_code = output.status.code();
+    let all_stderr: Vec<String> = {
+        let from_output = String::from_utf8_lossy(&output.stderr);
+        let mut combined = startup_lines;
+        combined.extend(remaining_lines);
+        // Also include any bytes that wait_with_output captured.
+        for line in from_output.lines() {
+            combined.push(line.to_string());
+        }
+        combined
+    };
+    let stderr_text = all_stderr.join("\n");
+
+    assert_eq!(
+        shutdown_code,
+        Some(0),
+        "expected exit code 0 after SIGTERM, got {:?}. stderr:\n{stderr_text}",
+        shutdown_code
+    );
+
+    assert!(
+        stderr_text.contains("shutdown complete"),
+        "expected 'shutdown complete' in agent stderr after SIGTERM.\nstderr:\n{stderr_text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +289,7 @@ async fn storage_credential_never_appears_in_agent_logs() {
         .env("EMBYR_AGENT_KEY", &key_path)
         .env("EMBYR_AGENT_CA", &ca_path)
         .env("EMBYR_AGENT_LOG_LEVEL", "debug") // max verbosity to surface any leak
+        .env("EMBYR_AGENT_LISTEN_ADDR", "127.0.0.1:0")
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn embyr-agent");

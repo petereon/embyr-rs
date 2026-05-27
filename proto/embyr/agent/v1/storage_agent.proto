@@ -35,6 +35,17 @@ service StorageAgent {
 
   // Rolls back a transaction.
   rpc Rollback(RollbackRequest) returns (google.protobuf.Empty);
+
+  // Health check: returns the current server time.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+// A ping request (no fields needed).
+message PingRequest {}
+
+// A ping response carrying the server's current time.
+message PingResponse {
+  google.protobuf.Timestamp server_time = 1;
 }
 
 // A document stored in the agent storage.
