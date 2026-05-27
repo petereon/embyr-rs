@@ -260,11 +260,81 @@ async fn rolling_back_already_committed_transaction_returns_not_found() {
 ///   Given two transactions exist: one expired, one still active
 ///   When  the sweep operation runs
 ///   Then  the expired record is removed; the active record remains
+///   And   committing the swept transaction returns not-found
 #[tokio::test]
-#[ignore = "requires sweeper — unskip in S04B delivery"]
 async fn expired_transactions_are_removed_by_sweep() {
-    let (_handle, mut client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — deferred to step 04-02");
+    let (handle, mut client) = start_test_agent("finops-prod").await;
+
+    // Begin an "expired" transaction.
+    let txn_resp = client
+        .begin_transaction(BeginTransactionRequest { ..Default::default() })
+        .await
+        .expect("begin_transaction")
+        .into_inner();
+    let txn_uuid = uuid::Uuid::from_slice(&txn_resp.transaction)
+        .expect("transaction token must be a valid UUID");
+
+    // Age it past the 60-second TTL.
+    sqlx::query(
+        "UPDATE transactions SET started_at = NOW() - INTERVAL '65 seconds' \
+         WHERE transaction_id = $1",
+    )
+    .bind(txn_uuid)
+    .execute(&handle.pool)
+    .await
+    .expect("age transaction in DB");
+
+    // Begin a second transaction that should NOT be swept (it is still active).
+    let txn_active_resp = client
+        .begin_transaction(BeginTransactionRequest { ..Default::default() })
+        .await
+        .expect("begin second transaction")
+        .into_inner();
+    let txn_active_uuid = uuid::Uuid::from_slice(&txn_active_resp.transaction)
+        .expect("active transaction token must be a valid UUID");
+
+    // Criterion 2 + 3: run one sweep with 60-second TTL.
+    let sweeper = embyr_agent::sweeper::AgentTransactionSweeper::new(
+        handle.pool.clone(),
+        60,
+        std::time::Duration::from_millis(100),
+    );
+    sweeper.sweep_once().await.expect("sweep_once must not error");
+
+    // Criterion 3a: expired transaction record is absent.
+    let count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM transactions WHERE transaction_id = $1",
+    )
+    .bind(txn_uuid)
+    .fetch_one(&handle.pool)
+    .await
+    .expect("count expired");
+    assert_eq!(count.0, 0, "expired transaction must be absent after sweep");
+
+    // Criterion 3b: active transaction record is still present.
+    let count2: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM transactions WHERE transaction_id = $1",
+    )
+    .bind(txn_active_uuid)
+    .fetch_one(&handle.pool)
+    .await
+    .expect("count active");
+    assert_eq!(count2.0, 1, "active transaction must remain after sweep");
+
+    // Criterion 4: committing the swept transaction returns NOT_FOUND.
+    let result = client
+        .commit(CommitRequest {
+            transaction: txn_resp.transaction.clone(),
+            writes: vec![],
+            ..Default::default()
+        })
+        .await;
+    assert!(result.is_err(), "commit of swept transaction must fail");
+    assert_eq!(
+        result.unwrap_err().code(),
+        tonic::Code::NotFound,
+        "commit of swept transaction must return NOT_FOUND"
+    );
 }
 
 // ---------------------------------------------------------------------------

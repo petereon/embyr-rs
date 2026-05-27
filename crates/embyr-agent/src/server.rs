@@ -30,6 +30,7 @@ use tracing::info;
 
 use crate::config::AgentConfig;
 use crate::encoding::{domain_doc_to_proto, proto_value_to_field_value};
+use crate::sweeper::AgentTransactionSweeper;
 
 /// StorageAgent gRPC service backed by PostgresBackendAdapter.
 pub struct StorageAgentService {
@@ -502,8 +503,17 @@ pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + 
 
     let tls = ServerTlsConfig::new().identity(identity).client_ca_root(ca_cert);
 
-    let storage = Arc::new(PostgresBackendAdapter::new_from_pool(pool));
+    let storage = Arc::new(PostgresBackendAdapter::new_from_pool(pool.clone()));
     let service = StorageAgentService::new(config.project_id, storage);
+
+    // Spawn background transaction sweeper — deletes expired active transactions
+    // every 30 seconds using the same 60-second TTL as commit_transaction.
+    let sweeper = AgentTransactionSweeper::new(
+        pool,
+        60,
+        std::time::Duration::from_secs(30),
+    );
+    let _sweep_handle = sweeper.spawn();
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     let addr = listener.local_addr()?;

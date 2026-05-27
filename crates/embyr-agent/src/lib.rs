@@ -4,3 +4,4 @@ pub mod config;
 pub mod encoding;
 pub mod probe;
 pub mod server;
+pub mod sweeper;
