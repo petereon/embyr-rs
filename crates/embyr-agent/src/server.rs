@@ -190,11 +190,11 @@ pub async fn serve(
 /// 2. Reads TLS cert/key/CA from the paths in config.
 /// 3. Starts tonic with `ServerTlsConfig` requiring client certificates.
 pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Note: "connected to Postgres" is logged by StartupProbe before run() is called.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(config.max_conns)
         .connect(&config.db_dsn)
         .await?;
-    info!("connected to Postgres");
 
     let cert_pem = std::fs::read_to_string(&config.cert_path)?;
     let key_pem = std::fs::read_to_string(&config.key_path)?;

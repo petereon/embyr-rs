@@ -17,10 +17,31 @@
 //! `start_test_postgres` from `mod.rs` to obtain a real Postgres container,
 //! then pass its DSN to the agent via EMBYR_AGENT_DB_DSN.
 
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use super::agent_common::start_test_postgres;
+use super::agent_common::{start_test_postgres, test_tls_config};
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+/// Write test TLS cert files to `dir`. Returns (cert_path, key_path, ca_path).
+fn write_test_certs(dir: &std::path::Path) -> (String, String, String) {
+    let tls = test_tls_config();
+    let cert = dir.join("server.pem");
+    let key = dir.join("server-key.pem");
+    let ca = dir.join("ca.pem");
+    std::fs::write(&cert, &tls.server_cert_pem).unwrap();
+    std::fs::write(&key, &tls.server_key_pem).unwrap();
+    std::fs::write(&ca, &tls.ca_cert_pem).unwrap();
+    (
+        cert.display().to_string(),
+        key.display().to_string(),
+        ca.display().to_string(),
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Happy path scenarios
@@ -37,9 +58,80 @@ use super::agent_common::start_test_postgres;
 #[ignore = "requires Docker + embyr-agent binary — unskip in S06A delivery"]
 async fn agent_logs_storage_readiness_before_accepting_connections() {
     let (_pg, db_url) = start_test_postgres().await;
-    // Launch agent binary, capture stdout/stderr
-    // Assert log line order: "connected to Postgres" < "listening on :9191"
-    panic!("Not yet implemented — RED scaffold");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, ca_path) = write_test_certs(tmp.path());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_embyr-agent"))
+        .env_clear()
+        .env("EMBYR_AGENT_DB_DSN", &db_url)
+        .env("EMBYR_AGENT_PROJECT_ID", "test-project")
+        .env("EMBYR_AGENT_CERT", &cert_path)
+        .env("EMBYR_AGENT_KEY", &key_path)
+        .env("EMBYR_AGENT_CA", &ca_path)
+        .env("EMBYR_AGENT_LOG_LEVEL", "info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn embyr-agent");
+
+    let stderr = child.stderr.take().expect("stderr piped");
+    let mut reader = BufReader::new(stderr);
+
+    // Collect all lines until "listening on" appears (with 30s timeout).
+    let mut all_lines: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+
+    let mut found_listening = false;
+    loop {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // process exited
+            Ok(_) => {
+                let trimmed = line.trim_end().to_string();
+                all_lines.push(trimmed.clone());
+                if trimmed.contains("listening on") {
+                    found_listening = true;
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Kill the agent.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        found_listening,
+        "agent never logged 'listening on' within 30s. Output:\n{}",
+        all_lines.join("\n")
+    );
+
+    // Find positions of the two key log lines.
+    let pg_pos = all_lines
+        .iter()
+        .position(|l| l.contains("connected to Postgres"))
+        .unwrap_or_else(|| {
+            panic!(
+                "'connected to Postgres' not found in agent output:\n{}",
+                all_lines.join("\n")
+            )
+        });
+
+    let listening_pos = all_lines
+        .iter()
+        .position(|l| l.contains("listening on"))
+        .expect("'listening on' must be present");
+
+    assert!(
+        pg_pos < listening_pos,
+        "'connected to Postgres' (line {pg_pos}) must appear before 'listening on' (line {listening_pos}).\nOutput:\n{}",
+        all_lines.join("\n")
+    );
 }
 
 /// @driving_port @us_a06 @real_io
@@ -75,14 +167,84 @@ async fn agent_completes_in_flight_work_before_exiting_on_shutdown_signal() {
 #[tokio::test]
 #[ignore = "requires Docker + embyr-agent binary — unskip in S06A delivery"]
 async fn storage_credential_never_appears_in_agent_logs() {
-    // DSN sentinel: postgres://agent:DO-NOT-LOG@127.0.0.1:<port>/db
     let sentinel = "DO-NOT-LOG";
 
-    let (_pg, base_url) = start_test_postgres().await;
-    // Inject sentinel into the password portion of the DSN
-    // Run agent, perform 10 RPCs, collect all log output
-    // Assert: no captured line contains the sentinel string
-    panic!("Not yet implemented — RED scaffold");
+    // Start Postgres with the sentinel as the password.
+    use testcontainers_modules::testcontainers::ImageExt;
+    use testcontainers_modules::testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::postgres::Postgres;
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let pg = Postgres::default()
+        .with_env_var("POSTGRES_PASSWORD", sentinel)
+        .start()
+        .await
+        .expect("start postgres with sentinel password");
+    let port = pg.get_host_port_ipv4(5432).await.expect("get port");
+    let dsn = format!("postgres://postgres:{sentinel}@127.0.0.1:{port}/postgres");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, ca_path) = write_test_certs(tmp.path());
+
+    // Spawn the agent with the sentinel DSN.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_embyr-agent"))
+        .env_clear()
+        .env("EMBYR_AGENT_DB_DSN", &dsn)
+        .env("EMBYR_AGENT_PROJECT_ID", "test-project")
+        .env("EMBYR_AGENT_CERT", &cert_path)
+        .env("EMBYR_AGENT_KEY", &key_path)
+        .env("EMBYR_AGENT_CA", &ca_path)
+        .env("EMBYR_AGENT_LOG_LEVEL", "debug") // max verbosity to surface any leak
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn embyr-agent");
+
+    let stderr = child.stderr.take().expect("stderr piped");
+    let mut reader = BufReader::new(stderr);
+
+    // Wait for agent to start (or give up after 15s).
+    let mut all_lines: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim_end().to_string();
+                all_lines.push(trimmed.clone());
+                // Once agent is listening, we've collected startup logs.
+                if trimmed.contains("listening on") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Kill agent and collect any remaining output.
+    let _ = child.kill();
+    // Drain remaining stderr.
+    for line in reader.lines() {
+        if let Ok(l) = line {
+            all_lines.push(l);
+        }
+    }
+    let _ = child.wait();
+
+    // Assert: sentinel never appears in any log line.
+    let leaking_lines: Vec<&str> = all_lines
+        .iter()
+        .filter(|l| l.contains(sentinel))
+        .map(|l| l.as_str())
+        .collect();
+
+    assert!(
+        leaking_lines.is_empty(),
+        "SECURITY VIOLATION: sentinel '{sentinel}' found in agent log output:\n{}",
+        leaking_lines.join("\n")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +262,65 @@ async fn storage_credential_never_appears_in_agent_logs() {
 #[ignore = "requires embyr-agent binary — unskip in S06A delivery"]
 async fn agent_exits_without_binding_port_when_storage_unreachable() {
     let unreachable_dsn = "postgres://agent:pw@127.0.0.1:1/db"; // port 1 always fails
-    panic!("Not yet implemented — RED scaffold");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (cert_path, key_path, ca_path) = write_test_certs(tmp.path());
+
+    // Use spawn + wait with timeout: probe has a 5s internal timeout, so agent
+    // should exit within ~10 seconds.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_embyr-agent"))
+        .env_clear()
+        .env("EMBYR_AGENT_DB_DSN", unreachable_dsn)
+        .env("EMBYR_AGENT_PROJECT_ID", "test-project")
+        .env("EMBYR_AGENT_CERT", &cert_path)
+        .env("EMBYR_AGENT_KEY", &key_path)
+        .env("EMBYR_AGENT_CA", &ca_path)
+        .env("EMBYR_AGENT_LOG_LEVEL", "info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn embyr-agent");
+
+    // Wait up to 15 seconds for the agent to exit.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(s) => break s,
+            None => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    panic!("agent did not exit within 15s when storage is unreachable");
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    };
+
+    let stderr_bytes = {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = stderr.read_to_end(&mut buf);
+        }
+        buf
+    };
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    // Assert: non-zero exit code.
+    assert_ne!(
+        status.code(),
+        Some(0),
+        "agent should exit with non-zero code when storage is unreachable. stderr:\n{stderr}"
+    );
+
+    // Assert: stderr mentions probe/Postgres/failed so operator knows why.
+    let has_diagnostic = stderr.contains("probe")
+        || stderr.contains("Postgres")
+        || stderr.contains("failed")
+        || stderr.contains("error");
+    assert!(
+        has_diagnostic,
+        "agent stderr should contain a connection-failure diagnostic. stderr:\n{stderr}"
+    );
 }
 
 /// @driving_port @us_a06 @real_io @error

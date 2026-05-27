@@ -1,7 +1,7 @@
 // embyr-agent: statically linked customer-VPC binary (Linux musl target).
 // Connects from the customer VPC to the embyr-server.
 
-use embyr_agent::{config, server};
+use embyr_agent::{config, probe, server};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -27,6 +27,15 @@ async fn main() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+
+    // Hard-gated startup probe: Postgres connectivity + TLS cert validity.
+    // This runs BEFORE any port is bound. On failure, exit code 1 is returned
+    // and the process terminates without opening the gRPC listener.
+    let startup_probe = probe::StartupProbe::new(&cfg.db_dsn, &cfg.cert_path);
+    if let Err(e) = startup_probe.run().await {
+        eprintln!("embyr-agent: startup probe failed: {e}");
+        std::process::exit(1);
+    }
 
     if let Err(err) = server::run(cfg).await {
         eprintln!("embyr-agent: fatal error: {err}");

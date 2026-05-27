@@ -35,6 +35,8 @@ tracing-subscriber.workspace = true
 config.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+rustls-pemfile.workspace = true
+x509-parser.workspace = true
 
 [[test]]
 name = "embyr_agent"
