@@ -12,7 +12,7 @@ pub enum FieldValue {
     String(String),
     Bytes(Vec<u8>),
     /// Firestore document reference path.
-    Reference(std::string::String),
+    Reference(String),
     Array(Vec<FieldValue>),
-    Map(BTreeMap<std::string::String, FieldValue>),
+    Map(BTreeMap<String, FieldValue>),
 }
