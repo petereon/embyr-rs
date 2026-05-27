@@ -21,6 +21,84 @@ impl ProjectId {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- ProjectId::as_str ---
+    // Kills: replace as_str -> &str with "" and "xyzzy"
+    #[test]
+    fn project_id_as_str_returns_original_value() {
+        let id = ProjectId::new("my-project").unwrap();
+        assert_eq!(id.as_str(), "my-project");
+    }
+
+    // --- is_valid_project_id ---
+    // Kills: replace || with && (line 25), replace > with ==/</>= (line 25),
+    //        match guard mutations, replace || with && (line 33), replace == with != (line 33)
+    #[test]
+    fn empty_string_invalid() {
+        assert!(ProjectId::new("").is_err());
+    }
+
+    #[test]
+    fn string_64_chars_invalid() {
+        // > 63 chars
+        let s = "a".repeat(64);
+        assert!(ProjectId::new(s).is_err());
+    }
+
+    #[test]
+    fn string_63_chars_valid() {
+        // exactly 63 chars: 'a' + 62 more lowercase
+        let s = "a".repeat(63);
+        assert!(ProjectId::new(s).is_ok());
+    }
+
+    #[test]
+    fn starts_with_digit_invalid() {
+        // kills: match guard c.is_ascii_lowercase() -> true
+        assert!(ProjectId::new("1abc").is_err());
+    }
+
+    #[test]
+    fn starts_with_uppercase_invalid() {
+        assert!(ProjectId::new("Abc").is_err());
+    }
+
+    #[test]
+    fn contains_uppercase_invalid() {
+        // kills: c.is_ascii_lowercase() || ... -> c.is_ascii_lowercase() && ...
+        assert!(ProjectId::new("abcDef").is_err());
+    }
+
+    #[test]
+    fn contains_underscore_invalid() {
+        // kills: c == '-' part
+        assert!(ProjectId::new("abc_def").is_err());
+    }
+
+    #[test]
+    fn single_lowercase_char_valid() {
+        assert!(ProjectId::new("a").is_ok());
+    }
+
+    #[test]
+    fn lowercase_digits_dashes_valid() {
+        assert!(ProjectId::new("my-project-123").is_ok());
+    }
+
+    #[test]
+    fn dash_only_after_start_valid() {
+        assert!(ProjectId::new("a-b-c").is_ok());
+    }
+
+    #[test]
+    fn starts_with_dash_invalid() {
+        assert!(ProjectId::new("-abc").is_err());
+    }
+}
+
 fn is_valid_project_id(s: &str) -> bool {
     if s.is_empty() || s.len() > 63 {
         return false;

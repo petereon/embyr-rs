@@ -54,4 +54,24 @@ mod tests {
         assert!(verify_api_key(key, &h1).unwrap());
         assert!(verify_api_key(key, &h2).unwrap());
     }
+
+    #[test]
+    fn argon2id_phc_string_encodes_required_params() {
+        // Kills: replace argon2_instance -> Argon2<'static> with Default::default()
+        // Default Argon2 uses Argon2i with m=19456 — both differ from our spec.
+        let hash = hash_api_key(b"probe-key").unwrap();
+        assert!(
+            hash.starts_with("$argon2id$"),
+            "must use Argon2id algorithm, got: {hash}"
+        );
+        assert!(
+            hash.contains("m=65536"),
+            "must use memory=65536 KiB, got: {hash}"
+        );
+        assert!(hash.contains("t=3"), "must use iterations=3, got: {hash}");
+        assert!(
+            hash.contains("p=4"),
+            "must use parallelism=4, got: {hash}"
+        );
+    }
 }

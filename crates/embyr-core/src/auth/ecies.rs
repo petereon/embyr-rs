@@ -89,4 +89,44 @@ mod tests {
         let k = b"some-api-key";
         assert_eq!(derive_public_key(k), derive_public_key(k));
     }
+
+    // Kills: replace < with ==, replace < with <=, replace + with -
+    // Ciphertext structure: 32 (eph_pub) + 12 (nonce) + 16 (GCM tag) = 60 bytes minimum
+    #[test]
+    fn ecies_encrypt_empty_plaintext_decrypts_successfully() {
+        // Kills: replace < with <= in length guard
+        // Empty plaintext → exactly 60 bytes (32 eph_pub + 12 nonce + 16 GCM tag).
+        // With <= mutation: 60 <= 60 is true → "ciphertext too short" → Err.
+        // With correct <: 60 < 60 is false → proceeds to decrypt → Ok.
+        let api_key = b"test-key-for-empty-plaintext";
+        let pub_key = derive_public_key(api_key);
+        let ct = encrypt(&pub_key, b"").unwrap();
+        assert_eq!(ct.len(), 60, "empty plaintext must produce 60-byte ciphertext");
+        let pt = decrypt(api_key, &ct).unwrap();
+        assert_eq!(pt, b"", "empty plaintext must round-trip");
+    }
+
+    #[test]
+    fn ecies_empty_ciphertext_rejected() {
+        let result = decrypt(b"any-key", &[]);
+        assert!(result.is_err(), "empty ciphertext must be rejected");
+    }
+
+    #[test]
+    fn ecies_ciphertext_59_bytes_rejected() {
+        // 59 < 60 (32 + 12 + 16) — must be rejected
+        let result = decrypt(b"any-key", &[0u8; 59]);
+        assert!(result.is_err(), "59-byte ciphertext must be rejected");
+    }
+
+    #[test]
+    fn ecies_ciphertext_exactly_at_minimum_length_attempts_decrypt() {
+        // 60 bytes = minimum valid length; GCM tag will fail but length check passes
+        let result = decrypt(b"any-key", &[0u8; 60]);
+        // Must err (bad tag), but NOT due to length — kills < vs == mutation
+        assert!(
+            result.is_err(),
+            "garbage 60-byte ciphertext must fail decryption (GCM tag mismatch)"
+        );
+    }
 }
