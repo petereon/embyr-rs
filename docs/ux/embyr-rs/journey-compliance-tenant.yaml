@@ -1,0 +1,113 @@
+version: "1.0"
+feature: embyr-rs
+persona: P4
+persona_name: Riley (Compliance-first Tenant / CISO)
+jobs:
+  - JOB-04
+updated: "2026-05-23"
+
+emotional_arc:
+  - step: 1
+    label: Evaluate Agent Architecture
+    emotion: Sceptical
+  - step: 2
+    label: Deploy Agent in VPC
+    emotion: Controlled
+  - step: 3
+    label: Register Project with embyr SaaS
+    emotion: Secure
+  - step: 4
+    label: Test SDK Connectivity
+    emotion: Validated
+  - step: 5
+    label: Security Audit Walkthrough
+    emotion: Confident
+  - step: 6
+    label: Operate and Monitor
+    emotion: Confident
+
+steps:
+  - id: 1
+    name: evaluate_agent_architecture
+    action: >
+      Read embyr agent documentation. Confirm: (a) DSN lives only in
+      EMBYR_AGENT_DB_DSN env var, (b) embyr SaaS connects to agent over mTLS,
+      (c) no credentials traverse the internet.
+    expected_output: >
+      Risk register updated: "embyr agent — zero credential egress, mTLS verified."
+
+  - id: 2
+    name: deploy_agent_in_vpc
+    action: >
+      Deploy embyr agent K8s pod: set EMBYR_AGENT_DB_DSN, mount TLS cert/key,
+      configure EMBYR_AGENT_CA with embyr CA cert. Agent starts on :9191.
+    expected_output: >
+      Agent logs show "listening on :9191" and "connected to Postgres".
+    artifacts_produced:
+      - agent_endpoint
+      - agent_ca_pem
+    error_paths:
+      - condition: Agent fails to start
+        symptom: Crash or no "listening" log
+        recovery: Check DSN connectivity; verify cert/key pair matches CA
+
+  - id: 3
+    name: register_project_with_saas
+    action: >
+      POST /admin/v1/projects with backend_mode=agent,
+      backend_agent_endpoint=${agent_endpoint},
+      backend_agent_ca=${agent_ca_pem}.
+    expected_output: >
+      Project created. embyr SaaS connects to agent and runs migrations.
+    artifacts_consumed:
+      - agent_endpoint
+      - agent_ca_pem
+    artifacts_produced:
+      - project_id
+      - auth_key
+    error_paths:
+      - condition: Agent unreachable from SaaS
+        symptom: 400 backend_agent_unreachable
+        recovery: Check VPC peering / network policy; verify port accessible from embyr egress IPs
+
+  - id: 4
+    name: test_sdk_connectivity
+    action: >
+      Run test suite against embyr endpoint using project credentials.
+      CRUD, query, onSnapshot tests.
+    expected_output: Test suite green. Agent logs show incoming gRPC + DB queries.
+    artifacts_consumed:
+      - project_id
+      - auth_key
+
+  - id: 5
+    name: security_audit
+    action: >
+      Auditor reviews: embyr SaaS config (no DSN), agent config (DSN in K8s Secret),
+      network traffic (only mTLS agent gRPC on egress), agent binary (static Rust).
+    expected_output: >
+      Audit confirms zero credential egress. Control passes.
+
+  - id: 6
+    name: cert_rotation
+    action: >
+      Rotate EMBYR_AGENT_CERT/EMBYR_AGENT_KEY; rolling restart agent;
+      PATCH /admin/v1/projects/{id} with new backend_agent_ca.
+    expected_output: Zero downtime during rolling restart.
+
+shared_artifacts:
+  - name: agent_endpoint
+    type: host:port
+    source_of_truth: K8s service DNS
+  - name: agent_ca_pem
+    type: PEM bytes
+    source_of_truth: Customer PKI
+  - name: embyr_agent_ca_pem
+    type: PEM bytes
+    source_of_truth: embyr operator PKI (EMBYR_AGENT_CA)
+  - name: project_id
+    type: string
+    source_of_truth: projects table PK
+  - name: auth_key
+    type: string
+    source_of_truth: Admin Create Project (one-time)

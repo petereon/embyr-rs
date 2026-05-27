@@ -1,0 +1,112 @@
+version: "1.0"
+feature: embyr-rs
+persona: P2
+persona_name: Sam (Service Operator)
+jobs:
+  - JOB-02
+  - JOB-06
+updated: "2026-05-23"
+
+emotional_arc:
+  - step: 1
+    label: Provision Project
+    emotion: Organised
+  - step: 2
+    label: Configure Auth / Hand Off Credentials
+    emotion: Efficient
+  - step: 3
+    label: Verify Project Health
+    emotion: Reassured
+  - step: 4
+    label: Monitor Usage
+    emotion: Watchful
+  - step: 5
+    label: Suspend Non-Paying Project
+    emotion: In-Control
+  - step: 6
+    label: Soft-Delete and Clean Up
+    emotion: Confident
+
+steps:
+  - id: 1
+    name: provision_project
+    action: >
+      POST /admin/v1/projects with {project_id, auth_mode, auth_key,
+      backend_mode, backend_pg_dsn} using Authorization: Bearer <admin_key>.
+    expected_output: >
+      201 Created with project record (no raw key or DSN in response).
+      Customer DB migrated.
+    artifacts_produced:
+      - project_id
+      - auth_key
+      - admin_endpoint
+    error_paths:
+      - condition: Unavailable
+        symptom: Customer DB unreachable
+        recovery: Check DSN; retry
+
+  - id: 2
+    name: configure_auth_handoff
+    action: >
+      Record project_id and auth_key; deliver to customer via credential delivery
+      mechanism. Optionally PATCH /admin/v1/projects/{id} to update auth config.
+    expected_output: Customer can connect their SDK.
+    artifacts_consumed:
+      - project_id
+      - auth_key
+    error_paths:
+      - condition: Customer reports auth failures
+        symptom: permission-denied in SDK
+        recovery: GET /admin/v1/projects/{id} to verify auth_mode; check key hash
+
+  - id: 3
+    name: verify_project_health
+    action: "GET /admin/v1/projects/{id}"
+    expected_output: "Project record shows status=active, backend_mode, auth_mode correct."
+    artifacts_consumed:
+      - project_id
+
+  - id: 4
+    name: monitor_usage
+    action: >
+      ETL job queries daily_project_metrics for the project.
+      Produces billing report.
+    expected_output: ingress_bytes, egress_bytes, cpu_ms rows per day.
+    artifacts_consumed:
+      - project_id
+
+  - id: 5
+    name: suspend_project
+    action: "POST /admin/v1/projects/{id}/suspend"
+    expected_output: >
+      200 OK. All subsequent Firestore requests return
+      PermissionDenied: "project suspended".
+    artifacts_consumed:
+      - project_id
+    error_paths:
+      - condition: Customer contacts support
+        symptom: All app requests failing
+        recovery: Expected; explain suspension
+
+  - id: 6
+    name: delete_project
+    action: "DELETE /admin/v1/projects/{id}"
+    expected_output: >
+      200 OK. Project returns NotFound immediately.
+      Data purged after admin.deletion_retention.
+    artifacts_consumed:
+      - project_id
+
+shared_artifacts:
+  - name: admin_endpoint
+    type: host:port
+    source_of_truth: service config admin.port
+  - name: admin_key
+    type: string
+    source_of_truth: service config admin.key
+  - name: project_id
+    type: string
+    source_of_truth: projects table PK
+  - name: auth_key
+    type: string
+    source_of_truth: Admin Create Project (one-time)
