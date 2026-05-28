@@ -40,6 +40,20 @@ use crate::config::AgentConfig;
 use crate::encoding::{domain_doc_to_proto, proto_value_to_field_value};
 use crate::sweeper::AgentTransactionSweeper;
 
+/// Encode an offset as a hex string page token (no external deps).
+fn encode_page_token(offset: u32) -> String {
+    format!("{:08x}", offset)
+}
+
+/// Decode a hex page token back to an offset.
+fn decode_page_token(token: &str) -> Result<u32, Status> {
+    if token.is_empty() {
+        return Ok(0);
+    }
+    u32::from_str_radix(token, 16)
+        .map_err(|_| Status::invalid_argument(format!("invalid page_token: {token}")))
+}
+
 /// StorageAgent gRPC service backed by PostgresBackendAdapter.
 pub struct StorageAgentService {
     project_id: String,
@@ -441,16 +455,92 @@ impl StorageAgent for StorageAgentService {
 
     async fn run_aggregation_query(
         &self,
-        _request: Request<RunAggregationQueryRequest>,
+        request: Request<RunAggregationQueryRequest>,
     ) -> Result<Response<RunAggregationQueryResponse>, Status> {
-        Err(Status::unimplemented("not implemented — step 05-02"))
+        use embyr_proto::agent::run_aggregation_query_request::QueryType;
+        let req = request.into_inner();
+        let sq = match req.query_type {
+            Some(QueryType::StructuredQuery(sq)) => sq,
+            None => return Err(Status::invalid_argument("query_type is required")),
+        };
+        let from = sq
+            .from
+            .into_iter()
+            .next()
+            .ok_or_else(|| Status::invalid_argument("from clause required"))?;
+        let project_id_str = parse_project_id_from_parent(&req.parent)?;
+        let domain_filter = sq.filter.map(proto_filter_to_domain).transpose()?;
+        let pid = ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(format!("{e}")))?;
+        let collection = CollectionPath {
+            project_id: pid,
+            collection_path: from.collection_id.clone(),
+        };
+        let query = DomainStructuredQuery {
+            collection_id: from.collection_id,
+            all_descendants: from.all_descendants,
+            filter: domain_filter,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            start_at: None,
+            end_at: None,
+            since_update_time: None,
+        };
+        let docs = self
+            .storage
+            .run_query(&collection, &query, None)
+            .await
+            .map_err(core_error_to_status)?;
+        Ok(Response::new(RunAggregationQueryResponse {
+            count: docs.len() as i64,
+        }))
     }
 
     async fn list_documents(
         &self,
-        _request: Request<ListDocumentsRequest>,
+        request: Request<ListDocumentsRequest>,
     ) -> Result<Response<ListDocumentsResponse>, Status> {
-        Err(Status::unimplemented("not implemented — step 05-02"))
+        let req = request.into_inner();
+        let project_id_str = parse_project_id_from_parent(&req.parent)?;
+        let page_size = if req.page_size <= 0 { 100i32 } else { req.page_size.min(100) };
+        let offset = decode_page_token(&req.page_token)?;
+        let pid = ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(format!("{e}")))?;
+        let collection = CollectionPath {
+            project_id: pid,
+            collection_path: req.collection_id.clone(),
+        };
+        let query = DomainStructuredQuery {
+            collection_id: req.collection_id,
+            all_descendants: false,
+            filter: None,
+            order_by: vec![],
+            limit: Some(page_size + 1), // fetch one extra to detect if more pages exist
+            offset: Some(offset as i32),
+            start_at: None,
+            end_at: None,
+            since_update_time: None,
+        };
+        let mut docs = self
+            .storage
+            .run_query(&collection, &query, None)
+            .await
+            .map_err(core_error_to_status)?;
+        let has_more = docs.len() > page_size as usize;
+        if has_more {
+            docs.truncate(page_size as usize);
+        }
+        let next_page_token = if has_more {
+            encode_page_token(offset + page_size as u32)
+        } else {
+            String::new()
+        };
+        let proto_docs = docs.into_iter().map(domain_doc_to_proto).collect();
+        Ok(Response::new(ListDocumentsResponse {
+            documents: proto_docs,
+            next_page_token,
+        }))
     }
 
     async fn begin_transaction(

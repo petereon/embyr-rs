@@ -174,10 +174,43 @@ async fn collection_group_query_traverses_nested_collections() {
 ///   When  a caller runs a count aggregation over "orders"
 ///   Then  the caller receives a count of 7
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S05A delivery"]
 async fn count_aggregation_returns_correct_total() {
-    let (_handle, mut client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+    let (handle, mut client) = start_test_agent("finops-prod").await;
+    for i in 0..7u8 {
+        sqlx::query(
+            "INSERT INTO documents (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+             VALUES ($1,$2,$3,$4::jsonb,1,NOW(),NOW())",
+        )
+        .bind("finops-prod")
+        .bind("orders")
+        .bind(format!("ord-{i}"))
+        .bind(r#"{"v":{"t":"I","v":1}}"#)
+        .execute(&handle.pool)
+        .await
+        .unwrap();
+    }
+    use embyr_proto::agent::{
+        RunAggregationQueryRequest,
+        StructuredQuery as ProtoSQ,
+        run_aggregation_query_request::QueryType,
+    };
+    use embyr_proto::agent::structured_query::CollectionSelector;
+    let req = RunAggregationQueryRequest {
+        parent: "projects/finops-prod/databases/(default)/documents".to_string(),
+        query_type: Some(QueryType::StructuredQuery(ProtoSQ {
+            from: vec![CollectionSelector {
+                collection_id: "orders".to_string(),
+                all_descendants: false,
+            }],
+            ..Default::default()
+        })),
+    };
+    let response = client
+        .run_aggregation_query(tonic::Request::new(req))
+        .await
+        .expect("run_aggregation_query");
+    assert_eq!(response.into_inner().count, 7);
+    drop(handle);
 }
 
 /// @driving_port @us_a03 @real_io
@@ -188,10 +221,53 @@ async fn count_aggregation_returns_correct_total() {
 ///   Then  the first page contains 100 documents with a continuation token
 ///   And   the final page has 50 documents with no continuation token
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S05A delivery"]
 async fn listing_documents_returns_pages_of_at_most_one_hundred() {
-    let (_handle, mut client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+    let (handle, mut client) = start_test_agent("finops-prod").await;
+    // Seed 150 documents
+    for i in 0..150u32 {
+        sqlx::query(
+            "INSERT INTO documents (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+             VALUES ($1,$2,$3,$4::jsonb,1,NOW(),NOW())",
+        )
+        .bind("finops-prod")
+        .bind("orders")
+        .bind(format!("ord-{i:04}"))
+        .bind(r#"{"v":{"t":"I","v":1}}"#)
+        .execute(&handle.pool)
+        .await
+        .unwrap();
+    }
+    use embyr_proto::agent::ListDocumentsRequest;
+    // First page
+    let req1 = ListDocumentsRequest {
+        parent: "projects/finops-prod/databases/(default)/documents".to_string(),
+        collection_id: "orders".to_string(),
+        page_size: 0, // 0 = use default 100
+        page_token: "".to_string(),
+    };
+    let resp1 = client
+        .list_documents(tonic::Request::new(req1))
+        .await
+        .expect("list_documents page 1")
+        .into_inner();
+    assert_eq!(resp1.documents.len(), 100, "first page should have 100 docs");
+    assert!(!resp1.next_page_token.is_empty(), "first page should have continuation token");
+
+    // Second page
+    let req2 = ListDocumentsRequest {
+        parent: "projects/finops-prod/databases/(default)/documents".to_string(),
+        collection_id: "orders".to_string(),
+        page_size: 0,
+        page_token: resp1.next_page_token.clone(),
+    };
+    let resp2 = client
+        .list_documents(tonic::Request::new(req2))
+        .await
+        .expect("list_documents page 2")
+        .into_inner();
+    assert_eq!(resp2.documents.len(), 50, "second page should have remaining 50 docs");
+    assert!(resp2.next_page_token.is_empty(), "final page should have empty token");
+    drop(handle);
 }
 
 /// @driving_port @us_a03 @real_io
@@ -271,10 +347,58 @@ async fn query_excluding_value_omits_documents_missing_that_field() {
 ///   When  a caller runs a streaming query
 ///   Then  the final message indicates the query is complete with no document payload
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S05A delivery"]
 async fn streaming_query_response_indicates_completion_at_end() {
-    let (_handle, mut client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+    let (handle, mut client) = start_test_agent("finops-prod").await;
+    // Seed 3 orders
+    for i in 0..3u8 {
+        sqlx::query(
+            "INSERT INTO documents (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+             VALUES ($1,$2,$3,$4::jsonb,1,NOW(),NOW())",
+        )
+        .bind("finops-prod")
+        .bind("orders")
+        .bind(format!("ord-{i}"))
+        .bind(r#"{"status":{"t":"S","v":"open"}}"#)
+        .execute(&handle.pool)
+        .await
+        .unwrap();
+    }
+    use embyr_proto::agent::{
+        RunQueryRequest,
+        StructuredQuery as ProtoSQ,
+        run_query_request::QueryType,
+        run_query_response::ContinuationSelector,
+    };
+    use embyr_proto::agent::structured_query::CollectionSelector;
+    let req = RunQueryRequest {
+        parent: "projects/finops-prod/databases/(default)/documents".to_string(),
+        query_type: Some(QueryType::StructuredQuery(ProtoSQ {
+            from: vec![CollectionSelector {
+                collection_id: "orders".to_string(),
+                all_descendants: false,
+            }],
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let mut stream = client
+        .run_query(tonic::Request::new(req))
+        .await
+        .expect("run_query")
+        .into_inner();
+    let mut docs = vec![];
+    let mut got_done = false;
+    while let Some(msg) = stream.message().await.expect("next") {
+        if msg.document.is_some() {
+            docs.push(msg.document.unwrap());
+        }
+        if matches!(msg.continuation_selector, Some(ContinuationSelector::Done(true))) {
+            got_done = true;
+        }
+    }
+    assert_eq!(docs.len(), 3, "expected 3 docs");
+    assert!(got_done, "final message must have done=true");
+    drop(handle);
 }
 
 // ---------------------------------------------------------------------------

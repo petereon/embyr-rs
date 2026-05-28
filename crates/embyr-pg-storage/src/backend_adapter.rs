@@ -489,10 +489,16 @@ impl BackendAdapter for PostgresBackendAdapter {
             }
         }
 
-        // LIMIT
+        // LIMIT / OFFSET — must emit LIMIT before OFFSET (SQL requirement)
         if let Some(limit) = query.limit {
             qb.push(" LIMIT ");
             qb.push_bind(limit as i64);
+        }
+        if let Some(offset) = query.offset {
+            if offset > 0 {
+                qb.push(" OFFSET ");
+                qb.push_bind(offset as i64);
+            }
         }
 
         let rows = qb
