@@ -351,6 +351,41 @@
       "s": "EXECUTED",
       "d": "PASS",
       "t": "2026-05-28T07:38:11Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-05-28T07:44:21Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-05-28T07:44:21Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: 3 acceptance tests (count_aggregation, listing_pages, streaming_completion) reached GREEN without unit tests (3-phase canon ADR-025); all behaviors driven end-to-end through StorageAgent gRPC driving port",
+      "t": "2026-05-28T07:44:21Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-05-28T07:44:21Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-05-28T07:44:21Z"
     }
   ]
 }
