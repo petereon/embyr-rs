@@ -1,0 +1,1 @@
+crates/embyr-core/src/auth/ecies.rs:13:5: replace derive_static_secret -> StaticSecret with Default::default()

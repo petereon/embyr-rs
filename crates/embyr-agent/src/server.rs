@@ -12,13 +12,21 @@ use embyr_core::domain::transaction::{TransactionId, TransactionOptions};
 use embyr_core::error::CoreError;
 use embyr_core::storage::backend_adapter::{BackendAdapter, Write as DomainWrite, WritePrecondition};
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
+use embyr_core::domain::{document::CollectionPath, query::{FieldFilter, FilterOp, QueryFilter, StructuredQuery as DomainStructuredQuery}};
 use embyr_proto::agent::{
+    filter::FilterType as ProtoFilterType,
     precondition::ConditionType,
+    run_query_request::QueryType as RunQueryQueryType,
+    run_query_response::ContinuationSelector,
     storage_agent_server::{StorageAgent, StorageAgentServer},
     write::Operation,
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
-    CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
-    PingRequest, PingResponse, Precondition, RollbackRequest, RunQueryRequest, RunQueryResponse,
+    CreateDocumentRequest, DeleteDocumentRequest, Document, FieldFilterOp,
+    Filter as ProtoFilter, GetDocumentRequest,
+    ListDocumentsRequest, ListDocumentsResponse,
+    PingRequest, PingResponse, Precondition, RollbackRequest,
+    RunAggregationQueryRequest, RunAggregationQueryResponse,
+    RunQueryRequest, RunQueryResponse,
     UpdateDocumentRequest,
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
@@ -72,6 +80,63 @@ fn parse_precondition(p: Option<Precondition>) -> Option<WritePrecondition> {
         Some(ConditionType::UpdateTime(ts)) => {
             Some(WritePrecondition::UpdateTime(ts.seconds, ts.nanos))
         }
+    }
+}
+
+/// Validate that a field path does not contain consecutive dots.
+fn validate_field_path(path: &str) -> Result<(), Status> {
+    if path.contains("..") {
+        Err(Status::invalid_argument(format!(
+            "invalid field path '{}': consecutive dots not allowed",
+            path
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Convert a proto FieldFilterOp i32 to a domain FilterOp.
+fn proto_filter_op_to_domain(op_i32: i32) -> Result<FilterOp, Status> {
+    match FieldFilterOp::try_from(op_i32).unwrap_or(FieldFilterOp::Unspecified) {
+        FieldFilterOp::LessThan => Ok(FilterOp::LessThan),
+        FieldFilterOp::LessThanOrEqual => Ok(FilterOp::LessThanOrEqual),
+        FieldFilterOp::GreaterThan => Ok(FilterOp::GreaterThan),
+        FieldFilterOp::GreaterThanOrEqual => Ok(FilterOp::GreaterThanOrEqual),
+        FieldFilterOp::Equal => Ok(FilterOp::Equal),
+        FieldFilterOp::NotEqual => Ok(FilterOp::NotEqual),
+        FieldFilterOp::ArrayContains => Ok(FilterOp::ArrayContains),
+        FieldFilterOp::In => Ok(FilterOp::In),
+        FieldFilterOp::NotIn => Ok(FilterOp::NotIn),
+        FieldFilterOp::ArrayContainsAny => Ok(FilterOp::ArrayContainsAny),
+        FieldFilterOp::Unspecified => Err(Status::invalid_argument("filter op unspecified")),
+    }
+}
+
+/// Convert a proto `Filter` to a domain `QueryFilter`, validating field paths.
+fn proto_filter_to_domain(filter: ProtoFilter) -> Result<QueryFilter, Status> {
+    match filter.filter_type {
+        Some(ProtoFilterType::FieldFilter(ff)) => {
+            validate_field_path(&ff.field_path)?;
+            let op = proto_filter_op_to_domain(ff.op)?;
+            let value = ff
+                .value
+                .map(|v| proto_value_to_field_value(&v))
+                .unwrap_or(FieldValue::Null);
+            Ok(QueryFilter::Field(FieldFilter {
+                field_path: ff.field_path,
+                op,
+                value,
+            }))
+        }
+        Some(ProtoFilterType::CompositeFilter(cf)) => {
+            let filters = cf
+                .filters
+                .into_iter()
+                .map(proto_filter_to_domain)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(QueryFilter::Composite(filters))
+        }
+        None => Err(Status::invalid_argument("filter_type required in Filter")),
     }
 }
 
@@ -297,9 +362,95 @@ impl StorageAgent for StorageAgentService {
 
     async fn run_query(
         &self,
-        _request: Request<RunQueryRequest>,
+        request: Request<RunQueryRequest>,
     ) -> Result<Response<Self::RunQueryStream>, Status> {
-        Err(Status::unimplemented("not implemented — step 03-01"))
+        let req = request.into_inner();
+
+        // Extract structured query
+        let sq = match req.query_type {
+            Some(RunQueryQueryType::StructuredQuery(sq)) => sq,
+            None => return Err(Status::invalid_argument("query_type is required")),
+        };
+
+        // Validate and extract from clause
+        let from = sq
+            .from
+            .into_iter()
+            .next()
+            .ok_or_else(|| Status::invalid_argument("from clause is required"))?;
+
+        // Convert filter BEFORE touching storage (validates field paths eagerly)
+        let domain_filter = sq.filter.map(proto_filter_to_domain).transpose()?;
+
+        // Parse project_id from parent
+        let project_id_str = parse_project_id_from_parent(&req.parent)?;
+
+        // Build domain query
+        let pid = ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(format!("invalid project_id: {e}")))?;
+        let collection = CollectionPath {
+            project_id: pid,
+            collection_path: from.collection_id.clone(),
+        };
+        let query = DomainStructuredQuery {
+            collection_id: from.collection_id,
+            all_descendants: from.all_descendants,
+            filter: domain_filter,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            start_at: None,
+            end_at: None,
+            since_update_time: None,
+        };
+
+        // Execute query against storage
+        let docs = self
+            .storage
+            .run_query(&collection, &query, None)
+            .await
+            .map_err(core_error_to_status)?;
+
+        // Stream results via tokio mpsc channel
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            for doc in docs {
+                let proto = domain_doc_to_proto(doc);
+                if tx
+                    .send(Ok(RunQueryResponse {
+                        document: Some(proto),
+                        ..Default::default()
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // Send completion signal
+            let _ = tx
+                .send(Ok(RunQueryResponse {
+                    continuation_selector: Some(ContinuationSelector::Done(true)),
+                    ..Default::default()
+                }))
+                .await;
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn run_aggregation_query(
+        &self,
+        _request: Request<RunAggregationQueryRequest>,
+    ) -> Result<Response<RunAggregationQueryResponse>, Status> {
+        Err(Status::unimplemented("not implemented — step 05-02"))
+    }
+
+    async fn list_documents(
+        &self,
+        _request: Request<ListDocumentsRequest>,
+    ) -> Result<Response<ListDocumentsResponse>, Status> {
+        Err(Status::unimplemented("not implemented — step 05-02"))
     }
 
     async fn begin_transaction(

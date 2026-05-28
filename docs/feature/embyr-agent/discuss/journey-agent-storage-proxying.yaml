@@ -1,0 +1,252 @@
+schema_version: 1
+
+journey:
+  name: "agent-storage-proxying"
+  goal: "SDK operations are transparently proxied through embyr SaaS → agent → customer Postgres with identical behavior to direct-mode projects"
+  persona: "P1 — Alex Chen (SDK Developer); supporting P4 — Riley Nakamura (configured agent backend)"
+  jobs:
+    - JOB-01  # sdk-compat
+    - JOB-03  # live-sync
+    - JOB-04  # credential-isolation
+    - JOB-08  # agent-livesync
+
+  emotional_arc:
+    start: "Indifferent — Alex writes SDK code with no knowledge of the backend mode"
+    middle: "Trusting — operations resolve correctly; round-trips match expectations"
+    end: "Confident — real-time onSnapshot fires for agent-mode projects identically to Firestore"
+
+steps:
+  - id: 1
+    name: "SDK write dispatched to agent"
+    action: "Firebase SDK setDoc → embyr SaaS → StorageAgent.CreateDocument gRPC (mTLS)"
+
+    shared_artifacts:
+      - name: "DOCUMENT_PATH"
+        source: "SDK doc() reference path"
+        displayed_as: "orders/ord-2026-001"
+        consumers: ["Step 3 SQL INSERT", "Step 4 getDoc", "Step 5 Subscribe target", "Step 6 DocChange routing"]
+      - name: "PROJECT_ID"
+        source: "firebase.initializeApp project config"
+        displayed_as: "finops-prod"
+        consumers: ["embyr SaaS project lookup", "agent RPC scoping", "DocChange fan-out filter"]
+
+    emotional_state:
+      entry: "Indifferent — Alex's code is unchanged from Firestore usage"
+      exit: "Trusting — setDoc resolves without error; SDK behavior identical to Firestore"
+
+    integration_checkpoint: |
+      embyr SaaS must resolve backend_mode=agent for project finops-prod.
+      Must establish mTLS connection to agent endpoint from system DB.
+      Must translate Firestore CreateDocument proto → StorageAgent.CreateDocument proto.
+      SPEC.md §Customer Database Connectivity §Mode: agent.
+
+    failure_modes:
+      - "Agent unreachable: SaaS returns Unavailable; SDK throws network error"
+      - "mTLS cert mismatch: TLS handshake failure; SaaS returns Internal; logs cert error"
+      - "Project not found: NotFound returned before reaching agent"
+
+    gherkin: |
+      Scenario: SDK setDoc succeeds through agent
+        Given the Firebase SDK is configured for project finops-prod on embyr SaaS
+        And the embyr-agent is running at 10.0.1.50:9191 with valid mTLS
+        When the SDK calls setDoc(doc(db, "orders/ord-2026-001"), { status: "pending" })
+        Then the setDoc Promise resolves
+        And the agent log contains a CreateDocument entry for orders/ord-2026-001
+        And the Postgres documents table contains the row for finops-prod / orders/ord-2026-001
+
+  - id: 2
+    name: "mTLS dispatch to agent"
+    action: "embyr SaaS establishes or reuses mTLS connection to agent; dispatches StorageAgent RPC"
+
+    shared_artifacts:
+      - name: "AGENT_MTLS_SESSION"
+        source: "embyr SaaS connection pool for agent endpoint"
+        displayed_as: "10.0.1.50:9191 (mTLS)"
+        consumers: ["all subsequent RPC calls to same project", "Subscribe stream"]
+
+    emotional_state:
+      entry: "Invisible to Alex"
+      exit: "Invisible to Alex — internal concern"
+
+    integration_checkpoint: |
+      embyr SaaS MUST verify agent cert against backend_agent_ca from system DB.
+      Agent MUST verify SaaS cert against EMBYR_AGENT_CA from local env.
+      Both sides must reject the connection if cert verification fails.
+      SPEC.md §embyr Agent §Security Model.
+
+    failure_modes:
+      - "Agent cert expired: TLS handshake failure; SaaS returns Unavailable"
+      - "CA mismatch: TLS handshake failure; structured error logged on both sides"
+
+    gherkin: |
+      Scenario: mTLS is bidirectionally enforced
+        Given the embyr SaaS has a valid client cert for agent connections
+        And the agent has the embyr SaaS CA configured in EMBYR_AGENT_CA
+        When embyr SaaS connects to the agent
+        Then the TLS handshake succeeds with both certificates verified
+        And a subsequent GetDocument RPC returns the requested document
+
+      Scenario: Agent rejects SaaS connection with wrong cert
+        Given the embyr SaaS presents a self-signed cert not trusted by agent's CA
+        When embyr SaaS attempts to connect to the agent
+        Then the agent rejects the TLS handshake
+        And no RPC is dispatched
+
+  - id: 3
+    name: "Agent executes SQL on local Postgres"
+    action: "Agent translates StorageAgent RPC to SQL; executes against local Postgres pool"
+
+    shared_artifacts:
+      - name: "DOCUMENT_VERSION"
+        source: "Postgres version column (auto-incremented on write)"
+        displayed_as: "version=1 (new document), version=N+1 (update)"
+        consumers: ["Step 4 getDoc response", "Step 6 OCC validation", "DocChange.version"]
+
+    emotional_state:
+      entry: "Invisible to Alex"
+      exit: "Invisible to Alex"
+
+    integration_checkpoint: |
+      Agent must use the same OCC semantics as the Postgres adapter:
+      version increments by 1 on every write; BeginTransaction/Commit/Rollback apply
+      the same read-set re-validation logic.
+      SPEC.md §Storage Backend Contract §OCC Contract.
+
+    failure_modes:
+      - "Postgres pool exhausted: agent returns Unavailable with pool stats in log"
+      - "OCC conflict: agent returns Aborted; SaaS propagates to SDK"
+      - "SQL constraint violation (AlreadyExists): mapped to gRPC AlreadyExists"
+
+    gherkin: |
+      Scenario: Document write increments version
+        Given the document orders/ord-2026-001 does not exist
+        When StorageAgent.CreateDocument is called
+        Then the Postgres row has version = 1
+        When StorageAgent.UpdateDocument is called on the same path
+        Then the Postgres row has version = 2
+
+  - id: 4
+    name: "SDK getDoc round-trip verification"
+    action: "SDK getDoc → StorageAgent.GetDocument → Postgres SELECT → Document response"
+
+    shared_artifacts:
+      - name: "DOCUMENT_DATA"
+        source: "Postgres documents.data JSONB column"
+        displayed_as: '{ customerId: "C-489", amount: 1250 }'
+        consumers: ["SDK snap.data() result", "step 6 listen live update"]
+
+    emotional_state:
+      entry: "Trusting — Alex expects the data he wrote"
+      exit: "Trusting — round-trip confirmed identical data"
+
+    integration_checkpoint: |
+      Agent GetDocument must return the document exactly as stored.
+      Proto field mapping must round-trip all Firestore Value types losslessly.
+      SPEC.md §Values (all types must round-trip via proto3-JSON).
+
+    failure_modes:
+      - "Document not found: agent returns NotFound; SDK snap.exists() = false"
+      - "Data truncation in proto marshalling: field values corrupted — must not happen"
+
+    gherkin: |
+      Scenario: getDoc returns document written via setDoc
+        Given setDoc wrote { customerId: "C-489", amount: 1250 } to orders/ord-2026-001
+        When getDoc is called for orders/ord-2026-001
+        Then the SDK receives { customerId: "C-489", amount: 1250 }
+        And the document version is 1
+
+  - id: 5
+    name: "onSnapshot receives initial snapshot via Subscribe"
+    action: "embyr SaaS → StorageAgent.Subscribe stream → agent pushes NOTIFY events → SaaS fans out"
+
+    shared_artifacts:
+      - name: "SUBSCRIBE_STREAM"
+        source: "embyr SaaS long-lived gRPC Subscribe stream to agent"
+        displayed_as: "Subscribe(project_id=finops-prod) stream"
+        consumers: ["all Listen targets for project finops-prod", "DocChange fan-out Registry"]
+      - name: "RESUME_TOKEN"
+        source: "base64.RawURLEncoding(read_time) per SPEC.md §Listen Stream"
+        displayed_as: "opaque bytes in targetChange{CURRENT}"
+        consumers: ["SDK reconnect delta delivery", "step 6 NO_CHANGE advancement"]
+
+    emotional_state:
+      entry: "Trusting — Alex expects real-time to work"
+      exit: "Confident — onSnapshot fires exactly as with direct Firestore"
+
+    integration_checkpoint: |
+      One Subscribe stream per project is maintained by embyr SaaS.
+      Agent must push DocChange events for ALL committed writes to that project.
+      On Subscribe stream disconnection: SaaS reconnects with exponential backoff 1s→30s.
+      Active Listen clients receive RESET and re-snapshot on reconnection.
+      SPEC.md §Change Notification §Agent mode; §Storage Backend Contract §Subscribe.
+
+    failure_modes:
+      - "Subscribe stream disconnects: SaaS reconnects with backoff; active Listen clients get RESET"
+      - "DocChange overflow (>64 buffered): overflow flag → RESET on next delivery"
+      - "Agent LISTEN connection to Postgres drops: agent reconnects; brief gap in notifications"
+
+    gherkin: |
+      Scenario: onSnapshot receives initial full snapshot for agent-mode project
+        Given Alex has called onSnapshot on collection orders for project finops-prod
+        And 3 orders documents exist in Postgres
+        When the Subscribe stream delivers the full snapshot
+        Then the SDK receives targetChange{ADD} then 3 documentChange events
+        Then the SDK receives targetChange{CURRENT} with a resume token
+        Then the onSnapshot callback fires with 3 documents
+
+      Scenario: Subscribe stream reconnects after agent disconnect
+        Given Alex's onSnapshot is registered on project finops-prod
+        And the Subscribe stream between SaaS and agent disconnects
+        When the agent restarts within 30 seconds
+        Then embyr SaaS reconnects with exponential backoff
+        And active Listen clients receive targetChange{RESET}
+        And clients re-snapshot and resume real-time delivery
+
+  - id: 6
+    name: "Live DocChange delivered to SDK via Subscribe"
+    action: "Concurrent write → agent SQL → Postgres NOTIFY → Subscribe stream → SaaS Registry → SDK onSnapshot"
+
+    emotional_state:
+      entry: "Confident — Alex trusts real-time works"
+      exit: "Confident — change delivered within seconds as with Firestore"
+
+    integration_checkpoint: |
+      Agent must emit DocChange immediately after successful SQL commit (same tx).
+      SaaS must re-fetch document via GetDocument from agent before sending documentChange.
+      SaaS sends targetChange{NO_CHANGE, resumeToken=now} after each live change.
+      SPEC.md §Listen Stream §Live Changes; §Storage Backend Contract §Subscribe.
+
+    failure_modes:
+      - "DocChange emitted before SQL commit visible (read-your-writes): must not happen"
+      - "Subscribe channel overflow: overflow flag → RESET on next change"
+
+    gherkin: |
+      Scenario: Live update delivered within 2 seconds via agent
+        Given Alex's onSnapshot is registered on orders collection (project finops-prod)
+        When another client calls updateDoc on orders/ord-2026-001 { status: "shipped" }
+        Then Alex's onSnapshot fires within 2 seconds
+        And the change shows status = "shipped"
+        And the document version has incremented
+
+      Scenario: Subscribe overflow triggers RESET and re-snapshot
+        Given the Subscribe channel for finops-prod has 64 pending DocChange events
+        When one more DocChange event is committed
+        Then embyr SaaS sends targetChange{RESET} to all Listen clients for finops-prod
+        And clients re-fetch the full snapshot
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "PROJECT_ID (finops-prod)"
+      must_match_across: [1, 2, 3, 4, 5, 6]
+      failure_message: "All RPCs must be scoped to the same project; cross-project access must return PermissionDenied"
+    - artifact: "DOCUMENT_VERSION"
+      must_match_across: [3, 4, 6]
+      failure_message: "Version must be consistent between write result, getDoc, and DocChange events"
+    - artifact: "SUBSCRIBE_STREAM"
+      must_match_across: [5, 6]
+      failure_message: "One long-lived Subscribe stream per project; reconnection must restore event delivery"
+
+changelog:
+  - date: "2026-05-27"
+    feature: "embyr-agent"
+    change: "Initial journey: SDK storage proxying from setDoc through live DocChange delivery via Subscribe"

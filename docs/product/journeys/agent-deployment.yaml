@@ -1,0 +1,70 @@
+version: "1.0"
+feature: embyr-agent
+persona: P4
+persona_name: Riley Nakamura (DevSecOps Lead, FinOps Corp)
+jobs:
+  - JOB-04  # credential-isolation
+  - JOB-07  # agent-operations
+  - JOB-09  # agent-auditproof
+updated: "2026-05-27"
+source: docs/feature/embyr-agent/discuss/journey-agent-deployment.yaml
+
+summary: >
+  DevSecOps lead deploys embyr-agent binary in Kubernetes VPC using EMBYR_AGENT_* env vars,
+  verifies startup via structured JSON logs ("connected to Postgres", "listening on :9191"),
+  registers the project with embyr SaaS admin API (backend_mode=agent, no DSN stored),
+  tests SDK writes through agent, and collects three audit artifacts: system DB row
+  (NULL backend_pg_creds_enc), log grep (zero DSN matches), mTLS probe (unauthenticated
+  connection rejected).
+
+emotional_arc:
+  start: Apprehensive — deploying unknown binary into production VPC
+  middle: Methodical — clear env-var config and structured logs build confidence
+  end: Confident — three-artifact audit evidence package is complete
+
+steps:
+  - id: 1
+    name: Configure environment variables
+    key_vars:
+      - EMBYR_AGENT_DB_DSN
+      - EMBYR_AGENT_CERT
+      - EMBYR_AGENT_KEY
+      - EMBYR_AGENT_CA
+      - EMBYR_AGENT_LISTEN_ADDR
+      - EMBYR_AGENT_MAX_CONNS
+      - EMBYR_AGENT_LOG_LEVEL
+    failure_mode: Binary exits code 1 with named missing var
+
+  - id: 2
+    name: Deploy to Kubernetes
+    command: kubectl apply -f agent-deployment.yaml
+    failure_mode: CrashLoopBackOff with clear stderr error
+
+  - id: 3
+    name: Verify startup logs
+    expected_log_lines:
+      - '{"msg":"connected to Postgres","max_conns":25}'
+      - '{"msg":"listening on :9191","tls":"mTLS enabled, client cert required"}'
+    audit_invariant: No log line contains the Postgres DSN string
+
+  - id: 4
+    name: Register project with embyr SaaS
+    api: POST /admin/v1/projects
+    required_fields:
+      - backend_mode: agent
+      - backend_agent_endpoint: "host:port"
+      - backend_agent_ca: "PEM certificate"
+    expected_response: HTTP 201, backend_pg_creds_enc absent from response
+
+  - id: 5
+    name: Test SDK write through agent
+    sdk_call: "setDoc(doc(db, 'users/riley'), { name: 'Riley' })"
+    verification: getDoc returns same data
+    agent_log: CreateDocument RPC entry with project_id, path, duration_ms
+
+  - id: 6
+    name: Collect audit evidence
+    artifacts:
+      - "SELECT backend_pg_creds_enc FROM projects WHERE project_id='finops-prod' → NULL"
+      - "grep -i 'postgres://' <agent-logs.txt> → no matches"
+      - "openssl s_client -connect 10.0.1.50:9191 (no client cert) → handshake failure"

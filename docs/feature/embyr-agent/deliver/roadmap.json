@@ -1,0 +1,249 @@
+{
+  "roadmap": {
+    "project_id": "embyr-agent",
+    "created_at": "2026-05-27T16:01:56Z",
+    "total_steps": 13
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "S01A \u2014 GetDocument Walking Skeleton",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Create embyr-pg-storage crate (extract PostgresBackendAdapter + PostgresNotifyListener)",
+          "criteria": [
+            "New crate embyr-pg-storage exists at crates/embyr-pg-storage/ with Cargo.toml declaring deps: embyr-core, sqlx, tokio, blake3, thiserror, tracing, serde, serde_json, uuid, chrono \u2014 NO tonic, axum, or rustls",
+            "cargo-deny check passes: embyr-pg-storage Cargo.toml contains no tonic, axum, or rustls entries",
+            "crates/embyr-server/src/adapters/postgres_backend.rs and postgres_notify_listener.rs are removed; equivalent modules exist at crates/embyr-pg-storage/src/backend_adapter.rs and crates/embyr-pg-storage/src/notify_listener.rs",
+            "Workspace Cargo.toml lists embyr-pg-storage as a member",
+            "embyr-server Cargo.toml declares embyr-pg-storage as a dependency and all existing embyr-server tests pass after the move",
+            "embyr-agent Cargo.toml declares embyr-pg-storage as a dependency",
+            "cargo build --workspace succeeds with zero compile errors"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/mod.rs",
+          "scenario_name": "compile_and_crate_graph_intact"
+        },
+        {
+          "id": "01-02",
+          "name": "Implement GetDocument in StorageAgentService + test infrastructure",
+          "criteria": [
+            "StorageAgentService::get_document delegates to PostgresBackendAdapter::get_document and returns a populated Document proto with all stored fields when the document exists",
+            "StorageAgentService::get_document returns Status::not_found when the requested document path does not exist in the project",
+            "StorageAgentService::get_document returns Status::invalid_argument when the request name field is empty",
+            "Agent audit log for get_document records project_id, document path, and duration_ms; no substring of EMBYR_AGENT_DB_DSN value appears in any log line",
+            "start_test_agent in tests/acceptance/embyr_agent/mod.rs starts a real agent against a Docker Postgres container, returns an AgentHandle and a configured StorageAgentClient over mTLS",
+            "test_tls_config helper returns valid client-side TLS configuration for mTLS connections to the test agent",
+            "AgentHandle::drop shuts down the test agent process and releases the Postgres container",
+            "#[ignore] removed from agent_returns_document_fields_to_authenticated_caller, agent_signals_not_found_for_absent_document, and agent_rejects_request_with_empty_document_path; all three pass"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a01_get_document.rs",
+          "scenario_name": "agent_returns_document_fields_to_authenticated_caller"
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "S06A \u2014 Agent Lifecycle",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "Extend AgentConfig with project-id and optional env vars",
+          "criteria": [
+            "AgentConfig::from_env() returns Err with a message naming EMBYR_AGENT_PROJECT_ID when that variable is absent from the environment",
+            "AgentConfig::from_env() returns Err with a message naming EMBYR_AGENT_DB_DSN when that variable is absent from the environment",
+            "AgentConfig::from_env() succeeds when EMBYR_AGENT_PROJECT_ID and EMBYR_AGENT_DB_DSN are set; project_id field holds the value of EMBYR_AGENT_PROJECT_ID",
+            "EMBYR_AGENT_MAX_CONNS defaults to 25 when not set; accepts an integer value when set",
+            "EMBYR_AGENT_LOG_LEVEL defaults to \"info\" when not set; the parsed value is used to initialise the tracing subscriber",
+            "EMBYR_AGENT_SHUTDOWN_TIMEOUT_SECS defaults to 30 when not set; accepts an integer value when set",
+            "#[ignore] removed from agent_exits_when_required_storage_config_is_absent and agent_exits_when_required_project_identifier_is_absent; both pass"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a06_lifecycle.rs",
+          "scenario_name": "agent_exits_when_required_storage_config_is_absent"
+        },
+        {
+          "id": "02-02",
+          "name": "StartupProbe \u2014 hard-gated Postgres and TLS verification before port binding",
+          "criteria": [
+            "StartupProbe::run() issues SELECT 1 against the Postgres pool; when the pool cannot be acquired within 5 seconds the probe returns Err and main exits with code 1 without binding :9191",
+            "StartupProbe::run() opens a dedicated PgListener connection and round-trips a NOTIFY/LISTEN on a probe channel; failure returns Err and main exits with code 1",
+            "StartupProbe::run() validates the TLS certificate file: parses the PEM, checks that the common name matches the configured CN, and checks that the notAfter timestamp is at least 24 hours in the future; failure returns Err and main exits with code 1",
+            "main.rs calls StartupProbe::run() before server::run(); no gRPC listener is opened until all probe gates pass",
+            "Structured log line containing \"connected to Postgres\" appears before the line containing \"listening on :9191\" in the agent's log output",
+            "No substring of the EMBYR_AGENT_DB_DSN value appears in any log line at any level during or after the probe",
+            "#[ignore] removed from agent_logs_storage_readiness_before_accepting_connections, agent_exits_without_binding_port_when_storage_unreachable, and storage_credential_never_appears_in_agent_logs; all three pass"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a06_lifecycle.rs",
+          "scenario_name": "agent_logs_storage_readiness_before_accepting_connections"
+        },
+        {
+          "id": "02-03",
+          "name": "GracefulShutdown + Ping RPC",
+          "criteria": [
+            "SIGTERM received while a GetDocument RPC is in flight causes the agent to stop accepting new connections, allow the in-flight RPC to complete, then exit with code 0",
+            "Structured log line \"shutdown complete\" appears in agent output after SIGTERM-triggered shutdown",
+            "StorageAgentService::ping returns a PingResponse whose server_time field is a Timestamp within 2 seconds of the wall clock at call time",
+            "Ping RPC is declared in storage_agent.proto as Ping(PingRequest) returns (PingResponse) with server_time: google.protobuf.Timestamp",
+            "#[ignore] removed from agent_completes_in_flight_work_before_exiting_on_shutdown_signal; test passes"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a06_lifecycle.rs",
+          "scenario_name": "agent_completes_in_flight_work_before_exiting_on_shutdown_signal"
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "S02A \u2014 Write Operations",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "Implement CreateDocument and UpdateDocument in StorageAgentService",
+          "criteria": [
+            "StorageAgentService::create_document persists the document with generation 1 when the path does not already exist; subsequent GetDocument returns the stored fields",
+            "StorageAgentService::create_document returns Status::already_exists when the document path already exists; the existing document is unchanged",
+            "StorageAgentService::create_document when no document identifier is provided generates a 20-character identifier and returns it in the response",
+            "StorageAgentService::update_document with a field mask updates only the named fields; fields absent from the mask retain their pre-update values",
+            "StorageAgentService::update_document returns Status::not_found when the target document path does not exist; no document is created",
+            "StorageAgentService::update_document applies an increment field transform to an absent numeric field by treating the absent value as zero",
+            "When two concurrent update_document calls assert the same document generation, exactly one succeeds and the other receives Status::failed_precondition",
+            "Document generation increments by exactly 1 on each successful write; generations observed across three sequential writes are 1, 2, 3 in order"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a02_write_operations.rs",
+          "scenario_name": "creating_new_document_stores_it_at_generation_one"
+        },
+        {
+          "id": "03-02",
+          "name": "Implement DeleteDocument in StorageAgentService",
+          "criteria": [
+            "StorageAgentService::delete_document succeeds without error when the target document does not exist",
+            "StorageAgentService::delete_document for an existing document writes a deletion record to project storage; subsequent GetDocument returns Status::not_found",
+            "#[ignore] removed from all 10 scenarios in us_a02_write_operations.rs: creating_new_document_stores_it_at_generation_one, updating_with_mask_preserves_unmentioned_fields, removing_absent_document_succeeds_without_error, removing_document_leaves_deletion_record, increment_transform_on_absent_field_treats_starting_value_as_zero, creating_document_without_identifier_generates_one, concurrent_write_on_same_generation_is_rejected, updating_absent_document_returns_not_found, creating_document_that_already_exists_is_rejected, document_generation_advances_by_one_on_every_successful_write; all pass"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a02_write_operations.rs",
+          "scenario_name": "removing_absent_document_succeeds_without_error"
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "name": "S04A \u2014 Transaction Lifecycle",
+      "steps": [
+        {
+          "id": "04-01",
+          "name": "Implement BeginTransaction, Commit, and Rollback in StorageAgentService",
+          "criteria": [
+            "StorageAgentService::begin_transaction returns a transaction token; the token can be used in subsequent Commit or Rollback calls",
+            "StorageAgentService::commit with no concurrent competing transaction applies the buffered writes and advances document generation; subsequent GetDocument reflects the committed values",
+            "StorageAgentService::commit returns Status::aborted when a competing writer has already modified the document at the generation the transaction read",
+            "StorageAgentService::commit returns Status::aborted when a document read inside the transaction was deleted by another writer before the commit",
+            "StorageAgentService::commit returns Status::not_found when the transaction token does not exist (already committed, rolled back, or never created)",
+            "StorageAgentService::rollback discards all buffered writes; subsequent GetDocument shows the document unchanged at the pre-transaction generation",
+            "StorageAgentService::rollback returns Status::not_found when the transaction token has already been committed"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a04_transactions.rs",
+          "scenario_name": "transaction_with_no_competition_commits_successfully"
+        },
+        {
+          "id": "04-02",
+          "name": "AgentTransactionSweeper \u2014 background expired-transaction cleanup",
+          "criteria": [
+            "AgentTransactionSweeper runs as a tokio background task and executes a sweep every 30 seconds",
+            "Sweep operation deletes transaction records whose created_at timestamp plus TTL is earlier than the sweep execution time",
+            "A transaction record with an elapsed TTL is absent from the transactions table after the sweep runs; a transaction record whose TTL has not elapsed remains present",
+            "StorageAgentService::commit returns Status::not_found when called with the token of a transaction whose TTL has elapsed and which has been swept",
+            "#[ignore] removed from all 7 scenarios in us_a04_transactions.rs: transaction_with_no_competition_commits_successfully, rolling_back_transaction_discards_writes_without_applying_them, rolling_back_already_committed_transaction_returns_not_found, expired_transactions_are_removed_by_sweep, concurrent_transaction_on_same_generation_is_rejected_with_conflict, transaction_on_deleted_document_is_aborted_on_commit, committing_expired_transaction_returns_not_found; all pass"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a04_transactions.rs",
+          "scenario_name": "expired_transactions_are_removed_by_sweep"
+        }
+      ]
+    },
+    {
+      "id": "05",
+      "name": "S03A \u2014 Query Operations",
+      "steps": [
+        {
+          "id": "05-01",
+          "name": "Implement RunQuery in StorageAgentService + proto extensions for RunAggregationQuery and ListDocuments",
+          "criteria": [
+            "storage_agent.proto declares RunAggregationQuery(RunAggregationQueryRequest) returns (RunAggregationQueryResponse) with a count field of type int64",
+            "storage_agent.proto declares ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse) with a documents repeated field and a next_page_token string field",
+            "StorageAgentService::run_query returns only documents matching the filter predicate; documents not matching the filter are absent from the response stream",
+            "StorageAgentService::run_query for a collection group query returns matching documents from all sub-collection paths regardless of parent document path",
+            "StorageAgentService::run_query returns Status::invalid_argument for a filter field path containing consecutive dots (e.g. \"order..amount\") without reading any documents from storage",
+            "StorageAgentService::run_query for a query with no matching documents returns a single completion message with no document payload",
+            "StorageAgentService::run_query for a not-equal filter omits documents where the named field is absent"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a03_query_operations.rs",
+          "scenario_name": "filtered_query_returns_only_matching_documents"
+        },
+        {
+          "id": "05-02",
+          "name": "Implement RunAggregationQuery and ListDocuments in StorageAgentService",
+          "criteria": [
+            "StorageAgentService::run_aggregation_query returns the correct count of documents matching the query; given 7 documents the count result is 7",
+            "StorageAgentService::list_documents returns at most 100 documents per page; given 150 documents the first page contains 100 documents and a non-empty next_page_token",
+            "StorageAgentService::list_documents returns the remaining documents on the second page when called with the next_page_token from the first page; the final page carries an empty next_page_token",
+            "StorageAgentService::run_query final server-streaming message has no document payload and signals query completion",
+            "#[ignore] removed from all 8 scenarios in us_a03_query_operations.rs: filtered_query_returns_only_matching_documents, collection_group_query_traverses_nested_collections, count_aggregation_returns_correct_total, listing_documents_returns_pages_of_at_most_one_hundred, query_excluding_value_omits_documents_missing_that_field, streaming_query_response_indicates_completion_at_end, query_over_empty_collection_returns_no_documents_and_completion_signal, query_with_malformed_field_path_rejected_before_data_read; all pass"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a03_query_operations.rs",
+          "scenario_name": "count_aggregation_returns_correct_total"
+        }
+      ]
+    },
+    {
+      "id": "06",
+      "name": "S05A \u2014 Subscribe Real-Time Stream",
+      "steps": [
+        {
+          "id": "06-01",
+          "name": "Subscribe proto extension + AgentNotifyBridge",
+          "criteria": [
+            "storage_agent.proto declares Subscribe(SubscribeRequest) returns (stream DocChange) where SubscribeRequest carries a collection_path string and DocChange carries kind (upsert|delete), document_name, generation int64, and fields map",
+            "AgentNotifyBridge wraps a PostgresNotifyListener; it exposes a subscribe() method that returns a tokio::sync::mpsc::Receiver<DocChange> with channel capacity 64",
+            "AgentNotifyBridge::subscribe() translates each raw Postgres NOTIFY payload into a DocChange proto message with the correct kind, document_name, generation, and fields",
+            "When the internal mpsc channel is full (64 pending messages), AgentNotifyBridge sets an overflow indicator and the next DocChange delivered to all active receivers carries kind=reset to signal resync",
+            "cargo build --workspace succeeds after the proto extension; generated Rust bindings include SubscribeRequest, DocChange, and the Subscribe RPC client stub"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a05_subscribe.rs",
+          "scenario_name": "overflow_of_pending_events_triggers_reset_notification"
+        },
+        {
+          "id": "06-02",
+          "name": "StorageAgentService::subscribe implementation + wire AgentNotifyBridge",
+          "criteria": [
+            "StorageAgentService::subscribe opens a server-streaming response; after a write commits to the subscribed collection path the subscriber receives a DocChange event within 2 seconds",
+            "The DocChange event for a created or updated document carries kind=upsert, a generation value of at least 1, and the complete document fields with no truncation",
+            "The DocChange event for a deleted document carries kind=delete and the document_name of the removed document",
+            "When the AgentNotifyBridge mpsc channel overflows, all active Subscribe streams receive a DocChange with kind=reset before the next real change event",
+            "When a Subscribe stream is interrupted and the caller reconnects, writes committed after reconnection are delivered within 2 seconds",
+            "AgentNotifyBridge is constructed at composition root (main.rs) and injected into StorageAgentService via constructor; no AgentNotifyBridge is instantiated inside StorageAgentService",
+            "#[ignore] removed from all 6 scenarios in us_a05_subscribe.rs: change_notification_arrives_within_two_seconds_of_committed_write, change_event_for_upsert_carries_generation_of_at_least_one, change_event_for_deleted_document_carries_delete_kind, change_event_carries_complete_document_contents, overflow_of_pending_events_triggers_reset_notification, subscription_stream_restores_delivery_after_interruption; all pass"
+          ],
+          "test_file": "tests/acceptance/embyr_agent/us_a05_subscribe.rs",
+          "scenario_name": "change_notification_arrives_within_two_seconds_of_committed_write"
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "crates/embyr-pg-storage/src/",
+      "crates/embyr-agent/src/",
+      "crates/embyr-proto/proto/"
+    ],
+    "test_directories": [
+      "tests/acceptance/embyr_agent/"
+    ],
+    "excluded_patterns": [
+      "target/**",
+      "**/*.lock"
+    ]
+  },
+  "validation": {
+    "status": "approved",
+    "reviewer": "nw-acceptance-designer-reviewer",
+    "approved_at": "2026-05-27T16:07:28Z"
+  }
+}

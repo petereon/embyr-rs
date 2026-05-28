@@ -1,0 +1,34 @@
+crates/embyr-core/src/auth/argon2.rs:10:5: replace argon2_instance -> Argon2<'static> with Default::default()
+crates/embyr-core/src/auth/argon2.rs:18:5: replace hash_api_key -> Result<String, CoreError> with Ok("xyzzy".into())
+crates/embyr-core/src/auth/argon2.rs:18:5: replace hash_api_key -> Result<String, CoreError> with Ok(String::new())
+crates/embyr-core/src/auth/argon2.rs:26:5: replace verify_api_key -> Result<bool, CoreError> with Ok(true)
+crates/embyr-core/src/auth/argon2.rs:26:5: replace verify_api_key -> Result<bool, CoreError> with Ok(false)
+crates/embyr-core/src/auth/blake3.rs:2:5: replace derive_cache_key -> [u8; 32] with [0; 32]
+crates/embyr-core/src/auth/blake3.rs:2:5: replace derive_cache_key -> [u8; 32] with [1; 32]
+crates/embyr-core/src/auth/ecies.rs:20:5: replace derive_aes_key -> [u8; 32] with [0; 32]
+crates/embyr-core/src/auth/ecies.rs:20:5: replace derive_aes_key -> [u8; 32] with [1; 32]
+crates/embyr-core/src/auth/ecies.rs:27:5: replace derive_public_key -> [u8; 32] with [0; 32]
+crates/embyr-core/src/auth/ecies.rs:27:5: replace derive_public_key -> [u8; 32] with [1; 32]
+crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])
+crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![0])
+crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![1])
+crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])
+crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![0])
+crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![1])
+crates/embyr-core/src/auth/ecies.rs:49:25: replace < with == in decrypt
+crates/embyr-core/src/auth/ecies.rs:49:25: replace < with > in decrypt
+crates/embyr-core/src/auth/ecies.rs:49:35: replace + with * in decrypt
+crates/embyr-core/src/auth/ecies.rs:49:30: replace + with * in decrypt
+crates/embyr-core/src/domain/project.rs:20:9: replace ProjectId::as_str -> &str with ""
+crates/embyr-core/src/domain/project.rs:20:9: replace ProjectId::as_str -> &str with "xyzzy"
+crates/embyr-core/src/domain/project.rs:103:5: replace is_valid_project_id -> bool with true
+crates/embyr-core/src/domain/project.rs:103:5: replace is_valid_project_id -> bool with false
+crates/embyr-core/src/domain/project.rs:103:21: replace || with && in is_valid_project_id
+crates/embyr-core/src/domain/project.rs:103:32: replace > with == in is_valid_project_id
+crates/embyr-core/src/domain/project.rs:103:32: replace > with < in is_valid_project_id
+crates/embyr-core/src/domain/project.rs:103:32: replace > with >= in is_valid_project_id
+crates/embyr-core/src/domain/project.rs:108:20: replace match guard c.is_ascii_lowercase() with true in is_valid_project_id
+crates/embyr-core/src/domain/project.rs:108:20: replace match guard c.is_ascii_lowercase() with false in is_valid_project_id
+crates/embyr-core/src/domain/project.rs:111:64: replace || with && in is_valid_project_id
+crates/embyr-core/src/domain/project.rs:111:42: replace || with && in is_valid_project_id
+crates/embyr-core/src/domain/project.rs:111:69: replace == with != in is_valid_project_id

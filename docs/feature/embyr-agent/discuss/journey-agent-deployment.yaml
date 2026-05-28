@@ -1,0 +1,301 @@
+schema_version: 1
+
+journey:
+  name: "agent-deployment"
+  goal: "Deploy embyr-agent in customer VPC, register with embyr SaaS, verify health and credential isolation"
+  persona: "P4 — Riley Nakamura (DevSecOps Lead, FinOps Corp)"
+  jobs:
+    - JOB-04  # credential-isolation
+    - JOB-07  # agent-operations
+    - JOB-09  # agent-auditproof
+
+  emotional_arc:
+    start: "Apprehensive — deploying an unknown binary into a production VPC is a risk"
+    middle: "Methodical — clear env-var config + structured logs build confidence"
+    end: "Confident — three audit artifacts confirm zero credential egress"
+
+steps:
+  - id: 1
+    name: "Configure environment variables"
+    action: "Create K8s Secret with EMBYR_AGENT_* env vars"
+
+    tui_mockup: |
+      +-- Step 1: Configure Agent Environment ---------------------------+
+      | EMBYR_AGENT_CERT   = /certs/agent.crt                           |
+      | EMBYR_AGENT_KEY    = /certs/agent.key                           |
+      | EMBYR_AGENT_CA     = /certs/embyr-ca.crt                        |
+      | EMBYR_AGENT_DB_DSN = postgres://user:***@pg.finops.internal/db  |
+      | EMBYR_AGENT_LISTEN_ADDR = 0.0.0.0:9191                         |
+      | EMBYR_AGENT_MAX_CONNS   = 25                                    |
+      | EMBYR_AGENT_LOG_LEVEL   = info                                  |
+      +------------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "EMBYR_AGENT_DB_DSN"
+        source: "customer K8s Secret (never leaves VPC)"
+        displayed_as: "postgres://user:***@..." (redacted in all logs)
+        consumers: ["agent Postgres pool", "audit evidence (NULL in system DB)"]
+      - name: "EMBYR_AGENT_CERT / EMBYR_AGENT_KEY"
+        source: "customer PKI or embyr agent CA"
+        displayed_as: "/certs/agent.crt"
+        consumers: ["agent TLS listener", "embyr SaaS backend_agent_ca verification"]
+      - name: "EMBYR_AGENT_CA"
+        source: "embyr SaaS CA certificate PEM"
+        displayed_as: "/certs/embyr-ca.crt"
+        consumers: ["agent mTLS client verification"]
+
+    emotional_state:
+      entry: "Apprehensive — many env vars, easy to miss one"
+      exit: "Methodical — each var has a clear description; exit code 1 + named error on missing"
+
+    integration_checkpoint: |
+      Every required env var (EMBYR_AGENT_DB_DSN, EMBYR_AGENT_CERT, EMBYR_AGENT_KEY, EMBYR_AGENT_CA)
+      must be present or the binary exits with named error before any port opens.
+      SPEC.md §embyr Agent §Configuration.
+
+    failure_modes:
+      - "Missing env var: binary prints named error to stderr, exits code 1 immediately"
+      - "Unreadable cert file: binary prints file path + OS error, exits code 1"
+      - "Empty env var (set but blank): treated as missing; same exit behavior"
+
+    gherkin: |
+      Scenario: Agent exits with named error when required env var is missing
+        Given the K8s Secret is missing EMBYR_AGENT_DB_DSN
+        When the agent binary starts
+        Then it writes "missing required environment variable: EMBYR_AGENT_DB_DSN" to stderr
+        And exits with code 1
+        And no port is opened
+
+  - id: 2
+    name: "Deploy to Kubernetes"
+    action: "kubectl apply -f agent-deployment.yaml"
+
+    shared_artifacts:
+      - name: "POD_NAME"
+        source: "kubectl output after apply"
+        displayed_as: "embyr-agent-7d9f4b-xkp9l"
+        consumers: ["Step 3 log retrieval", "audit evidence"]
+
+    emotional_state:
+      entry: "Tense — pod may crash immediately if config is wrong"
+      exit: "Relieved (pod Running) / Tense-but-directed (pod CrashLoopBackOff with clear exit message)"
+
+    integration_checkpoint: |
+      Pod reaches Running state. CrashLoopBackOff with clear stderr is acceptable — it directs to
+      a specific fix. Silent hang (no output, no exit) is NOT acceptable.
+
+    failure_modes:
+      - "Pod CrashLoopBackOff: kubectl logs shows named missing env var"
+      - "ImagePullBackOff: binary not found at registry path (separate concern)"
+
+    gherkin: |
+      Scenario: Successful deployment reaches Running state
+        Given all EMBYR_AGENT_* env vars are correctly configured
+        When the K8s Deployment is applied
+        Then the pod reaches Running state within 60 seconds
+        And kubectl logs shows startup success messages
+
+  - id: 3
+    name: "Verify startup logs"
+    action: "kubectl logs <pod>"
+
+    tui_mockup: |
+      +-- Step 3: Startup Logs ------------------------------------------+
+      | {"level":"INFO","ts":"2026-05-27T14:22:01Z",                     |
+      |  "msg":"connected to Postgres","max_conns":25}                   |
+      |                                                                   |
+      | {"level":"INFO","ts":"2026-05-27T14:22:01Z",                     |
+      |  "msg":"listening on :9191",                                      |
+      |  "tls":"mTLS enabled, client cert required"}                     |
+      |                                                                   |
+      | [No DSN string appears in any log line]                           |
+      +-------------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "AGENT_LISTEN_ADDR"
+        source: "EMBYR_AGENT_LISTEN_ADDR env var (default :9191)"
+        displayed_as: ":9191"
+        consumers: ["Step 4 registration", "audit evidence (mTLS test)"]
+
+    emotional_state:
+      entry: "Tense — waiting for the log line"
+      exit: "Relieved — two specific log lines confirm both Postgres and gRPC are healthy"
+
+    integration_checkpoint: |
+      Both "connected to Postgres" and "listening on :9191" log lines must appear.
+      No log line at any level must contain the Postgres DSN string.
+      SPEC.md §embyr Agent §Lifecycle (startup probe).
+
+    failure_modes:
+      - "Postgres unreachable: ERROR log + exit code 1 (agent refuses to start in degraded state)"
+      - "TLS cert parse failure: ERROR log + exit code 1"
+
+    gherkin: |
+      Scenario: Startup probe passes and agent logs readiness
+        Given Postgres is reachable at EMBYR_AGENT_DB_DSN
+        And TLS material files are readable at configured paths
+        When the agent binary starts
+        Then the log contains a line with msg="connected to Postgres"
+        And the log contains a line with msg="listening on :9191"
+        And no log line at any level contains the Postgres DSN string
+
+      Scenario: DSN is never echoed in logs (audit invariant)
+        Given EMBYR_AGENT_DB_DSN contains the token "DO-NOT-LOG"
+        When the agent starts and handles 10 GetDocument RPCs
+        Then grepping all log output for "DO-NOT-LOG" returns zero matches
+
+  - id: 4
+    name: "Register project with embyr SaaS"
+    action: "POST /admin/v1/projects with backend_mode=agent"
+
+    tui_mockup: |
+      +-- Step 4: Register Project ----------------------------------------+
+      | POST /admin/v1/projects                                            |
+      | {                                                                  |
+      |   "project_id": "finops-prod",                                    |
+      |   "auth_mode": "mtls",                                             |
+      |   "backend_mode": "agent",                                         |
+      |   "backend_agent_endpoint": "10.0.1.50:9191",                     |
+      |   "backend_agent_ca": "-----BEGIN CERTIFICATE-----\n..."           |
+      | }                                                                  |
+      |                                                                    |
+      | HTTP 201 Created                                                   |
+      | {"project_id":"finops-prod","backend_mode":"agent",               |
+      |  "backend_pg_creds_enc": null}   <- no DSN ever stored            |
+      +--------------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "PROJECT_ID"
+        source: "admin API create-project request"
+        displayed_as: "finops-prod"
+        consumers: ["Step 5 SDK operations", "Step 6 audit query", "all StorageAgent RPC calls"]
+      - name: "BACKEND_AGENT_CA"
+        source: "customer PEM file provided at registration"
+        displayed_as: "backend_agent_ca in system DB (PEM text)"
+        consumers: ["embyr SaaS mTLS verification when connecting to agent"]
+
+    emotional_state:
+      entry: "Methodical — known API, documented fields"
+      exit: "Confident (201 with no DSN in response) / Anxious (400 if agent unreachable)"
+
+    integration_checkpoint: |
+      HTTP 201 response MUST NOT contain backend_pg_creds_enc or any DSN.
+      embyr SaaS must perform a health check ping to the agent endpoint during registration.
+      SPEC.md §Tenant Management §Create Project (backend_mode=agent).
+
+    failure_modes:
+      - "Agent endpoint unreachable: HTTP 400 with error message naming the endpoint"
+      - "mTLS CA mismatch: HTTP 400 with TLS error detail"
+      - "Project ID already exists: HTTP 409 AlreadyExists"
+
+    gherkin: |
+      Scenario: Project registers successfully with backend_mode=agent
+        Given the agent is running at 10.0.1.50:9191 with valid TLS
+        When the admin API receives POST /admin/v1/projects with backend_mode=agent
+        Then the response is HTTP 201
+        And the response body contains no backend_pg_creds_enc field
+        And the system DB projects row has backend_pg_creds_enc = NULL
+
+      Scenario: Registration fails if agent endpoint is unreachable
+        Given no process is listening at 10.0.1.50:9191
+        When the admin API receives POST /admin/v1/projects with backend_agent_endpoint=10.0.1.50:9191
+        Then the response is HTTP 400
+        And the error message names the unreachable endpoint
+
+  - id: 5
+    name: "Test SDK write through agent"
+    action: "Firebase SDK setDoc + getDoc through embyr SaaS → agent → Postgres"
+
+    shared_artifacts:
+      - name: "SDK_DOCUMENT_DATA"
+        source: "Firebase SDK setDoc call"
+        displayed_as: '{ name: "Riley", role: "devops" }'
+        consumers: ["agent CreateDocument RPC", "Postgres documents table", "getDoc verification"]
+
+    emotional_state:
+      entry: "Excited — first real end-to-end test"
+      exit: "Excited (it works!) / Frustrated (Unimplemented error — agent binary needs update)"
+
+    integration_checkpoint: |
+      SDK setDoc resolves without error. getDoc returns same data.
+      Agent logs show the incoming gRPC call with project_id + path.
+      SPEC.md §embyr Agent §Agent gRPC Protocol.
+
+    failure_modes:
+      - "Status(Unimplemented): agent RPC not yet implemented"
+      - "mTLS handshake failure on SaaS→agent connection: check SaaS cert config"
+
+    gherkin: |
+      Scenario: SDK write round-trips through agent to Postgres
+        Given the SDK is configured to use project finops-prod on embyr SaaS
+        And the agent is running and connected to Postgres
+        When the SDK calls setDoc(doc(db, "users/riley"), { name: "Riley" })
+        And then calls getDoc(doc(db, "users/riley"))
+        Then getDoc returns { name: "Riley" }
+        And the agent log shows a CreateDocument RPC call for project finops-prod
+
+  - id: 6
+    name: "Collect audit evidence"
+    action: "System DB query + log grep + mTLS probe"
+
+    tui_mockup: |
+      +-- Step 6: Audit Evidence ------------------------------------------+
+      | SELECT project_id, backend_mode, backend_pg_creds_enc             |
+      | FROM projects WHERE project_id = 'finops-prod';                   |
+      |                                                                    |
+      | project_id  | backend_mode | backend_pg_creds_enc                |
+      | finops-prod | agent        | (null)                              |
+      |                                                                    |
+      | $ grep -i "postgres://" <agent-logs.txt>   → (no matches)         |
+      |                                                                    |
+      | $ openssl s_client -connect 10.0.1.50:9191  → TLS handshake error |
+      | (no client cert = rejected; proves mTLS is enforced)              |
+      +--------------------------------------------------------------------+
+
+    shared_artifacts:
+      - name: "AUDIT_EVIDENCE_SET"
+        source: "system DB + log export + TLS probe"
+        displayed_as: "Three artifacts: DB row, log grep, openssl output"
+        consumers: ["external security auditor for SOC2 evidence package"]
+
+    emotional_state:
+      entry: "Methodical — running three checks"
+      exit: "Confident — unambiguous three-artifact evidence package"
+
+    integration_checkpoint: |
+      All three evidence items must be producible without application-level access.
+      DSN must never appear in any exported log artifact.
+      SPEC.md Invariant 13: "Customer database credentials never exist in plaintext in the system database."
+
+    failure_modes:
+      - "DSN found in logs: audit invariant violated — must fix log redaction before proceeding"
+      - "backend_pg_creds_enc not null: system DB bug — registration stored DSN incorrectly"
+
+    gherkin: |
+      Scenario: System DB contains no DSN for agent-mode project
+        Given project finops-prod was created with backend_mode=agent
+        When the system DB is queried for backend_pg_creds_enc
+        Then the result is NULL
+
+      Scenario: mTLS is enforced — unauthenticated connection is rejected
+        Given the agent is running at 10.0.1.50:9191
+        When a TLS client connects without a client certificate
+        Then the TLS handshake fails with a certificate-required error
+        And no RPC data is transmitted
+
+integration_validation:
+  shared_artifact_consistency:
+    - artifact: "PROJECT_ID (finops-prod)"
+      must_match_across: [4, 5, 6]
+      failure_message: "Project ID must be consistent across registration, SDK usage, and audit query"
+    - artifact: "EMBYR_AGENT_DB_DSN"
+      must_match_across: [1, 3, 6]
+      failure_message: "DSN must appear in env config (step 1), never in logs (step 3), never in system DB (step 6)"
+    - artifact: "AGENT_LISTEN_ADDR (:9191)"
+      must_match_across: [3, 4, 6]
+      failure_message: "Listen address must match across startup log, registration endpoint, and audit mTLS probe"
+
+changelog:
+  - date: "2026-05-27"
+    feature: "embyr-agent"
+    change: "Initial journey: agent deployment from configure through audit evidence"

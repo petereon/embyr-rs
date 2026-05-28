@@ -1,0 +1,74 @@
+version: "1.0"
+feature: embyr-agent
+persona: P1
+persona_name: Alex Chen (SDK Developer)
+secondary_persona: P4
+secondary_persona_name: Riley Nakamura (DevSecOps Lead — configured the backend)
+jobs:
+  - JOB-01  # sdk-compat
+  - JOB-03  # live-sync
+  - JOB-04  # credential-isolation
+  - JOB-08  # agent-livesync
+updated: "2026-05-27"
+source: docs/feature/embyr-agent/discuss/journey-agent-storage-proxying.yaml
+
+summary: >
+  SDK Developer writes Firestore SDK code that is transparently proxied through
+  embyr SaaS → embyr-agent (mTLS) → customer Postgres, with identical behavior
+  to direct-mode projects. All document CRUD, queries, transactions, and real-time
+  onSnapshot (via Subscribe streaming RPC + Postgres NOTIFY) work without any
+  SDK code changes. Alex is unaware of the agent mode.
+
+emotional_arc:
+  start: Indifferent — Alex's code is unchanged from Firestore usage; no awareness of agent
+  middle: Trusting — setDoc/getDoc round-trips work; field values match; queries return expected results
+  end: Confident — onSnapshot fires within 2s for agent-mode projects, same as direct mode
+
+steps:
+  - id: 1
+    name: SDK write dispatched to agent
+    sdk_call: "setDoc(doc(db, 'orders/ord-2026-001'), { status: 'pending' })"
+    dispatch: embyr SaaS → StorageAgent.CreateDocument (mTLS)
+    agent_sql: INSERT INTO documents (project_id, path, ...) VALUES (...)
+
+  - id: 2
+    name: mTLS dispatch
+    verification:
+      - embyr SaaS cert verified against EMBYR_AGENT_CA
+      - Agent cert verified against backend_agent_ca in system DB
+      - Unauthenticated connection rejected
+
+  - id: 3
+    name: Agent SQL execution
+    occ: version increments by 1 on every write; BeginTransaction/Commit use same OCC read-set logic
+    doc_change: DocChange{Upsert} pushed to Subscribe stream after each committed write
+
+  - id: 4
+    name: SDK getDoc round-trip
+    sdk_call: "getDoc(doc(db, 'orders/ord-2026-001'))"
+    expected: data matches what was written; version=1
+
+  - id: 5
+    name: onSnapshot initial snapshot via Subscribe
+    subscribe_stream: embyr SaaS maintains one long-lived Subscribe stream per project
+    initial_snapshot:
+      - targetChange{ADD}
+      - documentChange (one per matching doc)
+      - targetChange{CURRENT, resumeToken}
+      - targetChange{NO_CHANGE}
+
+  - id: 6
+    name: Live DocChange delivered via Subscribe
+    flow:
+      - Concurrent write → agent SQL UPDATE → Postgres NOTIFY
+      - Agent LISTEN goroutine receives NOTIFY → pushes DocChange to Subscribe stream
+      - embyr SaaS Registry receives DocChange → evaluates against active Listen targets
+      - Match found → SaaS re-fetches doc via GetDocument from agent
+      - SaaS sends documentChange to SDK → onSnapshot callback fires
+    latency_target: "< 2 seconds from write commit to onSnapshot callback"
+    overflow:
+      threshold: 64 buffered events
+      action: "overflow flag set → SaaS sends targetChange{RESET} → clients re-snapshot"
+    reconnect:
+      backoff: "1s → 2s → 4s → ... → 30s"
+      on_reconnect: "active Listen clients receive targetChange{RESET}"

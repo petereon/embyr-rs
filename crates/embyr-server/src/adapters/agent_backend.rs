@@ -351,6 +351,7 @@ impl BackendAdapter for AgentBackendAdapter {
                 collection_id: collection.collection_path.clone(),
                 all_descendants: false,
             }],
+            filter: None,
         };
         let req = RunQueryRequest {
             parent,

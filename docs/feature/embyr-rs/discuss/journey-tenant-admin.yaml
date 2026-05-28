@@ -1,0 +1,124 @@
+version: "1.0"
+feature: embyr-rs
+persona: P3
+persona_name: Morgan (Tenant Admin / DevOps Lead)
+jobs:
+  - JOB-05
+updated: "2026-05-23"
+
+emotional_arc:
+  - step: 1
+    label: Evaluate Cloud-Secret Option
+    emotion: Sceptical
+  - step: 2
+    label: Grant embyr Cloud IAM Access
+    emotion: Confident
+  - step: 3
+    label: Register Project with Cloud-Secret Backend
+    emotion: Efficient
+  - step: 4
+    label: Verify Connectivity
+    emotion: Reassured
+  - step: 5
+    label: Rotate Database Password
+    emotion: Trusting
+  - step: 6
+    label: Operate and Audit
+    emotion: Trusting
+
+steps:
+  - id: 1
+    name: evaluate_cloud_secret_option
+    action: >
+      Read embyr docs. Confirm: (a) embyr fetches DSN from AWS/GCP at registration,
+      (b) re-fetches on cache expiry (TTL=5min), (c) no credential copy in embyr DB.
+    expected_output: >
+      Evaluation notes: "embyr uses our existing secret store — no second
+      credential store to operate."
+
+  - id: 2
+    name: grant_cloud_iam_access
+    action: >
+      AWS: Create IAM role with secretsmanager:GetSecretValue on specific ARN;
+      configure IRSA for embyr K8s pod.
+      GCP: Grant roles/secretmanager.secretAccessor to embyr GCP service account
+      on specific secret resource.
+    expected_output: >
+      aws secretsmanager get-secret-value --secret-id ${secret_arn} succeeds
+      from embyr execution context.
+    artifacts_produced:
+      - secret_arn      # AWS path
+      - secret_gcp_name # GCP path
+    error_paths:
+      - condition: Permission denied
+        symptom: AccessDeniedException / PERMISSION_DENIED
+        recovery: Verify trust policy / workload identity binding; check embyr service account ARN
+
+  - id: 3
+    name: register_project_cloud_secret
+    action: >
+      AWS: POST /admin/v1/projects with backend_mode=aws_secret,
+      backend_secret_arn=${secret_arn}.
+      GCP: POST /admin/v1/projects with backend_mode=gcp_secret,
+      backend_secret_gcp=${secret_gcp_name}.
+    expected_output: >
+      201 Created. embyr fetches DSN, runs migrations. Auth key returned once.
+    artifacts_consumed:
+      - secret_arn
+      - secret_gcp_name
+    artifacts_produced:
+      - project_id
+      - auth_key
+    error_paths:
+      - condition: embyr cannot read secret
+        symptom: 400 backend_secret_fetch_failed
+        recovery: Check IAM; verify secret format is {"dsn":"postgres://..."}
+
+  - id: 4
+    name: verify_connectivity
+    action: >
+      GET /admin/v1/projects/${project_id}. Run smoke-test SDK write + read.
+    expected_output: "status=active. SDK round-trip succeeds."
+    artifacts_consumed:
+      - project_id
+    error_paths:
+      - condition: status=migration_failed
+        symptom: DB migrations failed after secret fetch
+        recovery: Check DSN points to correct DB with migration permissions
+
+  - id: 5
+    name: rotate_db_password
+    action: >
+      Rotate DB password in AWS/GCP Secret Manager via standard cloud rotation.
+      No embyr interaction.
+    expected_output: >
+      After ≤5 min (TTL expiry), all SDK requests succeed with rotated password.
+      Zero downtime.
+    error_paths:
+      - condition: Transient Unavailable during rotation window
+        symptom: SDK retries for up to 5 min
+        recovery: Expected; max gap = TTL (5 min); SDK auto-retries
+
+  - id: 6
+    name: operate_audit
+    action: >
+      Audit embyr system DB: confirm only backend_secret_arn / backend_secret_gcp
+      stored (no plaintext DSN). Review CloudTrail / Cloud Audit Logs for
+      embyr GetSecretValue calls.
+    expected_output: >
+      Audit finding: "embyr stores only secret reference; access auditable
+      via cloud-native tooling."
+
+shared_artifacts:
+  - name: secret_arn
+    type: AWS ARN
+    source_of_truth: AWS Secrets Manager
+  - name: secret_gcp_name
+    type: GCP resource name
+    source_of_truth: GCP Secret Manager
+  - name: project_id
+    type: string
+    source_of_truth: projects table PK
+  - name: auth_key
+    type: string
+    source_of_truth: Admin Create Project (one-time)

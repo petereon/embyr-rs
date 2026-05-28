@@ -38,6 +38,12 @@ service StorageAgent {
 
   // Health check: returns the current server time.
   rpc Ping(PingRequest) returns (PingResponse);
+
+  // Runs an aggregation query (e.g., count).
+  rpc RunAggregationQuery(RunAggregationQueryRequest) returns (RunAggregationQueryResponse);
+
+  // Lists documents in a collection with pagination.
+  rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
 }
 
 // A ping request (no fields needed).
@@ -104,6 +110,48 @@ message Value {
 // A null value indicator.
 enum NullValue {
   NULL_VALUE = 0;
+}
+
+// Filter operation for a field comparison.
+enum FieldFilterOp {
+  FIELD_FILTER_OP_UNSPECIFIED = 0;
+  LESS_THAN = 1;
+  LESS_THAN_OR_EQUAL = 2;
+  GREATER_THAN = 3;
+  GREATER_THAN_OR_EQUAL = 4;
+  EQUAL = 5;
+  NOT_EQUAL = 6;
+  ARRAY_CONTAINS = 7;
+  IN = 8;
+  NOT_IN = 9;
+  ARRAY_CONTAINS_ANY = 10;
+}
+
+// Operation for a composite filter.
+enum CompositeFilterOp {
+  COMPOSITE_FILTER_OP_UNSPECIFIED = 0;
+  AND = 1;
+}
+
+// A filter on a specific document field.
+message FieldFilterProto {
+  string field_path = 1;
+  FieldFilterOp op = 2;
+  Value value = 3;
+}
+
+// A filter that combines multiple child filters with AND.
+message CompositeFilterProto {
+  CompositeFilterOp op = 1;
+  repeated Filter filters = 2;
+}
+
+// A document filter — either a field filter or a composite filter.
+message Filter {
+  oneof filter_type {
+    FieldFilterProto field_filter = 1;
+    CompositeFilterProto composite_filter = 2;
+  }
 }
 
 // An array value.
@@ -206,6 +254,7 @@ message RunQueryRequest {
 // A structured query.
 message StructuredQuery {
   repeated CollectionSelector from = 2;
+  Filter filter = 3;
 
   message CollectionSelector {
     string collection_id = 2;
@@ -263,4 +312,31 @@ message CommitResponse {
 message RollbackRequest {
   string database = 1;
   bytes transaction = 2;
+}
+
+// A request to run an aggregation query.
+message RunAggregationQueryRequest {
+  string parent = 1;
+  oneof query_type {
+    StructuredQuery structured_query = 2;
+  }
+}
+
+// The response to RunAggregationQuery.
+message RunAggregationQueryResponse {
+  int64 count = 1;
+}
+
+// A request to list documents in a collection.
+message ListDocumentsRequest {
+  string parent = 1;
+  string collection_id = 2;
+  int32 page_size = 3;
+  string page_token = 4;
+}
+
+// The response to ListDocuments.
+message ListDocumentsResponse {
+  repeated Document documents = 1;
+  string next_page_token = 2;
 }

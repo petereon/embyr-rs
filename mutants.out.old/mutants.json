@@ -1,0 +1,1218 @@
+[
+  {
+    "diff": "--- crates/embyr-core/src/auth/argon2.rs\n+++ replace argon2_instance -> Argon2<'static> with Default::default()\n@@ -2,21 +2,17 @@\n     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},\n     Algorithm, Argon2, Params, Version,\n };\n use rand_core::OsRng;\n \n use crate::error::CoreError;\n \n fn argon2_instance() -> Argon2<'static> {\n-    Argon2::new(\n-        Algorithm::Argon2id,\n-        Version::V0x13,\n-        Params::new(65536, 3, 4, Some(32)).expect(\"valid argon2 params\"),\n-    )\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn hash_api_key(api_key: &[u8]) -> Result<String, CoreError> {\n     let salt = SaltString::generate(&mut OsRng);\n     let hash = argon2_instance()\n         .hash_password(api_key, &salt)\n         .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n     Ok(hash.to_string())\n",
+    "file": "crates/embyr-core/src/auth/argon2.rs",
+    "function": {
+      "function_name": "argon2_instance",
+      "return_type": "-> Argon2<'static>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 15
+        },
+        "start": {
+          "column": 1,
+          "line": 9
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/argon2.rs:10:5: replace argon2_instance -> Argon2<'static> with Default::default()",
+    "package": "embyr-core",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 14
+      },
+      "start": {
+        "column": 5,
+        "line": 10
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/argon2.rs\n+++ replace hash_api_key -> Result<String, CoreError> with Ok(String::new())\n@@ -10,21 +10,17 @@\n     Argon2::new(\n         Algorithm::Argon2id,\n         Version::V0x13,\n         Params::new(65536, 3, 4, Some(32)).expect(\"valid argon2 params\"),\n     )\n }\n \n pub fn hash_api_key(api_key: &[u8]) -> Result<String, CoreError> {\n-    let salt = SaltString::generate(&mut OsRng);\n-    let hash = argon2_instance()\n-        .hash_password(api_key, &salt)\n-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n-    Ok(hash.to_string())\n+    Ok(String::new()) /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn verify_api_key(api_key: &[u8], phc_hash: &str) -> Result<bool, CoreError> {\n     let parsed = PasswordHash::new(phc_hash)\n         .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n     Ok(argon2_instance().verify_password(api_key, &parsed).is_ok())\n }\n \n",
+    "file": "crates/embyr-core/src/auth/argon2.rs",
+    "function": {
+      "function_name": "hash_api_key",
+      "return_type": "-> Result<String, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 23
+        },
+        "start": {
+          "column": 1,
+          "line": 17
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/argon2.rs:18:5: replace hash_api_key -> Result<String, CoreError> with Ok(String::new())",
+    "package": "embyr-core",
+    "replacement": "Ok(String::new())",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 22
+      },
+      "start": {
+        "column": 5,
+        "line": 18
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/argon2.rs\n+++ replace hash_api_key -> Result<String, CoreError> with Ok(\"xyzzy\".into())\n@@ -10,21 +10,17 @@\n     Argon2::new(\n         Algorithm::Argon2id,\n         Version::V0x13,\n         Params::new(65536, 3, 4, Some(32)).expect(\"valid argon2 params\"),\n     )\n }\n \n pub fn hash_api_key(api_key: &[u8]) -> Result<String, CoreError> {\n-    let salt = SaltString::generate(&mut OsRng);\n-    let hash = argon2_instance()\n-        .hash_password(api_key, &salt)\n-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n-    Ok(hash.to_string())\n+    Ok(\"xyzzy\".into()) /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn verify_api_key(api_key: &[u8], phc_hash: &str) -> Result<bool, CoreError> {\n     let parsed = PasswordHash::new(phc_hash)\n         .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n     Ok(argon2_instance().verify_password(api_key, &parsed).is_ok())\n }\n \n",
+    "file": "crates/embyr-core/src/auth/argon2.rs",
+    "function": {
+      "function_name": "hash_api_key",
+      "return_type": "-> Result<String, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 23
+        },
+        "start": {
+          "column": 1,
+          "line": 17
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/argon2.rs:18:5: replace hash_api_key -> Result<String, CoreError> with Ok(\"xyzzy\".into())",
+    "package": "embyr-core",
+    "replacement": "Ok(\"xyzzy\".into())",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 22
+      },
+      "start": {
+        "column": 5,
+        "line": 18
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/argon2.rs\n+++ replace verify_api_key -> Result<bool, CoreError> with Ok(true)\n@@ -18,19 +18,17 @@\n     let salt = SaltString::generate(&mut OsRng);\n     let hash = argon2_instance()\n         .hash_password(api_key, &salt)\n         .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n     Ok(hash.to_string())\n }\n \n pub fn verify_api_key(api_key: &[u8], phc_hash: &str) -> Result<bool, CoreError> {\n-    let parsed = PasswordHash::new(phc_hash)\n-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n-    Ok(argon2_instance().verify_password(api_key, &parsed).is_ok())\n+    Ok(true) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n     fn argon2id_hash_and_verify_roundtrip() {\n",
+    "file": "crates/embyr-core/src/auth/argon2.rs",
+    "function": {
+      "function_name": "verify_api_key",
+      "return_type": "-> Result<bool, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 29
+        },
+        "start": {
+          "column": 1,
+          "line": 25
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/argon2.rs:26:5: replace verify_api_key -> Result<bool, CoreError> with Ok(true)",
+    "package": "embyr-core",
+    "replacement": "Ok(true)",
+    "span": {
+      "end": {
+        "column": 68,
+        "line": 28
+      },
+      "start": {
+        "column": 5,
+        "line": 26
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/argon2.rs\n+++ replace verify_api_key -> Result<bool, CoreError> with Ok(false)\n@@ -18,19 +18,17 @@\n     let salt = SaltString::generate(&mut OsRng);\n     let hash = argon2_instance()\n         .hash_password(api_key, &salt)\n         .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n     Ok(hash.to_string())\n }\n \n pub fn verify_api_key(api_key: &[u8], phc_hash: &str) -> Result<bool, CoreError> {\n-    let parsed = PasswordHash::new(phc_hash)\n-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n-    Ok(argon2_instance().verify_password(api_key, &parsed).is_ok())\n+    Ok(false) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n     fn argon2id_hash_and_verify_roundtrip() {\n",
+    "file": "crates/embyr-core/src/auth/argon2.rs",
+    "function": {
+      "function_name": "verify_api_key",
+      "return_type": "-> Result<bool, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 29
+        },
+        "start": {
+          "column": 1,
+          "line": 25
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/argon2.rs:26:5: replace verify_api_key -> Result<bool, CoreError> with Ok(false)",
+    "package": "embyr-core",
+    "replacement": "Ok(false)",
+    "span": {
+      "end": {
+        "column": 68,
+        "line": 28
+      },
+      "start": {
+        "column": 5,
+        "line": 26
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/blake3.rs\n+++ replace derive_cache_key -> [u8; 32] with [0; 32]\n@@ -1,10 +1,10 @@\n pub fn derive_cache_key(api_key: &[u8]) -> [u8; 32] {\n-    *blake3::hash(api_key).as_bytes()\n+    [0; 32] /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n     fn blake3_cache_key_is_deterministic() {\n",
+    "file": "crates/embyr-core/src/auth/blake3.rs",
+    "function": {
+      "function_name": "derive_cache_key",
+      "return_type": "-> [u8; 32]",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 3
+        },
+        "start": {
+          "column": 1,
+          "line": 1
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/blake3.rs:2:5: replace derive_cache_key -> [u8; 32] with [0; 32]",
+    "package": "embyr-core",
+    "replacement": "[0; 32]",
+    "span": {
+      "end": {
+        "column": 38,
+        "line": 2
+      },
+      "start": {
+        "column": 5,
+        "line": 2
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/blake3.rs\n+++ replace derive_cache_key -> [u8; 32] with [1; 32]\n@@ -1,10 +1,10 @@\n pub fn derive_cache_key(api_key: &[u8]) -> [u8; 32] {\n-    *blake3::hash(api_key).as_bytes()\n+    [1; 32] /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n     fn blake3_cache_key_is_deterministic() {\n",
+    "file": "crates/embyr-core/src/auth/blake3.rs",
+    "function": {
+      "function_name": "derive_cache_key",
+      "return_type": "-> [u8; 32]",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 3
+        },
+        "start": {
+          "column": 1,
+          "line": 1
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/blake3.rs:2:5: replace derive_cache_key -> [u8; 32] with [1; 32]",
+    "package": "embyr-core",
+    "replacement": "[1; 32]",
+    "span": {
+      "end": {
+        "column": 38,
+        "line": 2
+      },
+      "start": {
+        "column": 5,
+        "line": 2
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace derive_static_secret -> StaticSecret with Default::default()\n@@ -5,20 +5,17 @@\n use hkdf::Hkdf;\n use rand_core::OsRng;\n use sha2::Sha256;\n use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};\n \n use crate::error::CoreError;\n \n fn derive_static_secret(api_key: &[u8]) -> StaticSecret {\n-    let hk = Hkdf::<Sha256>::new(Some(b\"embyr-ecies-v1-static\"), api_key);\n-    let mut okm = [0u8; 32];\n-    hk.expand(&[], &mut okm).expect(\"32 bytes always valid for HKDF\");\n-    StaticSecret::from(okm)\n+    Default::default() /* ~ changed by cargo-mutants ~ */\n }\n \n fn derive_aes_key(shared_secret: &[u8]) -> [u8; 32] {\n     let hk = Hkdf::<Sha256>::new(Some(b\"embyr-ecies-v1-enc\"), shared_secret);\n     let mut okm = [0u8; 32];\n     hk.expand(&[], &mut okm).expect(\"32 bytes valid\");\n     okm\n }\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "derive_static_secret",
+      "return_type": "-> StaticSecret",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 17
+        },
+        "start": {
+          "column": 1,
+          "line": 12
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:13:5: replace derive_static_secret -> StaticSecret with Default::default()",
+    "package": "embyr-core",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 28,
+        "line": 16
+      },
+      "start": {
+        "column": 5,
+        "line": 13
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace derive_aes_key -> [u8; 32] with [0; 32]\n@@ -12,20 +12,17 @@\n fn derive_static_secret(api_key: &[u8]) -> StaticSecret {\n     let hk = Hkdf::<Sha256>::new(Some(b\"embyr-ecies-v1-static\"), api_key);\n     let mut okm = [0u8; 32];\n     hk.expand(&[], &mut okm).expect(\"32 bytes always valid for HKDF\");\n     StaticSecret::from(okm)\n }\n \n fn derive_aes_key(shared_secret: &[u8]) -> [u8; 32] {\n-    let hk = Hkdf::<Sha256>::new(Some(b\"embyr-ecies-v1-enc\"), shared_secret);\n-    let mut okm = [0u8; 32];\n-    hk.expand(&[], &mut okm).expect(\"32 bytes valid\");\n-    okm\n+    [0; 32] /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn derive_public_key(api_key: &[u8]) -> [u8; 32] {\n     let secret = derive_static_secret(api_key);\n     PublicKey::from(&secret).to_bytes()\n }\n \n pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "derive_aes_key",
+      "return_type": "-> [u8; 32]",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 24
+        },
+        "start": {
+          "column": 1,
+          "line": 19
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:20:5: replace derive_aes_key -> [u8; 32] with [0; 32]",
+    "package": "embyr-core",
+    "replacement": "[0; 32]",
+    "span": {
+      "end": {
+        "column": 8,
+        "line": 23
+      },
+      "start": {
+        "column": 5,
+        "line": 20
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace derive_aes_key -> [u8; 32] with [1; 32]\n@@ -12,20 +12,17 @@\n fn derive_static_secret(api_key: &[u8]) -> StaticSecret {\n     let hk = Hkdf::<Sha256>::new(Some(b\"embyr-ecies-v1-static\"), api_key);\n     let mut okm = [0u8; 32];\n     hk.expand(&[], &mut okm).expect(\"32 bytes always valid for HKDF\");\n     StaticSecret::from(okm)\n }\n \n fn derive_aes_key(shared_secret: &[u8]) -> [u8; 32] {\n-    let hk = Hkdf::<Sha256>::new(Some(b\"embyr-ecies-v1-enc\"), shared_secret);\n-    let mut okm = [0u8; 32];\n-    hk.expand(&[], &mut okm).expect(\"32 bytes valid\");\n-    okm\n+    [1; 32] /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn derive_public_key(api_key: &[u8]) -> [u8; 32] {\n     let secret = derive_static_secret(api_key);\n     PublicKey::from(&secret).to_bytes()\n }\n \n pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "derive_aes_key",
+      "return_type": "-> [u8; 32]",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 24
+        },
+        "start": {
+          "column": 1,
+          "line": 19
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:20:5: replace derive_aes_key -> [u8; 32] with [1; 32]",
+    "package": "embyr-core",
+    "replacement": "[1; 32]",
+    "span": {
+      "end": {
+        "column": 8,
+        "line": 23
+      },
+      "start": {
+        "column": 5,
+        "line": 20
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace derive_public_key -> [u8; 32] with [0; 32]\n@@ -19,18 +19,17 @@\n fn derive_aes_key(shared_secret: &[u8]) -> [u8; 32] {\n     let hk = Hkdf::<Sha256>::new(Some(b\"embyr-ecies-v1-enc\"), shared_secret);\n     let mut okm = [0u8; 32];\n     hk.expand(&[], &mut okm).expect(\"32 bytes valid\");\n     okm\n }\n \n pub fn derive_public_key(api_key: &[u8]) -> [u8; 32] {\n-    let secret = derive_static_secret(api_key);\n-    PublicKey::from(&secret).to_bytes()\n+    [0; 32] /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {\n     let eph_secret = EphemeralSecret::random_from_rng(OsRng);\n     let eph_pub = PublicKey::from(&eph_secret);\n     let shared = eph_secret.diffie_hellman(&PublicKey::from(*recipient_pubkey));\n     let aes_key = derive_aes_key(shared.as_bytes());\n     let cipher = Aes256Gcm::new(&aes_key.into());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "derive_public_key",
+      "return_type": "-> [u8; 32]",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 29
+        },
+        "start": {
+          "column": 1,
+          "line": 26
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:27:5: replace derive_public_key -> [u8; 32] with [0; 32]",
+    "package": "embyr-core",
+    "replacement": "[0; 32]",
+    "span": {
+      "end": {
+        "column": 40,
+        "line": 28
+      },
+      "start": {
+        "column": 5,
+        "line": 27
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace derive_public_key -> [u8; 32] with [1; 32]\n@@ -19,18 +19,17 @@\n fn derive_aes_key(shared_secret: &[u8]) -> [u8; 32] {\n     let hk = Hkdf::<Sha256>::new(Some(b\"embyr-ecies-v1-enc\"), shared_secret);\n     let mut okm = [0u8; 32];\n     hk.expand(&[], &mut okm).expect(\"32 bytes valid\");\n     okm\n }\n \n pub fn derive_public_key(api_key: &[u8]) -> [u8; 32] {\n-    let secret = derive_static_secret(api_key);\n-    PublicKey::from(&secret).to_bytes()\n+    [1; 32] /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {\n     let eph_secret = EphemeralSecret::random_from_rng(OsRng);\n     let eph_pub = PublicKey::from(&eph_secret);\n     let shared = eph_secret.diffie_hellman(&PublicKey::from(*recipient_pubkey));\n     let aes_key = derive_aes_key(shared.as_bytes());\n     let cipher = Aes256Gcm::new(&aes_key.into());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "derive_public_key",
+      "return_type": "-> [u8; 32]",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 29
+        },
+        "start": {
+          "column": 1,
+          "line": 26
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:27:5: replace derive_public_key -> [u8; 32] with [1; 32]",
+    "package": "embyr-core",
+    "replacement": "[1; 32]",
+    "span": {
+      "end": {
+        "column": 40,
+        "line": 28
+      },
+      "start": {
+        "column": 5,
+        "line": 27
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])\n@@ -24,30 +24,17 @@\n }\n \n pub fn derive_public_key(api_key: &[u8]) -> [u8; 32] {\n     let secret = derive_static_secret(api_key);\n     PublicKey::from(&secret).to_bytes()\n }\n \n pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    let eph_secret = EphemeralSecret::random_from_rng(OsRng);\n-    let eph_pub = PublicKey::from(&eph_secret);\n-    let shared = eph_secret.diffie_hellman(&PublicKey::from(*recipient_pubkey));\n-    let aes_key = derive_aes_key(shared.as_bytes());\n-    let cipher = Aes256Gcm::new(&aes_key.into());\n-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);\n-    let ct = cipher\n-        .encrypt(&nonce, plaintext)\n-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n-    let mut out = Vec::with_capacity(32 + 12 + ct.len());\n-    out.extend_from_slice(eph_pub.as_bytes());\n-    out.extend_from_slice(&nonce);\n-    out.extend_from_slice(&ct);\n-    Ok(out)\n+    Ok(vec![]) /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n     if ciphertext.len() < 32 + 12 + 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "encrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 46
+        },
+        "start": {
+          "column": 1,
+          "line": 31
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])",
+    "package": "embyr-core",
+    "replacement": "Ok(vec![])",
+    "span": {
+      "end": {
+        "column": 12,
+        "line": 45
+      },
+      "start": {
+        "column": 5,
+        "line": 32
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![0])\n@@ -24,30 +24,17 @@\n }\n \n pub fn derive_public_key(api_key: &[u8]) -> [u8; 32] {\n     let secret = derive_static_secret(api_key);\n     PublicKey::from(&secret).to_bytes()\n }\n \n pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    let eph_secret = EphemeralSecret::random_from_rng(OsRng);\n-    let eph_pub = PublicKey::from(&eph_secret);\n-    let shared = eph_secret.diffie_hellman(&PublicKey::from(*recipient_pubkey));\n-    let aes_key = derive_aes_key(shared.as_bytes());\n-    let cipher = Aes256Gcm::new(&aes_key.into());\n-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);\n-    let ct = cipher\n-        .encrypt(&nonce, plaintext)\n-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n-    let mut out = Vec::with_capacity(32 + 12 + ct.len());\n-    out.extend_from_slice(eph_pub.as_bytes());\n-    out.extend_from_slice(&nonce);\n-    out.extend_from_slice(&ct);\n-    Ok(out)\n+    Ok(vec![0]) /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n     if ciphertext.len() < 32 + 12 + 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "encrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 46
+        },
+        "start": {
+          "column": 1,
+          "line": 31
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![0])",
+    "package": "embyr-core",
+    "replacement": "Ok(vec![0])",
+    "span": {
+      "end": {
+        "column": 12,
+        "line": 45
+      },
+      "start": {
+        "column": 5,
+        "line": 32
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![1])\n@@ -24,30 +24,17 @@\n }\n \n pub fn derive_public_key(api_key: &[u8]) -> [u8; 32] {\n     let secret = derive_static_secret(api_key);\n     PublicKey::from(&secret).to_bytes()\n }\n \n pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    let eph_secret = EphemeralSecret::random_from_rng(OsRng);\n-    let eph_pub = PublicKey::from(&eph_secret);\n-    let shared = eph_secret.diffie_hellman(&PublicKey::from(*recipient_pubkey));\n-    let aes_key = derive_aes_key(shared.as_bytes());\n-    let cipher = Aes256Gcm::new(&aes_key.into());\n-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);\n-    let ct = cipher\n-        .encrypt(&nonce, plaintext)\n-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;\n-    let mut out = Vec::with_capacity(32 + 12 + ct.len());\n-    out.extend_from_slice(eph_pub.as_bytes());\n-    out.extend_from_slice(&nonce);\n-    out.extend_from_slice(&ct);\n-    Ok(out)\n+    Ok(vec![1]) /* ~ changed by cargo-mutants ~ */\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n     if ciphertext.len() < 32 + 12 + 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "encrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 46
+        },
+        "start": {
+          "column": 1,
+          "line": 31
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![1])",
+    "package": "embyr-core",
+    "replacement": "Ok(vec![1])",
+    "span": {
+      "end": {
+        "column": 12,
+        "line": 45
+      },
+      "start": {
+        "column": 5,
+        "line": 32
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])\n@@ -41,29 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n-        return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n-    }\n-    let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n-    let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n-    let ct = &ciphertext[44..];\n-    let static_secret = derive_static_secret(api_key);\n-    let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n-    let aes_key = derive_aes_key(shared.as_bytes());\n-    let cipher = Aes256Gcm::new(&aes_key.into());\n-    cipher\n-        .decrypt(&nonce_bytes.into(), ct)\n-        .map_err(|_| CoreError::InvalidArgument(\"decryption failed\".into()))\n+    Ok(vec![]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n     fn ecies_encrypt_decrypt_roundtrip() {\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])",
+    "package": "embyr-core",
+    "replacement": "Ok(vec![])",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 61
+      },
+      "start": {
+        "column": 5,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![0])\n@@ -41,29 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n-        return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n-    }\n-    let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n-    let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n-    let ct = &ciphertext[44..];\n-    let static_secret = derive_static_secret(api_key);\n-    let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n-    let aes_key = derive_aes_key(shared.as_bytes());\n-    let cipher = Aes256Gcm::new(&aes_key.into());\n-    cipher\n-        .decrypt(&nonce_bytes.into(), ct)\n-        .map_err(|_| CoreError::InvalidArgument(\"decryption failed\".into()))\n+    Ok(vec![0]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n     fn ecies_encrypt_decrypt_roundtrip() {\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![0])",
+    "package": "embyr-core",
+    "replacement": "Ok(vec![0])",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 61
+      },
+      "start": {
+        "column": 5,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![1])\n@@ -41,29 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n-        return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n-    }\n-    let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n-    let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n-    let ct = &ciphertext[44..];\n-    let static_secret = derive_static_secret(api_key);\n-    let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n-    let aes_key = derive_aes_key(shared.as_bytes());\n-    let cipher = Aes256Gcm::new(&aes_key.into());\n-    cipher\n-        .decrypt(&nonce_bytes.into(), ct)\n-        .map_err(|_| CoreError::InvalidArgument(\"decryption failed\".into()))\n+    Ok(vec![1]) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n     fn ecies_encrypt_decrypt_roundtrip() {\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![1])",
+    "package": "embyr-core",
+    "replacement": "Ok(vec![1])",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 61
+      },
+      "start": {
+        "column": 5,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace < with == in decrypt\n@@ -41,17 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n+    if ciphertext.len() == /* ~ changed by cargo-mutants ~ */ 32 + 12 + 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n     let ct = &ciphertext[44..];\n     let static_secret = derive_static_secret(api_key);\n     let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n     let aes_key = derive_aes_key(shared.as_bytes());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:25: replace < with == in decrypt",
+    "package": "embyr-core",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 49
+      },
+      "start": {
+        "column": 25,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace < with > in decrypt\n@@ -41,17 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n+    if ciphertext.len() > /* ~ changed by cargo-mutants ~ */ 32 + 12 + 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n     let ct = &ciphertext[44..];\n     let static_secret = derive_static_secret(api_key);\n     let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n     let aes_key = derive_aes_key(shared.as_bytes());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:25: replace < with > in decrypt",
+    "package": "embyr-core",
+    "replacement": ">",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 49
+      },
+      "start": {
+        "column": 25,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace < with <= in decrypt\n@@ -41,17 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n+    if ciphertext.len() <= /* ~ changed by cargo-mutants ~ */ 32 + 12 + 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n     let ct = &ciphertext[44..];\n     let static_secret = derive_static_secret(api_key);\n     let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n     let aes_key = derive_aes_key(shared.as_bytes());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:25: replace < with <= in decrypt",
+    "package": "embyr-core",
+    "replacement": "<=",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 49
+      },
+      "start": {
+        "column": 25,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace + with - in decrypt\n@@ -41,17 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n+    if ciphertext.len() < 32 + 12 - /* ~ changed by cargo-mutants ~ */ 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n     let ct = &ciphertext[44..];\n     let static_secret = derive_static_secret(api_key);\n     let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n     let aes_key = derive_aes_key(shared.as_bytes());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:35: replace + with - in decrypt",
+    "package": "embyr-core",
+    "replacement": "-",
+    "span": {
+      "end": {
+        "column": 36,
+        "line": 49
+      },
+      "start": {
+        "column": 35,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace + with * in decrypt\n@@ -41,17 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n+    if ciphertext.len() < 32 + 12 * /* ~ changed by cargo-mutants ~ */ 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n     let ct = &ciphertext[44..];\n     let static_secret = derive_static_secret(api_key);\n     let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n     let aes_key = derive_aes_key(shared.as_bytes());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:35: replace + with * in decrypt",
+    "package": "embyr-core",
+    "replacement": "*",
+    "span": {
+      "end": {
+        "column": 36,
+        "line": 49
+      },
+      "start": {
+        "column": 35,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace + with - in decrypt\n@@ -41,17 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n+    if ciphertext.len() < 32 - /* ~ changed by cargo-mutants ~ */ 12 + 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n     let ct = &ciphertext[44..];\n     let static_secret = derive_static_secret(api_key);\n     let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n     let aes_key = derive_aes_key(shared.as_bytes());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:30: replace + with - in decrypt",
+    "package": "embyr-core",
+    "replacement": "-",
+    "span": {
+      "end": {
+        "column": 31,
+        "line": 49
+      },
+      "start": {
+        "column": 30,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/auth/ecies.rs\n+++ replace + with * in decrypt\n@@ -41,17 +41,17 @@\n     let mut out = Vec::with_capacity(32 + 12 + ct.len());\n     out.extend_from_slice(eph_pub.as_bytes());\n     out.extend_from_slice(&nonce);\n     out.extend_from_slice(&ct);\n     Ok(out)\n }\n \n pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {\n-    if ciphertext.len() < 32 + 12 + 16 {\n+    if ciphertext.len() < 32 * /* ~ changed by cargo-mutants ~ */ 12 + 16 {\n         return Err(CoreError::InvalidArgument(\"ciphertext too short\".into()));\n     }\n     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();\n     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();\n     let ct = &ciphertext[44..];\n     let static_secret = derive_static_secret(api_key);\n     let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));\n     let aes_key = derive_aes_key(shared.as_bytes());\n",
+    "file": "crates/embyr-core/src/auth/ecies.rs",
+    "function": {
+      "function_name": "decrypt",
+      "return_type": "-> Result<Vec<u8>, CoreError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 62
+        },
+        "start": {
+          "column": 1,
+          "line": 48
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/auth/ecies.rs:49:30: replace + with * in decrypt",
+    "package": "embyr-core",
+    "replacement": "*",
+    "span": {
+      "end": {
+        "column": 31,
+        "line": 49
+      },
+      "start": {
+        "column": 30,
+        "line": 49
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace ProjectId::as_str -> &str with \"\"\n@@ -12,17 +12,17 @@\n         } else {\n             Err(CoreError::InvalidArgument(format!(\n                 \"project id must match ^[a-z][a-z0-9-]{{0,62}}$, got: {s}\"\n             )))\n         }\n     }\n \n     pub fn as_str(&self) -> &str {\n-        &self.0\n+        \"\" /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     // --- ProjectId::as_str ---\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "ProjectId::as_str",
+      "return_type": "-> &str",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 21
+        },
+        "start": {
+          "column": 5,
+          "line": 19
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/domain/project.rs:20:9: replace ProjectId::as_str -> &str with \"\"",
+    "package": "embyr-core",
+    "replacement": "\"\"",
+    "span": {
+      "end": {
+        "column": 16,
+        "line": 20
+      },
+      "start": {
+        "column": 9,
+        "line": 20
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace ProjectId::as_str -> &str with \"xyzzy\"\n@@ -12,17 +12,17 @@\n         } else {\n             Err(CoreError::InvalidArgument(format!(\n                 \"project id must match ^[a-z][a-z0-9-]{{0,62}}$, got: {s}\"\n             )))\n         }\n     }\n \n     pub fn as_str(&self) -> &str {\n-        &self.0\n+        \"xyzzy\" /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     // --- ProjectId::as_str ---\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "ProjectId::as_str",
+      "return_type": "-> &str",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 21
+        },
+        "start": {
+          "column": 5,
+          "line": 19
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/domain/project.rs:20:9: replace ProjectId::as_str -> &str with \"xyzzy\"",
+    "package": "embyr-core",
+    "replacement": "\"xyzzy\"",
+    "span": {
+      "end": {
+        "column": 16,
+        "line": 20
+      },
+      "start": {
+        "column": 9,
+        "line": 20
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace is_valid_project_id -> bool with true\n@@ -95,25 +95,17 @@\n \n     #[test]\n     fn starts_with_dash_invalid() {\n         assert!(ProjectId::new(\"-abc\").is_err());\n     }\n }\n \n fn is_valid_project_id(s: &str) -> bool {\n-    if s.is_empty() || s.len() > 63 {\n-        return false;\n-    }\n-    let mut chars = s.chars();\n-    match chars.next() {\n-        Some(c) if c.is_ascii_lowercase() => {}\n-        _ => return false,\n-    }\n-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n+    true /* ~ changed by cargo-mutants ~ */\n }\n \n #[derive(Debug, Clone, PartialEq, Eq)]\n pub enum ProjectStatus {\n     Active,\n     Suspended,\n     Deleted,\n }\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/domain/project.rs:103:5: replace is_valid_project_id -> bool with true",
+    "package": "embyr-core",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 76,
+        "line": 111
+      },
+      "start": {
+        "column": 5,
+        "line": 103
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace is_valid_project_id -> bool with false\n@@ -95,25 +95,17 @@\n \n     #[test]\n     fn starts_with_dash_invalid() {\n         assert!(ProjectId::new(\"-abc\").is_err());\n     }\n }\n \n fn is_valid_project_id(s: &str) -> bool {\n-    if s.is_empty() || s.len() > 63 {\n-        return false;\n-    }\n-    let mut chars = s.chars();\n-    match chars.next() {\n-        Some(c) if c.is_ascii_lowercase() => {}\n-        _ => return false,\n-    }\n-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n+    false /* ~ changed by cargo-mutants ~ */\n }\n \n #[derive(Debug, Clone, PartialEq, Eq)]\n pub enum ProjectStatus {\n     Active,\n     Suspended,\n     Deleted,\n }\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/embyr-core/src/domain/project.rs:103:5: replace is_valid_project_id -> bool with false",
+    "package": "embyr-core",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 76,
+        "line": 111
+      },
+      "start": {
+        "column": 5,
+        "line": 103
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace || with && in is_valid_project_id\n@@ -95,17 +95,17 @@\n \n     #[test]\n     fn starts_with_dash_invalid() {\n         assert!(ProjectId::new(\"-abc\").is_err());\n     }\n }\n \n fn is_valid_project_id(s: &str) -> bool {\n-    if s.is_empty() || s.len() > 63 {\n+    if s.is_empty() && /* ~ changed by cargo-mutants ~ */ s.len() > 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n         Some(c) if c.is_ascii_lowercase() => {}\n         _ => return false,\n     }\n     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/domain/project.rs:103:21: replace || with && in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": "&&",
+    "span": {
+      "end": {
+        "column": 23,
+        "line": 103
+      },
+      "start": {
+        "column": 21,
+        "line": 103
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace > with == in is_valid_project_id\n@@ -95,17 +95,17 @@\n \n     #[test]\n     fn starts_with_dash_invalid() {\n         assert!(ProjectId::new(\"-abc\").is_err());\n     }\n }\n \n fn is_valid_project_id(s: &str) -> bool {\n-    if s.is_empty() || s.len() > 63 {\n+    if s.is_empty() || s.len() == /* ~ changed by cargo-mutants ~ */ 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n         Some(c) if c.is_ascii_lowercase() => {}\n         _ => return false,\n     }\n     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/domain/project.rs:103:32: replace > with == in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 33,
+        "line": 103
+      },
+      "start": {
+        "column": 32,
+        "line": 103
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace > with < in is_valid_project_id\n@@ -95,17 +95,17 @@\n \n     #[test]\n     fn starts_with_dash_invalid() {\n         assert!(ProjectId::new(\"-abc\").is_err());\n     }\n }\n \n fn is_valid_project_id(s: &str) -> bool {\n-    if s.is_empty() || s.len() > 63 {\n+    if s.is_empty() || s.len() < /* ~ changed by cargo-mutants ~ */ 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n         Some(c) if c.is_ascii_lowercase() => {}\n         _ => return false,\n     }\n     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/domain/project.rs:103:32: replace > with < in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": "<",
+    "span": {
+      "end": {
+        "column": 33,
+        "line": 103
+      },
+      "start": {
+        "column": 32,
+        "line": 103
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace > with >= in is_valid_project_id\n@@ -95,17 +95,17 @@\n \n     #[test]\n     fn starts_with_dash_invalid() {\n         assert!(ProjectId::new(\"-abc\").is_err());\n     }\n }\n \n fn is_valid_project_id(s: &str) -> bool {\n-    if s.is_empty() || s.len() > 63 {\n+    if s.is_empty() || s.len() >= /* ~ changed by cargo-mutants ~ */ 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n         Some(c) if c.is_ascii_lowercase() => {}\n         _ => return false,\n     }\n     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/domain/project.rs:103:32: replace > with >= in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": ">=",
+    "span": {
+      "end": {
+        "column": 33,
+        "line": 103
+      },
+      "start": {
+        "column": 32,
+        "line": 103
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace match guard c.is_ascii_lowercase() with true in is_valid_project_id\n@@ -100,17 +100,17 @@\n }\n \n fn is_valid_project_id(s: &str) -> bool {\n     if s.is_empty() || s.len() > 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n-        Some(c) if c.is_ascii_lowercase() => {}\n+        Some(c) if true /* ~ changed by cargo-mutants ~ */ => {}\n         _ => return false,\n     }\n     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n }\n \n #[derive(Debug, Clone, PartialEq, Eq)]\n pub enum ProjectStatus {\n     Active,\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/embyr-core/src/domain/project.rs:108:20: replace match guard c.is_ascii_lowercase() with true in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 42,
+        "line": 108
+      },
+      "start": {
+        "column": 20,
+        "line": 108
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace match guard c.is_ascii_lowercase() with false in is_valid_project_id\n@@ -100,17 +100,17 @@\n }\n \n fn is_valid_project_id(s: &str) -> bool {\n     if s.is_empty() || s.len() > 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n-        Some(c) if c.is_ascii_lowercase() => {}\n+        Some(c) if false /* ~ changed by cargo-mutants ~ */ => {}\n         _ => return false,\n     }\n     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n }\n \n #[derive(Debug, Clone, PartialEq, Eq)]\n pub enum ProjectStatus {\n     Active,\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/embyr-core/src/domain/project.rs:108:20: replace match guard c.is_ascii_lowercase() with false in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 42,
+        "line": 108
+      },
+      "start": {
+        "column": 20,
+        "line": 108
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace || with && in is_valid_project_id\n@@ -103,17 +103,17 @@\n     if s.is_empty() || s.len() > 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n         Some(c) if c.is_ascii_lowercase() => {}\n         _ => return false,\n     }\n-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() && /* ~ changed by cargo-mutants ~ */ c == '-')\n }\n \n #[derive(Debug, Clone, PartialEq, Eq)]\n pub enum ProjectStatus {\n     Active,\n     Suspended,\n     Deleted,\n }\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/domain/project.rs:111:64: replace || with && in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": "&&",
+    "span": {
+      "end": {
+        "column": 66,
+        "line": 111
+      },
+      "start": {
+        "column": 64,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace || with && in is_valid_project_id\n@@ -103,17 +103,17 @@\n     if s.is_empty() || s.len() > 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n         Some(c) if c.is_ascii_lowercase() => {}\n         _ => return false,\n     }\n-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n+    chars.all(|c| c.is_ascii_lowercase() && /* ~ changed by cargo-mutants ~ */ c.is_ascii_digit() || c == '-')\n }\n \n #[derive(Debug, Clone, PartialEq, Eq)]\n pub enum ProjectStatus {\n     Active,\n     Suspended,\n     Deleted,\n }\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/domain/project.rs:111:42: replace || with && in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": "&&",
+    "span": {
+      "end": {
+        "column": 44,
+        "line": 111
+      },
+      "start": {
+        "column": 42,
+        "line": 111
+      }
+    }
+  },
+  {
+    "diff": "--- crates/embyr-core/src/domain/project.rs\n+++ replace == with != in is_valid_project_id\n@@ -103,17 +103,17 @@\n     if s.is_empty() || s.len() > 63 {\n         return false;\n     }\n     let mut chars = s.chars();\n     match chars.next() {\n         Some(c) if c.is_ascii_lowercase() => {}\n         _ => return false,\n     }\n-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')\n+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c != /* ~ changed by cargo-mutants ~ */ '-')\n }\n \n #[derive(Debug, Clone, PartialEq, Eq)]\n pub enum ProjectStatus {\n     Active,\n     Suspended,\n     Deleted,\n }\n",
+    "file": "crates/embyr-core/src/domain/project.rs",
+    "function": {
+      "function_name": "is_valid_project_id",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 112
+        },
+        "start": {
+          "column": 1,
+          "line": 102
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/embyr-core/src/domain/project.rs:111:69: replace == with != in is_valid_project_id",
+    "package": "embyr-core",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 71,
+        "line": 111
+      },
+      "start": {
+        "column": 69,
+        "line": 111
+      }
+    }
+  }
+]

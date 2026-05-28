@@ -1,0 +1,21 @@
+--- crates/embyr-core/src/domain/project.rs
++++ replace || with && in is_valid_project_id
+@@ -103,17 +103,17 @@
+     if s.is_empty() || s.len() > 63 {
+         return false;
+     }
+     let mut chars = s.chars();
+     match chars.next() {
+         Some(c) if c.is_ascii_lowercase() => {}
+         _ => return false,
+     }
+-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
++    chars.all(|c| c.is_ascii_lowercase() && /* ~ changed by cargo-mutants ~ */ c.is_ascii_digit() || c == '-')
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum ProjectStatus {
+     Active,
+     Suspended,
+     Deleted,
+ }

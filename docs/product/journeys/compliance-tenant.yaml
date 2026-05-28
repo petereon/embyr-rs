@@ -1,0 +1,8 @@
+version: "1.0"
+feature: embyr-rs
+persona: P4
+persona_name: Riley (Compliance-first Tenant / CISO)
+jobs:
+  - JOB-04  # credential-isolation
+updated: "2026-05-23"
+source: docs/feature/embyr-rs/discuss/journey-compliance-tenant.yaml

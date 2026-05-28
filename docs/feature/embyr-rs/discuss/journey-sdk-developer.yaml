@@ -1,0 +1,143 @@
+version: "1.0"
+feature: embyr-rs
+persona: P1
+persona_name: Alex (SDK Developer)
+jobs:
+  - JOB-01
+  - JOB-03
+updated: "2026-05-23"
+
+emotional_arc:
+  - step: 1
+    label: Configure SDK
+    emotion: Uncertain
+  - step: 2
+    label: Write Document
+    emotion: Focused
+  - step: 3
+    label: Read Document
+    emotion: Relieved
+  - step: 4
+    label: Query Collection
+    emotion: Confident
+  - step: 5
+    label: Listen (onSnapshot)
+    emotion: Delighted
+  - step: 6
+    label: Run Transaction
+    emotion: Confident
+  - step: 7
+    label: Reconnect with Resume Token
+    emotion: Trusting
+
+steps:
+  - id: 1
+    name: configure_sdk
+    action: >
+      Change firebase.initializeApp config: set apiKey to embyr project auth_key,
+      add firestoreSettings({host: "${embyr_grpc_endpoint}", ssl: false}).
+    expected_output: No error at init; getFirestore() returns Firestore instance.
+    artifacts_produced:
+      - embyr_grpc_endpoint
+      - project_id
+      - auth_key
+    error_paths:
+      - condition: Wrong host
+        symptom: SDK hangs on first operation
+        recovery: Check host:port; verify /healthz responds
+
+  - id: 2
+    name: write_document
+    action: "setDoc(doc(db, 'users', 'alice'), {name: 'Alice', age: 30})"
+    expected_output: Promise resolves; document visible in customer DB.
+    artifacts_consumed:
+      - embyr_grpc_endpoint
+      - project_id
+      - auth_key
+    artifacts_produced:
+      - document_path
+    error_paths:
+      - condition: Auth failure
+        symptom: permission-denied
+        recovery: Verify auth_key matches project config
+
+  - id: 3
+    name: read_document
+    action: "getDoc(doc(db, 'users', 'alice'))"
+    expected_output: snapshot.exists() === true; data equals written fields.
+    artifacts_consumed:
+      - document_path
+    error_paths:
+      - condition: NotFound
+        symptom: snapshot.exists() === false
+        recovery: Ensure step 2 succeeded; check auth
+
+  - id: 4
+    name: query_collection
+    action: >
+      getDocs(query(collection(db, 'users'), where('age', '>=', 18), orderBy('age')))
+    expected_output: Array of documents matching filter; ordering correct.
+    artifacts_produced:
+      - query_result_set
+    error_paths:
+      - condition: FailedPrecondition
+        symptom: missing composite index error
+        recovery: Create required index via admin API
+
+  - id: 5
+    name: listen_on_snapshot
+    action: "onSnapshot(collection(db, 'users'), snapshot => { ... })"
+    expected_output: >
+      Initial snapshot delivered. After a write from a second client,
+      listener fires within 2 seconds.
+    artifacts_produced:
+      - resume_token
+    error_paths:
+      - condition: No change event
+        symptom: Listener never fires after write
+        recovery: Verify NOTIFY trigger installed; check transport connection
+
+  - id: 6
+    name: run_transaction
+    action: >
+      runTransaction(db, async (tx) => { const snap = await tx.get(ref);
+      tx.update(ref, {count: snap.data().count + 1}); })
+    expected_output: Transaction commits; count incremented exactly 1 under concurrency.
+    error_paths:
+      - condition: Aborted
+        symptom: SDK auto-retries (visible in logs as version mismatch)
+        recovery: Expected under high concurrency; retry succeeds
+
+  - id: 7
+    name: reconnect_resume_token
+    action: >
+      Simulate network drop (30s); reconnect. onSnapshot listener still active.
+    expected_output: >
+      Delta delivery: only documents changed during disconnect window,
+      not a full re-fetch.
+    artifacts_consumed:
+      - resume_token
+    error_paths:
+      - condition: Token expired (>24h)
+        symptom: Full re-snapshot sent
+        recovery: Correct behavior; no data loss
+
+shared_artifacts:
+  - name: embyr_grpc_endpoint
+    type: host:port
+    source_of_truth: service config server.grpc_port
+  - name: project_id
+    type: string
+    source_of_truth: projects table PK
+  - name: auth_key
+    type: string
+    source_of_truth: Admin Create Project (one-time)
+  - name: document_path
+    type: resource name
+    source_of_truth: documents.path
+  - name: query_result_set
+    type: list<document>
+    source_of_truth: server response (ephemeral)
+  - name: resume_token
+    type: bytes
+    source_of_truth: base64.RawURLEncoding(RFC3339Nano UTC)

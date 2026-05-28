@@ -1,0 +1,9 @@
+version: "1.0"
+feature: embyr-rs
+persona: P2
+persona_name: Sam (Service Operator)
+jobs:
+  - JOB-02  # tenant-provision
+  - JOB-06  # tenant-control
+updated: "2026-05-23"
+source: docs/feature/embyr-rs/discuss/journey-service-operator.yaml

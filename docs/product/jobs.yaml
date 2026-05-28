@@ -1,0 +1,162 @@
+version: "1.0"
+feature: embyr-rs
+updated: "2026-05-23"
+
+jobs:
+  - id: JOB-01
+    name: sdk-compat
+    persona: P1
+    job_story: >
+      When I have an app that uses the Firebase SDK, I want to point it at an embyr
+      endpoint and have it behave identically to Google Firestore, so I can eliminate
+      vendor lock-in and keep data in a region I control.
+    dimensions:
+      functional: Use firebase.initializeApp pointing at embyr; all SDK calls succeed unchanged
+      emotional: Feel confident the migration won't break production; feel in control of data residency
+      social: Be seen as infrastructure-independent; avoid "locked into Google" reputation
+    opportunity_score: 18
+    priority: critical
+
+  - id: JOB-02
+    name: tenant-provision
+    persona: P2
+    job_story: >
+      When I need to give a new customer their Firestore-compatible endpoint, I want to
+      create a project via the admin API and hand them credentials, so they are up and
+      running without manual database setup.
+    dimensions:
+      functional: POST /admin/v1/projects creates project, migrates DB, returns credentials
+      emotional: Feel confident isolation invariant holds; feel efficient onboarding at scale
+      social: Be trusted by customers that data is isolated
+    opportunity_score: 12
+    priority: high
+
+  - id: JOB-03
+    name: live-sync
+    persona: P1
+    job_story: >
+      When multiple clients are reading and writing a shared collection, I want all
+      connected onSnapshot listeners to receive changes within seconds, so I can build
+      collaborative features without a separate pub-sub layer.
+    dimensions:
+      functional: onSnapshot fires for every committed write; resume tokens allow reconnect
+      emotional: Feel confident that users see a consistent view
+      social: Deliver a responsive collaborative UX that rivals Google Firestore
+    opportunity_score: 15
+    priority: critical
+
+  - id: JOB-04
+    name: credential-isolation
+    persona: P4
+    job_story: >
+      When my security policy prohibits DB credentials from leaving my VPC, I want to
+      deploy the embyr agent alongside my Postgres instance, so I can use the Firestore
+      SDK without exposing credentials to any third party.
+    dimensions:
+      functional: embyr agent runs in-VPC; embyr SaaS never receives DSN
+      emotional: Feel secure I will pass my next audit
+      social: Demonstrate to auditors that zero credentials traverse the cloud boundary
+    opportunity_score: 14
+    priority: critical
+
+  - id: JOB-05
+    name: cloud-secret
+    persona: P3
+    job_story: >
+      When my database credentials are already managed in AWS/GCP secret infrastructure,
+      I want embyr to fetch them from there, so I don't have to operate yet another
+      credential store.
+    dimensions:
+      functional: Provide secret ARN; embyr fetches DSN; password rotation is transparent
+      emotional: Feel that operational surface area has not grown
+      social: Be seen as running consistent, auditable secrets hygiene
+    opportunity_score: 10
+    priority: high
+
+  - id: JOB-06
+    name: tenant-control
+    persona: P2
+    job_story: >
+      When a customer is overdue on payment or abusing the service, I want to suspend
+      their project and see their usage metrics, so I can enforce SLAs without touching
+      their documents.
+    dimensions:
+      functional: POST /suspend → PermissionDenied on all data requests; usage in daily_project_metrics
+      emotional: Feel in control of costs
+      social: Be trusted by investors that the service is self-sustaining
+    opportunity_score: 9
+    priority: medium
+
+  - id: JOB-07
+    name: agent-operations
+    persona: P4
+    feature: embyr-agent
+    job_story: >
+      When I need to put the embyr agent into production in my Kubernetes cluster,
+      I want to configure it via environment variables, verify it connects successfully
+      to Postgres and embyr SaaS, and know immediately if the startup fails, so I can
+      complete the deployment in under 30 minutes and hand off a green health check to
+      my SRE team.
+    dimensions:
+      functional: >
+        EMBYR_AGENT_* env vars configure everything; agent exits non-zero with named missing var;
+        agent logs "connected to Postgres" then "listening on :9191"; embyr SaaS accepts
+        backend_mode=agent with endpoint + CA PEM in admin API
+      emotional: Feel in control — startup errors are named and specific; no cryptic TLS failures
+      social: Show the SRE team a clean deploy log without Slack escalations
+    four_forces:
+      push: Without the agent, deployment is blocked by security policy prohibiting credential egress
+      pull: Structured log + startup probe means "it works" can be demoed in the first deploy session
+      anxiety: TLS cert misconfiguration causes cryptic errors at 3am — mitigated by named startup errors
+      habit: kubectl logs is the mental model; agent must emit machine-readable JSON logs compatible with Loki/Splunk
+    opportunity_score: 16
+    priority: critical
+
+  - id: JOB-08
+    name: agent-livesync
+    persona: P1
+    secondary_persona: P4
+    feature: embyr-agent
+    job_story: >
+      When SDK clients use onSnapshot on a project backed by backend_mode=agent, I want
+      the agent to forward Postgres NOTIFY events to the embyr SaaS via the Subscribe
+      streaming RPC, so collaborative features work identically to direct-mode projects
+      without the SDK knowing the difference.
+    dimensions:
+      functional: >
+        Agent maintains Postgres LISTEN connection; pushes DocChange over Subscribe stream;
+        embyr SaaS fans out to Listen targets; overflow triggers RESET; SaaS reconnects
+        with exponential backoff 1s→30s
+      emotional: Alex feels real-time UX is identical to Firestore (no awareness of agent mode)
+      social: Alex can demo real-time collaboration without caveats about agent mode limitations
+    four_forces:
+      push: Without Subscribe, onSnapshot falls back to polling or shows stale data; collaborative features break
+      pull: Subscribe with reconnect means agent mode is a full production peer of direct mode
+      anxiety: Silent change loss when Subscribe stream drops — mitigated by RESET + re-snapshot guarantee
+      habit: Alex tests real-time with Firebase Emulator; wants identical behavior from agent integration tests
+    opportunity_score: 15
+    priority: critical
+
+  - id: JOB-09
+    name: agent-auditproof
+    persona: P4
+    feature: embyr-agent
+    job_story: >
+      When my external security auditor asks me to demonstrate the "zero credential egress"
+      claim, I want to show them the agent network traffic log, the embyr SaaS system DB
+      entry (backend_mode=agent, no DSN stored), and the mTLS handshake log, so I can
+      close the audit finding without writing a remediation plan.
+    dimensions:
+      functional: >
+        System DB projects row shows backend_mode=agent, NULL backend_pg_creds_enc;
+        agent logs show mTLS handshake at DEBUG; DSN is never echoed in any log line;
+        agent GRPC wire logs contain no DSN strings
+      emotional: Feel confident walking into the audit room; evidence is unambiguous and self-documenting
+      social: Be seen by the auditor as operating a mature, evidence-based security posture
+    four_forces:
+      push: Open SOC2 finding — verbal claim insufficient; blocks contract renewal
+      pull: System DB row + network capture = concrete non-repudiable evidence; finding closed
+      anxiety: A bug logs the DSN at DEBUG level — mitigated by mandatory negative test (grep for sentinel)
+      habit: Auditors expect DB record or config file as evidence; system DB row serves this role
+    opportunity_score: 12
+    priority: high

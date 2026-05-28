@@ -1,0 +1,24 @@
+--- crates/embyr-core/src/auth/ecies.rs
++++ replace derive_static_secret -> StaticSecret with Default::default()
+@@ -5,20 +5,17 @@
+ use hkdf::Hkdf;
+ use rand_core::OsRng;
+ use sha2::Sha256;
+ use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
+ 
+ use crate::error::CoreError;
+ 
+ fn derive_static_secret(api_key: &[u8]) -> StaticSecret {
+-    let hk = Hkdf::<Sha256>::new(Some(b"embyr-ecies-v1-static"), api_key);
+-    let mut okm = [0u8; 32];
+-    hk.expand(&[], &mut okm).expect("32 bytes always valid for HKDF");
+-    StaticSecret::from(okm)
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ fn derive_aes_key(shared_secret: &[u8]) -> [u8; 32] {
+     let hk = Hkdf::<Sha256>::new(Some(b"embyr-ecies-v1-enc"), shared_secret);
+     let mut okm = [0u8; 32];
+     hk.expand(&[], &mut okm).expect("32 bytes valid");
+     okm
+ }

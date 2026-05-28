@@ -163,8 +163,9 @@ use embyr_proto::agent::{
     storage_agent_server::{StorageAgent, StorageAgentServer},
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, Document as AgentDocument,
-    GetDocumentRequest, PingRequest, PingResponse, RollbackRequest, RunQueryRequest,
-    RunQueryResponse, UpdateDocumentRequest,
+    GetDocumentRequest, ListDocumentsRequest, ListDocumentsResponse,
+    PingRequest, PingResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
+    RunQueryRequest, RunQueryResponse, UpdateDocumentRequest,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
@@ -337,6 +338,20 @@ impl StorageAgent for MockAgentServer {
                 nanos: now.subsec_nanos() as i32,
             }),
         }))
+    }
+
+    async fn run_aggregation_query(
+        &self,
+        _request: Request<RunAggregationQueryRequest>,
+    ) -> Result<Response<RunAggregationQueryResponse>, Status> {
+        Err(Status::unimplemented("not implemented — step 05-02"))
+    }
+
+    async fn list_documents(
+        &self,
+        _request: Request<ListDocumentsRequest>,
+    ) -> Result<Response<ListDocumentsResponse>, Status> {
+        Err(Status::unimplemented("not implemented — step 05-02"))
     }
 }
 

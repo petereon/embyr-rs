@@ -1,0 +1,34 @@
+--- crates/embyr-core/src/auth/ecies.rs
++++ replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])
+@@ -24,30 +24,17 @@
+ }
+ 
+ pub fn derive_public_key(api_key: &[u8]) -> [u8; 32] {
+     let secret = derive_static_secret(api_key);
+     PublicKey::from(&secret).to_bytes()
+ }
+ 
+ pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
+-    let eph_secret = EphemeralSecret::random_from_rng(OsRng);
+-    let eph_pub = PublicKey::from(&eph_secret);
+-    let shared = eph_secret.diffie_hellman(&PublicKey::from(*recipient_pubkey));
+-    let aes_key = derive_aes_key(shared.as_bytes());
+-    let cipher = Aes256Gcm::new(&aes_key.into());
+-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+-    let ct = cipher
+-        .encrypt(&nonce, plaintext)
+-        .map_err(|e| CoreError::InvalidArgument(e.to_string()))?;
+-    let mut out = Vec::with_capacity(32 + 12 + ct.len());
+-    out.extend_from_slice(eph_pub.as_bytes());
+-    out.extend_from_slice(&nonce);
+-    out.extend_from_slice(&ct);
+-    Ok(out)
++    Ok(vec![]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> {
+     if ciphertext.len() < 32 + 12 + 16 {
+         return Err(CoreError::InvalidArgument("ciphertext too short".into()));
+     }
+     let eph_pub_bytes: [u8; 32] = ciphertext[..32].try_into().unwrap();
+     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();

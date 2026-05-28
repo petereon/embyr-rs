@@ -1,0 +1,589 @@
+{
+  "roadmap": {
+    "project_id": "embyr-rs",
+    "created_at": "2026-05-24",
+    "total_steps": 25,
+    "validation": {
+      "status": "approved",
+      "approved_by": "nw-solution-architect",
+      "approved_at": "2026-05-24"
+    }
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Foundation: workspace, proto, core, auth primitives",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Convert to 5-crate Cargo workspace",
+          "criteria": [
+            "`cargo build --workspace` succeeds with zero errors",
+            "`cargo deny check` passes with embyr-core IO-prohibition rule",
+            "All five crates appear in `cargo metadata --workspace`"
+          ],
+          "files_to_modify": [
+            "Cargo.toml",
+            "crates/embyr-proto/Cargo.toml",
+            "crates/embyr-core/Cargo.toml",
+            "crates/embyr-server/Cargo.toml",
+            "crates/embyr-admin/Cargo.toml",
+            "crates/embyr-agent/Cargo.toml",
+            "deny.toml"
+          ],
+          "deps": [],
+          "implementation_notes": "Convert minimal single-crate Cargo.toml to workspace root with five member crates under crates/. Pin workspace deps for tokio, tonic, axum, sqlx, argon2, blake3, thiserror, serde, tracing."
+        },
+        {
+          "id": "01-02",
+          "name": "Vendor Firestore protos and run tonic-build codegen",
+          "criteria": [
+            "`cargo build -p embyr-proto` succeeds",
+            "`embyr_proto::firestore::GetDocumentRequest` is importable",
+            "`embyr_proto::agent::StorageAgentServer` is importable"
+          ],
+          "files_to_modify": [
+            "crates/embyr-proto/Cargo.toml",
+            "crates/embyr-proto/build.rs",
+            "crates/embyr-proto/src/lib.rs",
+            "proto/google/firestore/v1/firestore.proto",
+            "proto/google/firestore/v1/document.proto",
+            "proto/embyr/agent/v1/storage_agent.proto"
+          ],
+          "deps": ["01-01"],
+          "implementation_notes": "Vendor googleapis Firestore v1 protos into proto/. Configure tonic-build in build.rs. Also define embyr.agent.v1 StorageAgent service proto."
+        },
+        {
+          "id": "01-03",
+          "name": "Define core domain types and BackendAdapter trait",
+          "criteria": [
+            "`cargo build -p embyr-core` succeeds",
+            "`cargo deny check` confirms embyr-core has no IO crate in dependency closure",
+            "`dyn BackendAdapter` compiles (trait is object-safe)"
+          ],
+          "files_to_modify": [
+            "crates/embyr-core/src/lib.rs",
+            "crates/embyr-core/src/domain/project.rs",
+            "crates/embyr-core/src/domain/document.rs",
+            "crates/embyr-core/src/domain/field_value.rs",
+            "crates/embyr-core/src/domain/query.rs",
+            "crates/embyr-core/src/domain/transaction.rs",
+            "crates/embyr-core/src/storage/backend_adapter.rs",
+            "crates/embyr-core/src/error.rs"
+          ],
+          "deps": ["01-02"],
+          "implementation_notes": "Pure Rust domain: Project, ProjectStatus, BackendMode, BackendConfig, FirestoreDocument, FieldValue (8 types), QueryFilter, TransactionId. BackendAdapter trait: get/create/update/delete document, run_query, begin/commit/rollback transaction, probe."
+        },
+        {
+          "id": "01-04",
+          "name": "Auth primitives: Argon2id, BLAKE3, ECIES (pure fns)",
+          "criteria": [
+            "Argon2id hash of known key verifies correctly (unit test)",
+            "ECIES encrypt-then-decrypt round-trips a DSN string",
+            "`cargo test -p embyr-core` passes all auth unit tests"
+          ],
+          "files_to_modify": [
+            "crates/embyr-core/src/auth/argon2.rs",
+            "crates/embyr-core/src/auth/blake3.rs",
+            "crates/embyr-core/src/auth/ecies.rs",
+            "crates/embyr-core/Cargo.toml"
+          ],
+          "deps": ["01-03"],
+          "implementation_notes": "Argon2id: memory=65536KiB, iter=3, par=4, dual-hash rotation window. ECIES: x25519-dalek + hkdf + aes-gcm, private key re-derived from API key on each call. BLAKE3: cache key derivation. All pure/no-async."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "Walking skeleton: system DB, customer DB, gRPC GetDocument",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "System DB schema and SystemDb adapter",
+          "criteria": [
+            "sqlx migrate run against Testcontainers Postgres succeeds",
+            "SystemDb::probe() returns Ok when DB reachable and schema current",
+            "SystemDb::probe() returns Err with structured message when unreachable"
+          ],
+          "files_to_modify": [
+            "migrations/0001_initial_schema.sql",
+            "migrations/0002_metrics.sql",
+            "migrations/0003_composite_indexes.sql",
+            "crates/embyr-server/src/adapters/system_db.rs",
+            "crates/embyr-server/Cargo.toml"
+          ],
+          "deps": ["01-04"],
+          "implementation_notes": "System DB tables: projects, daily_project_metrics, composite_indexes. SystemDb adapter uses sqlx compile-time checked queries. probe() verifies schema version."
+        },
+        {
+          "id": "02-02",
+          "name": "Customer DB schema and PostgresBackendAdapter::probe + get_document",
+          "criteria": [
+            "PostgresBackendAdapter::probe() passes against Testcontainers Postgres with migrations",
+            "get_document returns Ok(None) for non-existent path",
+            "get_document returns Ok(Some(doc)) for seeded document with correct fields"
+          ],
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/postgres_backend.rs",
+            "migrations/customer/0001_documents.sql"
+          ],
+          "deps": ["02-01"],
+          "implementation_notes": "Customer DB: documents table (project_id, collection_path, document_id, fields JSONB, version BIGINT, create_time, update_time, deleted). Implements BackendAdapter trait."
+        },
+        {
+          "id": "02-03",
+          "name": "Walking skeleton: gRPC server wiring and GetDocument E2E",
+          "criteria": [
+            "Walking skeleton test passes: document seeded in Postgres, GetDocument via tonic returns doc with exists=true",
+            "Server refuses to start when SystemDb probe fails",
+            "Auth interceptor rejects wrong API key with UNAUTHENTICATED"
+          ],
+          "test_file": "tests/acceptance/walking_skeleton.rs",
+          "scenario_name": "sdk_developer_retrieves_written_document_via_grpc",
+          "files_to_modify": [
+            "crates/embyr-server/src/main.rs",
+            "crates/embyr-server/src/grpc/handler.rs",
+            "crates/embyr-server/src/middleware/auth.rs",
+            "crates/embyr-server/src/adapters/credential_cache.rs",
+            "crates/embyr-server/src/encoding/firestore_proto.rs",
+            "tests/acceptance/walking_skeleton.rs"
+          ],
+          "deps": ["02-02"],
+          "implementation_notes": "Composition root: wire → probe_all → listen. Auth interceptor Tower layer: load project, check status, Argon2id verify via spawn_blocking, rate limit, resolve BackendAdapter from CredentialCache. Wire gRPC listener on ephemeral port for tests."
+        },
+        {
+          "id": "02-04",
+          "name": "Healthz endpoint and US-01 SDK configure tests",
+          "criteria": [
+            "GET /healthz returns 200 OK within 100ms",
+            "gRPC client pointed at non-existent host gets transport error (not panic)",
+            "All three us_01 acceptance tests pass"
+          ],
+          "test_file": "tests/acceptance/us_01_configure_sdk.rs",
+          "scenario_name": "healthz_returns_200_while_server_healthy",
+          "files_to_modify": [
+            "crates/embyr-server/src/grpc/healthz.rs",
+            "crates/embyr-server/src/main.rs",
+            "tests/acceptance/us_01_configure_sdk.rs"
+          ],
+          "deps": ["02-03"]
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "Document write, read, delete, and full field type encoding",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "CreateDocument, UpdateDocument, delete with OCC",
+          "criteria": [
+            "write_then_read_returns_same_document_fields passes",
+            "write_result_update_time_has_microsecond_precision passes",
+            "concurrent_writes_on_same_document_one_aborts_per_occ passes",
+            "write_to_suspended_project_returns_permission_denied passes",
+            "write_with_invalid_api_key_returns_unauthenticated passes"
+          ],
+          "test_file": "tests/acceptance/us_02_write_document.rs",
+          "scenario_name": "write_then_read_returns_same_document_fields",
+          "files_to_modify": [
+            "crates/embyr-server/src/grpc/handler.rs",
+            "crates/embyr-server/src/adapters/postgres_backend.rs",
+            "crates/embyr-core/src/domain/document.rs",
+            "tests/acceptance/us_02_write_document.rs"
+          ],
+          "deps": ["02-04"],
+          "implementation_notes": "CreateDocument: INSERT version=1, server-assigned microsecond timestamps. UpdateDocument: UPDATE with OCC version check, ABORTED on mismatch. delete_document: soft-delete via deleted=true."
+        },
+        {
+          "id": "03-02",
+          "name": "All 8 Firestore field types round-trip encoding",
+          "criteria": [
+            "get_existing_document_returns_correct_fields passes",
+            "get_nonexistent_document_returns_missing_not_error passes",
+            "all_field_types_round_trip_correctly passes (all 8 Firestore types)",
+            "get_document_with_wrong_key_returns_unauthenticated passes"
+          ],
+          "test_file": "tests/acceptance/us_03_read_document.rs",
+          "scenario_name": "all_field_types_round_trip_correctly",
+          "files_to_modify": [
+            "crates/embyr-server/src/encoding/firestore_proto.rs",
+            "crates/embyr-server/src/encoding/field_value.rs",
+            "crates/embyr-server/src/adapters/postgres_backend.rs",
+            "crates/embyr-core/src/domain/field_value.rs",
+            "tests/acceptance/us_03_read_document.rs"
+          ],
+          "deps": ["03-01"],
+          "implementation_notes": "Encode/decode: string, int64, float64, bool, Timestamp (ns precision), bytes, array (recursive), map (recursive), null. JSONB storage format per type. MissingDocument response for absent paths."
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "name": "RunQuery: basic and advanced (NaN, indexes, collection groups)",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "04-01",
+          "name": "RunQuery: where, orderBy, limit, startAfter",
+          "criteria": [
+            "where_filter_returns_only_matching_documents passes (age >= 18)",
+            "order_by_returns_documents_in_ascending_order passes",
+            "limit_returns_at_most_n_documents passes",
+            "start_after_cursor_skips_cursor_document passes"
+          ],
+          "test_file": "tests/acceptance/us_04_query_collection.rs",
+          "scenario_name": "where_filter_returns_only_matching_documents",
+          "files_to_modify": [
+            "crates/embyr-server/src/grpc/handler.rs",
+            "crates/embyr-server/src/adapters/postgres_backend.rs",
+            "crates/embyr-core/src/domain/query.rs",
+            "crates/embyr-server/src/encoding/query.rs",
+            "tests/acceptance/us_04_query_collection.rs"
+          ],
+          "deps": ["03-02"],
+          "implementation_notes": "Translate StructuredQuery to dynamic SQL via sqlx. FieldFilter: JSONB path extract + cast. CompositeFilter: AND. OrderBy: ORDER BY JSONB cast. Limit: LIMIT N. StartAfter: WHERE clause from cursor snapshot. Stream DocumentResult then Done."
+        },
+        {
+          "id": "04-02",
+          "name": "Advanced query: NaN, composite indexes, collection groups",
+          "criteria": [
+            "is_nan_filter_returns_only_nan_documents passes",
+            "query_without_ready_index_returns_failed_precondition passes",
+            "query_succeeds_after_index_reaches_ready_status passes",
+            "collection_group_query_returns_documents_from_all_matching_subcollections passes",
+            "subscription_with_multi_field_filter_without_index_is_rejected passes"
+          ],
+          "test_file": "tests/acceptance/us_04_query_collection.rs",
+          "scenario_name": "is_nan_filter_returns_only_nan_documents",
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/postgres_backend.rs",
+            "crates/embyr-server/src/adapters/index_manager.rs",
+            "crates/embyr-server/src/grpc/handler.rs",
+            "tests/acceptance/us_04_query_collection.rs"
+          ],
+          "deps": ["04-01"],
+          "implementation_notes": "IS_NAN: JSONB NaN detection. Composite index: composite_indexes table in system DB; FAILED_PRECONDITION when no READY index for multi-field+orderBy query. Collection group: all_descendants=true omits collection_path prefix constraint in SQL."
+        }
+      ]
+    },
+    {
+      "id": "05",
+      "name": "Real-time Listen: initial snapshot, NOTIFY fan-out, resume tokens",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "05-01",
+          "name": "Listen initial snapshot: AddTarget, DocumentChange, CURRENT",
+          "criteria": [
+            "listen_delivers_full_initial_snapshot passes (3 DocumentChange Added events)",
+            "current_marker_arrives_after_last_initial_document passes",
+            "idle_listen_stream_receives_no_change_keep_alive passes (within 35s)"
+          ],
+          "test_file": "tests/acceptance/us_05_listen_realtime.rs",
+          "scenario_name": "listen_delivers_full_initial_snapshot",
+          "files_to_modify": [
+            "crates/embyr-server/src/grpc/handler.rs",
+            "crates/embyr-server/src/realtime/listen_registry.rs",
+            "crates/embyr-server/src/realtime/listen_handler.rs",
+            "crates/embyr-core/src/realtime/query_filter.rs",
+            "tests/acceptance/us_05_listen_realtime.rs"
+          ],
+          "deps": ["04-02"],
+          "implementation_notes": "Listen bidi streaming RPC. AddTarget: query documents, stream DocumentChange(Added) per doc, then TargetChange(CURRENT). ListenRegistry: Arc<RwLock<HashMap<ProjectId, Vec<SubscriberTx>>>>. Keep-alive: NO_CHANGE every 30s. Slow consumer overflow: RESET on channel capacity 64 exceeded. NOTIFY channel name: dc_<BLAKE3_16hex(project_id)> (19 chars, safe for Postgres 63-char limit — resolves OQ-04)."
+        },
+        {
+          "id": "05-02",
+          "name": "Postgres LISTEN/NOTIFY fan-out for live updates",
+          "criteria": [
+            "write_triggers_listen_callback_within_two_seconds passes (NOTIFY-driven, <= 2000ms)",
+            "delete_triggers_removed_change_event_on_listener passes",
+            "slow_consumer_overflow_triggers_reset passes (capacity 64 exceeded → RESET)"
+          ],
+          "test_file": "tests/acceptance/us_05_listen_realtime.rs",
+          "scenario_name": "write_triggers_listen_callback_within_two_seconds",
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/postgres_notify_listener.rs",
+            "crates/embyr-server/src/adapters/postgres_backend.rs",
+            "crates/embyr-server/src/realtime/listen_registry.rs",
+            "tests/acceptance/us_05_listen_realtime.rs"
+          ],
+          "deps": ["05-01"],
+          "implementation_notes": "PostgresNotifyListener: dedicated PgConnection (not pool) per project, LISTEN dc_<BLAKE3_16hex>. After write commit: NOTIFY dc_<channel> with document path. Per-project Tokio task receives NOTIFY, calls get_document (handles 8KB cap), calls ListenRegistry::fan_out. In-process query filter per subscriber target."
+        },
+        {
+          "id": "05-03",
+          "name": "Resume token: delta delivery and stale token re-snapshot",
+          "criteria": [
+            "reconnect_with_resume_token_delivers_only_delta passes (3 delta events, no full re-snapshot)",
+            "stale_resume_token_triggers_full_resnapshot_not_error passes (full snapshot, status OK)",
+            "listen_latency_p99_under_2_seconds_with_100_concurrent_listeners passes"
+          ],
+          "test_file": "tests/acceptance/us_05_listen_realtime.rs",
+          "scenario_name": "reconnect_with_resume_token_delivers_only_delta",
+          "files_to_modify": [
+            "crates/embyr-server/src/realtime/resume_token.rs",
+            "crates/embyr-server/src/realtime/listen_handler.rs",
+            "crates/embyr-server/src/adapters/postgres_backend.rs",
+            "tests/acceptance/us_05_listen_realtime.rs"
+          ],
+          "deps": ["05-02"],
+          "implementation_notes": "Resume token: BLAKE3(timestamp + project_id) bytes. On reconnect with token <= 24h old: query update_time > decoded_ts (delta). Token > 24h or unknown: full re-snapshot (no error). Emit NO_CHANGE with fresh token after CURRENT and each keep-alive."
+        }
+      ]
+    },
+    {
+      "id": "06",
+      "name": "Transactions: BeginTransaction, Commit, Rollback, OCC expiry",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "06-01",
+          "name": "Full transaction lifecycle with OCC and auto-expiry",
+          "criteria": [
+            "ten_concurrent_transaction_increments_produce_correct_final_value passes (final == 10)",
+            "expired_transaction_commit_returns_not_found passes (after 61s)",
+            "commit_after_rollback_returns_not_found passes",
+            "occ_conflict_causes_aborted_status passes"
+          ],
+          "test_file": "tests/acceptance/us_06_transactions.rs",
+          "scenario_name": "ten_concurrent_transaction_increments_produce_correct_final_value",
+          "files_to_modify": [
+            "crates/embyr-server/src/grpc/handler.rs",
+            "crates/embyr-server/src/adapters/postgres_backend.rs",
+            "crates/embyr-server/src/transactions/occ.rs",
+            "crates/embyr-core/src/domain/transaction.rs",
+            "migrations/customer/0002_transactions.sql",
+            "tests/acceptance/us_06_transactions.rs"
+          ],
+          "deps": ["05-03"],
+          "implementation_notes": "Transactions table in customer DB: transaction_id (UUID), read_set (paths+versions), write_set (pending mutations), status, started_at. OCC at Commit: verify each read_set doc version unchanged; ABORTED if mismatch. Auto-expiry Tokio task: mark expired after 60s; Commit of expired → NOT_FOUND."
+        }
+      ]
+    },
+    {
+      "id": "07",
+      "name": "Admin API: provisioning, monitoring, and project lifecycle",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "07-01",
+          "name": "POST /admin/v1/projects direct_pg provisioning",
+          "criteria": [
+            "provision_project_returns_201_with_key_and_applies_migrations passes (p99 <= 5s)",
+            "invalid_project_id_format_returns_400 passes",
+            "duplicate_project_id_returns_409 passes",
+            "unreachable_customer_db_returns_400_backend_unavailable passes",
+            "admin_endpoints_not_accessible_on_data_port passes"
+          ],
+          "test_file": "tests/acceptance/us_07_provision_project.rs",
+          "scenario_name": "provision_project_returns_201_with_key_and_applies_migrations",
+          "files_to_modify": [
+            "crates/embyr-admin/src/main.rs",
+            "crates/embyr-admin/src/router.rs",
+            "crates/embyr-admin/src/handlers/provision.rs",
+            "crates/embyr-admin/src/middleware/admin_auth.rs",
+            "crates/embyr-admin/Cargo.toml",
+            "crates/embyr-server/src/main.rs",
+            "tests/acceptance/us_07_provision_project.rs"
+          ],
+          "deps": ["06-01"],
+          "implementation_notes": "AdminRouter: axum on separate TcpListener :9090. Admin auth: Bearer token constant-time comparison vs EMBYR_ADMIN_KEY. Provision: validate project_id regex, check dup, probe DSN, ECIES-encrypt DSN, Argon2id-hash API key (spawn_blocking), apply customer migrations, return 201 with one-time api_key."
+        },
+        {
+          "id": "07-02",
+          "name": "GET /admin/v1/projects and daily_project_metrics",
+          "criteria": [
+            "get_project_returns_status_and_mode_without_credentials passes",
+            "metrics_row_exists_after_sdk_request passes (ingress_bytes or egress_bytes > 0)",
+            "get_nonexistent_project_returns_404 passes",
+            "get_deleted_project_returns_404 passes"
+          ],
+          "test_file": "tests/acceptance/us_08_monitor_project.rs",
+          "scenario_name": "get_project_returns_status_and_mode_without_credentials",
+          "files_to_modify": [
+            "crates/embyr-admin/src/handlers/get_project.rs",
+            "crates/embyr-server/src/adapters/metrics_adapter.rs",
+            "crates/embyr-server/src/middleware/auth.rs",
+            "tests/acceptance/us_08_monitor_project.rs"
+          ],
+          "deps": ["07-01"],
+          "implementation_notes": "GET returns status, backend_mode, auth_mode; no raw creds or encrypted bytes. MetricsAdapter: upsert daily_project_metrics after every SDK request via ON CONFLICT DO UPDATE ADD. Wire MetricsPort into auth interceptor post-request path."
+        },
+        {
+          "id": "07-03",
+          "name": "Suspend, activate, delete with cache invalidation",
+          "criteria": [
+            "suspend_causes_sdk_permission_denied_within_one_second passes",
+            "activate_restores_sdk_access passes",
+            "suspend_already_suspended_project_is_idempotent passes (200 idempotent)",
+            "delete_project_returns_200_and_get_returns_404 passes",
+            "sdk_call_for_deleted_project_returns_not_found passes"
+          ],
+          "test_file": "tests/acceptance/us_09_suspend_project.rs",
+          "scenario_name": "suspend_causes_sdk_permission_denied_within_one_second",
+          "files_to_modify": [
+            "crates/embyr-admin/src/handlers/lifecycle.rs",
+            "crates/embyr-server/src/adapters/credential_cache.rs",
+            "crates/embyr-server/src/middleware/auth.rs",
+            "crates/embyr-server/src/tasks/deletion_sweeper.rs",
+            "tests/acceptance/us_09_suspend_project.rs"
+          ],
+          "deps": ["07-02"],
+          "implementation_notes": "Suspend: update status to SUSPENDED + evict from CredentialCache immediately. Auth interceptor checks status on each cache miss. Delete: soft-delete (status=deleted, deleted_at=now()); GET returns 404 immediately. Deletion sweeper Tokio task purges after deletion_retention (168h)."
+        }
+      ]
+    },
+    {
+      "id": "08",
+      "name": "Browser transport: gRPC-Web and BrowserChannel on :8081",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "08-01",
+          "name": "gRPC-Web and BrowserChannel REST port implementation",
+          "criteria": [
+            "grpc_web_client_reads_and_writes_documents passes (HTTP grpc-web+proto)",
+            "browser_channel_delivers_snapshot_and_live_changes passes",
+            "browser_channel_request_without_sid_returns_400 passes",
+            "single_process_serves_both_grpc_and_grpc_web passes (same PID)"
+          ],
+          "test_file": "tests/acceptance/us_13_browser_transport.rs",
+          "scenario_name": "grpc_web_client_reads_and_writes_documents",
+          "files_to_modify": [
+            "crates/embyr-server/src/rest/mod.rs",
+            "crates/embyr-server/src/rest/browser_channel.rs",
+            "crates/embyr-server/src/rest/grpc_web.rs",
+            "crates/embyr-server/src/main.rs",
+            "tests/acceptance/us_13_browser_transport.rs"
+          ],
+          "deps": ["07-03"],
+          "implementation_notes": "RestRouter: axum :8081 with tonic-web layer for gRPC-Web (Content-Type grpc-web+proto reframing). BrowserChannel: POST /channel creates session+SID, GET /channel back-channel long-polls events. BrowserChannelSession: in-process Arc<Mutex<HashMap<SID, SessionState>>>. Resolves OQ-02 (CORS) and OQ-03 (undocumented extensions) by conforming to Firebase JS SDK behavior."
+        }
+      ]
+    },
+    {
+      "id": "09",
+      "name": "Agent backend: embyr-agent binary and AgentBackendAdapter",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "09-01",
+          "name": "embyr-agent binary with mTLS StorageAgent gRPC",
+          "criteria": [
+            "agent_starts_with_required_env_vars_and_logs_readiness passes (logs :9191 + Postgres)",
+            "connection_without_client_cert_fails_tls_handshake passes",
+            "agent_exits_nonzero_when_db_dsn_missing passes (stderr names missing var)"
+          ],
+          "test_file": "tests/acceptance/us_12_agent_backend.rs",
+          "scenario_name": "agent_starts_with_required_env_vars_and_logs_readiness",
+          "files_to_modify": [
+            "crates/embyr-agent/src/main.rs",
+            "crates/embyr-agent/src/server.rs",
+            "crates/embyr-agent/src/config.rs",
+            "crates/embyr-agent/Cargo.toml"
+          ],
+          "deps": ["08-01"],
+          "implementation_notes": "Agent startup: read EMBYR_AGENT_DB_DSN, EMBYR_AGENT_CERT, EMBYR_AGENT_KEY, EMBYR_AGENT_CA; exit non-zero with clear error if any missing. Probe Postgres. Start tonic mTLS gRPC server (rustls, require client cert from CA). Implement StorageAgentServer proxying BackendAdapter methods. Static link on Linux musl."
+        },
+        {
+          "id": "09-02",
+          "name": "AgentBackendAdapter in embyr-server for agent provisioning",
+          "criteria": [
+            "provision_with_agent_stores_endpoint_not_dsn passes (no DSN in system DB)",
+            "sdk_write_forwarded_through_agent_persists_in_customer_db passes",
+            "rolling_cert_rotation_has_zero_downtime passes",
+            "agent_projects_have_zero_dsn_rows_in_system_db passes"
+          ],
+          "test_file": "tests/acceptance/us_12_agent_backend.rs",
+          "scenario_name": "provision_with_agent_stores_endpoint_not_dsn",
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/agent_backend.rs",
+            "crates/embyr-server/src/adapters/mod.rs",
+            "crates/embyr-admin/src/handlers/provision.rs",
+            "tests/acceptance/us_12_agent_backend.rs"
+          ],
+          "deps": ["09-01"],
+          "implementation_notes": "AgentBackendAdapter: tonic mTLS channel to agent_endpoint. Implements BackendAdapter by proxying each method over StorageAgent gRPC. probe() calls lightweight ping RPC. Store only backend_agent_endpoint in system DB; backend_pg_creds_enc = NULL."
+        }
+      ]
+    },
+    {
+      "id": "10",
+      "name": "Cloud secrets: AWS Secrets Manager and GCP Secret Manager",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "10-01",
+          "name": "AwsSecretFetcher adapter with LocalStack integration",
+          "criteria": [
+            "provision_with_aws_secret_stores_arn_not_dsn passes (no DSN in system DB)",
+            "no_iam_access_returns_backend_secret_fetch_failed passes (400)",
+            "malformed_aws_secret_returns_format_invalid passes (400)",
+            "aws_secret_rotation_transparent_within_cache_ttl passes (6min wait)"
+          ],
+          "test_file": "tests/acceptance/us_10_aws_secrets.rs",
+          "scenario_name": "provision_with_aws_secret_stores_arn_not_dsn",
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/aws_secret_fetcher.rs",
+            "crates/embyr-server/src/adapters/credential_cache.rs",
+            "crates/embyr-admin/src/handlers/provision.rs",
+            "tests/acceptance/us_10_aws_secrets.rs"
+          ],
+          "deps": ["09-02"],
+          "implementation_notes": "AwsSecretFetcher: aws-sdk-secretsmanager GetSecretValue. Parse JSON {dsn:...}. Cache DSN with 5min TTL in CredentialCache. probe() calls GetSecretValue at startup. AccessDeniedException → backend_secret_fetch_failed. Malformed JSON → backend_secret_format_invalid. LocalStack ENDPOINT_URL in test env."
+        },
+        {
+          "id": "10-02",
+          "name": "GcpSecretFetcher adapter with GCP emulator integration",
+          "criteria": [
+            "provision_with_gcp_secret_stores_resource_name_not_dsn passes",
+            "gcp_secret_project_has_no_dsn_in_system_db passes (backend_pg_creds_enc NULL)",
+            "gcp_access_secret_version_is_audited passes (emulator call log shows AccessSecretVersion)",
+            "missing_gcp_workload_identity_returns_400 passes"
+          ],
+          "test_file": "tests/acceptance/us_11_gcp_secrets.rs",
+          "scenario_name": "provision_with_gcp_secret_stores_resource_name_not_dsn",
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/gcp_secret_fetcher.rs",
+            "crates/embyr-server/src/adapters/mod.rs",
+            "crates/embyr-admin/src/handlers/provision.rs",
+            "tests/acceptance/us_11_gcp_secrets.rs"
+          ],
+          "deps": ["10-01"],
+          "implementation_notes": "GcpSecretFetcher: google-cloud-secretmanager AccessSecretVersion (OQ-01: if crate unstable, fall back to reqwest + GCP auth token). 5min TTL cache. Store only backend_secret_gcp resource name. Mirrors AwsSecretFetcher error mapping."
+        }
+      ]
+    },
+    {
+      "id": "11",
+      "name": "Rate limiting: per-project per-instance token bucket",
+      "default_agent": "nw-software-crafter",
+      "steps": [
+        {
+          "id": "11-01",
+          "name": "Per-project token bucket rate limiter in auth middleware",
+          "criteria": [
+            "burst_above_default_returns_resource_exhausted passes (excess → RESOURCE_EXHAUSTED)",
+            "rate_limiting_disabled_no_requests_rejected passes (all 500 succeed)",
+            "rate_limiter_adds_less_than_half_ms_to_p99_latency passes (< 0.5ms overhead)",
+            "rate_limit_exhaustion_is_isolated_per_project passes (project-B unaffected)"
+          ],
+          "test_file": "tests/acceptance/us_14_rate_limiting.rs",
+          "scenario_name": "burst_above_default_returns_resource_exhausted",
+          "files_to_modify": [
+            "crates/embyr-server/src/middleware/rate_limit.rs",
+            "crates/embyr-server/src/middleware/auth.rs",
+            "crates/embyr-core/src/domain/project.rs",
+            "tests/acceptance/us_14_rate_limiting.rs"
+          ],
+          "deps": ["10-02"],
+          "implementation_notes": "RateLimiter: in-process HashMap<ProjectId, TokenBucket> behind Arc<Mutex<T>>. TokenBucket: capacity=default_burst, refill_rate=default_rps tokens/sec, last_refill timestamp. check_and_consume in auth Tower layer after credential verification. ratelimit.enabled=false: skip check. Per-project isolation: independent buckets."
+        }
+      ]
+    }
+  ]
+}

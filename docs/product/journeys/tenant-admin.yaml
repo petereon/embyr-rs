@@ -1,0 +1,8 @@
+version: "1.0"
+feature: embyr-rs
+persona: P3
+persona_name: Morgan (Tenant Admin / DevOps Lead)
+jobs:
+  - JOB-05  # cloud-secret
+updated: "2026-05-23"
+source: docs/feature/embyr-rs/discuss/journey-tenant-admin.yaml

@@ -1,0 +1,29 @@
+--- crates/embyr-core/src/domain/project.rs
++++ replace is_valid_project_id -> bool with false
+@@ -95,25 +95,17 @@
+ 
+     #[test]
+     fn starts_with_dash_invalid() {
+         assert!(ProjectId::new("-abc").is_err());
+     }
+ }
+ 
+ fn is_valid_project_id(s: &str) -> bool {
+-    if s.is_empty() || s.len() > 63 {
+-        return false;
+-    }
+-    let mut chars = s.chars();
+-    match chars.next() {
+-        Some(c) if c.is_ascii_lowercase() => {}
+-        _ => return false,
+-    }
+-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
++    false /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum ProjectStatus {
+     Active,
+     Suspended,
+     Deleted,
+ }

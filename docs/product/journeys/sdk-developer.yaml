@@ -1,0 +1,9 @@
+version: "1.0"
+feature: embyr-rs
+persona: P1
+persona_name: Alex (SDK Developer)
+jobs:
+  - JOB-01  # sdk-compat
+  - JOB-03  # live-sync
+updated: "2026-05-23"
+source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml

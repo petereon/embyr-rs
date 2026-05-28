@@ -1,0 +1,2499 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 6.801041667,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 6.7399905,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/argon2.rs:10:5: replace argon2_instance -> Argon2<'static> with Default::default()",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/argon2.rs",
+          "function": {
+            "function_name": "argon2_instance",
+            "return_type": "-> Argon2<'static>",
+            "span": {
+              "start": {
+                "line": 9,
+                "column": 1
+              },
+              "end": {
+                "line": 15,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 10,
+              "column": 5
+            },
+            "end": {
+              "line": 14,
+              "column": 6
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__argon2.rs_line_10_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__argon2.rs_line_10_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.920807834,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 3.116446959,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/argon2.rs:18:5: replace hash_api_key -> Result<String, CoreError> with Ok(\"xyzzy\".into())",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/argon2.rs",
+          "function": {
+            "function_name": "hash_api_key",
+            "return_type": "-> Result<String, CoreError>",
+            "span": {
+              "start": {
+                "line": 17,
+                "column": 1
+              },
+              "end": {
+                "line": 23,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 18,
+              "column": 5
+            },
+            "end": {
+              "line": 22,
+              "column": 25
+            }
+          },
+          "replacement": "Ok(\"xyzzy\".into())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__argon2.rs_line_18_col_5_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__argon2.rs_line_18_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.431004667,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.390399,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/argon2.rs:18:5: replace hash_api_key -> Result<String, CoreError> with Ok(String::new())",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/argon2.rs",
+          "function": {
+            "function_name": "hash_api_key",
+            "return_type": "-> Result<String, CoreError>",
+            "span": {
+              "start": {
+                "line": 17,
+                "column": 1
+              },
+              "end": {
+                "line": 23,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 18,
+              "column": 5
+            },
+            "end": {
+              "line": 22,
+              "column": 25
+            }
+          },
+          "replacement": "Ok(String::new())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__argon2.rs_line_18_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__argon2.rs_line_18_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 8.492607291,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.316134333,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/argon2.rs:26:5: replace verify_api_key -> Result<bool, CoreError> with Ok(true)",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/argon2.rs",
+          "function": {
+            "function_name": "verify_api_key",
+            "return_type": "-> Result<bool, CoreError>",
+            "span": {
+              "start": {
+                "line": 25,
+                "column": 1
+              },
+              "end": {
+                "line": 29,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 26,
+              "column": 5
+            },
+            "end": {
+              "line": 28,
+              "column": 68
+            }
+          },
+          "replacement": "Ok(true)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__argon2.rs_line_26_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__argon2.rs_line_26_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.6020095,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.540166167,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/argon2.rs:26:5: replace verify_api_key -> Result<bool, CoreError> with Ok(false)",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/argon2.rs",
+          "function": {
+            "function_name": "verify_api_key",
+            "return_type": "-> Result<bool, CoreError>",
+            "span": {
+              "start": {
+                "line": 25,
+                "column": 1
+              },
+              "end": {
+                "line": 29,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 26,
+              "column": 5
+            },
+            "end": {
+              "line": 28,
+              "column": 68
+            }
+          },
+          "replacement": "Ok(false)",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__argon2.rs_line_26_col_5_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__argon2.rs_line_26_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.378311916,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 4.897287833,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/blake3.rs:2:5: replace derive_cache_key -> [u8; 32] with [0; 32]",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/blake3.rs",
+          "function": {
+            "function_name": "derive_cache_key",
+            "return_type": "-> [u8; 32]",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 3,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2,
+              "column": 5
+            },
+            "end": {
+              "line": 2,
+              "column": 38
+            }
+          },
+          "replacement": "[0; 32]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__blake3.rs_line_2_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__blake3.rs_line_2_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.814147959,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.280912666,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:13:5: replace derive_static_secret -> StaticSecret with Default::default()",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "derive_static_secret",
+            "return_type": "-> StaticSecret",
+            "span": {
+              "start": {
+                "line": 12,
+                "column": 1
+              },
+              "end": {
+                "line": 17,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 13,
+              "column": 5
+            },
+            "end": {
+              "line": 16,
+              "column": 28
+            }
+          },
+          "replacement": "Default::default()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_13_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_13_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.324425125,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/blake3.rs:2:5: replace derive_cache_key -> [u8; 32] with [1; 32]",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/blake3.rs",
+          "function": {
+            "function_name": "derive_cache_key",
+            "return_type": "-> [u8; 32]",
+            "span": {
+              "start": {
+                "line": 1,
+                "column": 1
+              },
+              "end": {
+                "line": 3,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 2,
+              "column": 5
+            },
+            "end": {
+              "line": 2,
+              "column": 38
+            }
+          },
+          "replacement": "[1; 32]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__blake3.rs_line_2_col_5_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__blake3.rs_line_2_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.814410292,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 8.633748209,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:20:5: replace derive_aes_key -> [u8; 32] with [0; 32]",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "derive_aes_key",
+            "return_type": "-> [u8; 32]",
+            "span": {
+              "start": {
+                "line": 19,
+                "column": 1
+              },
+              "end": {
+                "line": 24,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 20,
+              "column": 5
+            },
+            "end": {
+              "line": 23,
+              "column": 8
+            }
+          },
+          "replacement": "[0; 32]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_20_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_20_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.597875625,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.277896125,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:20:5: replace derive_aes_key -> [u8; 32] with [1; 32]",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "derive_aes_key",
+            "return_type": "-> [u8; 32]",
+            "span": {
+              "start": {
+                "line": 19,
+                "column": 1
+              },
+              "end": {
+                "line": 24,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 20,
+              "column": 5
+            },
+            "end": {
+              "line": 23,
+              "column": 8
+            }
+          },
+          "replacement": "[1; 32]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_20_col_5_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_20_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.745209334,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 8.941276875,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:27:5: replace derive_public_key -> [u8; 32] with [0; 32]",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "derive_public_key",
+            "return_type": "-> [u8; 32]",
+            "span": {
+              "start": {
+                "line": 26,
+                "column": 1
+              },
+              "end": {
+                "line": 29,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 27,
+              "column": 5
+            },
+            "end": {
+              "line": 28,
+              "column": 40
+            }
+          },
+          "replacement": "[0; 32]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_27_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_27_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.440163625,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.280026583,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:27:5: replace derive_public_key -> [u8; 32] with [1; 32]",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "derive_public_key",
+            "return_type": "-> [u8; 32]",
+            "span": {
+              "start": {
+                "line": 26,
+                "column": 1
+              },
+              "end": {
+                "line": 29,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 27,
+              "column": 5
+            },
+            "end": {
+              "line": 28,
+              "column": 40
+            }
+          },
+          "replacement": "[1; 32]",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_27_col_5_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_27_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.59068325,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.022410541,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "encrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 31,
+                "column": 1
+              },
+              "end": {
+                "line": 46,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 32,
+              "column": 5
+            },
+            "end": {
+              "line": 45,
+              "column": 12
+            }
+          },
+          "replacement": "Ok(vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_32_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_32_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.483838166,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.269824,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![0])",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "encrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 31,
+                "column": 1
+              },
+              "end": {
+                "line": 46,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 32,
+              "column": 5
+            },
+            "end": {
+              "line": 45,
+              "column": 12
+            }
+          },
+          "replacement": "Ok(vec![0])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_32_col_5_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_32_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.649847792,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.174995042,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:32:5: replace encrypt -> Result<Vec<u8>, CoreError> with Ok(vec![1])",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "encrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 31,
+                "column": 1
+              },
+              "end": {
+                "line": 46,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 32,
+              "column": 5
+            },
+            "end": {
+              "line": 45,
+              "column": 12
+            }
+          },
+          "replacement": "Ok(vec![1])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_32_col_5_002.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_32_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.421911959,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.307099416,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![])",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 5
+            },
+            "end": {
+              "line": 61,
+              "column": 77
+            }
+          },
+          "replacement": "Ok(vec![])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.633831916,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.192287416,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![0])",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 5
+            },
+            "end": {
+              "line": 61,
+              "column": 77
+            }
+          },
+          "replacement": "Ok(vec![0])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_5_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.541495,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.420686417,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:5: replace decrypt -> Result<Vec<u8>, CoreError> with Ok(vec![1])",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 5
+            },
+            "end": {
+              "line": 61,
+              "column": 77
+            }
+          },
+          "replacement": "Ok(vec![1])",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_5_002.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_5_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.586895208,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.226829,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:25: replace < with == in decrypt",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 25
+            },
+            "end": {
+              "line": 49,
+              "column": 26
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_25.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_25.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.487159292,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.358318167,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:25: replace < with > in decrypt",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 25
+            },
+            "end": {
+              "line": 49,
+              "column": 26
+            }
+          },
+          "replacement": ">",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_25_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_25_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.635358625,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.4994565,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:25: replace < with <= in decrypt",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 25
+            },
+            "end": {
+              "line": 49,
+              "column": 26
+            }
+          },
+          "replacement": "<=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_25_002.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_25_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.435254709,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.565380667,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:35: replace + with - in decrypt",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 35
+            },
+            "end": {
+              "line": 49,
+              "column": 36
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_35.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_35.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.532728834,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.4806565,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:35: replace + with * in decrypt",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 35
+            },
+            "end": {
+              "line": 49,
+              "column": 36
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_35_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_35_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.42925,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.363253042,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:30: replace + with - in decrypt",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 30
+            },
+            "end": {
+              "line": 49,
+              "column": 31
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_30.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_30.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.542917958,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.452826917,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/auth/ecies.rs:49:30: replace + with * in decrypt",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/auth/ecies.rs",
+          "function": {
+            "function_name": "decrypt",
+            "return_type": "-> Result<Vec<u8>, CoreError>",
+            "span": {
+              "start": {
+                "line": 48,
+                "column": 1
+              },
+              "end": {
+                "line": 62,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 49,
+              "column": 30
+            },
+            "end": {
+              "line": 49,
+              "column": 31
+            }
+          },
+          "replacement": "*",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__auth__ecies.rs_line_49_col_30_001.log",
+      "diff_path": "diff/crates__embyr-core__src__auth__ecies.rs_line_49_col_30_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.426477167,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.447715708,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:20:9: replace ProjectId::as_str -> &str with \"\"",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "ProjectId::as_str",
+            "return_type": "-> &str",
+            "span": {
+              "start": {
+                "line": 19,
+                "column": 5
+              },
+              "end": {
+                "line": 21,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 20,
+              "column": 9
+            },
+            "end": {
+              "line": 20,
+              "column": 16
+            }
+          },
+          "replacement": "\"\"",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_20_col_9.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_20_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.532757709,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.428221166,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:20:9: replace ProjectId::as_str -> &str with \"xyzzy\"",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "ProjectId::as_str",
+            "return_type": "-> &str",
+            "span": {
+              "start": {
+                "line": 19,
+                "column": 5
+              },
+              "end": {
+                "line": 21,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 20,
+              "column": 9
+            },
+            "end": {
+              "line": 20,
+              "column": 16
+            }
+          },
+          "replacement": "\"xyzzy\"",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_20_col_9_001.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_20_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.435581125,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.482189958,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:103:5: replace is_valid_project_id -> bool with true",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 103,
+              "column": 5
+            },
+            "end": {
+              "line": 111,
+              "column": 76
+            }
+          },
+          "replacement": "true",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_103_col_5.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_103_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.535870167,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.409613375,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:103:5: replace is_valid_project_id -> bool with false",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 103,
+              "column": 5
+            },
+            "end": {
+              "line": 111,
+              "column": 76
+            }
+          },
+          "replacement": "false",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_103_col_5_001.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_103_col_5_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.438934416,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.608728833,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:103:21: replace || with && in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 103,
+              "column": 21
+            },
+            "end": {
+              "line": 103,
+              "column": 23
+            }
+          },
+          "replacement": "&&",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_103_col_21.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_103_col_21.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.582297041,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.452984583,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:103:32: replace > with == in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 103,
+              "column": 32
+            },
+            "end": {
+              "line": 103,
+              "column": 33
+            }
+          },
+          "replacement": "==",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_103_col_32.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_103_col_32.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.433336792,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.557214875,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:103:32: replace > with < in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 103,
+              "column": 32
+            },
+            "end": {
+              "line": 103,
+              "column": 33
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_103_col_32_001.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_103_col_32_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.533147042,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.349468666,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:103:32: replace > with >= in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 103,
+              "column": 32
+            },
+            "end": {
+              "line": 103,
+              "column": 33
+            }
+          },
+          "replacement": ">=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_103_col_32_002.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_103_col_32_002.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.428338834,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.500013292,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:108:20: replace match guard c.is_ascii_lowercase() with true in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 108,
+              "column": 20
+            },
+            "end": {
+              "line": 108,
+              "column": 42
+            }
+          },
+          "replacement": "true",
+          "genre": "MatchArmGuard"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_108_col_20.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_108_col_20.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.487968541,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.267699209,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:108:20: replace match guard c.is_ascii_lowercase() with false in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 108,
+              "column": 20
+            },
+            "end": {
+              "line": 108,
+              "column": 42
+            }
+          },
+          "replacement": "false",
+          "genre": "MatchArmGuard"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_108_col_20_001.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_108_col_20_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.438401792,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.555960375,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:111:64: replace || with && in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 64
+            },
+            "end": {
+              "line": 111,
+              "column": 66
+            }
+          },
+          "replacement": "&&",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_111_col_64.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_111_col_64.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.585776041,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.334016666,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:111:42: replace || with && in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 42
+            },
+            "end": {
+              "line": 111,
+              "column": 44
+            }
+          },
+          "replacement": "&&",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_111_col_42.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_111_col_42.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.435547459,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 9.562186542,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/embyr-core/src/domain/project.rs:111:69: replace == with != in is_valid_project_id",
+          "package": "embyr-core",
+          "file": "crates/embyr-core/src/domain/project.rs",
+          "function": {
+            "function_name": "is_valid_project_id",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 102,
+                "column": 1
+              },
+              "end": {
+                "line": 112,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 111,
+              "column": 69
+            },
+            "end": {
+              "line": 111,
+              "column": 71
+            }
+          },
+          "replacement": "!=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__embyr-core__src__domain__project.rs_line_111_col_69.log",
+      "diff_path": "diff/crates__embyr-core__src__domain__project.rs_line_111_col_69.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.583714459,
+          "process_status": "Success",
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 8.517500583,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/Users/petervyboch/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=embyr-core@0.1.0"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 38,
+  "missed": 2,
+  "caught": 35,
+  "timeout": 0,
+  "unviable": 1,
+  "success": 0,
+  "start_time": "2026-05-27T11:45:39.346648Z",
+  "end_time": "2026-05-27T11:48:44.44334Z",
+  "cargo_mutants_version": "27.0.0"
+}
