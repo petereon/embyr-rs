@@ -21,7 +21,7 @@ use embyr_proto::agent::{
     storage_agent_server::{StorageAgent, StorageAgentServer},
     write::Operation,
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
-    CreateDocumentRequest, DeleteDocumentRequest, DocChange, Document, FieldFilterOp,
+    CreateDocumentRequest, DeleteDocumentRequest, DocChange, DocChangeKind, Document, FieldFilterOp,
     Filter as ProtoFilter, GetDocumentRequest,
     ListDocumentsRequest, ListDocumentsResponse,
     PingRequest, PingResponse, Precondition, RollbackRequest,
@@ -39,6 +39,7 @@ use tracing::info;
 
 use crate::config::AgentConfig;
 use crate::encoding::{domain_doc_to_proto, proto_value_to_field_value};
+use crate::notify_bridge::AgentNotifyBridge;
 use crate::sweeper::AgentTransactionSweeper;
 
 /// Encode an offset as a hex string page token (no external deps).
@@ -59,12 +60,17 @@ fn decode_page_token(token: &str) -> Result<u32, Status> {
 pub struct StorageAgentService {
     project_id: String,
     storage: Arc<PostgresBackendAdapter>,
+    notify_bridge: Arc<AgentNotifyBridge>,
 }
 
 impl StorageAgentService {
     /// Construct the service.
-    pub fn new(project_id: String, storage: Arc<PostgresBackendAdapter>) -> Self {
-        Self { project_id, storage }
+    pub fn new(
+        project_id: String,
+        storage: Arc<PostgresBackendAdapter>,
+        notify_bridge: Arc<AgentNotifyBridge>,
+    ) -> Self {
+        Self { project_id, storage, notify_bridge }
     }
 }
 
@@ -627,9 +633,36 @@ impl StorageAgent for StorageAgentService {
 
     async fn subscribe(
         &self,
-        _request: Request<SubscribeRequest>,
+        request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        Err(Status::unimplemented("not implemented — step 06-02"))
+        let collection_path = request.into_inner().collection_path;
+        if collection_path.is_empty() {
+            return Err(Status::invalid_argument("collection_path is required"));
+        }
+
+        // Obtain a per-subscription receiver from the bridge.
+        // Each call creates an independent PgListener connection.
+        let receiver = self
+            .notify_bridge
+            .subscribe()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Filter bridge events: pass RESET always; pass others only when the
+        // document_name contains the subscribed collection_path.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<DocChange, Status>>(64);
+        tokio::spawn(async move {
+            let mut receiver = receiver;
+            while let Some(change) = receiver.recv().await {
+                let pass = change.kind == DocChangeKind::Reset as i32
+                    || change.document_name.contains(&collection_path);
+                if pass && tx.send(Ok(change)).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 
@@ -714,10 +747,11 @@ fn build_collection_path(parent: &str, collection_id: &str) -> Result<String, St
 pub async fn serve(
     project_id: String,
     storage: Arc<PostgresBackendAdapter>,
+    notify_bridge: Arc<AgentNotifyBridge>,
     tls: ServerTlsConfig,
     listen_addr: &str,
 ) -> Result<SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
-    let service = StorageAgentService::new(project_id, storage);
+    let service = StorageAgentService::new(project_id, storage, notify_bridge);
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     let addr = listener.local_addr()?;
     tokio::spawn(async move {
@@ -755,7 +789,8 @@ pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + 
     let tls = ServerTlsConfig::new().identity(identity).client_ca_root(ca_cert);
 
     let storage = Arc::new(PostgresBackendAdapter::new_from_pool(pool.clone()));
-    let service = StorageAgentService::new(config.project_id, storage);
+    let bridge = Arc::new(AgentNotifyBridge::new(pool.clone(), config.project_id.clone()));
+    let service = StorageAgentService::new(config.project_id, storage, bridge);
 
     // Spawn background transaction sweeper — deletes expired active transactions
     // every 30 seconds using the same 60-second TTL as commit_transaction.

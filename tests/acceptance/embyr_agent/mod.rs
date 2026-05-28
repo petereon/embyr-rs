@@ -154,10 +154,15 @@ pub async fn start_test_agent(
         .identity(identity)
         .client_ca_root(ca_cert);
 
-    // 4. Start agent server in-process on a free port.
+    // 4. Construct AgentNotifyBridge at the composition root and start the server.
+    let bridge = Arc::new(embyr_agent::notify_bridge::AgentNotifyBridge::new(
+        pool.clone(),
+        project_id.to_string(),
+    ));
     let grpc_addr = embyr_agent::server::serve(
         project_id.to_string(),
         storage,
+        bridge,
         server_tls,
         "127.0.0.1:0",
     )

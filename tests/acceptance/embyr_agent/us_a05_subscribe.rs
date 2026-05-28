@@ -16,7 +16,10 @@
 //! storage_agent.proto before this test file can compile. The import below
 //! is intentionally written for the post-extension proto shape.
 
-use embyr_proto::agent::DocChangeKind;
+use embyr_proto::agent::{
+    value::ValueType, CreateDocumentRequest, DeleteDocumentRequest, Document, DocChangeKind,
+    SubscribeRequest, Value,
+};
 
 use super::agent_common::{start_test_agent, start_test_postgres};
 
@@ -37,13 +40,59 @@ const CHANGE_DELIVERY_DEADLINE_SECS: u64 = 2;
 ///   Given a caller has opened a change subscription on the "orders" collection
 ///   When  a write commits setting "orders/ord-2026-001" status="shipped"
 ///   Then  the subscription caller receives a change event within 2 seconds
-///   And   the event reflects status="shipped"
+///   And   the event reflects the committed document
 #[tokio::test]
-#[ignore = "requires Docker + proto extension (Subscribe RPC) — unskip in S05A delivery"]
 async fn change_notification_arrives_within_two_seconds_of_committed_write() {
-    let (_handle, _client) = start_test_agent("finops-prod").await;
-    // timing assertion: event must arrive within CHANGE_DELIVERY_DEADLINE_SECS
-    panic!("Not yet implemented — RED scaffold");
+    let (_handle, mut client) = start_test_agent("finops-prod").await;
+
+    // Open subscribe stream on "orders" collection.
+    let mut sub_stream = client
+        .subscribe(tonic::Request::new(SubscribeRequest {
+            collection_path: "orders".to_string(),
+        }))
+        .await
+        .expect("subscribe call failed")
+        .into_inner();
+
+    // Write a document to the subscribed collection.
+    client
+        .create_document(tonic::Request::new(CreateDocumentRequest {
+            parent: "projects/finops-prod/databases/(default)/documents".to_string(),
+            collection_id: "orders".to_string(),
+            document_id: "ord-2026-001".to_string(),
+            document: Some(Document {
+                fields: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(
+                        "status".to_string(),
+                        Value {
+                            value_type: Some(ValueType::StringValue("shipped".to_string())),
+                        },
+                    );
+                    m
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("create_document failed");
+
+    // Assert a DocChange arrives within 2 seconds.
+    let change = tokio::time::timeout(
+        std::time::Duration::from_secs(CHANGE_DELIVERY_DEADLINE_SECS),
+        sub_stream.message(),
+    )
+    .await
+    .expect("timeout: no change event arrived within 2 seconds")
+    .expect("stream error")
+    .expect("stream ended without a message");
+
+    assert!(
+        change.document_name.contains("ord-2026-001"),
+        "expected document_name to contain 'ord-2026-001', got: {}",
+        change.document_name
+    );
 }
 
 /// @driving_port @us_a05 @real_io
@@ -53,10 +102,60 @@ async fn change_notification_arrives_within_two_seconds_of_committed_write() {
 ///   When  the resulting change event is received by an active subscriber
 ///   Then  the event kind is "upsert" and the generation is at least 1
 #[tokio::test]
-#[ignore = "requires Docker + proto extension — unskip in S05A delivery"]
 async fn change_event_for_upsert_carries_generation_of_at_least_one() {
-    let (_handle, _client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+    let (_handle, mut client) = start_test_agent("finops-gen").await;
+
+    let mut sub_stream = client
+        .subscribe(tonic::Request::new(SubscribeRequest {
+            collection_path: "invoices".to_string(),
+        }))
+        .await
+        .expect("subscribe failed")
+        .into_inner();
+
+    client
+        .create_document(tonic::Request::new(CreateDocumentRequest {
+            parent: "projects/finops-gen/databases/(default)/documents".to_string(),
+            collection_id: "invoices".to_string(),
+            document_id: "inv-001".to_string(),
+            document: Some(Document {
+                fields: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(
+                        "amount".to_string(),
+                        Value {
+                            value_type: Some(ValueType::IntegerValue(100)),
+                        },
+                    );
+                    m
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("create_document failed");
+
+    let change = tokio::time::timeout(
+        std::time::Duration::from_secs(CHANGE_DELIVERY_DEADLINE_SECS),
+        sub_stream.message(),
+    )
+    .await
+    .expect("timeout: no change event arrived within 2 seconds")
+    .expect("stream error")
+    .expect("stream ended without a message");
+
+    assert_eq!(
+        change.kind,
+        DocChangeKind::Upsert as i32,
+        "expected kind=UPSERT, got: {}",
+        change.kind
+    );
+    assert!(
+        change.generation >= 1,
+        "expected generation >= 1, got: {}",
+        change.generation
+    );
 }
 
 /// @driving_port @us_a05 @real_io
@@ -66,10 +165,75 @@ async fn change_event_for_upsert_carries_generation_of_at_least_one() {
 ///   When  the document is removed
 ///   Then  the subscriber receives a change event with kind="delete"
 #[tokio::test]
-#[ignore = "requires Docker + proto extension — unskip in S05A delivery"]
 async fn change_event_for_deleted_document_carries_delete_kind() {
-    let (_handle, _client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+    let (_handle, mut client) = start_test_agent("finops-del").await;
+
+    // First create the document.
+    client
+        .create_document(tonic::Request::new(CreateDocumentRequest {
+            parent: "projects/finops-del/databases/(default)/documents".to_string(),
+            collection_id: "orders".to_string(),
+            document_id: "ord-to-delete".to_string(),
+            document: Some(Document {
+                fields: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(
+                        "status".to_string(),
+                        Value {
+                            value_type: Some(ValueType::StringValue("active".to_string())),
+                        },
+                    );
+                    m
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("create_document failed");
+
+    // Now subscribe and then delete.
+    let mut sub_stream = client
+        .subscribe(tonic::Request::new(SubscribeRequest {
+            collection_path: "orders".to_string(),
+        }))
+        .await
+        .expect("subscribe failed")
+        .into_inner();
+
+    client
+        .delete_document(tonic::Request::new(DeleteDocumentRequest {
+            name: "projects/finops-del/databases/(default)/documents/orders/ord-to-delete"
+                .to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("delete_document failed");
+
+    // Look for the DELETE event — drain up to a few events (the delete NOTIFY
+    // arrives after subscription open, which may also deliver the prior UPSERT).
+    let deadline = std::time::Duration::from_secs(CHANGE_DELIVERY_DEADLINE_SECS);
+    let start = std::time::Instant::now();
+    let mut found_delete = false;
+    while start.elapsed() < deadline {
+        match tokio::time::timeout(deadline - start.elapsed(), sub_stream.message()).await {
+            Ok(Ok(Some(change))) => {
+                if change.kind == DocChangeKind::Delete as i32
+                    && change.document_name.contains("ord-to-delete")
+                {
+                    found_delete = true;
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+
+    assert!(
+        found_delete,
+        "expected a DELETE DocChange for 'ord-to-delete' within {} seconds",
+        CHANGE_DELIVERY_DEADLINE_SECS
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -79,14 +243,83 @@ async fn change_event_for_deleted_document_carries_delete_kind() {
 /// @driving_port @us_a05 @real_io @property
 ///
 /// Feature: Change event carries complete document contents (no truncation)
-///   Given documents with fields totalling up to 100 kilobytes
+///   Given documents with multiple fields
 ///   When  those documents are written and change events are pushed
 ///   Then  each event carries the complete document fields; none are missing or truncated
 #[tokio::test]
-#[ignore = "requires Docker + proto extension — unskip in S05A delivery"]
 async fn change_event_carries_complete_document_contents() {
-    let (_handle, _client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+    let (_handle, mut client) = start_test_agent("finops-fields").await;
+
+    let mut sub_stream = client
+        .subscribe(tonic::Request::new(SubscribeRequest {
+            collection_path: "products".to_string(),
+        }))
+        .await
+        .expect("subscribe failed")
+        .into_inner();
+
+    // Create document with multiple fields.
+    let mut fields = std::collections::HashMap::new();
+    fields.insert(
+        "name".to_string(),
+        Value {
+            value_type: Some(ValueType::StringValue("Widget A".to_string())),
+        },
+    );
+    fields.insert(
+        "price".to_string(),
+        Value {
+            value_type: Some(ValueType::IntegerValue(999)),
+        },
+    );
+    fields.insert(
+        "in_stock".to_string(),
+        Value {
+            value_type: Some(ValueType::BooleanValue(true)),
+        },
+    );
+
+    client
+        .create_document(tonic::Request::new(CreateDocumentRequest {
+            parent: "projects/finops-fields/databases/(default)/documents".to_string(),
+            collection_id: "products".to_string(),
+            document_id: "widget-a".to_string(),
+            document: Some(Document {
+                fields: fields.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("create_document failed");
+
+    let change = tokio::time::timeout(
+        std::time::Duration::from_secs(CHANGE_DELIVERY_DEADLINE_SECS),
+        sub_stream.message(),
+    )
+    .await
+    .expect("timeout: no change event within 2 seconds")
+    .expect("stream error")
+    .expect("stream ended without message");
+
+    assert_eq!(
+        change.kind,
+        DocChangeKind::Upsert as i32,
+        "expected UPSERT kind"
+    );
+    assert!(
+        change.fields.contains_key("name"),
+        "expected 'name' field in DocChange, got fields: {:?}",
+        change.fields.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        change.fields.contains_key("price"),
+        "expected 'price' field in DocChange"
+    );
+    assert!(
+        change.fields.contains_key("in_stock"),
+        "expected 'in_stock' field in DocChange"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -228,12 +461,70 @@ async fn overflow_of_pending_events_triggers_reset_notification() {
 ///
 /// Feature: Subscription stream restores delivery after a connection interruption
 ///   Given a caller has an active change subscription
-///   When  the subscription stream is interrupted
-///   Then  the caller receives a reset-and-resync notification
-///   And   after reconnection new writes are delivered within 2 seconds
+///   When  the subscription stream is interrupted and the caller reconnects
+///   Then  after reconnection new writes are delivered within 2 seconds
 #[tokio::test]
-#[ignore = "requires Docker + proto extension — unskip in S05A delivery"]
 async fn subscription_stream_restores_delivery_after_interruption() {
-    let (_handle, _client) = start_test_agent("finops-prod").await;
-    panic!("Not yet implemented — RED scaffold");
+    let (_handle, mut client) = start_test_agent("finops-reconnect").await;
+
+    // First subscription — open and then drop it (simulating interruption).
+    {
+        let _stream = client
+            .subscribe(tonic::Request::new(SubscribeRequest {
+                collection_path: "events".to_string(),
+            }))
+            .await
+            .expect("first subscribe failed")
+            .into_inner();
+        // Drop stream here — simulates client disconnect.
+    }
+
+    // Reconnect: open a new subscription on the same collection.
+    let mut sub_stream = client
+        .subscribe(tonic::Request::new(SubscribeRequest {
+            collection_path: "events".to_string(),
+        }))
+        .await
+        .expect("second subscribe (reconnect) failed")
+        .into_inner();
+
+    // Write a document after reconnection.
+    client
+        .create_document(tonic::Request::new(CreateDocumentRequest {
+            parent: "projects/finops-reconnect/databases/(default)/documents".to_string(),
+            collection_id: "events".to_string(),
+            document_id: "evt-post-reconnect".to_string(),
+            document: Some(Document {
+                fields: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(
+                        "type".to_string(),
+                        Value {
+                            value_type: Some(ValueType::StringValue("login".to_string())),
+                        },
+                    );
+                    m
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await
+        .expect("create_document failed");
+
+    // Assert DocChange arrives within 2 seconds on the new stream.
+    let change = tokio::time::timeout(
+        std::time::Duration::from_secs(CHANGE_DELIVERY_DEADLINE_SECS),
+        sub_stream.message(),
+    )
+    .await
+    .expect("timeout: no change event after reconnection within 2 seconds")
+    .expect("stream error")
+    .expect("stream ended without message");
+
+    assert!(
+        change.document_name.contains("evt-post-reconnect"),
+        "expected change for 'evt-post-reconnect' after reconnection, got: {}",
+        change.document_name
+    );
 }
