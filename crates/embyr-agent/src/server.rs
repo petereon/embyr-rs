@@ -21,12 +21,13 @@ use embyr_proto::agent::{
     storage_agent_server::{StorageAgent, StorageAgentServer},
     write::Operation,
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
-    CreateDocumentRequest, DeleteDocumentRequest, Document, FieldFilterOp,
+    CreateDocumentRequest, DeleteDocumentRequest, DocChange, Document, FieldFilterOp,
     Filter as ProtoFilter, GetDocumentRequest,
     ListDocumentsRequest, ListDocumentsResponse,
     PingRequest, PingResponse, Precondition, RollbackRequest,
     RunAggregationQueryRequest, RunAggregationQueryResponse,
     RunQueryRequest, RunQueryResponse,
+    SubscribeRequest,
     UpdateDocumentRequest,
 };
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
@@ -620,6 +621,15 @@ impl StorageAgent for StorageAgentService {
                 nanos: now.subsec_nanos() as i32,
             }),
         }))
+    }
+
+    type SubscribeStream = ReceiverStream<Result<DocChange, Status>>;
+
+    async fn subscribe(
+        &self,
+        _request: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        Err(Status::unimplemented("not implemented — step 06-02"))
     }
 }
 

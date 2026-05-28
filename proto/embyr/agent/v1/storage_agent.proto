@@ -44,6 +44,35 @@ service StorageAgent {
 
   // Lists documents in a collection with pagination.
   rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
+
+  // Subscribes to real-time changes for a collection.
+  rpc Subscribe(SubscribeRequest) returns (stream DocChange);
+}
+
+// The kind of change carried by a DocChange event.
+enum DocChangeKind {
+  DOC_CHANGE_KIND_UNSPECIFIED = 0;
+  UPSERT = 1;
+  DELETE = 2;
+  RESET = 3;
+}
+
+// A request to subscribe to real-time changes for a collection.
+message SubscribeRequest {
+  // The collection path to subscribe to (e.g., "orders").
+  string collection_path = 1;
+}
+
+// A single document change event delivered over the Subscribe stream.
+message DocChange {
+  // The kind of change: upsert, delete, or reset (resync signal).
+  DocChangeKind kind = 1;
+  // The full resource name of the document.
+  string document_name = 2;
+  // The document's generation (version counter) at the time of the change.
+  int64 generation = 3;
+  // The document's fields at the time of the change (empty for delete/reset).
+  map<string, Value> fields = 4;
 }
 
 // A ping request (no fields needed).

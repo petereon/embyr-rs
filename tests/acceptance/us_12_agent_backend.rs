@@ -162,10 +162,10 @@ fn agent_binary_path() -> std::path::PathBuf {
 use embyr_proto::agent::{
     storage_agent_server::{StorageAgent, StorageAgentServer},
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
-    CreateDocumentRequest, DeleteDocumentRequest, Document as AgentDocument,
+    CreateDocumentRequest, DeleteDocumentRequest, DocChange, Document as AgentDocument,
     GetDocumentRequest, ListDocumentsRequest, ListDocumentsResponse,
     PingRequest, PingResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
-    RunQueryRequest, RunQueryResponse, UpdateDocumentRequest,
+    RunQueryRequest, RunQueryResponse, SubscribeRequest, UpdateDocumentRequest,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
@@ -352,6 +352,15 @@ impl StorageAgent for MockAgentServer {
         _request: Request<ListDocumentsRequest>,
     ) -> Result<Response<ListDocumentsResponse>, Status> {
         Err(Status::unimplemented("not implemented — step 05-02"))
+    }
+
+    type SubscribeStream = ReceiverStream<Result<DocChange, Status>>;
+
+    async fn subscribe(
+        &self,
+        _request: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        Err(Status::unimplemented("not in scope for us_12"))
     }
 }
 

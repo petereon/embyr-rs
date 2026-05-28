@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod encoding;
+pub mod notify_bridge;
 pub mod probe;
 pub mod server;
 pub mod sweeper;
