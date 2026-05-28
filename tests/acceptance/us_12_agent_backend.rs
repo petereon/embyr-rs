@@ -497,6 +497,7 @@ async fn agent_starts_with_required_env_vars_and_logs_readiness() {
     let binary = agent_binary_path();
     let mut child = Command::new(&binary)
         .env("EMBYR_AGENT_DB_DSN", &dsn)
+        .env("EMBYR_AGENT_PROJECT_ID", "test-project")
         .env("EMBYR_AGENT_CERT", cert_path.to_str().unwrap())
         .env("EMBYR_AGENT_KEY", key_path.to_str().unwrap())
         .env("EMBYR_AGENT_CA", ca_path.to_str().unwrap())
@@ -610,6 +611,7 @@ async fn connection_without_client_cert_fails_tls_handshake() {
     let binary = agent_binary_path();
     let mut child = Command::new(&binary)
         .env("EMBYR_AGENT_DB_DSN", &dsn)
+        .env("EMBYR_AGENT_PROJECT_ID", "test-project")
         .env("EMBYR_AGENT_CERT", cert_path.to_str().unwrap())
         .env("EMBYR_AGENT_KEY", key_path.to_str().unwrap())
         .env("EMBYR_AGENT_CA", ca_path.to_str().unwrap())
