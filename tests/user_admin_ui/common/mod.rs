@@ -1,6 +1,11 @@
 // SCAFFOLD: true
 //! Common test infrastructure for user-admin-ui acceptance tests.
 
+// make_model_with_db and assert_owner_invariant are used across multiple slice
+// files; each slice re-includes this module via #[path], so the compiler may
+// flag helpers unused in slices that don't call every function.
+#![allow(dead_code)]
+
 pub mod arb;
 
 use embyr_admin_ui::model::{AppModel, Database, DbId, DbStatus, Role};

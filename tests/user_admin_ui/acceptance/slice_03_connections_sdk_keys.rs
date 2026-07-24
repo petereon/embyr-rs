@@ -4,7 +4,7 @@
 //!
 //! All tests are #[ignore] (RED). Enable one at a time in DELIVER.
 
-use embyr_admin_ui::model::{AppModel, DbId, DbPatch, KeyId, SdkKey};
+use embyr_admin_ui::model::{DbId, DbPatch, KeyId, SdkKey};
 use embyr_admin_ui::msg::Msg;
 use embyr_admin_ui::update::update;
 use uuid::Uuid;

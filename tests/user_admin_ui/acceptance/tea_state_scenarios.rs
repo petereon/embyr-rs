@@ -473,7 +473,7 @@ proptest! {
     }
 }
 
-/// AC-009-06 (invariant): At least one Owner always exists after RemoveMember.
+// AC-009-06 (invariant): At least one Owner always exists after RemoveMember.
 proptest! {
     #[test]
     fn sole_owner_invariant_holds_after_member_removal(
@@ -487,7 +487,7 @@ proptest! {
     }
 }
 
-/// AC-009-06 (invariant): At least one Owner always exists after SetMemberRole.
+// AC-009-06 (invariant): At least one Owner always exists after SetMemberRole.
 proptest! {
     #[test]
     fn sole_owner_invariant_holds_after_role_change(
@@ -637,7 +637,7 @@ proptest! {
 // ── Toast notifications ────────────────────────────────────────────────────
 
 proptest! {
-    /// PushToast appends to the toast queue.
+    // PushToast appends to the toast queue.
     #[test]
     fn push_toast_appends(toast in arb_toast()) {
         let mut m = AppModel::default();
@@ -650,7 +650,7 @@ proptest! {
     }
 }
 
-/// DismissToast removes the matching toast.
+// DismissToast removes the matching toast.
 proptest! {
     #[test]
     fn dismiss_toast_removes_toast(toast in arb_toast()) {

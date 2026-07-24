@@ -4,6 +4,10 @@
 //! Used by tea_state_scenarios.rs and the per-slice test files.
 //! All strategies produce valid domain values for property-based testing.
 
+// Generators are public API for future slice tests; not all are called in every
+// compilation unit that includes this module.
+#![allow(dead_code)]
+
 use embyr_admin_ui::model::{
     AdminKey, AppModel, Database, DbBackendMode, DbId, DbStatus, KeyId, LogRetention, Member,
     OidcId, OidcProvider, Role, SdkKey, ServiceAccount, ServiceAccountId, Toast, ToastId,

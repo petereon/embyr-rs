@@ -40,7 +40,7 @@ pub fn update(model: &mut AppModel, msg: Msg) {
         Msg::SetDatabases(dbs) => {
             model.databases = dbs
                 .into_iter()
-                .filter(|d| d.status != crate::model::DbStatus::Deleted)
+                .filter(|db| db.status != crate::model::DbStatus::Deleted)
                 .collect();
         }
         Msg::NavigateToDb(_) | Msg::NavigateToNewDb => {}
@@ -50,23 +50,23 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             model.databases.push(db);
         }
         Msg::DeleteDatabase(db_id) => {
-            model.databases.retain(|d| d.id != db_id);
+            model.databases.retain(|db| db.id != db_id);
             model.sdk_keys.remove(&db_id);
         }
         Msg::SetDbStatus(db_id, status) => {
-            if let Some(db) = model.databases.iter_mut().find(|d| d.id == db_id) {
+            if let Some(db) = model.databases.iter_mut().find(|db| db.id == db_id) {
                 db.status = status;
             }
         }
 
         // ── US-004: Database Detail / Overview ─────────────────────────────
         Msg::SetDbLogging(db_id, enabled) => {
-            if let Some(db) = model.databases.iter_mut().find(|d| d.id == db_id) {
+            if let Some(db) = model.databases.iter_mut().find(|db| db.id == db_id) {
                 db.logging_enabled = enabled;
             }
         }
         Msg::SetLogRetention(db_id, retention) => {
-            if let Some(db) = model.databases.iter_mut().find(|d| d.id == db_id) {
+            if let Some(db) = model.databases.iter_mut().find(|db| db.id == db_id) {
                 db.log_retention = Some(retention);
             }
         }
@@ -74,7 +74,7 @@ pub fn update(model: &mut AppModel, msg: Msg) {
 
         // ── US-005: Connections ────────────────────────────────────────────
         Msg::PatchDb(db_id, patch) => {
-            if let Some(db) = model.databases.iter_mut().find(|d| d.id == db_id) {
+            if let Some(db) = model.databases.iter_mut().find(|db| db.id == db_id) {
                 match patch {
                     DbPatch::Dsn(_) => {
                         // No dsn field on Database in V1 model — no-op until model expanded.
@@ -123,13 +123,13 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             let is_sole_owner = model
                 .members
                 .iter()
-                .find(|m| m.id == uid)
-                .map(|m| m.role == Role::Owner)
+                .find(|member| member.id == uid)
+                .map(|member| member.role == Role::Owner)
                 .unwrap_or(false)
                 && count_owners(&model.members) == 1;
             if !is_sole_owner || new_role == Role::Owner {
-                if let Some(m) = model.members.iter_mut().find(|m| m.id == uid) {
-                    m.role = new_role;
+                if let Some(member) = model.members.iter_mut().find(|member| member.id == uid) {
+                    member.role = new_role;
                 }
             }
         }
@@ -137,12 +137,12 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             let is_sole_owner = model
                 .members
                 .iter()
-                .find(|m| m.id == uid)
-                .map(|m| m.role == Role::Owner)
+                .find(|member| member.id == uid)
+                .map(|member| member.role == Role::Owner)
                 .unwrap_or(false)
                 && count_owners(&model.members) == 1;
             if !is_sole_owner {
-                model.members.retain(|m| m.id != uid);
+                model.members.retain(|member| member.id != uid);
             }
         }
 
@@ -151,13 +151,13 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             model.service_accounts.push(sa);
         }
         Msg::DeleteServiceAccount(id) => {
-            model.service_accounts.retain(|s| s.id != id);
+            model.service_accounts.retain(|sa| sa.id != id);
         }
         Msg::AdminKeyCreated(key) => {
             model.admin_keys.push(key);
         }
         Msg::RevokeAdminKey(id) => {
-            model.admin_keys.retain(|k| k.id != id);
+            model.admin_keys.retain(|key| key.id != id);
         }
 
         // ── US-011: Settings ───────────────────────────────────────────────────
@@ -165,12 +165,12 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             model.oidc_providers.push(provider);
         }
         Msg::ToggleOidc(id) => {
-            if let Some(p) = model.oidc_providers.iter_mut().find(|p| p.id == id) {
-                p.enabled = !p.enabled;
+            if let Some(provider) = model.oidc_providers.iter_mut().find(|provider| provider.id == id) {
+                provider.enabled = !provider.enabled;
             }
         }
         Msg::RemoveOidcProvider(id) => {
-            model.oidc_providers.retain(|p| p.id != id);
+            model.oidc_providers.retain(|provider| provider.id != id);
         }
 
         // ── Toast notifications ────────────────────────────────────────────────
@@ -178,7 +178,7 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             model.toasts.push(toast);
         }
         Msg::DismissToast(id) => {
-            model.toasts.retain(|t| t.id != id);
+            model.toasts.retain(|toast| toast.id != id);
         }
 
         // ── Navigation ─────────────────────────────────────────────────────────
@@ -192,5 +192,5 @@ pub fn update(model: &mut AppModel, msg: Msg) {
 ///
 /// Used by the sole-Owner invariant guards in `SetMemberRole` and `RemoveMember`.
 fn count_owners(members: &[Member]) -> usize {
-    members.iter().filter(|m| m.role == Role::Owner).count()
+    members.iter().filter(|member| member.role == Role::Owner).count()
 }

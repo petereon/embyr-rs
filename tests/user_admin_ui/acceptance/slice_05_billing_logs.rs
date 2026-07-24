@@ -27,7 +27,7 @@ use common::make_model_with_db;
 #[test]
 fn logs_tab_empty_when_logging_disabled() {
     // AC-007-01
-    let mut m = make_model_with_db();
+    let m = make_model_with_db();
     let db_id = m.databases[0].id.clone();
 
     // Ensure logging is off (precondition from make_model_with_db).

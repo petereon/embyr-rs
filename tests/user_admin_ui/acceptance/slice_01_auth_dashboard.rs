@@ -5,7 +5,7 @@
 //! All tests are #[ignore] (RED). Enable one at a time in DELIVER.
 //! Layer: in-memory acceptance (layer 2) — direct update() call.
 
-use embyr_admin_ui::model::{AppModel, Database, DbStatus, Role};
+use embyr_admin_ui::model::{AppModel, Database, DbStatus};
 use embyr_admin_ui::msg::Msg;
 use embyr_admin_ui::update::update;
 

@@ -4,7 +4,7 @@
 //!
 //! All tests are #[ignore] (RED). Enable one at a time in DELIVER.
 
-use embyr_admin_ui::model::{AppModel, OidcId, OidcProvider, Toast, ToastId, ToastLevel};
+use embyr_admin_ui::model::{OidcId, OidcProvider, Toast, ToastId, ToastLevel};
 use embyr_admin_ui::msg::Msg;
 use embyr_admin_ui::update::update;
 use uuid::Uuid;
