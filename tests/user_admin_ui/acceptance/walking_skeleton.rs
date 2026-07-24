@@ -101,7 +101,6 @@ async fn admin_spa_http_probe() {
 ///
 // @bundle_size @ci_gate @AC-001-01
 #[test]
-#[ignore = "requires trunk build --release to produce admin-ui/dist/"]
 fn wasm_bundle_size_gate() {
     // Locate the workspace root relative to the manifest dir.
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
