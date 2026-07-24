@@ -22,7 +22,6 @@ use common::{assert_owner_invariant, make_model_with_db};
 
 /// AC-009-02: MemberInvited appends a member with pending = true.
 #[test]
-#[ignore = "RED — implement update(_, Msg::MemberInvited)"]
 fn invite_member_appears_with_pending_status() {
     // AC-009-02
     let mut m = make_model_with_db();
@@ -53,7 +52,6 @@ fn invite_member_appears_with_pending_status() {
 
 /// AC-009-04: SetMemberRole upgrades Viewer to Admin.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetMemberRole) promote"]
 fn promote_viewer_to_admin() {
     // AC-009-04
     let mut m = make_model_with_db();
@@ -74,7 +72,6 @@ fn promote_viewer_to_admin() {
 
 /// AC-009-05: RemoveMember removes a non-Owner member.
 #[test]
-#[ignore = "RED — implement update(_, Msg::RemoveMember)"]
 fn remove_viewer_member() {
     // AC-009-05
     let mut m = make_model_with_db();
