@@ -5,8 +5,8 @@
 //! V2 plan: replace with `#[server]` function calls. Component code is unchanged (ADR-007).
 
 use crate::model::{
-    AdminKey, Database, DbBackendMode, DbId, DbStatus, Member, OidcProvider, SdkKey,
-    ServiceAccount,
+    AdminKey, Database, DbBackendMode, DbId, DbStatus, KeyId, Member, OidcProvider, Role, SdkKey,
+    ServiceAccount, ServiceAccountId,
 };
 use uuid::Uuid;
 
@@ -51,13 +51,46 @@ pub mod mock {
     }
 
     /// Return mock account-level admin API keys.
+    ///
+    /// Two hardcoded entries with the "embyr_adm_" prefix covering Owner and Admin roles.
     pub fn admin_keys() -> Vec<AdminKey> {
-        Vec::new()
+        vec![
+            AdminKey {
+                id: KeyId(Uuid::parse_str("00000000-0000-0000-0000-000000000010").unwrap()),
+                name: "ci-pipeline-key".to_string(),
+                service_account_id: Some(ServiceAccountId(
+                    Uuid::parse_str("00000000-0000-0000-0000-000000000020").unwrap(),
+                )),
+                member_id: None,
+                role: Role::Admin,
+                prefix: "embyr_adm_".to_string(),
+                created_at: None,
+            },
+            AdminKey {
+                id: KeyId(Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap()),
+                name: "read-only-key".to_string(),
+                service_account_id: None,
+                member_id: None,
+                role: Role::Viewer,
+                prefix: "embyr_adm_".to_string(),
+                created_at: None,
+            },
+        ]
     }
 
     /// Return mock service accounts.
+    ///
+    /// One hardcoded entry for a CI service account.
     pub fn service_accounts() -> Vec<ServiceAccount> {
-        Vec::new()
+        vec![ServiceAccount {
+            id: ServiceAccountId(
+                Uuid::parse_str("00000000-0000-0000-0000-000000000020").unwrap(),
+            ),
+            name: "ci-service-account".to_string(),
+            description: Some("Used by the CI pipeline".to_string()),
+            role: Role::Admin,
+            created_at: None,
+        }]
     }
 
     /// Return mock OIDC providers.

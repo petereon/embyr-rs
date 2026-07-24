@@ -520,7 +520,6 @@ fn remove_member_missing_uid_is_noop() {
 proptest! {
     /// AC-010-02: ServiceAccountCreated appends the service account.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::ServiceAccountCreated)"]
     fn service_account_created_appends(sa in arb_service_account()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -534,7 +533,6 @@ proptest! {
 proptest! {
     /// AC-010-03: DeleteServiceAccount removes the service account.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::DeleteServiceAccount)"]
     fn delete_service_account_removes_it(sa in arb_service_account()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -553,7 +551,6 @@ proptest! {
 proptest! {
     /// AC-010-05: AdminKeyCreated appends the admin key.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::AdminKeyCreated)"]
     fn admin_key_created_appends(key in arb_admin_key()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -567,7 +564,6 @@ proptest! {
 proptest! {
     /// AC-010-06: RevokeAdminKey removes the admin key.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::RevokeAdminKey)"]
     fn revoke_admin_key_removes_key(key in arb_admin_key()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -585,7 +581,6 @@ proptest! {
 
 /// Sad: RevokeAdminKey with non-existent key_id is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement RevokeAdminKey no-op on missing key"]
 fn revoke_admin_key_missing_is_noop() {
     let mut m = AppModel::default();
     m.authed = true;

@@ -146,6 +146,20 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             }
         }
 
+        // ── US-010: Service Accounts + Admin Keys ──────────────────────────
+        Msg::ServiceAccountCreated(sa) => {
+            model.service_accounts.push(sa);
+        }
+        Msg::DeleteServiceAccount(id) => {
+            model.service_accounts.retain(|s| s.id != id);
+        }
+        Msg::AdminKeyCreated(key) => {
+            model.admin_keys.push(key);
+        }
+        Msg::RevokeAdminKey(id) => {
+            model.admin_keys.retain(|k| k.id != id);
+        }
+
         // All remaining variants are no-ops until their slices are delivered.
         _ => {}
     }
