@@ -13,7 +13,7 @@
       "sid": "01-01",
       "p": "RED_ACCEPTANCE",
       "s": "EXECUTED",
-      "d": "PASS: test fails (connection refused due to std\u2192tokio blocking socket on macOS; business assertion would be 501\u2260200); RED gate cleared",
+      "d": "PASS",
       "t": "2026-07-24T06:57:44Z"
     },
     {
@@ -27,8 +27,15 @@
       "sid": "01-01",
       "p": "GREEN",
       "s": "EXECUTED",
-      "d": "PASS: admin_spa_http_probe green; trunk build produces 62KB WASM; all quality gates pass",
+      "d": "PASS",
       "t": "2026-07-24T07:06:17Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-07-24T07:06:57Z"
     }
   ]
 }
