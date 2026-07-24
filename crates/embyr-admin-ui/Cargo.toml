@@ -1,0 +1,59 @@
+[package]
+name = "embyr-admin-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Build notes:
+#   WASM/browser build: `trunk build --release` (uses `csr` feature)
+#   Host test build:    `cargo test --package embyr-admin-ui` (no feature flags)
+#   The `csr` feature gate keeps leptos/wasm-bindgen out of the host test target.
+
+[features]
+default = []
+csr = ["dep:leptos", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:console_error_panic_hook", "uuid/js"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4" }
+thiserror = "2"
+
+[dependencies.leptos]
+version = "0.8"
+features = ["csr"]
+optional = true
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+optional = true
+
+[dependencies.web-sys]
+version = "0.3"
+optional = true
+features = ["Window", "Document", "Element", "MouseEvent", "KeyboardEvent", "Navigator", "Clipboard"]
+
+[dependencies.js-sys]
+version = "0.3"
+optional = true
+
+[dependencies.console_error_panic_hook]
+version = "0.1"
+optional = true
+
+[[test]]
+name = "user_admin_ui_walking_skeleton"
+path = "../../tests/user_admin_ui/acceptance/walking_skeleton.rs"
+
+[[test]]
+name = "user_admin_ui_tea_state"
+path = "../../tests/user_admin_ui/user_admin_ui.rs"
+
+[dev-dependencies]
+proptest = "1"
+proptest-derive = "0.4"
+tokio = { version = "1", features = ["rt", "macros", "time", "net"] }
+reqwest = { version = "0.12", features = ["json"], default-features = false }
+axum = { version = "0.7" }
+tower-http = { version = "0.5", features = ["fs"] }
+uuid = { version = "1", features = ["v4"] }

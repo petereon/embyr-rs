@@ -1,0 +1,338 @@
+{
+  "roadmap": {
+    "project_id": "user-admin-ui",
+    "created_at": "2026-07-01T20:31:23Z",
+    "total_steps": 14
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Walking Skeleton",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Wire embyr-admin ServeDir + WASM entry + trunk build",
+          "criteria": [
+            "GET /admin/ returns 200 with Content-Type: text/html containing <script",
+            "embyr-admin binary starts an Axum TCP listener on the configured port",
+            "trunk build --release produces dist/ directory with a .wasm file",
+            "admin_spa_http_probe test passes (currently not #[ignore])"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/walking_skeleton.rs",
+          "scenario_name": "admin_spa_http_probe",
+          "files_to_modify": [
+            "crates/embyr-admin/src/main.rs",
+            "crates/embyr-admin/Cargo.toml",
+            "crates/embyr-admin-ui/src/main.rs",
+            "crates/embyr-admin-ui/src/app.rs",
+            "crates/embyr-admin-ui/src/model.rs",
+            "crates/embyr-admin-ui/src/update.rs",
+            "crates/embyr-admin-ui/src/data.rs",
+            "crates/embyr-admin-ui/src/lib.rs",
+            "crates/embyr-admin-ui/index.html",
+            "crates/embyr-admin-ui/Trunk.toml",
+            "crates/embyr-admin-ui/public/styles.css"
+          ],
+          "implementation_notes": "TEST PARADIGM: admin_spa_http_probe is NOT #[ignore] \u2014 it must go GREEN. This test starts an in-process Axum server with ServeDir at /admin/, sends reqwest GET, asserts 200 + HTML body contains '<script'. To make it pass: (1) wire embyr-admin/src/main.rs as a real Axum server with tower-http ServeDir; (2) run 'trunk build --release' in crates/embyr-admin-ui to produce dist/; (3) embyr-admin ServeDir points to the dist/ directory. The WASM entry (src/main.rs) must call mount_to_body(App). app.rs creates RwSignal<AppModel> + Callback<Msg> via leptos::provide_context. model.rs and msg.rs are already scaffolded \u2014 remove SCAFFOLD markers and fill AppModel::from_mock() with data::mock::databases() etc. update.rs panic stub becomes real match arms. data.rs mock::* fns return hardcoded Vec<T>. PREREQUISITE: trunk CLI must be installed ('cargo install trunk'). Add tower-http = { version = '0.5', features = ['fs'] } to embyr-admin/Cargo.toml."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "TEA State Machine \u2014 Auth + Dashboard + Database CRUD",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "Auth TEA state: SignIn, SignOut, TotpFailure, TotpSuccess",
+          "criteria": [
+            "Msg::SignIn sets model.authed = true",
+            "Msg::SignOut sets model.authed = false",
+            "Three Msg::TotpFailure in sequence sets model.locked = true",
+            "Msg::TotpSuccess resets failure counter and locked=false",
+            "sign_in_sets_authed, sign_out_clears_authed, three_totp_failures_lock_account, totp_success_resets_failure_counter proptest passes"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/tea_state_scenarios.rs",
+          "scenario_name": "sign_in_sets_authed",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/update.rs",
+            "crates/embyr-admin-ui/src/model.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from sign_in_sets_authed, sign_out_clears_authed, three_totp_failures_lock_account, totp_success_resets_failure_counter in tea_state_scenarios.rs. These are proptest! macros \u2014 run via 'cargo test --package embyr-admin-ui --test user_admin_ui_tea_state'. update() match arms needed: Msg::SignIn => model.authed = true; Msg::SignOut => { model.authed = false; model.nav = NavState::default(); }; Msg::TotpFailure => { model.totp_failures += 1; if model.totp_failures >= 3 { model.locked = true; } }; Msg::TotpSuccess => { model.totp_failures = 0; model.locked = false; }. model.rs needs: totp_failures: u8, locked: bool fields on AppModel. Remove __SCAFFOLD__ and // SCAFFOLD: true markers from update.rs and model.rs."
+        },
+        {
+          "id": "02-02",
+          "name": "Dashboard + Database CRUD TEA state (US-002, US-003, US-004)",
+          "criteria": [
+            "Msg::SetDatabases populates model.databases excluding Deleted entries",
+            "Msg::DatabaseCreated appends db to model.databases",
+            "Msg::SetDbStatus updates matching database status",
+            "Msg::DeleteDatabase removes db and cascades to sdk_keys",
+            "All 9 related proptest scenarios pass (set_databases_*, database_created_*, delete_database_*, set_db_logging_*)"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/tea_state_scenarios.rs",
+          "scenario_name": "set_databases_populates_model",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/update.rs",
+            "crates/embyr-admin-ui/src/data.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from set_databases_populates_model, set_databases_excludes_deleted, database_created_appends_db, delete_database_removes_db_and_sdk_keys, set_db_status_updates_database, set_db_status_missing_id_is_noop, set_db_logging_enables_logging, set_db_logging_disables_logging, set_db_logging_wrong_id_is_noop. Implement Msg arms: SetDatabases => model.databases = dbs.into_iter().filter(|d| d.status != DbStatus::Deleted).collect(); DatabaseCreated => model.databases.push(db); SetDbStatus => find db by id, set status; DeleteDatabase => remove db + remove all sdk_keys entries for that db_id; SetDbLogging => find db by id, set logging fields. data.rs mock::databases() should return Vec<Database> with 2-3 hardcoded entries covering direct_pg and agent_mode backends."
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "TEA State \u2014 Connections + SDK Keys",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "Connections backend config + SDK key create/revoke (US-005, US-006)",
+          "criteria": [
+            "Msg::PatchDb updates matching database backend config fields",
+            "Msg::PatchDb with unknown id is a no-op",
+            "Msg::SdkKeyCreated appends key to model.sdk_keys[db_id]",
+            "Msg::RevokeSdkKey removes matching key; unknown key is no-op",
+            "All 6 proptest scenarios pass (patch_db_*, sdk_key_*, revoke_sdk_key_*)"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/tea_state_scenarios.rs",
+          "scenario_name": "patch_db_updates_backend_config",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/update.rs",
+            "crates/embyr-admin-ui/src/model.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from patch_db_updates_backend_config, patch_db_missing_id_is_noop, sdk_key_created_appends_key, revoke_sdk_key_removes_key, revoke_sdk_key_missing_key_is_noop, sdk_key_created_unknown_db_is_noop. PatchDb arm: find db by id, apply DbPatch enum variants (UpdateDsn, UpdateAgentEndpoint, UpdateSecretBackend, UpdateSecretName). SdkKeyCreated: model.sdk_keys.entry(db_id).or_default().push(key). RevokeSdkKey: model.sdk_keys.entry(db_id).and_modify(|keys| keys.retain(|k| k.id != key_id)). data.rs mock::sdk_keys(db_id) returns 2 hardcoded SdkKey entries."
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "name": "TEA State \u2014 Identity + Admin Keys",
+      "steps": [
+        {
+          "id": "04-01",
+          "name": "Members + sole-Owner invariant (US-009)",
+          "criteria": [
+            "Msg::MemberInvited appends member to model.members",
+            "Msg::SetMemberRole updates role for matching member",
+            "Msg::RemoveMember removes non-Owner; sole-Owner removal is a no-op",
+            "sole_owner_invariant_holds_after_member_removal proptest passes",
+            "sole_owner_invariant_holds_after_role_change proptest passes"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/tea_state_scenarios.rs",
+          "scenario_name": "member_invited_appends_member",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/update.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from member_invited_appends_member, set_member_role_updates_role, remove_member_removes_non_owner, sole_owner_invariant_holds_after_member_removal, sole_owner_invariant_holds_after_role_change, remove_member_missing_uid_is_noop. CRITICAL invariant: RemoveMember must check that at least one other Owner exists before removing. Helper: fn count_owners(members: &[Member]) -> usize { members.iter().filter(|m| m.role == Role::Owner).count() }. RemoveMember arm: let is_sole_owner = model.members.iter().find(|m| m.id == uid).map(|m| m.role == Role::Owner).unwrap_or(false) && count_owners(&model.members) == 1; if !is_sole_owner { model.members.retain(|m| m.id != uid); }. SetMemberRole: same sole-owner check before demotion."
+        },
+        {
+          "id": "04-02",
+          "name": "Service Accounts + Admin API Keys (US-010)",
+          "criteria": [
+            "Msg::ServiceAccountCreated appends; DeleteServiceAccount removes",
+            "Msg::AdminKeyCreated appends to model.admin_keys",
+            "Msg::RevokeAdminKey removes; unknown id is no-op",
+            "All 5 proptest scenarios pass (service_account_*, admin_key_*, revoke_admin_key_*)",
+            "data.rs mock::admin_keys() and mock::service_accounts() return non-empty vecs"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/tea_state_scenarios.rs",
+          "scenario_name": "service_account_created_appends",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/update.rs",
+            "crates/embyr-admin-ui/src/data.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from service_account_created_appends, delete_service_account_removes_it, admin_key_created_appends, revoke_admin_key_removes_key, revoke_admin_key_missing_is_noop. Check msg.rs for exact Msg variant names. ServiceAccountCreated: model.service_accounts.push(sa). DeleteServiceAccount: model.service_accounts.retain(|s| s.id != id). AdminKeyCreated: model.admin_keys.push(key). RevokeAdminKey: model.admin_keys.retain(|k| k.id != id). data.rs mock::admin_keys() returns 1-2 hardcoded AdminKey entries. mock::service_accounts() returns 1 hardcoded ServiceAccount."
+        }
+      ]
+    },
+    {
+      "id": "05",
+      "name": "TEA State \u2014 Billing + Logs + Settings + Toast",
+      "steps": [
+        {
+          "id": "05-01",
+          "name": "OIDC + Toast + Billing + Logs TEA state",
+          "criteria": [
+            "Msg::ToggleOidc flips enabled; double-toggle restores original",
+            "Msg::PushToast appends; DismissToast removes; unknown id is no-op",
+            "Pushing many toasts does not panic",
+            "data.rs mock functions return non-empty data for billing, logs, oidc_providers",
+            "All 8 related proptest scenarios pass"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/tea_state_scenarios.rs",
+          "scenario_name": "toggle_oidc_flips_enabled",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/update.rs",
+            "crates/embyr-admin-ui/src/data.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from toggle_oidc_flips_enabled, toggle_oidc_double_toggle_restores, push_toast_appends, dismiss_toast_removes_toast, dismiss_toast_missing_id_is_noop, push_many_toasts_does_not_panic. ToggleOidc: model.oidc_providers.iter_mut().find(|p| p.id == id).map(|p| p.enabled = !p.enabled); PushToast: model.toasts.push(toast); DismissToast: model.toasts.retain(|t| t.id != id). data.rs mock::oidc_providers() returns 1 hardcoded OidcProvider with enabled=false. mock::billing_usage(range) returns 3 hardcoded BillingRow entries. mock::query_logs(db_id) returns 5 hardcoded LogEntry entries."
+        }
+      ]
+    },
+    {
+      "id": "06",
+      "name": "Leptos Component Views",
+      "steps": [
+        {
+          "id": "06-01",
+          "name": "Auth view + Dashboard view + primitive components (US-001, US-002)",
+          "criteria": [
+            "App root renders AuthView when !authed, ShellView when authed",
+            "AuthView form dispatches Msg::SignIn on submit",
+            "DashboardView renders a card per database; empty state when none",
+            "Primitives compile: Button, Badge, Card, Menu, Sidebar, Topbar",
+            "sign_in_with_mock_credentials_sets_authed slice test passes"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/slice_01_auth_dashboard.rs",
+          "scenario_name": "sign_in_with_mock_credentials_sets_authed",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/views/auth.rs",
+            "crates/embyr-admin-ui/src/views/dashboard.rs",
+            "crates/embyr-admin-ui/src/components/mod.rs",
+            "crates/embyr-admin-ui/src/components/primitives/mod.rs",
+            "crates/embyr-admin-ui/src/components/sidebar.rs",
+            "crates/embyr-admin-ui/src/components/topbar.rs",
+            "crates/embyr-admin-ui/src/app.rs",
+            "crates/embyr-admin-ui/src/lib.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from all 6 slice_01 tests: sign_in_with_mock_credentials_sets_authed, sign_out_clears_session, three_totp_failures_lock_account_for_fifteen_minutes, dashboard_shows_all_databases_after_load, dashboard_empty_state_when_no_databases, dashboard_suspended_visible_deleted_hidden. These tests call update() directly \u2014 no browser or WASM. Views gated behind #[cfg(feature = 'csr')]. Tests verify model state: create AppModel::from_mock(), dispatch Msg variants, assert model fields. Source: port views_auth.jsx and views_dashboard.jsx to Leptos view! macro syntax. AuthView: form with RwSignal<String> for email+password, on:submit dispatches Msg::SignIn. DashboardView: model.with(|m| m.databases.iter().map(|db| view!{ <DatabaseCard db=db.clone()/> }).collect_view()); empty state when databases is empty. Remove __SCAFFOLD__ from lib.rs."
+        },
+        {
+          "id": "06-02",
+          "name": "Databases view + DB Detail Overview (US-003, US-004)",
+          "criteria": [
+            "DatabasesView renders table with Name, Status, Backend Mode columns",
+            "CreateDatabaseModal dispatches Msg::DatabaseCreated on submit",
+            "DB Detail Overview renders KPI tiles and logging toggle",
+            "Logging toggle dispatches Msg::SetDbLogging",
+            "new_database_appears_in_list_after_creation slice test passes"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/slice_02_database_management.rs",
+          "scenario_name": "new_database_appears_in_list_after_creation",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/views/databases.rs",
+            "crates/embyr-admin-ui/src/views/db_detail/mod.rs",
+            "crates/embyr-admin-ui/src/views/db_detail/overview.rs",
+            "crates/embyr-admin-ui/src/components/primitives/modal.rs",
+            "crates/embyr-admin-ui/src/components/primitives/toggle.rs",
+            "crates/embyr-admin-ui/src/components/primitives/tabs.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from new_database_appears_in_list_after_creation, suspend_database_changes_status_to_suspended, reactivate_database_restores_active_status. Tests call update() directly. Views gated behind #[cfg(feature = 'csr')]. Port views_databases.jsx: DatabasesView reads model.databases via use_context, renders table. CreateDatabaseModal uses Modal primitive, local RwSignal for form fields. DB Detail: tab router via match model.nav.db_tab. Overview: KPI tiles show '--' for latency/ops in V1 mock. Logging toggle: <Toggle checked=db.logging_enabled on_change=move |v| dispatch(Msg::SetDbLogging(db_id, v, LogRetention::SevenDay)) />."
+        },
+        {
+          "id": "06-03",
+          "name": "Connections + Keys views (US-005, US-006)",
+          "criteria": [
+            "Connections tab shows masked DSN or agent endpoint (read-only)",
+            "Edit mode dispatches Msg::PatchDb with correct DbPatch variant",
+            "Keys tab shows table with prefix; Create modal shows key once",
+            "Revoke shows confirmation modal before dispatching Msg::RevokeSdkKey",
+            "patch_db_updates_dsn_field slice test passes"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/slice_03_connections_sdk_keys.rs",
+          "scenario_name": "patch_db_updates_dsn_field",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/views/db_detail/connections.rs",
+            "crates/embyr-admin-ui/src/views/db_detail/keys.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from patch_db_updates_dsn_field, patch_db_updates_agent_endpoint, patch_db_unknown_id_is_noop. Tests call update() directly. Views gated behind #[cfg(feature = 'csr')]. Connections: mode-dependent panel \u2014 direct_pg shows masked host:port/dbname; agent_mode shows endpoint + secret backend selector. Edit button sets local RwSignal<bool> edit_mode. Save dispatches Msg::PatchDb(db_id, DbPatch::UpdateDsn(value)). Keys: table from model.sdk_keys[db_id]. Create modal generates UUID key shown once. Revoke confirm modal dispatches Msg::RevokeSdkKey."
+        },
+        {
+          "id": "06-04",
+          "name": "Identities + Admin Keys views (US-009, US-010)",
+          "criteria": [
+            "Members table shows Email, Role, Last Login; Invite dispatches Msg::MemberInvited",
+            "Role selector and Remove disabled for sole Owner (tooltip shown)",
+            "Service Accounts table and Admin Keys table render",
+            "invite_member_appears_with_pending_status slice test passes",
+            "promote_viewer_to_admin and remove_viewer_member slice tests pass"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/slice_04_identity_admin_keys.rs",
+          "scenario_name": "invite_member_appears_with_pending_status",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/views/identities.rs",
+            "crates/embyr-admin-ui/src/views/api_keys.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from invite_member_appears_with_pending_status, promote_viewer_to_admin, remove_viewer_member. Tests call update() directly. Views gated behind #[cfg(feature = 'csr')]. Identities: tabs (Members | Service Accounts). Members table: count_owners helper to determine if Remove/role-change should be disabled. Sole-owner guard: let sole_owner = count_owners == 1 && member.role == Role::Owner; button disabled if sole_owner. Admin Keys: separate view, table from model.admin_keys. Create key modal same pattern as SDK keys but prefix 'embyr_adm_'."
+        },
+        {
+          "id": "06-05",
+          "name": "Billing + Logs + Settings views (US-007, US-008, US-011)",
+          "criteria": [
+            "Billing renders time range selector and per-database breakdown table",
+            "Logs tab: empty state when logging disabled; table with filters when enabled",
+            "Charts module compiles: Sparkline, LatencyChart, BarChart as pure SVG",
+            "logs_tab_empty_when_logging_disabled, logs_become_visible_after_enabling_logging pass",
+            "log_retention_stored_when_logging_enabled slice test passes"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/slice_05_billing_logs.rs",
+          "scenario_name": "logs_tab_empty_when_logging_disabled",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/views/billing.rs",
+            "crates/embyr-admin-ui/src/views/db_detail/logs.rs",
+            "crates/embyr-admin-ui/src/components/charts/mod.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from logs_tab_empty_when_logging_disabled, logs_become_visible_after_enabling_logging, log_retention_stored_when_logging_enabled. Tests call update() directly. Views gated behind #[cfg(feature = 'csr')]. Billing: RwSignal<BillingRange> for time selector. Table from mock::billing_usage(range). Logs: if !db.logging_enabled { show empty state 'Logging is off \u2014 enable it on the Overview tab' }; else { show filter controls + table from mock::query_logs(db_id) }. Charts module: Sparkline, LatencyChart, BarChart, Donut as pure SVG path functions \u2014 in V1 mock they render '--' placeholders or flat lines."
+        },
+        {
+          "id": "06-06",
+          "name": "Settings view: OIDC providers + Danger Zone (US-011)",
+          "criteria": [
+            "Settings view renders OIDC providers list with enabled Toggle per provider",
+            "Add OIDC provider form dispatches Msg::PushToast on success (V1 mock)",
+            "Danger Zone section visible only to Owner role",
+            "add_oidc_provider_appends_to_list, toggle_oidc_disables_enabled_provider, toggle_oidc_enables_disabled_provider slice tests pass",
+            "Settings gated: Admin/Viewer see read-only view (no edit controls)"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/slice_06_settings.rs",
+          "scenario_name": "add_oidc_provider_appends_to_list",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/src/views/settings.rs"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from add_oidc_provider_appends_to_list, toggle_oidc_disables_enabled_provider, toggle_oidc_enables_disabled_provider. Tests call update() directly. Settings view gated behind #[cfg(feature = 'csr')]. OIDC section: list model.oidc_providers; each row has Toggle dispatching Msg::ToggleOidc(id). Add provider form: local RwSignal fields for issuer_url, client_id; in V1 mock, submit appends new OidcProvider to model via dispatch. Danger Zone: gated by current_user.role == Role::Owner; shows account name re-entry for delete confirmation. Transfer Ownership: enter new owner email field. Both Danger Zone actions show confirmation modals before dispatching."
+        }
+      ]
+    },
+    {
+      "id": "07",
+      "name": "WASM Bundle Validation",
+      "steps": [
+        {
+          "id": "07-01",
+          "name": "trunk build --release + bundle size gate < 5 MB",
+          "criteria": [
+            "trunk build --release completes without error",
+            "Total dist/ directory size < 5 MB",
+            ".wasm file exists in dist/",
+            "wasm_bundle_size_gate test passes (remove #[ignore])"
+          ],
+          "test_file": "tests/user_admin_ui/acceptance/walking_skeleton.rs",
+          "scenario_name": "wasm_bundle_size_gate",
+          "files_to_modify": [
+            "crates/embyr-admin-ui/Cargo.toml"
+          ],
+          "implementation_notes": "TEST PARADIGM: Remove #[ignore] from wasm_bundle_size_gate. This test checks std::fs::metadata on the .wasm file in crates/embyr-admin-ui/dist/ (or admin-ui/dist/ depending on trunk output path). Run 'trunk build --release' in crates/embyr-admin-ui/. If bundle > 5 MB: audit web-sys features in Cargo.toml \u2014 only include features actually used (Window, Document, Element, MouseEvent, KeyboardEvent, Navigator, Clipboard, ClipboardItem). wasm-opt is invoked automatically by trunk in release mode for tree-shaking. If still over budget, profile with 'twiggy dominators' or 'wasm-pack build --profiling'. Expected size: ~810 KB \u2013 1.4 MB compressed. PREREQUISITE: trunk installed ('cargo install trunk'); wasm32-unknown-unknown target added ('rustup target add wasm32-unknown-unknown')."
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "crates/embyr-admin-ui/src/",
+      "crates/embyr-admin/src/"
+    ],
+    "test_directories": [
+      "tests/user_admin_ui/"
+    ],
+    "excluded_patterns": [
+      "target/",
+      "*.lock",
+      "dist/",
+      "crates/embyr-admin/static/"
+    ]
+  },
+  "validation": {
+    "status": "pending",
+    "reviewer": "nw-acceptance-designer-reviewer",
+    "approved_at": ""
+  }
+}
