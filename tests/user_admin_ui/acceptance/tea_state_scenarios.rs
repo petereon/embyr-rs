@@ -698,3 +698,99 @@ fn push_many_toasts_does_not_panic() {
     // Must not panic. Model should have ≤ 100 toasts (or be bounded by implementation).
     assert!(!m.toasts.is_empty(), "toasts must not be empty after 100 pushes");
 }
+
+// ── Mutation-killing: sole-Owner invariant explicit blocking tests ──────────
+
+// Test that RemoveMember with the sole Owner's id is a no-op.
+#[test]
+fn sole_owner_cannot_be_removed() {
+    let owner_id = UserId(uuid::Uuid::new_v4());
+    let mut m = AppModel::default();
+    m.members = vec![Member {
+        id: owner_id.clone(),
+        email: "owner@example.com".to_string(),
+        display_name: None,
+        role: Role::Owner,
+        pending: false,
+        mfa_enabled: false,
+        last_login: None,
+    }];
+
+    update(&mut m, Msg::RemoveMember(owner_id));
+
+    assert_eq!(m.members.len(), 1, "sole Owner must not be removed");
+    assert_eq!(m.members[0].role, Role::Owner, "sole Owner role must be preserved");
+}
+
+// Test that SetMemberRole cannot demote the sole Owner.
+#[test]
+fn sole_owner_cannot_be_demoted() {
+    let owner_id = UserId(uuid::Uuid::new_v4());
+    let mut m = AppModel::default();
+    m.members = vec![Member {
+        id: owner_id.clone(),
+        email: "owner@example.com".to_string(),
+        display_name: None,
+        role: Role::Owner,
+        pending: false,
+        mfa_enabled: false,
+        last_login: None,
+    }];
+
+    update(&mut m, Msg::SetMemberRole(owner_id, Role::Admin));
+
+    assert_eq!(m.members[0].role, Role::Owner, "sole Owner must not be demoted");
+}
+
+// Test that removing one Owner is allowed when another Owner exists.
+// Kills "count_owners returns constant 1" mutation.
+#[test]
+fn non_sole_owner_can_be_removed() {
+    let owner1_id = UserId(uuid::Uuid::new_v4());
+    let owner2_id = UserId(uuid::Uuid::new_v4());
+    let mut m = AppModel::default();
+    m.members = vec![
+        Member {
+            id: owner1_id.clone(),
+            email: "owner1@example.com".to_string(),
+            display_name: None,
+            role: Role::Owner,
+            pending: false,
+            mfa_enabled: false,
+            last_login: None,
+        },
+        Member {
+            id: owner2_id.clone(),
+            email: "owner2@example.com".to_string(),
+            display_name: None,
+            role: Role::Owner,
+            pending: false,
+            mfa_enabled: false,
+            last_login: None,
+        },
+    ];
+
+    update(&mut m, Msg::RemoveMember(owner1_id));
+
+    assert_eq!(m.members.len(), 1, "Owner with a peer Owner must be removable");
+    assert_eq!(m.members[0].id, owner2_id, "remaining member must be owner2");
+}
+
+// Test that RemoveOidcProvider removes the matching provider.
+// Kills the retain `!= → ==` mutation on that arm.
+#[test]
+fn remove_oidc_provider_removes_matching() {
+    use embyr_admin_ui::model::OidcProvider;
+    let target_id = OidcId(uuid::Uuid::new_v4());
+    let other_id = OidcId(uuid::Uuid::new_v4());
+    let mut m = AppModel::default();
+    m.oidc_providers = vec![
+        OidcProvider { id: target_id.clone(), issuer: "https://a.example".to_string(), client_id: "a".to_string(), enabled: true },
+        OidcProvider { id: other_id.clone(), issuer: "https://b.example".to_string(), client_id: "b".to_string(), enabled: false },
+    ];
+
+    update(&mut m, Msg::RemoveOidcProvider(target_id.clone()));
+
+    assert_eq!(m.oidc_providers.len(), 1, "RemoveOidcProvider must remove one provider");
+    assert_eq!(m.oidc_providers[0].id, other_id, "only the non-targeted provider must remain");
+}
