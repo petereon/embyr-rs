@@ -85,7 +85,6 @@ fn totp_success_resets_failure_counter() {
 proptest! {
     /// AC-002-01 / AC-002-02: SetDatabases populates model.databases.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::SetDatabases)"]
     fn set_databases_populates_model(dbs in prop::collection::vec(arb_database(), 0..=6)) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -100,7 +99,6 @@ proptest! {
 
 /// AC-002-05: Deleted databases are not shown (status=Deleted not in model after SetDatabases).
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetDatabases) filtering"]
 fn set_databases_excludes_deleted() {
     use embyr_admin_ui::model::DbBackendMode;
 
@@ -138,7 +136,6 @@ fn set_databases_excludes_deleted() {
 proptest! {
     /// AC-003-02: DatabaseCreated appends the new database to model.databases.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::DatabaseCreated)"]
     fn database_created_appends_db(
         initial_dbs in prop::collection::vec(arb_database(), 0..=3),
         new_db in arb_database(),
@@ -160,7 +157,6 @@ proptest! {
 proptest! {
     /// AC-003-05: DeleteDatabase removes the database and its SDK keys (cascade).
     #[test]
-    #[ignore = "RED — implement update(_, Msg::DeleteDatabase) with cascade"]
     fn delete_database_removes_db_and_sdk_keys(db in arb_database()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -184,7 +180,6 @@ proptest! {
 proptest! {
     /// AC-003-04: SetDbStatus changes the database status.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::SetDbStatus)"]
     fn set_db_status_updates_database(
         db in arb_database(),
         new_status in arb_db_status(),
@@ -203,7 +198,6 @@ proptest! {
 
 /// Sad: SetDbStatus with non-existent DbId is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetDbStatus) no-op on missing id"]
 fn set_db_status_missing_id_is_noop() {
     let mut m = make_model_with_db();
     let phantom_id = DbId(uuid::Uuid::new_v4());
@@ -219,7 +213,6 @@ fn set_db_status_missing_id_is_noop() {
 proptest! {
     /// AC-004-03 / AC-004-04: SetDbLogging(id, true) enables logging on the database.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::SetDbLogging)"]
     fn set_db_logging_enables_logging(db in arb_database()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -238,7 +231,6 @@ proptest! {
 proptest! {
     /// AC-004-03: SetDbLogging(id, false) disables logging on the database.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::SetDbLogging) disable path"]
     fn set_db_logging_disables_logging(db in arb_database()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -256,7 +248,6 @@ proptest! {
 
 /// Sad: SetDbLogging with wrong id is a no-op (no panic, no database modified).
 #[test]
-#[ignore = "RED — implement SetDbLogging no-op on wrong id"]
 fn set_db_logging_wrong_id_is_noop() {
     let mut m = make_model_with_db();
     let wrong_id = DbId(uuid::Uuid::new_v4());

@@ -36,6 +36,42 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             model.account_locked = false;
         }
 
+        // ── US-002: Dashboard ──────────────────────────────────────────────
+        Msg::SetDatabases(dbs) => {
+            model.databases = dbs
+                .into_iter()
+                .filter(|d| d.status != crate::model::DbStatus::Deleted)
+                .collect();
+        }
+        Msg::NavigateToDb(_) | Msg::NavigateToNewDb => {}
+
+        // ── US-003: Database Management ────────────────────────────────────
+        Msg::DatabaseCreated(db) => {
+            model.databases.push(db);
+        }
+        Msg::DeleteDatabase(db_id) => {
+            model.databases.retain(|d| d.id != db_id);
+            model.sdk_keys.remove(&db_id);
+        }
+        Msg::SetDbStatus(db_id, status) => {
+            if let Some(db) = model.databases.iter_mut().find(|d| d.id == db_id) {
+                db.status = status;
+            }
+        }
+
+        // ── US-004: Database Detail / Overview ─────────────────────────────
+        Msg::SetDbLogging(db_id, enabled) => {
+            if let Some(db) = model.databases.iter_mut().find(|d| d.id == db_id) {
+                db.logging_enabled = enabled;
+            }
+        }
+        Msg::SetLogRetention(db_id, retention) => {
+            if let Some(db) = model.databases.iter_mut().find(|d| d.id == db_id) {
+                db.log_retention = Some(retention);
+            }
+        }
+        Msg::SetDbTab(_, _) => {}
+
         // All remaining variants are no-ops until their slices are delivered.
         _ => {}
     }
