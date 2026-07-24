@@ -33,7 +33,6 @@ use common::{assert_owner_invariant, make_model_with_db};
 proptest! {
     /// AC-001-02 / AC-001-08: SignIn sets authed=true (V1 mock: always).
     #[test]
-    #[ignore = "RED — implement update(_, Msg::SignIn)"]
     fn sign_in_sets_authed(model in arb_authed_model().prop_map(|mut m| { m.authed = false; m })) {
         let mut m = model;
         update(&mut m, Msg::SignIn);
@@ -44,7 +43,6 @@ proptest! {
 proptest! {
     /// AC-001-10: SignOut resets authed=false and clears session state.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::SignOut)"]
     fn sign_out_clears_authed(model in arb_authed_model()) {
         let mut m = model;
         update(&mut m, Msg::SignOut);
@@ -57,7 +55,6 @@ proptest! {
 
 /// AC-001-03 / AC-001-04: Three TOTP failures lock the account.
 #[test]
-#[ignore = "RED — implement update(_, Msg::TotpFailure)"]
 fn three_totp_failures_lock_account() {
     let mut m = AppModel::default();
     m.authed = false;
@@ -74,7 +71,6 @@ fn three_totp_failures_lock_account() {
 
 /// AC-001-05: Successful TOTP resets failure counter.
 #[test]
-#[ignore = "RED — implement update(_, Msg::TotpSuccess)"]
 fn totp_success_resets_failure_counter() {
     let mut m = AppModel::default();
     m.totp_failures = 2;
