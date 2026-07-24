@@ -25,7 +25,6 @@ use common::make_model_with_db;
 /// The model represents log visibility via database.logging_enabled.
 /// When false, the view renders the "Logging is off" empty state.
 #[test]
-#[ignore = "RED — implement logging disabled state in model"]
 fn logs_tab_empty_when_logging_disabled() {
     // AC-007-01
     let mut m = make_model_with_db();
@@ -45,7 +44,6 @@ fn logs_tab_empty_when_logging_disabled() {
 
 /// AC-007-01 → AC-007-02: Enabling logging makes log rows visible (via model state).
 #[test]
-#[ignore = "RED — implement SetDbLogging to enable logs"]
 fn logs_become_visible_after_enabling_logging() {
     // AC-007-01 → AC-004-03 chained
     let mut m = make_model_with_db();
@@ -63,7 +61,6 @@ fn logs_become_visible_after_enabling_logging() {
 
 /// AC-004-03 (retention) → AC-007: Log retention period stored when logging enabled.
 #[test]
-#[ignore = "RED — implement SetLogRetention → log retention stored"]
 fn log_retention_stored_when_logging_enabled() {
     // AC-004-03 / AC-007 (retention gating)
     let mut m = make_model_with_db();
@@ -82,7 +79,6 @@ fn log_retention_stored_when_logging_enabled() {
 
 /// Sad: SetLogRetention with wrong db_id is a no-op.
 #[test]
-#[ignore = "RED — implement SetLogRetention no-op guard"]
 fn set_log_retention_wrong_db_is_noop() {
     let mut m = make_model_with_db();
     let phantom = DbId(Uuid::new_v4());
@@ -103,7 +99,6 @@ fn set_log_retention_wrong_db_is_noop() {
 /// In V1, billing reads usage from model.databases (mock values in data.rs).
 /// This test verifies the model is populated correctly for billing display.
 #[test]
-#[ignore = "RED — implement SetDatabases populating billing data"]
 fn billing_data_source_populated_from_set_databases() {
     // AC-008-01, AC-008-02
     let mut m = AppModel::default();
@@ -144,7 +139,6 @@ fn billing_data_source_populated_from_set_databases() {
 
 /// AC-008-01: Empty billing table when account has no databases.
 #[test]
-#[ignore = "RED — implement SetDatabases empty billing state"]
 fn billing_empty_state_when_no_databases() {
     // AC-008-01 empty path
     let mut m = AppModel::default();

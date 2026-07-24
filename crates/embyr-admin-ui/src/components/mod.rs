@@ -8,6 +8,8 @@ pub mod primitives;
 pub mod sidebar;
 #[cfg(feature = "csr")]
 pub mod topbar;
+#[cfg(feature = "csr")]
+pub mod charts;
 
 #[cfg(feature = "csr")]
 pub use primitives::{Badge, Button, Card, Menu};

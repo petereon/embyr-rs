@@ -14,6 +14,8 @@ pub mod db_detail;
 pub mod identities;
 #[cfg(feature = "csr")]
 pub mod api_keys;
+#[cfg(feature = "csr")]
+pub mod billing;
 
 #[cfg(feature = "csr")]
 pub use auth::AuthView;
@@ -28,6 +30,8 @@ pub use identities::IdentitiesView;
 #[cfg(feature = "csr")]
 pub use api_keys::ApiKeysView;
 #[cfg(feature = "csr")]
+pub use billing::BillingView;
+#[cfg(feature = "csr")]
 pub use shell::ShellView;
 
 /// Main application shell — sidebar + topbar + content area.
@@ -39,6 +43,7 @@ mod shell {
     use leptos::prelude::*;
     use crate::components::{Sidebar, Topbar};
     use crate::model::{AppModel, Section};
+    use crate::views::billing::BillingView;
     use crate::views::dashboard::DashboardView;
     use crate::views::databases::DatabasesView;
     use crate::views::identities::IdentitiesView;
@@ -58,6 +63,7 @@ mod shell {
                             Section::Databases => view! { <DatabasesView /> }.into_any(),
                             Section::Identities => view! { <IdentitiesView /> }.into_any(),
                             Section::ApiKeys => view! { <ApiKeysView /> }.into_any(),
+                            Section::Billing => view! { <BillingView /> }.into_any(),
                             _ => view! { <DashboardView /> }.into_any(),
                         }}
                     </main>

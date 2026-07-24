@@ -11,6 +11,8 @@ pub mod overview;
 pub mod connections;
 #[cfg(feature = "csr")]
 pub mod keys;
+#[cfg(feature = "csr")]
+pub mod logs;
 
 #[cfg(feature = "csr")]
 pub use overview::DbOverview;
@@ -18,6 +20,8 @@ pub use overview::DbOverview;
 pub use connections::ConnectionsView;
 #[cfg(feature = "csr")]
 pub use keys::KeysView;
+#[cfg(feature = "csr")]
+pub use logs::LogsView;
 
 #[cfg(feature = "csr")]
 use leptos::prelude::*;
@@ -125,11 +129,7 @@ pub fn DbDetailView() -> impl IntoView {
                                     view! { <KeysView db=db.clone() /> }.into_any()
                                 }
                                 DbTab::Logs => {
-                                    view! {
-                                        <div class="page">
-                                            <p>"Query logs — available in V2."</p>
-                                        </div>
-                                    }.into_any()
+                                    view! { <LogsView db=db.clone() /> }.into_any()
                                 }
                             }}
                         </div>
