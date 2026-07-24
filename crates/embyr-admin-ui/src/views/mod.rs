@@ -16,6 +16,8 @@ pub mod identities;
 pub mod api_keys;
 #[cfg(feature = "csr")]
 pub mod billing;
+#[cfg(feature = "csr")]
+pub mod settings;
 
 #[cfg(feature = "csr")]
 pub use auth::AuthView;
@@ -31,6 +33,8 @@ pub use identities::IdentitiesView;
 pub use api_keys::ApiKeysView;
 #[cfg(feature = "csr")]
 pub use billing::BillingView;
+#[cfg(feature = "csr")]
+pub use settings::SettingsView;
 #[cfg(feature = "csr")]
 pub use shell::ShellView;
 
@@ -48,6 +52,7 @@ mod shell {
     use crate::views::databases::DatabasesView;
     use crate::views::identities::IdentitiesView;
     use crate::views::api_keys::ApiKeysView;
+    use crate::views::settings::SettingsView;
 
     #[component]
     pub fn ShellView() -> impl IntoView {
@@ -64,6 +69,7 @@ mod shell {
                             Section::Identities => view! { <IdentitiesView /> }.into_any(),
                             Section::ApiKeys => view! { <ApiKeysView /> }.into_any(),
                             Section::Billing => view! { <BillingView /> }.into_any(),
+                            Section::Settings => view! { <SettingsView /> }.into_any(),
                             _ => view! { <DashboardView /> }.into_any(),
                         }}
                     </main>

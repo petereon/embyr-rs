@@ -19,7 +19,6 @@ use common::make_model_with_db;
 
 /// AC-011-02: OidcProviderAdded appends a new OIDC provider.
 #[test]
-#[ignore = "RED — implement update(_, Msg::OidcProviderAdded)"]
 fn add_oidc_provider_appends_to_list() {
     // AC-011-02
     let mut m = make_model_with_db();
@@ -46,7 +45,6 @@ fn add_oidc_provider_appends_to_list() {
 
 /// AC-011-04: ToggleOidc disables an enabled provider.
 #[test]
-#[ignore = "RED — implement update(_, Msg::ToggleOidc) disable path"]
 fn toggle_oidc_disables_enabled_provider() {
     // AC-011-04
     let mut m = make_model_with_db();
@@ -66,7 +64,6 @@ fn toggle_oidc_disables_enabled_provider() {
 
 /// AC-011-04: ToggleOidc enables a disabled provider.
 #[test]
-#[ignore = "RED — implement update(_, Msg::ToggleOidc) enable path"]
 fn toggle_oidc_enables_disabled_provider() {
     // AC-011-04
     let mut m = make_model_with_db();
