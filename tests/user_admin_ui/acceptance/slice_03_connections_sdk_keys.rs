@@ -19,7 +19,6 @@ use common::make_model_with_db;
 
 /// AC-005-03: PatchDb(id, Dsn) updates the DSN without removing the database.
 #[test]
-#[ignore = "RED — implement update(_, Msg::PatchDb) DSN update"]
 fn patch_db_updates_dsn_field() {
     // AC-005-03
     let mut m = make_model_with_db();
@@ -33,7 +32,6 @@ fn patch_db_updates_dsn_field() {
 
 /// AC-005-03: PatchDb(id, AgentEndpoint) updates the agent endpoint.
 #[test]
-#[ignore = "RED — implement update(_, Msg::PatchDb) agent endpoint"]
 fn patch_db_updates_agent_endpoint() {
     // AC-005-03
     let mut m = make_model_with_db();
@@ -50,7 +48,6 @@ fn patch_db_updates_agent_endpoint() {
 
 /// Sad: PatchDb with non-existent DbId is a no-op (no panic, no database modified).
 #[test]
-#[ignore = "RED — implement PatchDb no-op guard on unknown id"]
 fn patch_db_unknown_id_is_noop() {
     let mut m = make_model_with_db();
     let count_before = m.databases.len();

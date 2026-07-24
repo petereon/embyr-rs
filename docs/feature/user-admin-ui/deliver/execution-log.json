@@ -295,6 +295,76 @@
       "s": "EXECUTED",
       "d": "PASS",
       "t": "2026-07-24T07:55:48Z"
+    },
+    {
+      "sid": "06-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-07-24T07:56:20Z"
+    },
+    {
+      "sid": "06-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-07-24T08:01:26Z"
+    },
+    {
+      "sid": "06-02",
+      "p": "PREPARE",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: 3-phase ADR-025 canon",
+      "t": "2026-07-24T08:01:32Z"
+    },
+    {
+      "sid": "06-02",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: slice tests cover AT surface; views are compile-time artifacts",
+      "t": "2026-07-24T08:01:32Z"
+    },
+    {
+      "sid": "06-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-07-24T08:01:33Z"
+    },
+    {
+      "sid": "06-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-07-24T08:02:00Z"
+    },
+    {
+      "sid": "06-03",
+      "p": "PREPARE",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: 3-phase ADR-025 canon",
+      "t": "2026-07-24T08:15:26Z"
+    },
+    {
+      "sid": "06-03",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-07-24T08:15:30Z"
+    },
+    {
+      "sid": "06-03",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: slice tests cover AT surface; views are compile-time artifacts",
+      "t": "2026-07-24T08:17:33Z"
+    },
+    {
+      "sid": "06-03",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-07-24T08:17:36Z"
     }
   ]
 }
