@@ -5,7 +5,7 @@
 //!   - Deterministic: same (model, msg) → same new model state
 //!   - Exhaustive: all Msg variants handled (enforced by compiler)
 
-use crate::model::{AppModel, DbPatch, DbStatus, NavState};
+use crate::model::{AppModel, DbPatch, DbStatus, Member, NavState, Role};
 use crate::msg::Msg;
 
 /// Threshold for TOTP consecutive failures before account lockout.
@@ -115,7 +115,45 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             }
         }
 
+        // ── US-009: Members ────────────────────────────────────────────────
+        Msg::MemberInvited(member) => {
+            model.members.push(member);
+        }
+        Msg::SetMemberRole(uid, new_role) => {
+            let is_sole_owner = model
+                .members
+                .iter()
+                .find(|m| m.id == uid)
+                .map(|m| m.role == Role::Owner)
+                .unwrap_or(false)
+                && count_owners(&model.members) == 1;
+            if !is_sole_owner || new_role == Role::Owner {
+                if let Some(m) = model.members.iter_mut().find(|m| m.id == uid) {
+                    m.role = new_role;
+                }
+            }
+        }
+        Msg::RemoveMember(uid) => {
+            let is_sole_owner = model
+                .members
+                .iter()
+                .find(|m| m.id == uid)
+                .map(|m| m.role == Role::Owner)
+                .unwrap_or(false)
+                && count_owners(&model.members) == 1;
+            if !is_sole_owner {
+                model.members.retain(|m| m.id != uid);
+            }
+        }
+
         // All remaining variants are no-ops until their slices are delivered.
         _ => {}
     }
+}
+
+/// Count the number of members with the Owner role.
+///
+/// Used by the sole-Owner invariant guards in `SetMemberRole` and `RemoveMember`.
+fn count_owners(members: &[Member]) -> usize {
+    members.iter().filter(|m| m.role == Role::Owner).count()
 }

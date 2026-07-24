@@ -393,7 +393,6 @@ fn sdk_key_created_unknown_db_is_noop() {
 proptest! {
     /// AC-009-02: MemberInvited appends a pending member.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::MemberInvited)"]
     fn member_invited_appends_member(
         model in arb_authed_model(),
         new_member in arb_member_with_role(Role::Viewer),
@@ -410,7 +409,6 @@ proptest! {
 proptest! {
     /// AC-009-04: SetMemberRole updates the member's role.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::SetMemberRole)"]
     fn set_member_role_updates_role(
         initial_role in arb_non_owner_role(),
         new_role in arb_non_owner_role(),
@@ -449,7 +447,6 @@ proptest! {
 proptest! {
     /// AC-009-05: RemoveMember removes the member from the list.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::RemoveMember)"]
     fn remove_member_removes_non_owner(
         model in arb_model_with_one_owner(),
         uid in arb_non_owner_user_id(),
@@ -479,7 +476,6 @@ proptest! {
 /// AC-009-06 (invariant): At least one Owner always exists after RemoveMember.
 proptest! {
     #[test]
-    #[ignore = "RED — implement sole-Owner invariant in update(_, Msg::RemoveMember)"]
     fn sole_owner_invariant_holds_after_member_removal(
         model in arb_model_with_one_owner(),
         uid in arb_non_owner_user_id(),
@@ -494,7 +490,6 @@ proptest! {
 /// AC-009-06 (invariant): At least one Owner always exists after SetMemberRole.
 proptest! {
     #[test]
-    #[ignore = "RED — implement sole-Owner invariant in update(_, Msg::SetMemberRole)"]
     fn sole_owner_invariant_holds_after_role_change(
         model in arb_model_with_one_owner(),
         uid in arb_non_owner_user_id(),
@@ -510,7 +505,6 @@ proptest! {
 
 /// Sad: RemoveMember with non-existent uid is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement RemoveMember no-op on missing uid"]
 fn remove_member_missing_uid_is_noop() {
     let mut m = make_model_with_db();
     let count_before = m.members.len();
