@@ -264,7 +264,6 @@ fn set_db_logging_wrong_id_is_noop() {
 proptest! {
     /// AC-005-03: PatchDb updates the database's backend config.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::PatchDb)"]
     fn patch_db_updates_backend_config(db in arb_database()) {
         use embyr_admin_ui::model::DbPatch;
 
@@ -285,7 +284,6 @@ proptest! {
 
 /// Sad: PatchDb with non-existent DbId is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement PatchDb no-op on missing id"]
 fn patch_db_missing_id_is_noop() {
     use embyr_admin_ui::model::DbPatch;
 
@@ -303,7 +301,6 @@ fn patch_db_missing_id_is_noop() {
 proptest! {
     /// AC-006-01 / AC-006-02: SdkKeyCreated appends the key to sdk_keys[db_id].
     #[test]
-    #[ignore = "RED — implement update(_, Msg::SdkKeyCreated)"]
     fn sdk_key_created_appends_key(db in arb_database()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -329,7 +326,6 @@ proptest! {
 proptest! {
     /// AC-006-04: RevokeSdkKey removes the key from sdk_keys[db_id].
     #[test]
-    #[ignore = "RED — implement update(_, Msg::RevokeSdkKey)"]
     fn revoke_sdk_key_removes_key(db in arb_database(), key_id in arb_key_id()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -357,7 +353,6 @@ proptest! {
 
 /// Sad: RevokeSdkKey with non-existent key_id is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement RevokeSdkKey no-op on missing key"]
 fn revoke_sdk_key_missing_key_is_noop() {
     let mut m = make_model_with_db();
     let db_id = m.databases[0].id.clone();
@@ -372,7 +367,6 @@ fn revoke_sdk_key_missing_key_is_noop() {
 
 /// Sad: SdkKeyCreated with non-existent db_id is a no-op (no panic, no entry created).
 #[test]
-#[ignore = "RED — implement SdkKeyCreated no-op on unknown db"]
 fn sdk_key_created_unknown_db_is_noop() {
     let mut m = make_model_with_db();
     let known_db_keys_before = m.sdk_keys.len();

@@ -5,7 +5,7 @@
 //!   - Deterministic: same (model, msg) → same new model state
 //!   - Exhaustive: all Msg variants handled (enforced by compiler)
 
-use crate::model::{AppModel, NavState};
+use crate::model::{AppModel, DbPatch, DbStatus, NavState};
 use crate::msg::Msg;
 
 /// Threshold for TOTP consecutive failures before account lockout.
@@ -71,6 +71,49 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             }
         }
         Msg::SetDbTab(_, _) => {}
+
+        // ── US-005: Connections ────────────────────────────────────────────
+        Msg::PatchDb(db_id, patch) => {
+            if let Some(db) = model.databases.iter_mut().find(|d| d.id == db_id) {
+                match patch {
+                    DbPatch::Dsn(_) => {
+                        // No dsn field on Database in V1 model — no-op until model expanded.
+                    }
+                    DbPatch::AgentEndpoint(_) => {
+                        // No agent_endpoint field on Database in V1 model — no-op until model expanded.
+                    }
+                    DbPatch::LoggingEnabled(enabled, retention) => {
+                        db.logging_enabled = enabled;
+                        if let Some(r) = retention {
+                            db.log_retention = Some(r);
+                        }
+                    }
+                    DbPatch::BackendMode(mode) => {
+                        db.backend_mode = mode;
+                    }
+                    DbPatch::Suspended(suspended) => {
+                        db.status = if suspended {
+                            DbStatus::Suspended
+                        } else {
+                            DbStatus::Active
+                        };
+                    }
+                }
+            }
+        }
+
+        // ── US-006: SDK Keys ───────────────────────────────────────────────
+        Msg::SdkKeyCreated { db_id, key } => {
+            // Only append if the database exists; unknown db_id is a no-op.
+            if model.databases.iter().any(|d| d.id == db_id) {
+                model.sdk_keys.entry(db_id).or_default().push(key);
+            }
+        }
+        Msg::RevokeSdkKey(db_id, key_id) => {
+            if let Some(keys) = model.sdk_keys.get_mut(&db_id) {
+                keys.retain(|k| k.id != key_id);
+            }
+        }
 
         // All remaining variants are no-ops until their slices are delivered.
         _ => {}
