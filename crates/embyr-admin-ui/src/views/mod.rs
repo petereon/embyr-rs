@@ -6,11 +6,19 @@
 pub mod auth;
 #[cfg(feature = "csr")]
 pub mod dashboard;
+#[cfg(feature = "csr")]
+pub mod databases;
+#[cfg(feature = "csr")]
+pub mod db_detail;
 
 #[cfg(feature = "csr")]
 pub use auth::AuthView;
 #[cfg(feature = "csr")]
 pub use dashboard::DashboardView;
+#[cfg(feature = "csr")]
+pub use databases::DatabasesView;
+#[cfg(feature = "csr")]
+pub use db_detail::DbDetailView;
 #[cfg(feature = "csr")]
 pub use shell::ShellView;
 

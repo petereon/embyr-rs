@@ -19,7 +19,6 @@ use common::make_model_with_db;
 
 /// AC-003-02: DatabaseCreated appends the new database as the last entry.
 #[test]
-#[ignore = "RED — implement update(_, Msg::DatabaseCreated)"]
 fn new_database_appears_in_list_after_creation() {
     // AC-003-02
     let mut m = make_model_with_db();
@@ -50,7 +49,6 @@ fn new_database_appears_in_list_after_creation() {
 
 /// AC-003-04: Suspend sets status to Suspended.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetDbStatus) suspend"]
 fn suspend_database_changes_status_to_suspended() {
     // AC-003-04
     let mut m = make_model_with_db();
@@ -64,7 +62,6 @@ fn suspend_database_changes_status_to_suspended() {
 
 /// AC-003-04: Reactivate restores status to Active.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetDbStatus) reactivate"]
 fn reactivate_database_restores_active_status() {
     // AC-003-04
     let mut m = make_model_with_db();
