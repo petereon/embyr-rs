@@ -19,7 +19,6 @@ use common::make_model_with_db;
 
 /// AC-001-02, AC-001-08: Mock sign-in with any credentials grants session.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SignIn)"]
 fn sign_in_with_mock_credentials_sets_authed() {
     // AC-001-02
     let mut m = AppModel::default();
@@ -36,7 +35,6 @@ fn sign_in_with_mock_credentials_sets_authed() {
 
 /// AC-001-10: SignOut resets authed=false and navigates to login.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SignOut)"]
 fn sign_out_clears_session() {
     // AC-001-10
     let mut m = make_model_with_db();
@@ -53,7 +51,6 @@ fn sign_out_clears_session() {
 
 /// AC-001-04: Three consecutive TOTP failures lock the account for 15 minutes.
 #[test]
-#[ignore = "RED — implement Msg::TotpFailure lockout logic"]
 fn three_totp_failures_lock_account_for_fifteen_minutes() {
     // AC-001-04
     let mut m = AppModel::default();
@@ -75,7 +72,6 @@ fn three_totp_failures_lock_account_for_fifteen_minutes() {
 
 /// AC-002-01: SetDatabases populates model with the provided database list.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetDatabases)"]
 fn dashboard_shows_all_databases_after_load() {
     // AC-002-01
     use embyr_admin_ui::model::{Database, DbBackendMode, DbId};
@@ -120,7 +116,6 @@ fn dashboard_shows_all_databases_after_load() {
 
 /// AC-002-01 (empty state): Zero databases after SetDatabases([]).
 #[test]
-#[ignore = "RED — implement SetDatabases empty state"]
 fn dashboard_empty_state_when_no_databases() {
     // AC-002-01 empty path
     let mut m = AppModel::default();
@@ -147,7 +142,6 @@ fn dashboard_empty_state_when_no_databases() {
 
 /// AC-002-05: Suspended databases remain in model but Deleted databases are excluded.
 #[test]
-#[ignore = "RED — implement SetDatabases delete-filtering"]
 fn dashboard_suspended_visible_deleted_hidden() {
     // AC-002-05
     use embyr_admin_ui::model::{DbBackendMode, DbId};

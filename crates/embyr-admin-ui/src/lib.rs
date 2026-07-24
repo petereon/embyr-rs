@@ -8,3 +8,11 @@ pub mod msg;
 pub mod update;
 pub mod data;
 pub mod app;
+
+/// View modules (auth, dashboard, shell). Compiled only with `csr` feature.
+#[cfg(feature = "csr")]
+pub mod views;
+
+/// UI component library (primitives, sidebar, topbar). Compiled only with `csr` feature.
+#[cfg(feature = "csr")]
+pub mod components;

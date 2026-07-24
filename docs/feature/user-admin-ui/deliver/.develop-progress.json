@@ -1,8 +1,25 @@
 {
-  "feature_id": "user-admin-ui",
-  "phase": "Phase 2 — Execute Steps",
-  "completed_steps": [],
-  "current_step": "01-01",
-  "started_at": "2026-07-01T00:00:00Z",
-  "last_updated": "2026-07-24T00:00:00Z"
+  "project_id": "",
+  "total_steps": 14,
+  "completed_steps": 7,
+  "completed_step_ids": [
+    "01-01",
+    "02-01",
+    "02-02",
+    "03-01",
+    "04-01",
+    "04-02",
+    "05-01"
+  ],
+  "pending_step_ids": [
+    "06-01",
+    "06-02",
+    "06-03",
+    "06-04",
+    "06-05",
+    "06-06",
+    "07-01"
+  ],
+  "all_steps_done": false,
+  "phases_completed": {}
 }
