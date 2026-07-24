@@ -5,8 +5,8 @@
 //! V2 plan: replace with `#[server]` function calls. Component code is unchanged (ADR-007).
 
 use crate::model::{
-    AdminKey, Database, DbBackendMode, DbId, DbStatus, KeyId, Member, OidcProvider, Role, SdkKey,
-    ServiceAccount, ServiceAccountId,
+    AdminKey, Database, DbBackendMode, DbId, DbStatus, KeyId, Member, OidcId, OidcProvider, Role,
+    SdkKey, ServiceAccount, ServiceAccountId,
 };
 use uuid::Uuid;
 
@@ -94,7 +94,15 @@ pub mod mock {
     }
 
     /// Return mock OIDC providers.
+    ///
+    /// One hardcoded entry (Google) with enabled=false, representing a provider
+    /// that has been configured but not yet activated.
     pub fn oidc_providers() -> Vec<OidcProvider> {
-        Vec::new()
+        vec![OidcProvider {
+            id: OidcId(Uuid::parse_str("00000000-0000-0000-0000-000000000030").unwrap()),
+            issuer: "https://accounts.google.com".to_string(),
+            client_id: "mock-google-client-id".to_string(),
+            enabled: false,
+        }]
     }
 }

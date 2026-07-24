@@ -160,8 +160,31 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             model.admin_keys.retain(|k| k.id != id);
         }
 
-        // All remaining variants are no-ops until their slices are delivered.
-        _ => {}
+        // ── US-011: Settings ───────────────────────────────────────────────────
+        Msg::OidcProviderAdded(provider) => {
+            model.oidc_providers.push(provider);
+        }
+        Msg::ToggleOidc(id) => {
+            if let Some(p) = model.oidc_providers.iter_mut().find(|p| p.id == id) {
+                p.enabled = !p.enabled;
+            }
+        }
+        Msg::RemoveOidcProvider(id) => {
+            model.oidc_providers.retain(|p| p.id != id);
+        }
+
+        // ── Toast notifications ────────────────────────────────────────────────
+        Msg::PushToast(toast) => {
+            model.toasts.push(toast);
+        }
+        Msg::DismissToast(id) => {
+            model.toasts.retain(|t| t.id != id);
+        }
+
+        // ── Navigation ─────────────────────────────────────────────────────────
+        Msg::NavigateTo(section) => {
+            model.nav.section = section;
+        }
     }
 }
 

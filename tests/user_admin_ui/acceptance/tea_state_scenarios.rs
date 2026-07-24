@@ -596,7 +596,6 @@ fn revoke_admin_key_missing_is_noop() {
 proptest! {
     /// AC-011-04: ToggleOidc flips the enabled flag on the matching provider.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::ToggleOidc)"]
     fn toggle_oidc_flips_enabled(provider in arb_oidc_provider()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -617,7 +616,6 @@ proptest! {
 proptest! {
     /// AC-011-04: ToggleOidc is idempotent in the sense that double-toggle restores original state.
     #[test]
-    #[ignore = "RED — implement ToggleOidc double-toggle restores state"]
     fn toggle_oidc_double_toggle_restores(provider in arb_oidc_provider()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -641,7 +639,6 @@ proptest! {
 proptest! {
     /// PushToast appends to the toast queue.
     #[test]
-    #[ignore = "RED — implement update(_, Msg::PushToast)"]
     fn push_toast_appends(toast in arb_toast()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -656,7 +653,6 @@ proptest! {
 /// DismissToast removes the matching toast.
 proptest! {
     #[test]
-    #[ignore = "RED — implement update(_, Msg::DismissToast)"]
     fn dismiss_toast_removes_toast(toast in arb_toast()) {
         let mut m = AppModel::default();
         m.authed = true;
@@ -674,7 +670,6 @@ proptest! {
 
 /// Sad: DismissToast with non-existent ToastId is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement DismissToast no-op on missing id"]
 fn dismiss_toast_missing_id_is_noop() {
     let mut m = AppModel::default();
     m.authed = true;
@@ -687,7 +682,6 @@ fn dismiss_toast_missing_id_is_noop() {
 
 /// Toast overflow: pushing 100 toasts does not panic.
 #[test]
-#[ignore = "RED — implement PushToast overflow safety"]
 fn push_many_toasts_does_not_panic() {
     let mut m = AppModel::default();
     m.authed = true;
