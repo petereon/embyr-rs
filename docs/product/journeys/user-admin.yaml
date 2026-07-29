@@ -1,0 +1,99 @@
+version: "1.0"
+feature: user-admin-ui
+persona: P5
+persona_name: Chris (Account Admin / Platform Engineer)
+jobs:
+  - JOB-10  # account-admin (primary)
+  - JOB-04  # credential-isolation (Connections panel)
+  - JOB-05  # cloud-secret (Connections panel — agent_mode secret backends)
+updated: "2026-06-05"
+source: docs/feature/user-admin-ui/feature-delta.md
+
+happy_path:
+  - step: 1
+    action: "Navigate to /admin/"
+    output: "Login form renders"
+    emotion: neutral
+  - step: 2
+    action: "Enter email + password + TOTP"
+    output: "Redirect to Dashboard with database cards"
+    emotion: relief
+  - step: 3
+    action: "Scan database cards"
+    output: "All databases visible with status + P95 latency"
+    emotion: oriented
+  - step: 4
+    action: "Click 'New Database'"
+    output: "Create form with name + backend mode"
+    emotion: confident
+  - step: 5
+    action: "Submit create form"
+    output: "New database card appears immediately"
+    emotion: satisfied
+  - step: 6
+    action: "Open database → Connections tab"
+    output: "Backend config editable; masked DSN or agent endpoint"
+    emotion: in_control
+  - step: 7
+    action: "Open Keys tab → Create SDK Key"
+    output: "Full key shown once in modal; copy button available"
+    emotion: purposeful
+  - step: 8
+    action: "Navigate to Identities → Invite member"
+    output: "Pending member appears in table; invitation email queued (V2)"
+    emotion: trusted
+  - step: 9
+    action: "Navigate to Billing → Last 30 days"
+    output: "Per-database read/write/delete breakdown table"
+    emotion: informed
+  - step: 10
+    action: "Sign out"
+    output: "Session invalidated; redirected to login form"
+    emotion: complete
+
+shared_artifacts:
+  - name: session_cookie
+    source: step 2
+    consumed_by: all subsequent steps
+  - name: account_id
+    source: step 2 (session)
+    consumed_by: all sections
+  - name: db_id
+    source: steps 4-5 (create or select)
+    consumed_by: database detail, connections, keys, logs
+  - name: sdk_key
+    source: step 7 (key creation modal, shown once)
+    consumed_by: SDK developers (external)
+  - name: invite_token
+    source: step 8 (invitation email, V2)
+    consumed_by: recipient sign-up flow
+
+slices:
+  # user-admin-ui: frontend (mock data layer)
+  - id: slice-01
+    path: docs/feature/user-admin-ui/slices/slice-01-walking-skeleton.md
+  - id: slice-02
+    path: docs/feature/user-admin-ui/slices/slice-02-database-management.md
+  - id: slice-03
+    path: docs/feature/user-admin-ui/slices/slice-03-connections-sdk-keys.md
+  - id: slice-04
+    path: docs/feature/user-admin-ui/slices/slice-04-identity-admin-keys.md
+  - id: slice-05
+    path: docs/feature/user-admin-ui/slices/slice-05-billing-logs.md
+  - id: slice-06
+    path: docs/feature/user-admin-ui/slices/slice-06-settings.md
+  - id: slice-07
+    path: docs/feature/user-admin-ui/slices/slice-07-backend-api.md
+  # admin-api-v2: backend wiring (replaces mock data layer)
+  - id: slice-B01
+    path: docs/feature/admin-api-v2/slices/slice-B01-auth-migrations.md
+  - id: slice-B02
+    path: docs/feature/admin-api-v2/slices/slice-B02-project-list.md
+  - id: slice-B03
+    path: docs/feature/admin-api-v2/slices/slice-B03-sdk-keys.md
+  - id: slice-B04
+    path: docs/feature/admin-api-v2/slices/slice-B04-patch-metrics-logs.md
+  - id: slice-B05
+    path: docs/feature/admin-api-v2/slices/slice-B05-members-service-accounts-admin-keys.md
+  - id: slice-B06
+    path: docs/feature/admin-api-v2/slices/slice-B06-oidc-billing.md

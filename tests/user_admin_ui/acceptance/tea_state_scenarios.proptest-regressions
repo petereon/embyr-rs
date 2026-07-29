@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 100fa1932983755dcfb42f782bdc8e8b36fe1889f054fdbeba54284cb2f489b1 # shrinks to model = AppModel { authed: true, databases: [Database { id: DbId(00000000-0000-0000-0000-000000000000), name: "a--", status: Active, backend_mode: DirectPg, logging_enabled: false, log_retention: None, created_at: None }], members: [Member { id: UserId(00000000-0000-0000-0000-000000000000), email: "aaa@aaa.com", display_name: None, role: Owner, pending: false, mfa_enabled: false, last_login: None }], sdk_keys: {}, service_accounts: [], admin_keys: [], oidc_providers: [], toasts: [], nav: NavState { section: Login, db_tab: Overview }, totp_failures: 0, account_locked: false }
+cc 156100d989cd1a4dcc53f87e2880c5aef12f3bd27ae2d6f83e1fbe7bfa412c95 # shrinks to model = AppModel { authed: false, databases: [Database { id: DbId(00000000-0000-0000-0000-000000000000), name: "a00", status: Active, backend_mode: DirectPg, logging_enabled: false, log_retention: None, created_at: None }], members: [Member { id: UserId(00000000-0000-0000-0000-000000000000), email: "aaa@aaa.com", display_name: None, role: Owner, pending: false, mfa_enabled: false, last_login: None }], sdk_keys: {}, service_accounts: [], admin_keys: [], oidc_providers: [], toasts: [], nav: NavState { section: Login, db_tab: Overview }, totp_failures: 0, account_locked: false }
+cc c6eb925964fcf1a25eb3c1fda47bd6870fded0d1a5659304217cd14ab4e44d7d # shrinks to db = Database { id: DbId(00000000-0000-0000-0000-000000000000), name: "aa0", status: Suspended, backend_mode: DirectPg, logging_enabled: false, log_retention: None, created_at: None }, new_status = Active

@@ -1548,3 +1548,247 @@ Slice order S01A → S06A → S02A → S04A → S03A → S05A (locked decision D
 | S03A | Query RPCs: `RunQuery`, `RunAggregationQuery`, `ListDocuments`; new proto messages | S01A (read path working) |
 | S05A | `Subscribe` RPC; `AgentNotifyBridge`; proto extension; NOTIFY round-trip in startup probe | S01A, S02A (writes trigger NOTIFY), S06A (probe includes NOTIFY check) |
 
+---
+
+## Application Architecture — user-admin-ui
+
+> Updated: 2026-06-14
+> Feature: user-admin-ui (Leptos 0.8 CSR WASM SPA)
+> Mode: Propose (autonomous analysis — design spec pre-approved)
+> ADRs: docs/product/architecture/adr-005 through adr-008
+
+---
+
+### Wave: DESIGN / [REF] Quality Attribute Priorities — user-admin-ui
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|-------------------|
+| 1 | **Bundle size** | Hard limit: `<5 MB` WASM bundle (CLAUDE.md). Highest-risk assumption. Validated at Walking Skeleton (Slice 01). Any dependency that adds significant size is a blocker. |
+| 2 | **Zero JS toolchain** | Pure Rust workspace. No npm, no webpack, no TypeScript compiler. `trunk` is the only additional build tool. Contributors must not need two build systems. |
+| 3 | **Type safety** | All domain types (Database, Member, AdminKey, NavState) are Rust structs. Compiler enforces exhaustiveness of Msg enum. No `serde_json::Value` duck-typing in view code. |
+| 4 | **UX responsiveness** | SVG charts with mousemove crosshair, modal Portal rendering, clipboard API, keyboard ESC — all require genuine reactivity, not server round-trips. Leptos fine-grained reactivity re-renders only changed components. |
+| 5 | **Testability** | `update()` is a pure Rust function testable with `cargo test` — no browser, no WASM runtime. Domain type constructors in `data.rs` are testable. Charts' SVG path functions are pure math functions. |
+| 6 | **Maintainability** | Single language for both server and UI. Directory structure mirrors views and components 1:1. `Msg` enum variants are the authoritative list of state transitions — compiler enforces completeness. |
+| 7 | **V2 migration safety** | `Resource`/`Action` async blocks are the only thing that changes when moving from mock to `#[server]` functions. No component changes. Migration is a compile-time-verifiable guarantee. |
+
+---
+
+### Wave: DESIGN / [REF] Component Decomposition
+
+New workspace crate: `crates/embyr-admin-ui/`
+
+**Core TEA modules:**
+
+| File Path | Responsibility | Slice |
+|-----------|---------------|-------|
+| `src/main.rs` | WASM entry: `mount_to_body(App)`, `console_error_panic_hook` | 01 |
+| `src/model.rs` | `AppModel` struct (all domain state) + domain types (`Database`, `Member`, `NavState`, `Section`, `DbTab`, etc.) | 01 |
+| `src/msg.rs` | `Msg` enum — 30+ variants, all `Clone`, exhaustive | 01 |
+| `src/update.rs` | Pure `fn update(&mut AppModel, Msg)` — no IO, no async, deterministic | 01 |
+| `src/data.rs` | Mock data: `databases()`, `members()`, `sdk_keys()`, `billing_usage()`, `query_logs()` — V2 replacement target | 01 |
+| `src/app.rs` | Root component: `RwSignal<AppModel>`, `Callback<Msg>`, context provision, Auth/Shell router | 01 |
+
+**Shell components:**
+
+| File Path | Responsibility | Slice |
+|-----------|---------------|-------|
+| `src/components/sidebar.rs` | Navigation items, database count badge, account switcher `Menu` | 01 |
+| `src/components/topbar.rs` | Breadcrumb, notifications menu, user avatar menu, sign-out | 01 |
+| `src/components/mod.rs` | Module re-exports | 01 |
+
+**Primitive component library (`src/components/primitives/`):**
+
+| Component | Props/Variants | Slice |
+|-----------|---------------|-------|
+| `Button` | variant: Default|Primary|Ghost|Danger; size: Sm|Md|Lg; icon; disabled; on_click | 01 |
+| `Badge` | variant: Active|Suspended|Deleted|Pending | 01 |
+| `Card` | header slot; children | 01 |
+| `Modal` | title; Leptos Portal; ESC closes via `window_event_listener` | 02 |
+| `Input` | value signal; on_change; placeholder; error | 02 |
+| `Toggle` | checked; on_change; disabled | 04 |
+| `Tabs` | items: Vec<TabItem>; active signal; on_change | 02 |
+| `Menu` | trigger slot; items; width | 01 |
+
+**Chart components (`src/components/charts/`):**
+
+| Component | What it renders | Slice |
+|-----------|----------------|-------|
+| `Sparkline` | Polyline SVG path from `&[f64]` (24 points) | 02 |
+| `LatencyChart` | Full 24h latency chart + mousemove crosshair via `web-sys::MouseEvent` | 02 |
+| `BarChart` | Hourly ops bar chart (reads/writes/deletes) | 02 |
+| `Donut` | Percentage ring SVG | 05 |
+
+**Views:**
+
+| File Path | Responsibility | Slice |
+|-----------|---------------|-------|
+| `src/views/auth.rs` | Login form, MFA TOTP 6-digit input, email OTP, recovery code | 01 |
+| `src/views/dashboard.rs` | KPI grid, database card grid, empty state | 01 |
+| `src/views/databases.rs` | Databases table, `CreateDatabaseModal` | 02 |
+| `src/views/db_detail/mod.rs` | DB detail wrapper: header, tab router | 02 |
+| `src/views/db_detail/overview.rs` | KPI tiles, latency chart, ops bar chart, logging toggle | 02 |
+| `src/views/db_detail/connections.rs` | Backend config panel (masked DSN / agent endpoint), edit/save/cancel, active connections placeholder | 03 |
+| `src/views/db_detail/logs.rs` | Query log table, filters, sort, export CSV | 05 |
+| `src/views/db_detail/keys.rs` | SDK keys table, create-and-show-once flow, revoke | 03 |
+| `src/views/billing.rs` | Time range selector, per-database breakdown table | 05 |
+| `src/views/identities.rs` | Members tab + Service Accounts tab | 04 |
+| `src/views/api_keys.rs` | Admin API keys table, create-and-show-once flow | 04 |
+| `src/views/settings.rs` | Account, Auth Methods, OIDC providers, Danger Zone | 06 |
+
+**Build artifacts:**
+
+| File Path | Responsibility | Slice |
+|-----------|---------------|-------|
+| `Cargo.toml` | `leptos { features = ["csr"] }`, `wasm-bindgen`, `web-sys`, `js-sys`, `serde`, `uuid`, `chrono` | 01 |
+| `Trunk.toml` | `public_url = "/admin/"`, dist output | 01 |
+| `index.html` | Trunk entry: links `styles.css`, loads `.wasm` | 01 |
+| `public/styles.css` | Verbatim port of `static/styles.css` — 3 themes (`data-look="ember"|"graphite"|"paper"`), 2 density modes | 01 |
+| `public/assets/embyr-mark.svg` | Brand mark | 01 |
+
+**embyr-admin extension:**
+
+| Change | Scope | Slice |
+|--------|-------|-------|
+| Add `ServeDir` route at `/admin/` in `main.rs` | `crates/embyr-admin/src/main.rs` | 01 |
+| Add `tower-http` with `fs` feature to Cargo.toml | `crates/embyr-admin/Cargo.toml` | 01 |
+| `make ui` Makefile target | root `Makefile` | 01 |
+
+---
+
+### Wave: DESIGN / [REF] Driving Ports (Inbound)
+
+The embyr-admin-ui SPA is driven by the browser environment. There are no traditional "driving ports" in the hexagonal sense — the SPA is a client, not a server. The inbound event sources are:
+
+| Event Source | Adapter in Leptos | What triggers it |
+|-------------|------------------|-----------------|
+| Browser HTTP GET `/admin/` | `ServeDir` in `embyr-admin` serves `index.html` | User navigates to the admin URL |
+| DOM events (click, input, submit) | Leptos event handlers (`on:click`, `on:input`) | User interaction with any component |
+| Keyboard events | `window_event_listener("keydown", ...)` in Modal component | ESC key closes modals |
+| Mouse events | `web-sys::MouseEvent` + `mousemove` listener | Chart crosshair positioning in `LatencyChart` |
+| Clipboard API | `web-sys::Navigator::clipboard()` | Copy-to-clipboard in key creation modals |
+| Leptos `Resource` completion | `Effect::new` wired to `dispatch` | Async data load completes (mock in V1, `#[server]` in V2) |
+
+---
+
+### Wave: DESIGN / [REF] Driven Ports and Adapters
+
+**V1 driven port — Mock data (`data.rs`):**
+
+| Port | V1 Adapter | V2 Adapter |
+|------|-----------|-----------|
+| Database list | `mock::databases() -> Vec<Database>` | `#[server] fetch_databases() -> Result<Vec<Database>, ServerFnError>` |
+| Database mutation | `mock::make_database(&NewDatabase) -> Database` | `#[server] create_database(input) -> Result<Database, ServerFnError>` |
+| Member list | `mock::members() -> Vec<Member>` | `#[server] fetch_members() -> Result<Vec<Member>, ServerFnError>` |
+| SDK keys | `mock::sdk_keys(db_id) -> Vec<SdkKey>` | `#[server] fetch_sdk_keys(db_id) -> Result<Vec<SdkKey>, ServerFnError>` |
+| Admin keys | `mock::admin_keys() -> Vec<AdminKey>` | `#[server] fetch_admin_keys() -> Result<Vec<AdminKey>, ServerFnError>` |
+| OIDC providers | `mock::oidc_providers() -> Vec<OidcProvider>` | `#[server] fetch_oidc_providers() -> Result<Vec<OidcProvider>, ServerFnError>` |
+| Billing usage | `mock::billing_usage(range) -> Vec<BillingRow>` | `#[server] fetch_billing(range) -> Result<Vec<BillingRow>, ServerFnError>` |
+| Query logs | `mock::query_logs(db_id) -> Vec<LogEntry>` | `#[server] fetch_query_logs(db_id, filters) -> Result<Vec<LogEntry>, ServerFnError>` |
+
+**V2 migration path** (ADR-007): the only change per operation is the single line inside the `Resource`/`Action` async block. No component changes.
+
+**Earned Trust — no driven adapter probe required for V1** because the mock data layer is in-process Rust code with no external substrate. V2 `#[server]` functions call `embyr-admin` API routes which call Postgres — the Postgres probe is already covered by the `embyr-admin` startup sequence (V2 work outside this feature's scope).
+
+---
+
+### Wave: DESIGN / [REF] Bundle Size Budget
+
+| Layer | Estimated Size (compressed) | Notes |
+|-------|-----------------------------|-------|
+| Leptos 0.8 core + CSR runtime | ~300–500 KB | Fine-grained reactivity; no VDOM overhead |
+| `wasm-bindgen` + `web-sys` | ~100–200 KB | Only features requested via Cargo.toml features compile in |
+| `serde` + `serde_json` | ~80–120 KB | Required for domain type serialization |
+| `uuid` (v4 + js feature) | ~30–50 KB | Uses `js-sys` Math.random in WASM |
+| `chrono` (wasmbind feature) | ~50–80 KB | Date formatting for log tables and billing range |
+| Application code (all views + components + charts) | ~200–400 KB | SVG path math, TEA model, all views |
+| `styles.css` (uncompressed) | ~50–80 KB | Verbatim port of design prototype CSS |
+| **Total estimated (compressed)** | **~810 KB – 1.4 MB** | Well under 5 MB hard limit |
+
+**Validation**: `trunk build --release` output is measured in the Slice 01 CI job. The CI job fails if the total `dist/` directory exceeds 5 MB. This is the primary KPI gate for Walking Skeleton.
+
+**Risk**: `web-sys` features requested but unused are tree-shaken by `wasm-opt` (invoked by trunk in release mode). Over-requesting features (e.g., all of `web-sys`) would balloon the bundle. The `Cargo.toml` must list only the features actually used: `Window`, `Document`, `Element`, `MouseEvent`, `KeyboardEvent`, `Navigator`, `Clipboard`, `ClipboardItem`.
+
+---
+
+### Wave: DESIGN / [REF] Architecture Enforcement
+
+| Concern | Enforcement Mechanism |
+|---------|----------------------|
+| No tokio/sqlx/tonic/axum in `embyr-admin-ui` | `cargo-deny`: `deny.toml` for the UI crate lists server-side IO crates as denied |
+| `update()` must remain pure (no IO) | CI mutation test (`cargo mutants -p embyr-admin-ui`): any mutation that introduces IO will cause test failures since no async test infrastructure is present |
+| `Msg` enum exhaustiveness | Rust compiler: `match msg { ... }` in `update()` must be exhaustive — missing variant = compile error |
+| `AppModel` types are `Clone` | Rust compiler: `RwSignal::new(AppModel::from_mock())` requires `Clone` — missing impl = compile error |
+| Bundle size `<5 MB` | CI job: `trunk build --release && du -sh dist/ && [ $(du -sm dist/ | cut -f1) -lt 5 ]` |
+| Primitive components match CSS contract | Visual regression screenshots in CI (V2; Slice 07) |
+
+---
+
+### Wave: DESIGN / [REF] Reuse Analysis
+
+#### JSX Prototype Files (`crates/embyr-admin/static/`)
+
+The JSX prototype is a design-time artifact in a different language (JavaScript/JSX). The `EXTEND` classification is inapplicable — the prototype cannot be extended or imported into the Rust/WASM codebase. The applicable classifications are PORT (manual translation required), REUSE_ASSET (copy verbatim), DROP (exclude from production), and DERIVE (Rust type derived from JS shape with type-system guarantees added).
+
+| File | Classification | Action |
+|------|---------------|--------|
+| `store.jsx` | PORT | AppProvider state + mutations → `model.rs` (AppModel struct) + `msg.rs` (Msg enum) + `update.rs` (update fn). The 7 `useState` instances → 7 fields on `AppModel`. The 12 mutation functions → 12 Msg variants. Manual translation required — type system guarantees added (exhaustive match, Clone bounds). |
+| `app.jsx` | PORT | Sidebar, Topbar, Routed, Root → `sidebar.rs`, `topbar.rs`, `app.rs`. Routing via `nav.section` match → `match model.nav.section` in `app.rs`. TweaksPanel dropped (see below). |
+| `views_auth.jsx` | PORT | AuthGate component → `views/auth.rs`. Form state (`useState`) → local `RwSignal` or dispatched Msg. TOTP input logic → CodeInput component in `views/auth.rs`. |
+| `views_dashboard.jsx` | PORT | DashView → `views/dashboard.rs`. Database card grid, KPI grid → Leptos component with `move || model.with(|m| m.databases.clone())`. |
+| `views_databases.jsx` | PORT | DatabasesView → `views/databases.rs`. CreateDatabaseModal → Modal primitive. |
+| `views_db_detail.jsx` | PORT | DatabaseDetail → `views/db_detail/mod.rs` + `overview.rs` + `connections.rs`. |
+| `views_db_logs.jsx` | PORT | Log table + filters → `views/db_detail/logs.rs`. |
+| `views_billing.jsx` | PORT | BillingView → `views/billing.rs`. |
+| `views_identities.jsx` | PORT | IdentitiesView (Members + Service Accounts tabs) → `views/identities.rs`. |
+| `views_apikeys.jsx` | PORT | ApiKeysView → `views/api_keys.rs`. |
+| `views_settings.jsx` | PORT | SettingsView → `views/settings.rs`. |
+| `ui.jsx` | PORT | Button, Badge, Card, Modal, Input, Toggle, Tabs, Menu, Avatar, MenuItem → `components/primitives/` (one file per component). CSS class names preserved verbatim. |
+| `charts.jsx` | PORT | Sparkline, LatencyChart, BarChart, Donut → `components/charts/` (pure Rust SVG path math). `mousemove` event handler → `web-sys::MouseEvent` + `web_sys::window().unwrap().add_event_listener_with_callback`. |
+| `icons.jsx` | PORT | SVG icon paths → `components/icons.rs` or inline `view!` macro SVG literals. Icon name string map → `pub enum Icon` with `impl IntoView`. |
+| `styles.css` | REUSE_ASSET | Copy verbatim to `public/styles.css`. No modifications. CSS variables, class names, and data-attribute selectors are referenced by the Leptos components via string class names in `view!` macros. |
+| `tweaks-panel.jsx` | DROP | Design-time tool (theme/font/density switcher for design review). Not included in the Leptos build. Default theme `ember` + `comfortable` density hardcoded via `data-look="ember"` on `<html>` in `index.html`. |
+| `data.js` | DERIVE | Mock data shapes → `src/data.rs`. JavaScript objects → Rust structs with field-type guarantees. `genKey("embyr_sdk")` → `uuid::Uuid::new_v4()` formatted as `embyr_sdk_{uuid}`. Date strings → `chrono::NaiveDate`. |
+
+#### Existing Rust Code in `crates/embyr-admin/`
+
+| Existing Component | File | Classification | Action |
+|-------------------|------|---------------|--------|
+| `embyr-admin` binary stub | `crates/embyr-admin/src/main.rs` | EXTEND | Add `ServeDir` route + `tower-http` dependency. Stub is 6 lines; extension is minimal. |
+| `embyr-admin` Cargo.toml | `crates/embyr-admin/Cargo.toml` | EXTEND | Add `tower-http = { version = "0.5", features = ["fs"] }`. Existing `axum`, `tokio`, `serde` dependencies unchanged. |
+
+#### New Rust Code
+
+| Component | Classification | Justification |
+|-----------|---------------|---------------|
+| `crates/embyr-admin-ui/` (entire crate) | CREATE NEW | No existing Rust WASM UI crate in the workspace. The JSX prototype is design-only — not importable. |
+| Root `Makefile` `ui` target | CREATE NEW | No Makefile exists; `make ui` is the build orchestration for `trunk build --release` + dist copy. |
+
+---
+
+### Wave: DESIGN / [REF] Open Questions
+
+| ID | Question | Blocking | Resolution Timing |
+|----|----------|---------|------------------|
+| OQ-UI-01 | **WASM bundle size** — the 810 KB–1.4 MB estimate is unvalidated. `web-sys` with all requested features may produce a larger bundle than estimated. Actual size is only known after `trunk build --release` on the full component tree. | Blocks go/no-go on Leptos CSR decision. Validated at Slice 01. | Slice 01 Walking Skeleton CI job. |
+| OQ-UI-02 | **Email delivery in V1 mock** — member invitations (US-009) show a pending entry in the Members table but no email is sent. The invitation email flow requires an SMTP adapter in `embyr-admin` (V2 work). Is the UI behaviour (pending entry only) sufficient for P5's needs in V1? | No — pending entry behaviour is documented in AC-009-02. V2 SMTP work is separate feature scope. | Confirmed in DISCUSS wave (Out of Scope). |
+| OQ-UI-03 | **Active connections display** — shown as "—" with V2 badge. Multi-pod connection counting requires a distributed counter (Redis/shared Postgres). Is the "—" placeholder + badge sufficient for V1 or does P5 need a single-instance count? | Low risk — confirmed deferred in DISCUSS wave (AC-004-01, AC-005-04). | Confirmed in DISCUSS wave locked decisions (D4). |
+| OQ-UI-04 | **SSR migration timing** — the migration from CSR to SSR requires `leptos_axum` integration in `embyr-admin`. When does SSR become worth the added build coupling? The trigger is likely "V2 real data + stakeholder request for faster initial paint." | Not blocking V1 or V2 mock-to-real migration. SSR path is documented in design spec § Migration. | V3 consideration; tracked in design spec. |
+| OQ-UI-05 | **`leptos_router` for URL-based navigation** — V1 nav is in-memory (`NavState` in `AppModel`). Browser back button does not work. Adding `leptos_router` requires wrapping each section in a `Route` and migrating `NavState` to URL params. Impact on AppModel is moderate. | Not blocking V1. Deferred to V2 per locked decision and DISCUSS Out of Scope. | V2 consideration; adds `leptos_router` dependency. |
+
+---
+
+### Wave: DESIGN / [REF] Application-Level Decisions Table — user-admin-ui
+
+| ID | Decision | Verdict | Rationale |
+|----|----------|---------|-----------|
+| UI-AD-01 | Leptos 0.8 CSR WASM | Accepted | Zero JS toolchain, shared types, TEA pattern built-in. See ADR-005. |
+| UI-AD-02 | TEA via `RwSignal<AppModel>` + `Callback<Msg>` via context | Accepted | Testable pure update(), no prop drilling, fine-grained reactivity. See ADR-006. |
+| UI-AD-03 | Mock-first V1, `#[server]` V2 | Accepted | Decouples UI sprint from backend sprint. Zero-component-change migration guarantee. See ADR-007. |
+| UI-AD-04 | Separate workspace crate `embyr-admin-ui` | Accepted | Build isolation: trunk vs cargo. Dependency isolation: no server-side IO crates in UI crate. See ADR-008. |
+| UI-AD-05 | Pure SVG charts (no JS chart library) | Accepted | Zero bundle size impact. Path math is pure Rust functions. No `canvas`, no `d3`, no `chart.js`. Design prototype already used SVG. |
+| UI-AD-06 | Verbatim CSS port (no CSS-in-Rust) | Accepted | `styles.css` is 100% design-reviewed. No CSS library (tailwind, emotion) introduces build complexity. Leptos components reference CSS classes as string literals in `view!` macros — standard HTML practice. |
+| UI-AD-07 | `window_event_listener` for ESC, not per-component JS | Accepted | Modals rendered via Leptos Portal outside the component tree. ESC must be caught at the window level. `leptos::window_event_listener("keydown", ...)` is the correct Leptos primitive. |
+| UI-AD-08 | Default theme hardcoded (`data-look="ember"` in index.html) | Accepted | TweaksPanel is a design-time tool (DROP classification). Production theme is the approved ember theme. No runtime theme switching in V1. |
+| UI-AD-09 | In-memory navigation state (no `leptos_router` in V1) | Accepted | URL deep linking is not required by any V1 AC. Adding `leptos_router` in V1 would require routing configuration for every view with no user-visible benefit. Deferred to V2. |
+| UI-AD-10 | `cargo-mutants` mutation testing on `update.rs` and `data.rs` | Accepted | The pure `update()` function is the highest-value mutation target — it contains all state transition logic. `cargo-mutants` can test it without a browser. Target: ≥80% kill rate per CLAUDE.md `per-feature` mutation strategy. |
+

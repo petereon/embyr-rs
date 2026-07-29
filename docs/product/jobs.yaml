@@ -160,3 +160,40 @@ jobs:
       habit: Auditors expect DB record or config file as evidence; system DB row serves this role
     opportunity_score: 12
     priority: high
+
+  - id: JOB-10
+    name: account-admin
+    persona: P5
+    persona_name: Chris (Account Admin / Platform Engineer)
+    feature: user-admin-ui
+    job_story: >
+      When I have an embyr account with multiple databases and a team of developers,
+      I want a web UI to create and monitor databases, manage team access, view usage
+      costs, and rotate SDK/admin keys, so I can operate self-sufficiently without
+      contacting the embyr SaaS operator or writing admin API scripts.
+    dimensions:
+      functional: >
+        Create/list/detail databases; view P95 latency + ops charts; manage Members +
+        Service Accounts; create/revoke SDK + Admin keys; view billing breakdown;
+        configure OIDC + account settings
+      emotional: >
+        Feel in control of the account; feel like a self-sufficient operator rather
+        than a dependent customer; feel confident keys and access are under my governance
+      social: >
+        Be seen by the engineering team as running a mature, access-controlled data
+        platform; demonstrate clean secrets hygiene to auditors
+    four_forces:
+      push: >
+        No UI exists; all management requires raw admin API calls or asking the embyr
+        operator; error-prone and time-consuming
+      pull: >
+        Dashboard + CRUD + key management via browser = complete self-service in minutes;
+        no operator dependency for any routine task
+      anxiety: >
+        "What if I accidentally revoke a key in production?" — mitigated by
+        confirm-before-revoke modal and key prefix display for identification
+      habit: >
+        Admins expect a web console (AWS Console, Vercel dashboard, Supabase studio
+        mental model); CLI-only access creates friction and slows new-member onboarding
+    opportunity_score: 16
+    priority: critical

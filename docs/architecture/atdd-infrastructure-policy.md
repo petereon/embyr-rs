@@ -14,6 +14,7 @@ rewrite with `--policy=fresh`. Git history is the audit trail.
 | gRPC data port (:8080) | In-process tonic test client via `Channel::from_shared` pointing at the test server started with `tokio::net::TcpListener::bind("127.0.0.1:0")` | Ephemeral port per test; no port conflicts in CI |
 | REST / gRPC-Web port (:8081) | `reqwest::Client` (async) against an in-process Axum test server | Covers gRPC-Web, BrowserChannel, REST/JSON paths |
 | Admin port (:9090) | `reqwest::Client` against the Axum admin server bound on an ephemeral port | Admin bearer token injected per test |
+| Browser WASM SPA (`/admin/` path) | `reqwest::Client::get("/admin/")` against embyr-admin on ephemeral port; asserts 200 + HTML body contains WASM boot `<script>`; separate `#[test]` asserts `.wasm` file in `admin-ui/dist/` is < 5,000,000 bytes. Pure `update()` proptest runs via `cargo test` directly (no browser, no WASM needed). | Walking skeleton = HTTP probe + bundle size gate; TEA state machine = proptest on the pure function. Added: 2026-06-14 (DISTILL wave, feature user-admin-ui) |
 | Agent gRPC (:9191) | In-process tonic mTLS test client; test CA + leaf certs generated via `rcgen` in `tests/common/tls.rs` | Client cert required; no-cert test asserts TLS failure |
 
 ---

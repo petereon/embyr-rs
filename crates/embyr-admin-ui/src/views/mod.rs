@@ -50,6 +50,7 @@ mod shell {
     use crate::views::billing::BillingView;
     use crate::views::dashboard::DashboardView;
     use crate::views::databases::DatabasesView;
+    use crate::views::db_detail::DbDetailView;
     use crate::views::identities::IdentitiesView;
     use crate::views::api_keys::ApiKeysView;
     use crate::views::settings::SettingsView;
@@ -58,23 +59,30 @@ mod shell {
     pub fn ShellView() -> impl IntoView {
         let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
 
+        // Memo: only re-runs routing when nav.section actually changes.
+        // Without this, any model mutation (PatchDb, SetDbLogging, etc.) would
+        // re-run the match and re-mount the active view, resetting local state.
+        let section = Memo::new(move |_| model.with(|m| m.nav.section.clone()));
+
         view! {
-            <div class="shell">
+            <div class="app">
                 <Sidebar />
-                <div class="shell-content">
+                <div class="main">
                     <Topbar />
-                    <main class="shell-main">
-                        {move || match model.with(|m| m.nav.section.clone()) {
-                            Section::Databases => view! { <DatabasesView /> }.into_any(),
-                            Section::Identities => view! { <IdentitiesView /> }.into_any(),
-                            Section::ApiKeys => view! { <ApiKeysView /> }.into_any(),
-                            Section::Billing => view! { <BillingView /> }.into_any(),
-                            Section::Settings => view! { <SettingsView /> }.into_any(),
-                            _ => view! { <DashboardView /> }.into_any(),
+                    <main class="content">
+                        {move || match section.get() {
+                            Section::Databases   => view! { <DatabasesView /> }.into_any(),
+                            Section::DbDetail(_) => view! { <DbDetailView /> }.into_any(),
+                            Section::Identities  => view! { <IdentitiesView /> }.into_any(),
+                            Section::ApiKeys     => view! { <ApiKeysView /> }.into_any(),
+                            Section::Billing     => view! { <BillingView /> }.into_any(),
+                            Section::Settings    => view! { <SettingsView /> }.into_any(),
+                            _                    => view! { <DashboardView /> }.into_any(),
                         }}
                     </main>
                 </div>
             </div>
+
         }
     }
 }
