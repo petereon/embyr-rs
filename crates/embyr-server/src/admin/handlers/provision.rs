@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -8,27 +8,12 @@ use embyr_core::{auth::{argon2, ecies}, domain::project::ProjectId};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
-use std::sync::Arc;
 
 use crate::adapters::{
-    aws_secret_fetcher::{AwsSecretError, AwsSecretFetcher},
-    credential_cache::CredentialCache,
-    gcp_secret_fetcher::{GcpSecretError, GcpSecretFetcher},
-    system_db::SystemDb,
+    aws_secret_fetcher::AwsSecretError,
+    gcp_secret_fetcher::GcpSecretError,
 };
-
-#[derive(Clone)]
-pub struct AdminState {
-    pub system_db: Arc<SystemDb>,
-    pub admin_key: String,
-    pub credential_cache: Arc<CredentialCache>,
-    /// Injected AWS Secrets Manager fetcher. None when the server is started
-    /// without AWS support (e.g., standard direct_pg/agent tests).
-    pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
-    /// Injected GCP Secret Manager fetcher. None when the server is started
-    /// without GCP support (e.g., standard direct_pg/aws/agent tests).
-    pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
-}
+use crate::admin::state::OperatorState;
 
 #[derive(Deserialize)]
 pub struct ProvisionRequest {
@@ -75,24 +60,11 @@ fn err(code: StatusCode, error: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": error })))
 }
 
-pub fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-}
-
 pub async fn provision(
-    headers: HeaderMap,
-    State(state): State<AdminState>,
+    State(state): State<OperatorState>,
     Json(req): Json<ProvisionRequest>,
 ) -> ApiResult<(StatusCode, Json<ProvisionResponse>)> {
-    // Auth check
-    let token = extract_bearer(&headers)
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "missing_auth"))?;
-    if token != state.admin_key {
-        return Err(err(StatusCode::UNAUTHORIZED, "invalid_auth"));
-    }
+    // Auth is enforced by operator_auth_middleware applied at the router layer.
 
     // Validate project_id using the domain rule (same regex as ProjectId::new).
     if ProjectId::new(&req.project_id).is_err() {

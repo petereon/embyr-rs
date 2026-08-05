@@ -1,11 +1,11 @@
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     Json,
 };
 use serde::Serialize;
 
-use super::provision::{extract_bearer, AdminState};
+use crate::admin::state::OperatorState;
 
 #[derive(Serialize)]
 pub struct GetProjectResponse {
@@ -17,13 +17,9 @@ pub struct GetProjectResponse {
 
 pub async fn get_project(
     Path(project_id): Path<String>,
-    headers: HeaderMap,
-    State(state): State<AdminState>,
+    State(state): State<OperatorState>,
 ) -> Result<Json<GetProjectResponse>, StatusCode> {
-    let token = extract_bearer(&headers).ok_or(StatusCode::UNAUTHORIZED)?;
-    if token != state.admin_key {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    // Auth is enforced by the calling sub-router's middleware layer.
 
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT status, backend_mode FROM projects WHERE id=$1",
