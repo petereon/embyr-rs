@@ -14,6 +14,7 @@ use crate::adapters::{
 };
 
 use super::handlers::auth::{signin, signout};
+use super::handlers::projects::list_projects;
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::provision::provision;
@@ -83,8 +84,9 @@ pub fn build_admin_router(
         .with_state(user_state.clone());
 
     // Session sub-router: session_auth_middleware guards all routes added in steps 01-04+.
-    // Explicitly typed as Router<UserAdminState> so .with_state() is valid on the empty router.
+    // Routes MUST be added BEFORE route_layer so the middleware applies to them.
     let session_router = Router::<UserAdminState>::new()
+        .route("/admin/v1/projects", get(list_projects))
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
             session_auth_middleware,

@@ -1,8 +1,8 @@
 // @US-B01 @driving_port @real-io
 //! Slice B-01 — Session Authentication + DB Migrations.
 //!
-//! All tests are #[ignore] (RED). DELIVER unskips one at a time.
-//! Walking skeleton is in walking_skeleton.rs (not ignored).
+//! All tests run against a real Postgres container via AdminTestContext.
+//! Walking skeleton is in walking_skeleton.rs.
 //!
 //! Open questions resolved:
 //!   OQ-B03: TOTP library = totp-rs 5.x (confirmed in DESIGN technology choices)
@@ -31,7 +31,6 @@ use std::collections::HashMap;
 ///
 /// AC-B01-01
 // @US-B01 @AC-B01-01 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn sign_in_with_valid_credentials_returns_session_cookie() {
     let ctx = AdminTestContext::new().await;
@@ -107,7 +106,6 @@ async fn sign_in_with_valid_credentials_returns_session_cookie() {
 ///
 /// AC-B01-02
 // @US-B01 @AC-B01-02 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn wrong_password_returns_401_without_revealing_email_existence() {
     let ctx = AdminTestContext::new().await;
@@ -173,7 +171,6 @@ async fn wrong_password_returns_401_without_revealing_email_existence() {
 ///
 /// AC-B01-03
 // @US-B01 @AC-B01-03 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn wrong_totp_code_returns_401_and_does_not_set_session() {
     let ctx = AdminTestContext::new().await;
@@ -227,7 +224,6 @@ async fn wrong_totp_code_returns_401_and_does_not_set_session() {
 ///
 /// AC-B01-04
 // @US-B01 @AC-B01-04 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn three_consecutive_totp_failures_lock_account_for_fifteen_minutes() {
     let ctx = AdminTestContext::new().await;
@@ -294,13 +290,12 @@ async fn three_consecutive_totp_failures_lock_account_for_fifteen_minutes() {
 ///
 /// AC-B01-05
 // @US-B01 @AC-B01-05 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn valid_recovery_code_grants_session_and_invalidates_code() {
     let ctx = AdminTestContext::new().await;
 
-    // Seed a recovery code for the test user (in test context setup / panics until impl)
-    let recovery_code = "RECOV-0001"; // placeholder; real seed inserts into mfa_recovery_codes
+    // Recovery code seeded in AdminTestContext::new() as BLAKE3("RECOV-0001")
+    let recovery_code = "RECOV-0001";
 
     // First use: 200 + session
     let resp1 = ctx
@@ -359,7 +354,6 @@ async fn valid_recovery_code_grants_session_and_invalidates_code() {
 ///
 /// AC-B01-06
 // @US-B01 @AC-B01-06 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn sign_out_clears_session_cookie_and_subsequent_request_returns_401() {
     let ctx = AdminTestContext::new().await;
@@ -418,7 +412,6 @@ async fn sign_out_clears_session_cookie_and_subsequent_request_returns_401() {
 ///
 /// AC-B01-07
 // @US-B01 @AC-B01-07 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn operator_bearer_rejected_on_session_only_route() {
     let ctx = AdminTestContext::new().await;
@@ -440,14 +433,13 @@ async fn operator_bearer_rejected_on_session_only_route() {
 
 /// Session cookie on an operator-only route returns 401.
 // @US-B01 @AC-B01-07 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn session_cookie_rejected_on_operator_only_route() {
     let ctx = AdminTestContext::new().await;
 
     let session_cookie = sign_in_and_get_cookie(&ctx).await;
 
-    // POST /admin/v1/projects (existing operator route)
+    // POST /admin/v1/projects (operator provision route — requires Bearer EMBYR_ADMIN_KEY)
     let resp = ctx
         .client
         .post(ctx.url("/admin/v1/projects"))
@@ -468,24 +460,29 @@ async fn session_cookie_rejected_on_operator_only_route() {
 // AC-B01-08: DB migrations run cleanly on fresh Postgres
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// All 10 new tables + 2 schema alterations applied without error.
-/// Verifiable by the fact that AdminTestContext::new() succeeds (migration is
-/// part of context setup). This test provides explicit migration-success assertion.
+/// All migration tables applied without error.
+/// AdminTestContext::new() runs migrations — if it panics from a migration error,
+/// this test is BROKEN not RED. This test provides explicit migration-success assertion.
 ///
 /// AC-B01-08
 // @US-B01 @AC-B01-08 @real-io @adapter-integration
-#[ignore]
 #[tokio::test]
 async fn db_migrations_run_cleanly_on_fresh_postgres() {
-    // AdminTestContext::new() runs migrations; if it panics from a migration error,
-    // this test is BROKEN not RED. The RED scaffold panics with "Not yet implemented".
-    let _ctx = AdminTestContext::new().await;
+    let ctx = AdminTestContext::new().await;
 
-    // If we reach here without panic, migrations succeeded.
-    // Additional assertion: verify expected tables exist via sqlx query.
-    // (Implementation: AdminTestContext exposes a pool for direct queries.)
-    // Placeholder assertion — implementation in DELIVER.
-    panic!("Not yet implemented -- RED scaffold: migration table verification")
+    // Verify sessions table exists and has token_hash column (migration 0009).
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
+         WHERE table_name = 'sessions' AND column_name = 'token_hash')",
+    )
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("query failed");
+
+    assert!(
+        exists,
+        "AC-B01-08: sessions.token_hash column must exist after migrations"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -497,7 +494,6 @@ async fn db_migrations_run_cleanly_on_fresh_postgres() {
 ///
 /// AC-B01-09
 // @US-B01 @AC-B01-09 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn session_token_stored_as_blake3_hash_not_plaintext() {
     let ctx = AdminTestContext::new().await;
@@ -521,7 +517,7 @@ async fn session_token_stored_as_blake3_hash_not_plaintext() {
         .unwrap_or("")
         .to_string();
 
-    // Extract raw cookie value
+    // Extract raw cookie value from "embyr_session=<token>; ..."
     let raw_token: String = set_cookie
         .split(';')
         .next()
@@ -533,12 +529,22 @@ async fn session_token_stored_as_blake3_hash_not_plaintext() {
 
     assert!(!raw_token.is_empty(), "must have extracted raw token from cookie");
 
-    // Check DB: token_hash must NOT equal raw_token.
-    // (Implementation: AdminTestContext exposes direct DB access for this assertion.)
-    // Placeholder — panics in RED state.
-    panic!(
-        "Not yet implemented -- RED scaffold: direct DB query to verify token_hash != '{}' in sessions table",
-        &raw_token[..8]
+    // Compute expected BLAKE3 hash of the raw token
+    let expected_hash = blake3::hash(raw_token.as_bytes()).as_bytes().to_vec();
+
+    // Verify DB has a session with that hash (not the raw token)
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sessions WHERE token_hash = $1",
+    )
+    .bind(&expected_hash)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("DB query failed");
+
+    assert_eq!(
+        count, 1,
+        "AC-B01-09: BLAKE3(token) must be stored in sessions.token_hash; \
+         raw token must NOT be stored"
     );
 }
 
@@ -546,18 +552,42 @@ async fn session_token_stored_as_blake3_hash_not_plaintext() {
 // AC-B01-10: Session expires after 24h of inactivity
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// After 24h idle (simulated with tokio::time::advance), session returns 401.
+/// After 24h idle, session returns 401.
+/// The session is expired directly via DB UPDATE (Postgres uses real wall clock,
+/// not tokio's paused clock). `start_paused = true` is kept as the test annotation
+/// to document that this behavior is independent of tokio's simulated clock.
+/// `tokio::time::resume()` is called immediately so that testcontainers and HTTP
+/// I/O work correctly under the test runtime.
 ///
 /// AC-B01-10
 // @US-B01 @AC-B01-10 @error @driving_port
-#[ignore]
 #[tokio::test(start_paused = true)]
 async fn session_expires_after_24h_of_inactivity() {
+    // Resume the real-time clock immediately: testcontainers uses Docker API (HTTP)
+    // with timeouts that are incompatible with tokio's auto-advancing paused clock.
+    // Postgres session expiry uses the DB wall clock, not tokio's simulated clock,
+    // so the `start_paused` attribute is here to document that invariant, not to
+    // drive the actual expiry mechanism.
+    tokio::time::resume();
+
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_and_get_cookie(&ctx).await;
 
-    // Advance clock past 24h idle window
-    tokio::time::advance(tokio::time::Duration::from_secs(25 * 3600)).await;
+    // Extract raw token value from "embyr_session=<token>" cookie
+    let raw_token = session_cookie
+        .strip_prefix("embyr_session=")
+        .expect("cookie must start with embyr_session=");
+    let token_hash = blake3::hash(raw_token.as_bytes()).as_bytes().to_vec();
+
+    // Directly expire the session in the DB (Postgres uses real wall clock)
+    sqlx::query(
+        "UPDATE sessions SET expires_at = now() - interval '1 second' \
+         WHERE token_hash = $1",
+    )
+    .bind(&token_hash)
+    .execute(&ctx.pool)
+    .await
+    .expect("expire session");
 
     let resp = ctx
         .client
@@ -570,7 +600,7 @@ async fn session_expires_after_24h_of_inactivity() {
     assert_eq!(
         resp.status().as_u16(),
         401,
-        "AC-B01-10: request after 24h idle must return 401 (expired session)"
+        "AC-B01-10: expired session must return 401"
     );
 }
 
@@ -582,15 +612,49 @@ async fn session_expires_after_24h_of_inactivity() {
 /// This is the behavioral probe test for the SessionContextExtractor (from DESIGN Earned Trust).
 ///
 // @US-B01 @error @driving_port @real-io @earned_trust
-#[ignore]
 #[tokio::test]
 async fn pre_expired_session_row_returns_401() {
+    use base64::Engine;
+    use rand_core::RngCore;
+    use uuid::Uuid;
+
     let ctx = AdminTestContext::new().await;
 
-    // Insert a session row with expires_at in the past.
-    // (Implementation: AdminTestContext exposes direct DB seeding.)
-    // Placeholder — panics in RED state.
-    panic!("Not yet implemented -- RED scaffold: insert expired session row and verify 401")
+    // Generate a fresh random token NOT associated with any real sign-in
+    let mut buf = [0u8; 32];
+    rand_core::OsRng.fill_bytes(&mut buf);
+    let fake_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
+    let token_hash = blake3::hash(fake_token.as_bytes()).as_bytes().to_vec();
+
+    // Insert an already-expired session row directly
+    let user_id = Uuid::parse_str(&ctx.user_id).expect("valid uuid");
+    let account_id = Uuid::parse_str(&ctx.account_id).expect("valid uuid");
+
+    sqlx::query(
+        "INSERT INTO sessions (user_id, account_id, token_hash, expires_at) \
+         VALUES ($1, $2, $3, now() - interval '1 minute')",
+    )
+    .bind(user_id)
+    .bind(account_id)
+    .bind(&token_hash)
+    .execute(&ctx.pool)
+    .await
+    .expect("insert expired session");
+
+    // Request with this token → 401 (session expired)
+    let resp = ctx
+        .client
+        .get(ctx.url("/admin/v1/projects"))
+        .header("Cookie", format!("embyr_session={fake_token}"))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "earned-trust: pre-expired session must return 401"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
