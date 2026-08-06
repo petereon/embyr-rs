@@ -1,5 +1,4 @@
 use axum::{
-    http::StatusCode,
     routing::{delete, get, post},
     Router,
 };
@@ -14,17 +13,13 @@ use crate::adapters::{
     system_db::SystemDb,
 };
 
+use super::handlers::auth::{signin, signout};
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::provision::provision;
 use super::middleware::operator_auth::operator_auth_middleware;
 use super::middleware::session_auth::session_auth_middleware;
 use super::state::{OperatorState, UserAdminState};
-
-/// Placeholder handler for routes added in subsequent steps (01-04 through 06-03).
-async fn placeholder_handler() -> StatusCode {
-    StatusCode::NOT_IMPLEMENTED
-}
 
 /// Build the admin router with all four sub-routers merged under /admin/v1.
 ///
@@ -81,11 +76,11 @@ pub fn build_admin_router(
         .route("/admin/v1/projects/:project_id", get(get_project))
         .with_state(operator_state);
 
-    // Public sub-router: no auth.
-    // Placeholder handlers replaced by real signin/signout handlers in step 01-04.
-    let public_router = Router::new()
-        .route("/admin/v1/auth/signin", post(placeholder_handler))
-        .route("/admin/v1/auth/signout", post(placeholder_handler));
+    // Public sub-router: no auth. Wired to UserAdminState (step 01-04).
+    let public_router = Router::<UserAdminState>::new()
+        .route("/admin/v1/auth/signin", post(signin))
+        .route("/admin/v1/auth/signout", post(signout))
+        .with_state(user_state.clone());
 
     // Session sub-router: session_auth_middleware guards all routes added in steps 01-04+.
     // Explicitly typed as Router<UserAdminState> so .with_state() is valid on the empty router.
