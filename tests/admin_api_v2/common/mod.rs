@@ -1,5 +1,8 @@
 // SCAFFOLD: true
 //! Common test infrastructure — admin-api-v2 acceptance tests.
+// Items here are consumed incrementally as each slice's tests are unskipped.
+// Suppress unused warnings for infra that later slices will use.
+#![allow(dead_code, unused_imports)]
 //!
 //! Provides:
 //! - `AdminTestContext`: ephemeral Postgres + Axum admin server on a random port.
@@ -202,9 +205,54 @@ impl AdminTestContext {
         let credential_cache = Arc::new(CredentialCache::new(1024));
         let email_sender = Arc::new(NoopEmailSender);
 
+        // ── Seed projects ─────────────────────────────────────────────────────────
+
+        // Active project in ctx.account_id
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, account_id, backend_mode, api_key_hash_current, status, name) \
+             VALUES ($1, $2, 'direct_pg', 'placeholder_hash_active', 'active', 'Test Project')",
+        )
+        .bind("test-project-seeded-for-account")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("insert active test project");
+
+        // Deleted project in ctx.account_id (to test exclusion)
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, account_id, backend_mode, api_key_hash_current, status, name) \
+             VALUES ($1, $2, 'direct_pg', 'placeholder_hash_deleted', 'deleted', 'Deleted Project')",
+        )
+        .bind("test-project-deleted")
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("insert deleted test project");
+
+        // Create a second account (no user) and a project in it (for cross-account test)
+        let other_account_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO accounts (name) VALUES ('Other Account') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert other account");
+
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, account_id, backend_mode, api_key_hash_current, status, name) \
+             VALUES ($1, $2, 'direct_pg', 'placeholder_hash_other', 'active', 'Other Account Project')",
+        )
+        .bind("project-belonging-to-other-account")
+        .bind(other_account_id)
+        .execute(&pool)
+        .await
+        .expect("insert other account project");
+
         let router = build_admin_router(
             system_db,
-            "test-admin-key".to_string(),
+            "test-admin-key-from-env".to_string(),
             credential_cache,
             [0u8; 32], // test encryption key (matches TOTP encryption above)
             email_sender,

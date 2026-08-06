@@ -26,6 +26,7 @@ pub struct ProjectSummary {
     pub backend_mode: String,
     pub logging_enabled: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub account_id: String,
 }
 
 /// GET /admin/v1/projects — account-scoped project list.
@@ -39,7 +40,7 @@ pub async fn list_projects(
     let pool = state.system_db.pool();
 
     let rows = sqlx::query(
-        "SELECT id, name, status, backend_mode, logging_enabled, created_at \
+        "SELECT id, name, status, backend_mode, logging_enabled, created_at, account_id \
          FROM projects \
          WHERE account_id = $1 AND status != 'deleted' \
          ORDER BY created_at DESC",
@@ -63,6 +64,10 @@ pub async fn list_projects(
             created_at: row
                 .try_get("created_at")
                 .unwrap_or_else(|_| chrono::Utc::now()),
+            account_id: row
+                .try_get::<uuid::Uuid, _>("account_id")
+                .map(|u| u.to_string())
+                .unwrap_or_default(),
         })
         .collect();
 
