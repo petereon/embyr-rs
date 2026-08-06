@@ -18,6 +18,7 @@ use super::handlers::projects::list_projects;
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::provision::provision;
+use super::middleware::dual_auth::dual_auth_middleware;
 use super::middleware::operator_auth::operator_auth_middleware;
 use super::middleware::session_auth::session_auth_middleware;
 use super::state::{OperatorState, UserAdminState};
@@ -26,7 +27,7 @@ use super::state::{OperatorState, UserAdminState};
 ///
 /// Sub-router breakdown (ADR-009, AA-01):
 ///   - `operator_router`:   Bearer EMBYR_ADMIN_KEY; 4 mutating operator routes.
-///   - `dual_auth_router`:  GET /projects/:id; operator bearer for now, real dual-auth in step 02-02.
+///   - `dual_auth_router`:  GET /projects/:id; session cookie OR operator Bearer (step 02-02).
 ///   - `public_router`:     No auth; signin/signout placeholders replaced in step 01-04.
 ///   - `session_router`:    Session cookie / admin_api_key Bearer; populated in steps 01-04 through 06-03.
 pub fn build_admin_router(
@@ -72,10 +73,14 @@ pub fn build_admin_router(
         .with_state(operator_state.clone());
 
     // Dual-auth sub-router: GET /projects/:id.
-    // Uses OperatorState + operator bearer for now; real dual-auth middleware added in step 02-02.
-    let dual_auth_router = Router::new()
+    // Accepts session cookie (account-scoped) OR operator Bearer EMBYR_ADMIN_KEY (unscoped).
+    let dual_auth_router = Router::<UserAdminState>::new()
         .route("/admin/v1/projects/:project_id", get(get_project))
-        .with_state(operator_state);
+        .route_layer(axum::middleware::from_fn_with_state(
+            user_state.clone(),
+            dual_auth_middleware,
+        ))
+        .with_state(user_state.clone());
 
     // Public sub-router: no auth. Wired to UserAdminState (step 01-04).
     let public_router = Router::<UserAdminState>::new()
