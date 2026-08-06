@@ -13,6 +13,7 @@ use crate::adapters::{
     system_db::SystemDb,
 };
 
+use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
 use super::handlers::auth::{signin, signout};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
@@ -22,6 +23,9 @@ use super::handlers::metrics::get_project_metrics;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::provision::provision;
 use super::handlers::query_logs::list_query_logs;
+use super::handlers::service_accounts::{
+    create_service_account, delete_service_account, list_service_accounts,
+};
 use super::middleware::dual_auth::dual_auth_middleware;
 use super::middleware::operator_auth::operator_auth_middleware;
 use super::middleware::session_auth::session_auth_middleware;
@@ -118,6 +122,21 @@ pub fn build_admin_router(
         .route("/admin/v1/members/invite", post(invite_member))
         .route("/admin/v1/members/:member_id/role", patch(change_member_role))
         .route("/admin/v1/members/:member_id", delete(remove_member))
+        // Service account routes (step 05-03).
+        .route(
+            "/admin/v1/service_accounts",
+            get(list_service_accounts).post(create_service_account),
+        )
+        .route(
+            "/admin/v1/service_accounts/:sa_id",
+            delete(delete_service_account),
+        )
+        // Admin key routes (step 05-03).
+        .route(
+            "/admin/v1/admin_keys",
+            get(list_admin_keys).post(create_admin_key),
+        )
+        .route("/admin/v1/admin_keys/:key_id", delete(revoke_admin_key))
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
             session_auth_middleware,
