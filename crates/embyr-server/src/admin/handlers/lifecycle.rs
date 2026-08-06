@@ -61,6 +61,15 @@ pub async fn delete_project(
 ) -> StatusCode {
     // Auth is enforced by operator_auth_middleware applied at the router layer.
 
+    // AC-B03-06: cascade-revoke all active SDK keys before soft-deleting the project.
+    let _ = sqlx::query(
+        "UPDATE sdk_api_keys SET revoked_at = now() \
+         WHERE project_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(&project_id)
+    .execute(state.system_db.pool())
+    .await;
+
     let result = sqlx::query(
         "UPDATE projects SET status='deleted', deleted_at=now(), updated_at=now() \
          WHERE id=$1 AND status != 'deleted'",

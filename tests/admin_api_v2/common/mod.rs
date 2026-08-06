@@ -89,6 +89,12 @@ pub struct AdminTestContext {
     pub user_email: String,
     /// Plain-text password of the seeded user.
     pub user_password: String,
+    /// Email of the seeded Viewer role user.
+    pub viewer_email: String,
+    /// Plain-text password of the seeded Viewer role user.
+    pub viewer_password: String,
+    /// TOTP secret for the Viewer user (base64url-no-pad of raw 20 bytes).
+    pub viewer_totp_secret_b32: String,
 }
 
 impl AdminTestContext {
@@ -201,7 +207,52 @@ impl AdminTestContext {
         .await
         .expect("insert recovery code");
 
-        // ── 10. Build admin router and start Axum server ──────────────────────
+        // ── 10. Seed Viewer user ──────────────────────────────────────────────
+        let viewer_password = "viewer-password-456".to_string();
+        let viewer_salt = SaltString::generate(&mut OsRng);
+        let viewer_password_hash = argon2
+            .hash_password(viewer_password.as_bytes(), &viewer_salt)
+            .expect("Argon2id hash failed for viewer")
+            .to_string();
+
+        let mut viewer_totp_raw = [0u8; 20];
+        OsRng.fill_bytes(&mut viewer_totp_raw);
+        let viewer_totp_secret_b32 = URL_SAFE_NO_PAD.encode(&viewer_totp_raw);
+
+        let mut viewer_nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut viewer_nonce_bytes);
+        let viewer_nonce = Nonce::from_slice(&viewer_nonce_bytes);
+        let viewer_ct = cipher
+            .encrypt(viewer_nonce, viewer_totp_raw.as_ref())
+            .expect("AES-256-GCM encrypt failed for viewer TOTP");
+        let mut viewer_totp_enc = viewer_nonce_bytes.to_vec();
+        viewer_totp_enc.extend_from_slice(&viewer_ct);
+
+        let viewer_email = "viewer@example.com".to_string();
+        let viewer_user_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO users (account_id, email, display_name, password_hash, totp_secret_enc) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        )
+        .bind(account_id)
+        .bind(&viewer_email)
+        .bind("Viewer User")
+        .bind(&viewer_password_hash)
+        .bind(&viewer_totp_enc)
+        .fetch_one(&pool)
+        .await
+        .expect("insert viewer user");
+
+        sqlx::query(
+            "INSERT INTO account_members (user_id, account_id, role, joined_at) \
+             VALUES ($1, $2, 'Viewer', now())",
+        )
+        .bind(viewer_user_id)
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("insert viewer account_member");
+
+        // ── 11. Build admin router and start Axum server ──────────────────────
         let credential_cache = Arc::new(CredentialCache::new(1024));
         let email_sender = Arc::new(NoopEmailSender);
 
@@ -290,6 +341,9 @@ impl AdminTestContext {
             user_id: user_id.to_string(),
             user_email,
             user_password,
+            viewer_email,
+            viewer_password,
+            viewer_totp_secret_b32,
         }
     }
 
@@ -314,6 +368,24 @@ impl AdminTestContext {
     /// Generate an intentionally wrong TOTP code (always "000000").
     pub fn totp_code_wrong(&self) -> String {
         "000000".to_string()
+    }
+
+    /// Generate a valid TOTP code for the seeded Viewer user's secret at the current system time.
+    pub fn viewer_totp_code_now(&self) -> String {
+        let totp_raw = URL_SAFE_NO_PAD
+            .decode(&self.viewer_totp_secret_b32)
+            .expect("viewer_totp_secret_b32 must be valid base64url-no-pad");
+        let totp = TOTP::new(
+            TotpAlgorithm::SHA1,
+            6,
+            1,
+            30,
+            totp_raw,
+            None,
+            String::new(),
+        )
+        .expect("TOTP::new failed for viewer");
+        totp.generate_current().expect("generate_current failed for viewer")
     }
 
     /// Returns the full URL for the given admin API path.
