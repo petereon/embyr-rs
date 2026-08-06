@@ -17,6 +17,7 @@ use super::handlers::auth::{signin, signout};
 use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
 use super::handlers::get_project::get_project;
+use super::handlers::metrics::get_project_metrics;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::provision::provision;
 use super::middleware::dual_auth::dual_auth_middleware;
@@ -101,6 +102,10 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/sdk_keys/:key_id",
             delete(revoke_sdk_key),
+        )
+        .route(
+            "/admin/v1/projects/:project_id/metrics",
+            get(get_project_metrics),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
