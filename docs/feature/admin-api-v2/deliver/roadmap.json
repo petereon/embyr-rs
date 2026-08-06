@@ -1,0 +1,374 @@
+{
+  "roadmap": {
+    "project_id": "admin-api-v2",
+    "created_at": "2026-08-05T21:14:09Z",
+    "total_steps": 23
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "B-01: Auth + Migrations + Walking Skeleton",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "DB migrations — 10 new tables + 2 schema alterations (sqlx migrate)",
+          "criteria": [
+            "All 10 new tables (accounts, users, sessions, account_members, invitations, service_accounts, admin_api_keys, sdk_api_keys, oidc_providers, query_logs) created without error by sqlx::migrate!().run()",
+            "CREATE UNIQUE INDEX sessions_token_hash_idx ON sessions(token_hash) is present after migration",
+            "projects table has account_id FK, logging_enabled, log_retention_days, backend_pg_dsn_enc columns added by the two ALTER TABLE migrations",
+            "query_logs table is partitioned by day (PARTITION BY RANGE on created_at or equivalent)",
+            "Migration is idempotent: re-running on an already-migrated database does not error"
+          ],
+          "test_file": "tests/admin_api_v2/acceptance/b01_auth_migrations.rs",
+          "scenario_name": "db_migrations_run_cleanly_on_fresh_postgres"
+        },
+        {
+          "id": "01-02",
+          "name": "Router refactor — AdminState → OperatorState, UserAdminState, 4-way sub-router merge",
+          "criteria": [
+            "AdminState renamed to OperatorState in crates/embyr-server/src/admin/state.rs; no remaining references to AdminState",
+            "UserAdminState constructed from PgPool and EMBYR_ENCRYPTION_KEY with account_id scoping available via SessionContext",
+            "build_admin_router in crates/embyr-server/src/admin/router.rs merges operator, session, public, and dual-auth sub-routers under /admin/v1 without route collisions",
+            "extract_bearer logic moved to crates/embyr-server/src/admin/middleware/operator_auth.rs; handler files no longer contain inline bearer extraction",
+            "Provision handler crates/embyr-server/src/admin/handlers/provision.rs compiles and remains on the operator sub-router"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "01-03",
+          "name": "Session auth middleware — operator_auth, session_auth, SessionContext extractor",
+          "criteria": [
+            "operator_auth middleware in crates/embyr-server/src/admin/middleware/operator_auth.rs returns 401 for missing or malformed Bearer token; passes only on EMBYR_ADMIN_KEY match",
+            "session_auth middleware in crates/embyr-server/src/admin/middleware/session_auth.rs returns 401 when embyr_session cookie is absent or when the sessions row is expired (expires_at <= now())",
+            "SessionContext extractor in crates/embyr-server/src/admin/extractors/session_context.rs is implemented as axum::extract::FromRequestParts and carries account_id, user_id, and role fields",
+            "SessionContext lookup queries sessions table via SELECT ... WHERE token_hash = BLAKE3(cookie_value) AND expires_at > now()",
+            "Pre-expired session row inserted directly into DB is rejected with 401 (Earned Trust probe scenario)"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "01-04",
+          "name": "Signin and signout handlers — Argon2id verify, TOTP (totp-rs), session cookie lifecycle",
+          "criteria": [
+            "POST /admin/v1/auth/signin returns 200 + Set-Cookie: embyr_session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/admin on valid email + password + TOTP code",
+            "Response body includes account_id, display_name, and role fields",
+            "POST /admin/v1/auth/signin returns 401 + {message: 'Invalid credentials'} for wrong password and for unknown email (identical response shape prevents oracle attack)",
+            "POST /admin/v1/auth/signin returns 401 + {message: 'Invalid or expired code'} for correct credentials but wrong TOTP code; no Set-Cookie emitted",
+            "Three consecutive TOTP failures within 15 minutes lock the account; fourth attempt returns 429 + {message: '...account locked for 15 minutes'} even with correct TOTP",
+            "Valid one-time recovery code grants 200 + session cookie and is immediately invalidated; second use of the same code returns 401",
+            "Session token stored as BLAKE3 hash in sessions.token_hash column; raw plaintext token is never written to any DB column",
+            "POST /admin/v1/auth/signout returns 204 + Set-Cookie: embyr_session=; Max-Age=0; subsequent request with the cleared cookie returns 401"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "01-05",
+          "name": "Walking skeleton GREEN + B-01 test suite unskip (1 walking skeleton + 12 b01 scenarios)",
+          "criteria": [
+            "AdminTestContext::new() in tests/admin_api_v2/common/mod.rs starts a real Axum admin server on an ephemeral port against a test Postgres database with migrations applied",
+            "admin_user_signs_in_views_databases_and_signs_out passes end-to-end: POST signin → GET /admin/v1/projects → POST signout with correct status codes and headers",
+            "All 12 #[ignore] scenarios in tests/admin_api_v2/acceptance/b01_auth_migrations.rs are unskipped (remove #[ignore]) and pass",
+            "Two auth-stack isolation tests pass: operator Bearer rejected on session-only route (401); session cookie rejected on operator-only route (401)"
+          ],
+          "test_file": "tests/admin_api_v2/acceptance/walking_skeleton.rs",
+          "scenario_name": "admin_user_signs_in_views_databases_and_signs_out"
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "B-02: Project List + Detail",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "list_projects handler — GET /admin/v1/projects, account-scoped query",
+          "criteria": [
+            "GET /admin/v1/projects returns 200 + JSON array filtered by WHERE account_id = $session.account_id AND status != 'deleted'",
+            "Response objects include id, name, status, backend_mode, logging_enabled, created_at fields",
+            "Account with zero projects returns 200 + [] (not 404 or 500)",
+            "account_id column is indexed; query plan does not perform a full table scan",
+            "Deleted projects are excluded from the list even if they belong to the session account"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "02-02",
+          "name": "Expanded get_project + dual_auth middleware + AuthPrincipal extractor",
+          "criteria": [
+            "GET /admin/v1/projects/:id returns expanded shape including id, name, status, backend_mode, auth_mode, logging_enabled, log_retention_days, created_at fields",
+            "dual_auth middleware in crates/embyr-server/src/admin/middleware/dual_auth.rs accepts both a valid session cookie and a Bearer EMBYR_ADMIN_KEY on annotated routes",
+            "AuthPrincipal extractor in crates/embyr-server/src/admin/extractors/dual_auth_principal.rs resolves the caller identity from either auth source",
+            "GET /admin/v1/projects/:id with a session from account A for a project owned by account B returns 403 (not 404)",
+            "GET /admin/v1/projects/:id with a valid Bearer EMBYR_ADMIN_KEY returns 200 (dual-auth route accepts operator credentials)"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "02-03",
+          "name": "B-02 test suite unskip — 8 scenarios including 2 dual-auth safety tests",
+          "criteria": [
+            "All #[ignore] scenarios in tests/admin_api_v2/acceptance/b02_project_list.rs are unskipped and passing",
+            "operator_bearer_route_must_reject_session_cookie_auth passes: session cookie on operator-only route returns 401 (ADR-009 AA-01)",
+            "session_auth_route_must_reject_bare_bearer_token passes: bare Bearer on session-only route returns 401 (ADR-009 AA-01)",
+            "cross_account_project_detail_returns_403 passes: account isolation invariant holds on detail route",
+            "project_list_scoped_to_session_account_only passes: list never leaks cross-account projects"
+          ],
+          "test_file": "tests/admin_api_v2/acceptance/b02_project_list.rs",
+          "scenario_name": "authenticated_user_sees_only_their_account_databases"
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "B-03: SDK Keys",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "new_sdk_key_material pure domain function in embyr-core::admin",
+          "criteria": [
+            "new_sdk_key_material(raw_key: &[u8]) -> SdkKeyMaterial is a pure function in crates/embyr-core/src/admin/ with no IO crate imports",
+            "SdkKeyMaterial struct carries argon2id_hash (via embyr_core::auth::argon2::hash_api_key), ecies_pubkey (via embyr_core::auth::ecies::derive_public_key), and blake3_hash (via embyr_core::auth::blake3)",
+            "cargo deny check passes for embyr-core: deny.toml rejects tokio, sqlx, tonic, axum as direct dependencies of embyr-core",
+            "Function is unit-testable without any network, filesystem, or database access"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "03-02",
+          "name": "SDK key CRUD handlers — list, create (spawn_blocking Argon2id), revoke + credential cache evict",
+          "criteria": [
+            "POST /admin/v1/projects/:id/sdk_keys returns 201 + {id, name, key, prefix, created_at}; key has format 'embyr_sdk_' + 32 random chars; prefix is the first 8 chars of the random part",
+            "Argon2id hashing inside create_sdk_key runs inside tokio::task::spawn_blocking to avoid blocking the async executor",
+            "Creation is atomic: sdk_api_keys row inserted and credential_cache evicted in a single logical transaction with no partial state",
+            "GET /admin/v1/projects/:id/sdk_keys returns list that never includes the 'key' field; only id, name, prefix, created_at, revoked_at are returned",
+            "DELETE /admin/v1/projects/:id/sdk_keys/:key_id returns 204 and sets revoked_at on the row",
+            "GET .../sdk_keys?active=true excludes keys where revoked_at is non-null",
+            "Viewer role attempting create or delete returns 403"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "03-03",
+          "name": "B-03 test suite unskip — 9 scenarios",
+          "criteria": [
+            "All 9 #[ignore] scenarios in tests/admin_api_v2/acceptance/b03_sdk_keys.rs are unskipped and passing",
+            "owner_creates_sdk_key_and_key_shown_once_then_absent passes: key field present in 201 response and absent in subsequent GET",
+            "sdk_key_stored_as_blake3_hash_not_plaintext passes: direct DB query confirms BLAKE3 hash stored and plaintext absent",
+            "sdk_key_authenticates_to_firestore_grpc_rpc passes: ECIES integration wired so generated key authenticates a GetDocument RPC",
+            "viewer_role_cannot_create_sdk_key and viewer_role_cannot_delete_sdk_key both return 403"
+          ],
+          "test_file": "tests/admin_api_v2/acceptance/b03_sdk_keys.rs",
+          "scenario_name": "owner_creates_sdk_key_and_key_shown_once_then_absent"
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "name": "B-04: Project Patch + Metrics + Query Logs",
+      "steps": [
+        {
+          "id": "04-01",
+          "name": "patch_project handler — PATCH /admin/v1/projects/:id with DSN AES-256-GCM encryption + cache evict",
+          "criteria": [
+            "PATCH /admin/v1/projects/:id returns 200 + updated project JSON for any valid partial payload (logging_enabled, log_retention_days, backend_pg_dsn, status)",
+            "backend_pg_dsn value is AES-256-GCM encrypted under EMBYR_ENCRYPTION_KEY before being written to backend_pg_dsn_enc; the plaintext DSN never appears in any DB column",
+            "credential_cache is evicted for the project after a DSN patch so the next SDK request uses the updated DSN",
+            "PATCH with {status: 'deleted'} returns 422 (soft-delete is operator-only)",
+            "PATCH on a project from a different account returns 403",
+            "PATCH on a project where backend_pg_dsn_enc IS NULL skips re-encryption silently and succeeds (OQ-B01 resolution)"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "04-02",
+          "name": "metrics handler — GET /admin/v1/projects/:id/metrics from daily_project_metrics",
+          "criteria": [
+            "GET /admin/v1/projects/:id/metrics returns 200 + JSON with fields p95_read_ms, p95_write_ms, reads_today, writes_today, deletes_today, and sparkline",
+            "sparkline is a JSON array of exactly 24 elements representing hourly read/write buckets",
+            "Metrics are sourced from the daily_project_metrics table scoped to the session account_id",
+            "GET metrics for a project not belonging to the session account returns 404"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "04-03",
+          "name": "query_logs handler + fire-and-forget PostgresQueryLogAdapter (channel=1000) + daily QueryLogSweeper",
+          "criteria": [
+            "GET /admin/v1/projects/:id/query_logs returns 200 + {total, entries} with at most 500 entries per page",
+            "Cursor pagination works: ?after=<last_entry_id> returns the next page of entries",
+            "Operation filter ?op=read returns only entries with op='read'; other op values filter correspondingly",
+            "GET query_logs when logging_enabled=false returns 200 + {total: 0, entries: []}",
+            "Disabling logging via PATCH does not delete existing query_log rows; they remain until swept by retention policy",
+            "PostgresQueryLogAdapter in crates/embyr-server/src/adapters/query_log.rs uses a bounded channel of capacity 1000; write failures are dropped without returning an error to the caller (fire-and-forget, IQueryLogWriter port)",
+            "QueryLogSweeper tokio task acquires pg_try_advisory_lock before dropping partition tables to prevent concurrent sweep races",
+            "GET query_logs for a project not in the session account returns 404"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "04-04",
+          "name": "B-04 test suite unskip — 13 scenarios",
+          "criteria": [
+            "All 13 #[ignore] scenarios in tests/admin_api_v2/acceptance/b04_project_patch.rs are unskipped and passing",
+            "owner_enables_logging_and_new_entries_appear_in_logs passes: PATCH logging_enabled=true returns 200 with updated fields",
+            "backend_pg_dsn_never_stored_plaintext_after_patch passes: direct DB assertion confirms no plaintext DSN in any column",
+            "query_logs_cursor_pagination_returns_next_page passes with seeded 501+ entries",
+            "pre_existing_project_with_null_dsn_enc_skips_re_encryption_silently passes without error"
+          ],
+          "test_file": "tests/admin_api_v2/acceptance/b04_project_patch.rs",
+          "scenario_name": "owner_enables_logging_and_new_entries_appear_in_logs"
+        }
+      ]
+    },
+    {
+      "id": "05",
+      "name": "B-05: Members + Service Accounts + Admin Keys",
+      "steps": [
+        {
+          "id": "05-01",
+          "name": "check_rbac pure domain function — last-Owner invariant, self-demotion block, key role cap",
+          "criteria": [
+            "check_rbac is a pure function in crates/embyr-core/src/admin/rbac.rs with zero Axum, sqlx, or tokio imports",
+            "check_rbac returns Err(RbacError::LastOwner) when an action would remove or demote the sole remaining Owner",
+            "check_rbac blocks Admin actors from changing any Owner member's role",
+            "check_rbac blocks Admin actors from creating an admin_api_key with role = Owner",
+            "cargo deny check continues to pass for embyr-core after rbac.rs is implemented"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "05-02",
+          "name": "members handlers — list, invite (IEmailSender port), change_role (check_rbac), remove (cascade sessions + admin_api_keys)",
+          "criteria": [
+            "GET /admin/v1/members returns 200 + array where each element includes id, email, display_name, role, auth_method, mfa_enabled, last_login_at, joined_at (joined_at null for pending invitations)",
+            "POST /admin/v1/members/invite returns 202 + {invitation_id, email, role, expires_at} and calls IEmailSender::send with the invitation details; NoopEmailSender used in V1",
+            "PATCH /admin/v1/members/:id/role calls check_rbac; sole Owner attempting self-demotion returns 403; Admin attempting to change Owner's role returns 403; successful role change returns 200",
+            "DELETE /admin/v1/members/:id returns 204 and cascades: all sessions for that member are expired and all admin_api_keys for that member have revoked_at set",
+            "DELETE of the last Owner returns 409 + {message: 'Transfer ownership before removing the last Owner.'}",
+            "Viewer attempting POST /admin/v1/members/invite returns 403"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "05-03",
+          "name": "service_accounts and admin_keys CRUD handlers — list, create, delete (cascade), immediate key revocation",
+          "criteria": [
+            "GET /admin/v1/service_accounts returns 200 + array with id, name, description, role, created_at for each service account",
+            "POST /admin/v1/service_accounts returns 201 + {id, name, role, created_at}; Viewer attempting create returns 403",
+            "DELETE /admin/v1/service_accounts/:id returns 204 and cascades: all admin_api_keys for that service account have revoked_at set in the same transaction",
+            "GET /admin/v1/admin_keys returns 200 + array including revoked keys for audit; 'key' plaintext field is absent from all list responses",
+            "POST /admin/v1/admin_keys returns 201 + {id, name, key, prefix, created_at}; key = 'embyr_adm_' + 32 random chars; prefix is 8 chars; BLAKE3 hash stored in admin_api_keys table; plaintext never in DB",
+            "Admin creating a key with role = Owner returns 403 (check_rbac key role cap)",
+            "DELETE /admin/v1/admin_keys/:key_id returns 204; the revoked key returns 401 on the very next request with no grace period",
+            "Each successful Bearer authentication using an admin key updates last_used_at on the admin_api_keys row",
+            "Bearer token not matching any admin_api_keys hash returns 401"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "05-04",
+          "name": "B-05 test suite unskip — 21 scenarios + proptest",
+          "criteria": [
+            "All 21 #[ignore] test functions in tests/admin_api_v2/acceptance/b05_members.rs are unskipped and passing",
+            "sole_owner_removal_always_rejected_for_any_member_count proptest passes for n_non_owners in 0..=5 (pure domain check via check_rbac)",
+            "owner_removes_admin_member_and_sessions_cascade_revoked passes: direct DB assertion confirms session and admin_api_key rows are invalidated",
+            "deleting_service_account_revokes_its_admin_keys passes: direct DB assertion confirms cascade on admin_api_keys.revoked_at",
+            "revoking_admin_key_causes_immediate_401_on_next_request passes: no cache window or delay observed"
+          ],
+          "test_file": "tests/admin_api_v2/acceptance/b05_members.rs",
+          "scenario_name": "member_list_includes_pending_invitations"
+        }
+      ]
+    },
+    {
+      "id": "06",
+      "name": "B-06: OIDC Providers + Billing",
+      "steps": [
+        {
+          "id": "06-01",
+          "name": "OIDC provider CRUD — list, create (AES-256-GCM secret encryption), patch enable/disable, delete",
+          "criteria": [
+            "GET /admin/v1/oidc_providers returns 200 + array; neither client_secret nor client_secret_enc field appears in any GET response",
+            "POST /admin/v1/oidc_providers returns 201 + {id, issuer, client_id, enabled, created_at}; client_secret is encrypted with AES-256-GCM under EMBYR_ENCRYPTION_KEY before being written to oidc_providers.client_secret_enc; plaintext never stored",
+            "POST /admin/v1/oidc_providers returns 201 with enabled=true by default",
+            "PATCH /admin/v1/oidc_providers/:id with {enabled: false} returns 200 + updated provider; existing sessions authenticated via this provider remain valid (sessions are not invalidated on provider disable)",
+            "DELETE /admin/v1/oidc_providers/:id returns 204; existing sessions remain valid after provider deletion",
+            "Viewer attempting GET, POST, PATCH, or DELETE on oidc_providers returns 403 (Owner-only access)"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "06-02",
+          "name": "OIDC callback handler — id_token validation (issuer, audience, expiry, JWKS signature) + session cookie on success",
+          "criteria": [
+            "GET /admin/v1/auth/oidc/callback with a valid id_token returns 302 redirect to /admin/ and sets embyr_session cookie (HttpOnly, Secure, SameSite=Strict)",
+            "Callback with a tampered id_token (invalid JWKS signature) returns 302 with Location containing error=oidc_failed or returns 401",
+            "Callback claiming an issuer not present in oidc_providers for the account returns 401",
+            "CSRF state parameter is verified: mismatched or missing state value returns 401 without setting a session"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "06-03",
+          "name": "billing handler — GET /admin/v1/billing aggregate from daily_project_metrics grouped by account + range",
+          "criteria": [
+            "GET /admin/v1/billing?range=7d returns 200 + {range, databases: [{id, name, reads, writes, deletes, peak_connections, log_storage_bytes}], totals}",
+            "Projects with no rows in daily_project_metrics for the requested range appear in the databases array with reads=0, writes=0, deletes=0 (LEFT JOIN correctness)",
+            "All supported range values are accepted: 7d, 30d, month, last_month",
+            "peak_connections is always null in V1 (deferred; UI shows '—')",
+            "Unsupported range value (e.g., 'forever') returns 422"
+          ],
+          "test_file": "",
+          "scenario_name": ""
+        },
+        {
+          "id": "06-04",
+          "name": "B-06 test suite unskip — 13 scenarios",
+          "criteria": [
+            "All 13 #[ignore] scenarios in tests/admin_api_v2/acceptance/b06_oidc_billing.rs are unskipped and passing",
+            "oidc_provider_list_excludes_client_secret passes: client_secret and client_secret_enc absent from GET response for all providers",
+            "owner_creates_oidc_provider_and_secret_encrypted passes: direct DB query confirms client_secret_enc contains AES-GCM ciphertext, not the submitted plaintext",
+            "zero_metric_projects_appear_in_billing_with_zero_counters passes: LEFT JOIN ensures zero-activity projects are included",
+            "oidc_callback_with_valid_id_token_grants_session passes: local mock JWKS server in place and session cookie set on valid token"
+          ],
+          "test_file": "tests/admin_api_v2/acceptance/b06_oidc_billing.rs",
+          "scenario_name": "oidc_provider_list_excludes_client_secret"
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "crates/embyr-core/src/admin/",
+      "crates/embyr-server/src/admin/",
+      "crates/embyr-server/src/adapters/"
+    ],
+    "test_directories": [
+      "tests/admin_api_v2/"
+    ],
+    "excluded_patterns": [
+      "target/**",
+      "*.lock"
+    ]
+  },
+  "validation": {
+    "status": "pending",
+    "reviewer": "nw-solution-architect",
+    "approved_at": "TODO"
+  }
+}

@@ -1792,3 +1792,413 @@ The JSX prototype is a design-time artifact in a different language (JavaScript/
 | UI-AD-09 | In-memory navigation state (no `leptos_router` in V1) | Accepted | URL deep linking is not required by any V1 AC. Adding `leptos_router` in V1 would require routing configuration for every view with no user-visible benefit. Deferred to V2. |
 | UI-AD-10 | `cargo-mutants` mutation testing on `update.rs` and `data.rs` | Accepted | The pure `update()` function is the highest-value mutation target — it contains all state transition logic. `cargo-mutants` can test it without a browser. Target: ≥80% kill rate per CLAUDE.md `per-feature` mutation strategy. |
 
+---
+
+## Application Architecture — admin-api-v2
+
+> Updated: 2026-07-29
+> Feature: admin-api-v2 (22 new Axum routes, 10 new Postgres tables, session auth layer)
+> Mode: Propose (autonomous analysis)
+> ADRs: docs/product/architecture/adr-009 through adr-014
+
+---
+
+### Wave: DESIGN / [REF] Quality Attribute Priorities — admin-api-v2
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|-------------------|
+| 1 | **Auth isolation** | Operator Bearer routes must never run session middleware (AC-B01-07). Zero incidents where operator routes broken — KPI in DISCUSS. |
+| 2 | **Account isolation** | `projects.account_id` is the sole scoping mechanism (D3). A missing `WHERE account_id` clause leaks cross-account data — service-ending event equivalent to a cross-tenant breach. |
+| 3 | **Credential confidentiality** | No plaintext key stored anywhere: session tokens as BLAKE3, SDK keys as BLAKE3 + Argon2id, admin keys as BLAKE3, TOTP secrets as AES-GCM, OIDC secrets as AES-GCM. |
+| 4 | **Response latency** | `GET /admin/v1/projects` p99 ≤ 100ms (AC-B02-05). Session lookup adds one SELECT; must be indexed on `token_hash`. |
+| 5 | **Testability** | RBAC domain function testable without Axum. Session extractor testable with DB stubs. Handlers testable with pre-constructed `SessionContext`. |
+| 6 | **Backward compatibility** | All 5 operator routes unchanged (D7: GET project response extended in-place; non-breaking). |
+
+---
+
+### Wave: DESIGN / [REF] Component Map
+
+#### Auth Middleware Architecture
+
+```
+Admin Port :9090
+        │
+   ┌────┴──────────────────────────────────────────┐
+   │  admin_router (merged from four sub-routers)  │
+   └────────────────────────────────────────────────┘
+        │                 │                 │                 │
+   ┌────┴─────┐    ┌──────┴──────┐   ┌─────┴──────┐  ┌──────┴──────┐
+   │ operator │    │   session   │   │   public   │  │  dual_auth  │
+   │ sub-rtr  │    │   sub-rtr   │   │   sub-rtr  │  │   sub-rtr   │
+   │          │    │             │   │            │  │             │
+   │ Bearer   │    │ cookie OR   │   │  no auth   │  │ either      │
+   │ EMBYR    │    │ admin_key   │   │            │  │ principal   │
+   │ _ADMIN   │    │ Bearer      │   │            │  │             │
+   │ _KEY     │    │             │   │            │  │             │
+   └──────────┘    └─────────────┘   └────────────┘  └─────────────┘
+        │                 │                 │                 │
+   4 op routes     22 user routes     2 public routes   GET /projects/:id
+```
+
+#### SessionContext Extractor Flow
+
+```
+HTTP request with cookie OR admin_api_key Bearer
+        │
+   SessionContextExtractor::from_request_parts()
+        │
+   ├─ cookie present? → BLAKE3(cookie_value) → SELECT FROM sessions WHERE token_hash = $1
+   │       AND expires_at > now()
+   │       → spawn(UPDATE sessions SET last_active_at = now())
+   │       → Ok(SessionContext { user_id, account_id, role })
+   │
+   └─ Bearer starts with "embyr_adm_"? → BLAKE3(raw_token) → SELECT FROM admin_api_keys
+           WHERE key_hash = $1 AND revoked_at IS NULL
+           → spawn(UPDATE admin_api_keys SET last_used_at = now())
+           → Ok(SessionContext { user_id: user_or_sa_id, account_id, role })
+   │
+   Neither → 401
+```
+
+#### Account-Scoping Pattern
+
+Every session-auth handler receives `session: SessionContext` from the extractor. All SQL queries include:
+```sql
+WHERE account_id = $<session.account_id>
+```
+This predicate is explicit in the handler body — not hidden in middleware. Code review and static analysis can verify its presence.
+
+#### SDK Key → RotateAuthKey Path
+
+```
+POST /admin/v1/projects/:id/sdk_keys
+        │
+   [1] SessionContext extractor → verify role ≥ Admin via check_rbac()
+   [2] Verify project.account_id = session.account_id
+   [3] OsRng.fill_bytes(32) → raw_key
+   [4] spawn_blocking: new_sdk_key_material(raw_key)
+        → SdkKeyMaterial { argon2id_hash, ecies_pubkey, blake3_hash }
+   [5] BEGIN TRANSACTION
+        INSERT INTO sdk_api_keys (project_id, name, key_hash, prefix, created_at)
+        UPDATE projects SET
+          api_key_hash_secondary = api_key_hash_current,
+          api_key_hash_current = $argon2id_hash,
+          [if backend_mode=direct_pg AND backend_pg_dsn_enc IS NOT NULL]:
+            ecies_encrypted_dsn = ecies::encrypt(&ecies_pubkey, &decrypt(dsn_enc))
+        WHERE id = $project_id AND account_id = $account_id
+       COMMIT
+   [6] credential_cache.evict_project(project_id) -- fire-and-forget
+   [7] Return 201: { id, name, key: "embyr_sdk_<base64url>", prefix, created_at }
+```
+
+#### Query Log Write Path
+
+```
+gRPC handler (e.g., UpdateDocument)
+        │
+   [1] Storage op → Ok(result)
+   [2] Check project_meta.logging_enabled (from request extension, loaded in auth middleware)
+   [3] If true: query_log_writer.record(QueryLogEntry { project_id, op, path, status, duration_ms })
+        └─ PostgresQueryLogAdapter::record():
+               tokio::spawn (bounded channel, 1000 capacity)
+               → INSERT INTO query_logs (...) -- partitioned by (project_id, date)
+               → failure: tracing::warn!, drop silently
+   [4] Return result to client immediately (no wait for log write)
+```
+
+---
+
+### Wave: DESIGN / [REF] C4 System Context — Extended
+
+The `userAdmin` person (Chris) is now a first-class actor on the admin port. The system context diagram gains one new actor; all other elements are unchanged.
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (extended for admin-api-v2)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Uses Firebase SDK pointed at embyr")
+    Person(operator, "Service Operator (Sam)", "Provisions projects via Admin API (Bearer token)")
+    Person(userAdmin, "User Admin (Chris)", "Manages databases, members, SDK keys via web console (session auth)")
+    Person(tenantAdmin, "Tenant Admin (Morgan)", "Manages cloud secrets for DB credentials")
+    Person(ciso, "Compliance Tenant (Riley)", "Deploys embyr-agent in own VPC")
+
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Accepts Firestore SDK traffic; translates to SQL on customer-owned Postgres. Admin port serves both operator and user-admin principals.")
+
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK", "Client library: JS (web, Node.js), mobile, server SDKs.")
+    System_Ext(systemDB, "System Postgres", "Operator-managed. Stores project metadata, auth hashes, encrypted credentials, usage metrics, sessions, accounts, members, SDK keys.")
+    System_Ext(customerDB, "Customer Postgres", "Customer-managed. One per project.")
+    System_Ext(adminUI, "embyr-admin-ui (Leptos SPA)", "Browser-side WASM SPA served from admin port. Calls admin-api-v2 routes via session cookie.")
+    System_Ext(awsSecrets, "AWS Secrets Manager")
+    System_Ext(gcpSecrets, "GCP Secret Manager")
+    System_Ext(embyrAgent, "embyr-agent", "Customer-deployed Rust binary.")
+
+    Rel(sdkDev, firebaseSDK, "Calls")
+    Rel(firebaseSDK, embyr, "gRPC / gRPC-Web / BrowserChannel / REST", "TCP :8080 / :8081")
+    Rel(operator, embyr, "Admin API: provision/suspend/delete projects", "HTTP :9090 Bearer admin_key")
+    Rel(userAdmin, adminUI, "Signs in, manages databases and team", "HTTPS browser")
+    Rel(adminUI, embyr, "Admin API: session cookie auth, reads real data", "HTTP :9090")
+    Rel(tenantAdmin, awsSecrets, "Stores DB DSN, grants embyr IAM access")
+    Rel(tenantAdmin, gcpSecrets, "Stores DB DSN, grants embyr SA access")
+    Rel(ciso, embyrAgent, "Deploys in own VPC")
+
+    Rel(embyr, systemDB, "Project lookup, auth, metrics, sessions, accounts", "Postgres")
+    Rel(embyr, customerDB, "Document CRUD, queries, LISTEN/NOTIFY", "Postgres")
+    Rel(embyr, awsSecrets, "GetSecretValue on cache miss", "AWS SDK")
+    Rel(embyr, gcpSecrets, "AccessSecretVersion on cache miss", "GCP SDK")
+    Rel(embyr, embyrAgent, "StorageAgent gRPC", "mTLS gRPC :9191")
+```
+
+---
+
+### Wave: DESIGN / [REF] C4 Container Diagram — Extended
+
+The admin port (:9090) now serves two distinct traffic types routed through four sub-routers. The System Postgres gains the new admin-api-v2 tables.
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (admin-api-v2 extension)
+
+    Person(sdkDev, "Firebase SDK Client")
+    Person(operator, "Service Operator (Bearer admin_key)")
+    Person(userAdmin, "User Admin (session cookie / admin_api_key)")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(lb, "Load Balancer", "L7 (nginx / AWS ALB)", "Sticky routing for BrowserChannel. TCP-affine for gRPC. Admin port NOT exposed publicly.")
+
+        Container(embyrA, "embyr-rs instance A", "Rust binary", "Three listeners: gRPC :8080, REST :8081, Admin :9090. Admin port now serves operator sub-router + session sub-router + public sub-router + dual-auth sub-router. Credential cache, Listen registry, BrowserChannel session store.")
+
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "Existing: projects, daily_project_metrics. New (admin-api-v2): accounts, account_members, users, sessions, invitations, service_accounts, admin_api_keys, sdk_api_keys, oidc_providers, query_logs (partitioned). projects gains account_id, logging_enabled, log_retention_days, backend_pg_dsn_enc columns.")
+
+        Container(adminUI, "embyr-admin-ui", "Leptos 0.8 WASM SPA", "Served from admin port /admin/ via ServeDir. Calls admin-api-v2 routes with session cookie. Replaces mock data layer with real API calls.")
+    }
+
+    System_Boundary(customerInfra, "Customer Infrastructure") {
+        ContainerDb(custDB, "Customer Postgres", "PostgreSQL")
+    }
+
+    System_Ext(awsSecrets, "AWS Secrets Manager")
+    System_Ext(gcpSecrets, "GCP Secret Manager")
+
+    Rel(sdkDev, lb, "gRPC / gRPC-Web / BrowserChannel", "HTTPS :443")
+    Rel(operator, embyrA, "Admin API: provision/lifecycle routes", "HTTP :9090 Bearer admin_key (internal network only)")
+    Rel(userAdmin, adminUI, "Navigates admin console", "HTTPS browser")
+    Rel(adminUI, embyrA, "Admin API: auth + all user-facing routes", "HTTP :9090 session cookie")
+
+    Rel(lb, embyrA, "Route request", "gRPC / HTTP")
+
+    Rel(embyrA, sysDB, "Project lookup + auth (existing). Sessions, accounts, members, keys (new).", "Postgres SQL")
+    Rel(embyrA, custDB, "Document CRUD, RunQuery, LISTEN/NOTIFY", "Postgres SQL")
+    Rel(embyrA, awsSecrets, "GetSecretValue (cache miss)", "AWS SDK")
+    Rel(embyrA, gcpSecrets, "AccessSecretVersion (cache miss)", "GCP SDK")
+```
+
+---
+
+### Wave: DESIGN / [REF] C4 Component Diagram — Admin Port (admin-api-v2)
+
+This L3 diagram shows the internal components of the admin port subsystem within `embyr-server`. The data-plane components (gRPC listener, Firestore handler, Listen registry) are not shown — see the existing data-plane L3 diagram.
+
+```mermaid
+C4Component
+    title Component Diagram — Admin Port (admin-api-v2)
+
+    Container_Boundary(adminPort, "embyr-server Admin Port :9090") {
+
+        Component(adminRouter, "Admin Router", "embyr-server::admin::router", "Axum Router merging four sub-routers: operator, session, public, dual_auth. Built once at composition root. with_state() erases type parameters before merge.")
+
+        Component(operatorRouter, "Operator Sub-Router", "embyr-server::admin (operator routes)", "Routes: POST /projects, POST .../suspend, POST .../activate, DELETE /projects/:id. Layer: OperatorAuthMiddleware.")
+        Component(sessionRouter, "Session Sub-Router", "embyr-server::admin (session routes)", "Routes: all 22 new user-facing routes. Layer: SessionAuthMiddleware.")
+        Component(publicRouter, "Public Sub-Router", "embyr-server::admin (public routes)", "Routes: POST /auth/signin, GET /auth/oidc/callback. No auth middleware.")
+        Component(dualAuthRouter, "Dual-Auth Sub-Router", "embyr-server::admin (dual-auth route)", "Route: GET /projects/:id. Layer: DualAuthMiddleware.")
+
+        Component(operatorAuthMw, "OperatorAuthMiddleware", "embyr-server::admin::middleware::operator_auth", "Tower from_fn_with_state. Validates Bearer EMBYR_ADMIN_KEY. Returns 401 if absent or mismatched.")
+        Component(sessionAuthMw, "SessionAuthMiddleware", "embyr-server::admin::middleware::session_auth", "Tower from_fn_with_state. Tries cookie BLAKE3 lookup in sessions table; then admin_api_key BLAKE3 lookup. Sets SessionContext extension on success.")
+        Component(dualAuthMw, "DualAuthMiddleware", "embyr-server::admin::middleware::dual_auth", "Tries session auth first, then operator Bearer. Sets AuthPrincipal { User(SessionContext) | Operator } extension.")
+
+        Component(sessionCtxExtractor, "SessionContextExtractor", "embyr-server::admin::extractors::session_context", "FromRequestParts impl. Reads cookie or admin_api_key Bearer. Queries sessions or admin_api_keys table. Returns SessionContext { user_id, account_id, role }.")
+
+        Component(authHandlers, "Auth Handlers", "embyr-server::admin::handlers::auth", "signin: validate email+password+TOTP, create session row, set HTTP-only cookie. signout: clear cookie, expire session. oidc_callback: validate id_token, create session, redirect.")
+        Component(projectHandlers, "Project Handlers", "embyr-server::admin::handlers::projects + sdk_keys + metrics + query_logs", "list_projects (account-scoped), patch_project, list/create/revoke sdk_keys, get_metrics, list_query_logs. SDK key creation calls new_sdk_key_material on blocking thread.")
+        Component(memberHandlers, "Member/SA/Key Handlers", "embyr-server::admin::handlers::members + service_accounts + admin_keys", "Member CRUD, service account CRUD, admin API key CRUD. All call check_rbac before write ops.")
+        Component(oidcBillingHandlers, "OIDC + Billing Handlers", "embyr-server::admin::handlers::oidc_providers + billing", "OIDC provider CRUD (Owner only): AES-GCM encrypts client_secret. Billing: aggregate daily_project_metrics by account + time range.")
+        Component(operatorHandlers, "Operator Handlers", "embyr-server::admin::handlers::provision + lifecycle + get_project", "Existing 5 operator routes. provision.rs uses OperatorState. get_project.rs reads AuthPrincipal extension to apply account scoping for User, or return unscoped for Operator.")
+
+        Component(rbacFn, "check_rbac()", "embyr-core::admin::rbac", "Pure domain function. Returns RbacError for: InsufficientRole, SelfDemotion, CannotChangeOwnerRole, LastOwnerRemoval, KeyRoleExceedsActor.")
+        Component(sdkKeyMaterial, "new_sdk_key_material()", "embyr-core::domain::project", "Pure function. Returns SdkKeyMaterial { argon2id_hash, ecies_pubkey, blake3_hash }. Called on spawn_blocking thread.")
+        Component(emailSender, "IEmailSender", "embyr-core::admin::email (trait) / embyr-server::adapters::email (NoopEmailSender V1)", "Invitation email port. V1: NoopEmailSender logs and returns Ok. V2: SmtpEmailSender via lettre.")
+        Component(queryLogWriter, "IQueryLogWriter", "embyr-core::admin::query_log (trait) / embyr-server::adapters::query_log", "PostgresQueryLogAdapter. record() spawns bounded Tokio task. Inserts into query_logs partition. Best-effort: failure never propagated.")
+        Component(queryLogSweeper, "QueryLogSweeper", "embyr-server::sweepers::query_log_sweeper", "Daily Tokio task. Drops query_logs_<project_id>_<date> partitions older than projects.log_retention_days. Acquires Postgres advisory lock before each cycle to prevent duplicate drops in multi-instance deployments. Lock: pg_try_advisory_lock(fnv1a_hash('embyr_query_log_sweep')).")
+        Component(sessionCleaner, "SessionCleaner", "embyr-server::sweepers::session_cleaner", "Hourly Tokio task. Deletes sessions WHERE expires_at < now() - 30 days. Also deletes expired unaccepted invitations. Advisory lock: pg_try_advisory_lock(fnv1a_hash('embyr_session_clean')).")
+    }
+
+    System_Ext(systemDB, "System Postgres", "accounts, users, sessions, admin_api_keys, sdk_api_keys, oidc_providers, query_logs, projects, daily_project_metrics")
+    System_Ext(credCache, "CredentialCache", "In-process LRU (Arc<RwLock>). Evicted on SDK key creation/revocation.")
+
+    Rel(adminRouter, operatorRouter, "merges")
+    Rel(adminRouter, sessionRouter, "merges")
+    Rel(adminRouter, publicRouter, "merges")
+    Rel(adminRouter, dualAuthRouter, "merges")
+
+    Rel(operatorRouter, operatorAuthMw, "layered with")
+    Rel(operatorRouter, operatorHandlers, "routes to")
+    Rel(sessionRouter, sessionAuthMw, "layered with")
+    Rel(sessionRouter, sessionCtxExtractor, "handlers use")
+    Rel(sessionRouter, projectHandlers, "routes to")
+    Rel(sessionRouter, memberHandlers, "routes to")
+    Rel(sessionRouter, oidcBillingHandlers, "routes to")
+    Rel(publicRouter, authHandlers, "routes to")
+    Rel(dualAuthRouter, dualAuthMw, "layered with")
+    Rel(dualAuthRouter, operatorHandlers, "routes get_project to")
+
+    Rel(sessionAuthMw, systemDB, "looks up session/admin_key hash in")
+    Rel(sessionCtxExtractor, systemDB, "queries sessions and admin_api_keys in")
+    Rel(authHandlers, systemDB, "reads users, creates sessions in")
+    Rel(projectHandlers, systemDB, "reads/writes projects, sdk_api_keys, query_logs in")
+    Rel(projectHandlers, sdkKeyMaterial, "calls for SDK key creation")
+    Rel(projectHandlers, credCache, "evicts on SDK key create/revoke")
+    Rel(projectHandlers, queryLogWriter, "records operation logs via")
+    Rel(memberHandlers, systemDB, "reads/writes account_members, invitations in")
+    Rel(memberHandlers, emailSender, "sends invitation email via")
+    Rel(memberHandlers, rbacFn, "enforces RBAC via")
+    Rel(projectHandlers, rbacFn, "enforces RBAC via")
+    Rel(oidcBillingHandlers, systemDB, "reads/writes oidc_providers, daily_project_metrics in")
+    Rel(queryLogSweeper, systemDB, "drops old partitions in")
+    Rel(sessionCleaner, systemDB, "deletes expired sessions and invitations in")
+```
+
+---
+
+### Wave: DESIGN / [REF] New Database Schema (Migrations)
+
+10 new tables + 2 schema alterations. All run via `sqlx-migrate` at startup (B-01 migration).
+
+| Table | Purpose | Key Columns | Index |
+|-------|---------|-------------|-------|
+| `accounts` | Tenant account container | `id UUID PK`, `name TEXT`, `created_at TIMESTAMPTZ` | PK |
+| `users` | Login credentials | `id UUID PK`, `email TEXT UNIQUE`, `password_hash TEXT`, `totp_secret_enc BYTEA`, `failed_totp_attempts INT`, `locked_until TIMESTAMPTZ` | `email` UNIQUE |
+| `account_members` | User ↔ Account with role | `account_id UUID FK`, `user_id UUID FK`, `role TEXT`, `joined_at TIMESTAMPTZ`, PK(`account_id, user_id`) | `(account_id, role)` |
+| `sessions` | Active sessions | `id UUID PK`, `token_hash BYTEA(32) UNIQUE`, `user_id UUID FK`, `account_id UUID FK`, `role TEXT`, `created_at TIMESTAMPTZ`, `last_active_at TIMESTAMPTZ`, `expires_at TIMESTAMPTZ` | `token_hash` UNIQUE |
+| `invitations` | Pending member invites | `id UUID PK`, `account_id UUID FK`, `email TEXT`, `role TEXT`, `invited_by UUID FK`, `expires_at TIMESTAMPTZ`, `accepted_at TIMESTAMPTZ` | `(account_id, email)` |
+| `service_accounts` | Non-human principals | `id UUID PK`, `account_id UUID FK`, `name TEXT`, `description TEXT`, `role TEXT`, `created_at TIMESTAMPTZ` | `account_id` |
+| `admin_api_keys` | Programmatic access keys | `id UUID PK`, `account_id UUID FK`, `name TEXT`, `key_hash BYTEA(32) UNIQUE`, `prefix TEXT`, `role TEXT`, `user_id UUID FK nullable`, `service_account_id UUID FK nullable`, `created_at TIMESTAMPTZ`, `last_used_at TIMESTAMPTZ`, `revoked_at TIMESTAMPTZ` | `key_hash` UNIQUE |
+| `sdk_api_keys` | SDK auth keys per project | `id UUID PK`, `project_id TEXT FK`, `name TEXT`, `key_hash BYTEA(32) UNIQUE`, `prefix TEXT`, `created_at TIMESTAMPTZ`, `last_used_at TIMESTAMPTZ`, `revoked_at TIMESTAMPTZ` | `key_hash` UNIQUE, `project_id` |
+| `oidc_providers` | Per-account OIDC config | `id UUID PK`, `account_id UUID FK`, `issuer TEXT`, `client_id TEXT`, `client_secret_enc BYTEA`, `enabled BOOL`, `created_at TIMESTAMPTZ` | `account_id` |
+| `query_logs` | Per-project operation log | `id BIGSERIAL`, `project_id TEXT FK`, `operation TEXT`, `collection_path TEXT`, `document_path TEXT`, `status TEXT`, `duration_ms INT`, `client_ip TEXT`, `ts TIMESTAMPTZ NOT NULL` | Partitioned by `(project_id, ts::date)` |
+
+**Schema alterations on existing tables:**
+- `projects` gains: `account_id UUID REFERENCES accounts(id) NOT NULL`, `logging_enabled BOOLEAN NOT NULL DEFAULT false`, `log_retention_days INT`, `backend_pg_dsn_enc BYTEA` (AES-GCM encrypted DSN under `EMBYR_ENCRYPTION_KEY`)
+- Index added: `projects(account_id)` — required for `GET /admin/v1/projects` p99 ≤ 100ms target
+
+**Known Limitation — SDK key rotation for pre-existing projects:**
+Projects provisioned before this feature have `backend_pg_dsn_enc IS NULL` because the plaintext DSN cannot be backfilled without the original API key (only its Argon2id hash is stored). For these projects, SDK key creation proceeds normally — `api_key_hash_current` and `api_key_hash_secondary` are updated, Firestore SDK authentication with the new SDK key works — but `ecies_encrypted_dsn` is NOT re-encrypted with the new key's ECIES pubkey (step 7b in the SDK key creation flow is skipped). The credential cache continues to use the existing `ecies_encrypted_dsn` until the project is re-provisioned. **Mitigation for operators:** Delete and re-provision the project using the operator API (DELETE then POST `/admin/v1/projects`). After re-provisioning, `backend_pg_dsn_enc` is populated and full SDK key rotation with DSN re-encryption is supported. Acceptance test AC-B03-03 must explicitly verify the `backend_pg_dsn_enc IS NULL` skip-path and document it as expected behavior.
+
+---
+
+### Wave: DESIGN / [REF] Background Tasks
+
+Two background Tokio tasks run on a schedule within `embyr-server`. Both use **Postgres advisory locks** to prevent duplicate execution in multi-instance deployments.
+
+| Task | Location | Schedule | Advisory Lock Key | Failure Mode |
+|------|----------|----------|------------------|--------------|
+| `QueryLogSweeper` | `embyr-server::sweepers::query_log_sweeper` | Daily (configurable via env, default 02:00 UTC) | `pg_try_advisory_lock(fnv1a_hash("embyr_query_log_sweep"))` | Lock held by another instance → skip cycle, retry next cycle |
+| `SessionCleaner` | `embyr-server::sweepers::session_cleaner` | Hourly | `pg_try_advisory_lock(fnv1a_hash("embyr_session_clean"))` | Lock held by another instance → skip cycle, retry next cycle |
+
+**Advisory lock pattern (both sweepers):**
+
+```
+loop (every schedule interval):
+  if NOT pg_try_advisory_lock($key):
+    tracing::debug!("sweep cycle skipped: lock held by another instance")
+    continue
+  try:
+    run_sweep()
+  finally:
+    pg_advisory_unlock($key)
+```
+
+`pg_try_advisory_lock` is non-blocking (returns false immediately if held). Advisory locks are session-scoped and released on connection close — crash-safe at the cost of one missed cycle if the sweeper crashes holding the lock. This is acceptable for non-critical maintenance tasks.
+
+**SessionCleaner behavior:** Deletes `sessions` rows where `expires_at < now() - INTERVAL '30 days'`. The 30-day grace period prevents any in-flight request from referencing a recently-expired session. Hard delete (no soft-delete needed; sessions contain no user-generated content). Also deletes `invitations` rows where `expires_at < now() - INTERVAL '7 days'` and `accepted_at IS NULL`.
+
+**QueryLogSweeper behavior:** Queries `projects` for `logging_enabled = true` records and their `log_retention_days`. Drops partition tables `query_logs_<project_id>_<date>` for dates older than `retention_days` using `DROP TABLE IF EXISTS`. DDL is instant and lock-free for table-level drops. Sweeper must run against a test environment partition table before production use (B-04 slice gate).
+
+---
+
+### Wave: DESIGN / [REF] Startup Sequence Extension
+
+The composition root adds two new startup validations after existing probes:
+
+```
+[Existing probes]
+  System DB connectivity, WAL mode, schema migration, port availability, admin key present
+
+[New — admin-api-v2]
+  EMBYR_ENCRYPTION_KEY check:
+    IF SELECT count(*) FROM accounts > 0 AND EMBYR_ENCRYPTION_KEY absent or ≠ 32 bytes:
+      → refuse to start: health.startup.refused: encryption_key_missing
+    IF accounts table empty:
+      → warn: health.startup.warn: encryption_key_not_configured
+      → proceed (fresh deployment; key can be set before first user is created)
+```
+
+---
+
+### Wave: DESIGN / [REF] Architecture Enforcement
+
+| Concern | Enforcement Mechanism |
+|---------|----------------------|
+| `embyr-core::admin` must not import IO crates | `cargo-deny` `deny.toml` for `embyr-core`: `tokio`, `sqlx`, `axum`, `lettre` in deny list |
+| Operator routes never run session middleware | Axum sub-router layer scoping: structurally enforced. Integration test: operator routes must pass with Bearer admin_key, fail with session cookie |
+| Account-scoping completeness | Integration test: cross-account 403 test for every session-auth endpoint (DISTILL wave acceptance test matrix) |
+| No plaintext credentials stored | CI test: scan `query_logs` and `sessions` tables for known test plaintext values after operations — must return empty |
+| `new_sdk_key_material` not bypassed | `cargo-deny` / `cargo-depcheck`: handlers must not import `argon2`, `ecies`, `blake3` directly — they must go through `embyr-core::domain::project::new_sdk_key_material` |
+| RBAC function not bypassed | `cargo-machete` / code review: handler files in `admin/handlers/` that write data must import `embyr_core::admin::rbac::check_rbac` |
+| Mutation testing | `cargo-mutants -p embyr-server --filter admin` targets RBAC function, session extractor, SDK key creation. Target: ≥80% kill rate |
+
+---
+
+### Wave: DESIGN / [REF] Application-Level Decisions Table — admin-api-v2
+
+| ID | Decision | Verdict | Rationale |
+|----|----------|---------|-----------|
+| B-AD-01 | Sub-router merge with per-router Tower layers | Accepted | ADR-009. Structural isolation; operator routes and session routes cannot cross-contaminate. One dual-auth route handled by dedicated sub-router. |
+| B-AD-02 | `SessionContext` as `FromRequestParts` extractor | Accepted | ADR-010. Compile-time enforcement of account scoping; impossible to forget `account_id` in handler SQL because `SessionContext` is the only way to obtain it. |
+| B-AD-03 | `IEmailSender` port in `embyr-core::admin::email` | Accepted | ADR-011. Inner-hexagon port trait placement. V1 `NoopEmailSender` trivially satisfies Earned Trust; V2 `SmtpEmailSender` adds real probe. |
+| B-AD-04 | RBAC via pure domain function | Accepted | ADR-012. Non-trivial RBAC invariants (self-demotion, last-owner, key role cap) encoded in one auditable pure function in `embyr-core`. Testable without Axum server. |
+| B-AD-05 | Fire-and-forget query log writes | Accepted | ADR-013. Zero client latency impact. Consistent with MetricsPort pattern. Bounded channel (1000) caps resource use. |
+| B-AD-06 | `new_sdk_key_material` domain function; `backend_pg_dsn_enc` column | Accepted | ADR-014. D4 compliance (no ECIES bypass). DSN re-encryption on key rotation via server-side AES-GCM encrypted DSN column. Pre-existing projects skip DSN re-encryption (known limitation, documented). |
+| B-AD-07 | `UserAdminState` separate from `OperatorState` | Accepted | Different dependency graphs; merging creates unnecessary coupling between operator infrastructure (AWS/GCP fetchers) and user-admin infrastructure (email, encryption key). |
+| B-AD-08 | `QueryLogSweeper` uses `DROP TABLE` on old partitions (not `DELETE`) | Accepted | `DROP TABLE` on a daily partition is instant and lock-free. `DELETE WHERE ts < cutoff` on a large table takes O(rows) and holds locks. Same rationale as deleted-project sweeper vs. immediate hard-delete. |
+| B-AD-09 | `totp-rs` crate for TOTP validation | Accepted | MIT license. RFC 6238 compliant. Pure Rust, no C dependency. Active maintenance (last release < 3 months). Only alternative (`oath-toolkit` crate) requires `liboath` C binding — rejected per OSS preference for pure Rust. |
+| B-AD-10 | No idle expiry for admin API keys (long-lived by design) | Accepted | AC-B05-11 specifies "immediate revocation" as the only invalidation mechanism. Admin API keys are for CI/CD automation — 24h idle expiry would break unattended pipelines. Revocation is the explicit invalidation mechanism. |
+
+---
+
+### Wave: DESIGN / [REF] Open Questions — admin-api-v2
+
+| ID | Question | Blocking | Resolution Timing |
+|----|----------|---------|------------------|
+| OQ-B01 | DSN re-encryption for pre-existing projects | No (fallback: skip when `backend_pg_dsn_enc IS NULL`) | Before B-03 merge |
+| OQ-B02 | `sessions.token_hash` column type: `BYTEA` vs `TEXT` | No (minor DDL) | B-01 migration DDL |
+| OQ-B03 | TOTP library confirmed: `totp-rs` | Yes — blocks B-01 | Before B-01 crafter handoff |
+| OQ-B04 | Admin API key idle expiry: none (long-lived by design, B-AD-10) | No | Resolved above |
+| OQ-B05 | Sam's tooling handles unknown fields in `GET /projects/:id` response | No (AC-B02-04 asserts this) | B-02 integration test |
+
+---
+
+### Wave: DESIGN / [REF] External Integrations Requiring Contract Tests
+
+**Handoff annotation for platform-architect:**
+
+No new external third-party APIs introduced in admin-api-v2 (all data lives in System Postgres). The SMTP relay (V2 `SmtpEmailSender`) is the only new external integration:
+
+```
+External Integrations Requiring Contract Tests (V2):
+- SMTP relay (SmtpEmailSender): EHLO handshake probe at startup.
+  Recommended V2: smoke test against a real SMTP relay in CI (e.g., Mailpit for local,
+  AWS SES sandbox for integration environment) to detect SMTP auth format changes.
+  Not a consumer-driven contract test (SMTP is a standard protocol, not a versioned API).
+```
+
+OIDC providers are configured at runtime by the account Owner — they are not a fixed external integration at the infrastructure layer. No contract tests needed at the platform level.
+

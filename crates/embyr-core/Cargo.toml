@@ -18,3 +18,4 @@ hkdf.workspace = true
 aes-gcm = { workspace = true, features = ["aes"] }
 rand_core.workspace = true
 sha2.workspace = true
+uuid.workspace = true

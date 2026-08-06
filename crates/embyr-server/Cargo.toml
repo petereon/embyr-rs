@@ -114,6 +114,35 @@ path = "../../tests/acceptance/us_11_gcp_secrets.rs"
 name = "us_14_rate_limiting"
 path = "../../tests/acceptance/us_14_rate_limiting.rs"
 
+# admin-api-v2 acceptance tests
+[[test]]
+name = "admin_api_v2_walking_skeleton"
+path = "../../tests/admin_api_v2/acceptance/walking_skeleton.rs"
+
+[[test]]
+name = "admin_api_v2_b01_auth_migrations"
+path = "../../tests/admin_api_v2/acceptance/b01_auth_migrations.rs"
+
+[[test]]
+name = "admin_api_v2_b02_project_list"
+path = "../../tests/admin_api_v2/acceptance/b02_project_list.rs"
+
+[[test]]
+name = "admin_api_v2_b03_sdk_keys"
+path = "../../tests/admin_api_v2/acceptance/b03_sdk_keys.rs"
+
+[[test]]
+name = "admin_api_v2_b04_project_patch"
+path = "../../tests/admin_api_v2/acceptance/b04_project_patch.rs"
+
+[[test]]
+name = "admin_api_v2_b05_members"
+path = "../../tests/admin_api_v2/acceptance/b05_members.rs"
+
+[[test]]
+name = "admin_api_v2_b06_oidc_billing"
+path = "../../tests/admin_api_v2/acceptance/b06_oidc_billing.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
@@ -136,3 +165,4 @@ aws-config = { workspace = true }
 aws-sdk-secretsmanager = { workspace = true }
 base64 = { workspace = true }
 serial_test = { workspace = true }
+proptest = { workspace = true }

@@ -1,3 +1,13 @@
+pub mod admin_keys;
+pub mod auth;
+pub mod billing;
 pub mod get_project;
 pub mod lifecycle;
+pub mod members;
+pub mod metrics;
+pub mod oidc_providers;
+pub mod projects;
 pub mod provision;
+pub mod query_logs;
+pub mod sdk_keys;
+pub mod service_accounts;
