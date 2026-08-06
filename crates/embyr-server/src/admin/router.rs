@@ -1,5 +1,5 @@
 use axum::{
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use crate::adapters::{
 };
 
 use super::handlers::auth::{signin, signout};
-use super::handlers::projects::list_projects;
+use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
@@ -93,6 +93,7 @@ pub fn build_admin_router(
     // Routes MUST be added BEFORE route_layer so the middleware applies to them.
     let session_router = Router::<UserAdminState>::new()
         .route("/admin/v1/projects", get(list_projects))
+        .route("/admin/v1/projects/:project_id", patch(patch_project))
         .route(
             "/admin/v1/projects/:project_id/sdk_keys",
             get(list_sdk_keys).post(create_sdk_key),
