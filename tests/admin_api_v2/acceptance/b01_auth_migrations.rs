@@ -19,7 +19,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
-use common::{AdminTestContext, assert_state_delta, set_to, unchanged};
+use common::{AdminTestContext, assert_state_delta, set_to};
 use std::collections::HashMap;
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -18,7 +18,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
-use common::{AdminTestContext, FakeEmailSender};
+use common::AdminTestContext;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AC-B05-01: GET /admin/v1/members
