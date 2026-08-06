@@ -20,6 +20,7 @@ use super::handlers::get_project::get_project;
 use super::handlers::metrics::get_project_metrics;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::provision::provision;
+use super::handlers::query_logs::list_query_logs;
 use super::middleware::dual_auth::dual_auth_middleware;
 use super::middleware::operator_auth::operator_auth_middleware;
 use super::middleware::session_auth::session_auth_middleware;
@@ -106,6 +107,10 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/metrics",
             get(get_project_metrics),
+        )
+        .route(
+            "/admin/v1/projects/:project_id/query_logs",
+            get(list_query_logs),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
