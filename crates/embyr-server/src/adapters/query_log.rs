@@ -22,7 +22,7 @@ impl PostgresQueryLogAdapter {
 }
 
 impl IQueryLogWriter for PostgresQueryLogAdapter {
-    fn record(&self, entry: QueryLogEntry) {
+    fn record(&self, _entry: QueryLogEntry) {
         panic!("Not yet implemented -- RED scaffold: PostgresQueryLogAdapter::record")
     }
 }

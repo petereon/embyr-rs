@@ -21,6 +21,7 @@ use crate::admin::state::UserAdminState;
 #[derive(Serialize)]
 pub struct ProjectSummary {
     pub id: String,
+    pub name: Option<String>,
     pub status: String,
     pub backend_mode: String,
     pub logging_enabled: bool,
@@ -38,7 +39,7 @@ pub async fn list_projects(
     let pool = state.system_db.pool();
 
     let rows = sqlx::query(
-        "SELECT id, status, backend_mode, logging_enabled, created_at \
+        "SELECT id, name, status, backend_mode, logging_enabled, created_at \
          FROM projects \
          WHERE account_id = $1 AND status != 'deleted' \
          ORDER BY created_at DESC",
@@ -55,6 +56,7 @@ pub async fn list_projects(
         .into_iter()
         .map(|row| ProjectSummary {
             id: row.try_get("id").unwrap_or_default(),
+            name: row.try_get("name").unwrap_or(None),
             status: row.try_get("status").unwrap_or_default(),
             backend_mode: row.try_get("backend_mode").unwrap_or_default(),
             logging_enabled: row.try_get("logging_enabled").unwrap_or(false),
