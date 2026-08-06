@@ -14,6 +14,7 @@ use crate::adapters::{
 };
 
 use super::handlers::auth::{signin, signout};
+use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
 use super::handlers::get_project::get_project;
@@ -112,6 +113,11 @@ pub fn build_admin_router(
             "/admin/v1/projects/:project_id/query_logs",
             get(list_query_logs),
         )
+        // Members routes (step 05-02).
+        .route("/admin/v1/members", get(list_members))
+        .route("/admin/v1/members/invite", post(invite_member))
+        .route("/admin/v1/members/:member_id/role", patch(change_member_role))
+        .route("/admin/v1/members/:member_id", delete(remove_member))
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
             session_auth_middleware,
