@@ -18,7 +18,7 @@ use super::handlers::billing::get_billing;
 use super::handlers::oidc_providers::{
     create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
 };
-use super::handlers::auth::{signin, signout};
+use super::handlers::auth::{oidc_callback, signin, signout};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
@@ -98,6 +98,7 @@ pub fn build_admin_router(
     let public_router = Router::<UserAdminState>::new()
         .route("/admin/v1/auth/signin", post(signin))
         .route("/admin/v1/auth/signout", post(signout))
+        .route("/admin/v1/auth/oidc/callback", get(oidc_callback))
         .with_state(user_state.clone());
 
     // Session sub-router: session_auth_middleware guards all routes added in steps 01-04+.
