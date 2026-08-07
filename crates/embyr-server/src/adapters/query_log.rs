@@ -80,6 +80,10 @@ impl PostgresQueryLogAdapter {
                     .to_string();
                 let partition_name = format!("query_logs_{date}");
 
+                // Safety: partition_name is derived from chrono date formatting
+                // ("%Y_%m_%d") and date_str/next_date from "%Y-%m-%d" — both
+                // produce only digits, underscores, and hyphens. User input never
+                // reaches these strings, so there is no SQL injection risk.
                 let create_partition_sql = format!(
                     "CREATE TABLE IF NOT EXISTS {partition_name} PARTITION OF query_logs \
                      FOR VALUES FROM ('{date_str}') TO ('{next_date}')"
