@@ -25,8 +25,8 @@ use crate::admin::state::UserAdminState;
 
 /// Extract a named cookie value from the `Cookie` request header.
 fn extract_cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
-    let hdr = headers.get("cookie")?.to_str().ok()?;
-    for pair in hdr.split(';') {
+    let cookie_header = headers.get("cookie")?.to_str().ok()?;
+    for pair in cookie_header.split(';') {
         let pair = pair.trim();
         if let Some((k, v)) = pair.split_once('=') {
             if k.trim() == name {

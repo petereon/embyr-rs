@@ -20,6 +20,9 @@ use uuid::Uuid;
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::state::UserAdminState;
 
+/// Maximum entries returned per page. One extra row is fetched to detect has_next_page.
+const PAGE_SIZE: usize = 500;
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -122,11 +125,12 @@ pub async fn list_query_logs(
             None
         };
 
-    // Step 4: fetch up to 501 entries (one extra to detect has_next_page);
-    // return at most 500 to the caller.
+    // Step 4: fetch PAGE_SIZE + 1 entries (one extra to detect has_next_page);
+    // return at most PAGE_SIZE to the caller.
     //
     // Keyset pagination uses (created_at DESC, id DESC) ordering.
     // The cursor condition: rows that come after the cursor in that order.
+    let fetch_limit = PAGE_SIZE + 1;
     let select_cols =
         "SELECT id::text as id, op, collection_path, latency_ms, \
          status, error_code, created_at FROM query_logs WHERE project_id = $1";
@@ -134,7 +138,7 @@ pub async fn list_query_logs(
     let rows = match (&op_filter, &cursor) {
         (None, None) => {
             sqlx::query(&format!(
-                "{select_cols} ORDER BY created_at DESC, id DESC LIMIT 501"
+                "{select_cols} ORDER BY created_at DESC, id DESC LIMIT {fetch_limit}"
             ))
             .bind(&project_id)
             .fetch_all(pool)
@@ -143,7 +147,7 @@ pub async fn list_query_logs(
         (Some(op), None) => {
             sqlx::query(&format!(
                 "{select_cols} AND op = $2 \
-                 ORDER BY created_at DESC, id DESC LIMIT 501"
+                 ORDER BY created_at DESC, id DESC LIMIT {fetch_limit}"
             ))
             .bind(&project_id)
             .bind(op.as_str())
@@ -154,7 +158,7 @@ pub async fn list_query_logs(
             sqlx::query(&format!(
                 "{select_cols} \
                  AND (created_at < $2 OR (created_at = $2 AND id < $3)) \
-                 ORDER BY created_at DESC, id DESC LIMIT 501"
+                 ORDER BY created_at DESC, id DESC LIMIT {fetch_limit}"
             ))
             .bind(&project_id)
             .bind(cursor_ts)
@@ -166,7 +170,7 @@ pub async fn list_query_logs(
             sqlx::query(&format!(
                 "{select_cols} AND op = $2 \
                  AND (created_at < $3 OR (created_at = $3 AND id < $4)) \
-                 ORDER BY created_at DESC, id DESC LIMIT 501"
+                 ORDER BY created_at DESC, id DESC LIMIT {fetch_limit}"
             ))
             .bind(&project_id)
             .bind(op.as_str())
@@ -203,10 +207,10 @@ pub async fn list_query_logs(
         .unwrap_or(0),
     };
 
-    // Step 6: map rows → response, capped at 500 per page.
+    // Step 6: map rows → response, capped at PAGE_SIZE per page.
     let entries: Vec<QueryLogEntryResponse> = rows
         .into_iter()
-        .take(500)
+        .take(PAGE_SIZE)
         .map(|r| QueryLogEntryResponse {
             id: r.try_get("id").unwrap_or_default(),
             op: r.try_get("op").unwrap_or_default(),

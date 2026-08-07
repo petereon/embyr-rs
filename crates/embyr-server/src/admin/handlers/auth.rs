@@ -30,6 +30,9 @@ use uuid::Uuid;
 
 use crate::admin::state::UserAdminState;
 
+/// Session cookie lifetime in seconds (24 hours).
+const SESSION_COOKIE_MAX_AGE_SECS: u32 = 86_400;
+
 // ── Request / response types ──────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -79,8 +82,16 @@ fn internal_err(context: &str, e: impl std::fmt::Display) -> Response {
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
 
-// ── Cookie extraction (mirrors session_auth_middleware helper) ─────────────────
+// ── Cookie helpers ────────────────────────────────────────────────────────────
 
+/// Build the `Set-Cookie` header value for the session cookie.
+fn build_session_cookie(token: &str) -> String {
+    format!(
+        "embyr_session={token}; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age={SESSION_COOKIE_MAX_AGE_SECS}"
+    )
+}
+
+/// Extract a named cookie value from the `Cookie` request header.
 fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie_header = headers.get("cookie")?.to_str().ok()?;
     for pair in cookie_header.split(';') {
@@ -333,9 +344,9 @@ pub async fn signin(
 
     // ── 7. Generate session token ─────────────────────────────────────────────
     // 32 random bytes → base64url (no padding) → opaque token string.
-    let mut buf = [0u8; 32];
-    OsRng.fill_bytes(&mut buf);
-    let token = URL_SAFE_NO_PAD.encode(buf);
+    let mut token_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut token_bytes);
+    let token = URL_SAFE_NO_PAD.encode(token_bytes);
 
     // ── 8. Store BLAKE3(token) in sessions ───────────────────────────────────
     // AC-7: raw plaintext token is NEVER written to the DB.
@@ -355,9 +366,7 @@ pub async fn signin(
 
     // ── 9. Return 200 + Set-Cookie ────────────────────────────────────────────
     // AC-1: cookie attributes per spec.
-    let cookie = format!(
-        "embyr_session={token}; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age=86400"
-    );
+    let cookie = build_session_cookie(&token);
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
@@ -613,9 +622,9 @@ pub async fn oidc_callback(
     };
 
     // Generate 32-byte random session token (same pattern as signin).
-    let mut buf = [0u8; 32];
-    OsRng.fill_bytes(&mut buf);
-    let token = URL_SAFE_NO_PAD.encode(buf);
+    let mut token_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut token_bytes);
+    let token = URL_SAFE_NO_PAD.encode(token_bytes);
     let token_hash = blake3::hash(token.as_bytes()).as_bytes().to_vec();
 
     if let Err(e) = sqlx::query(
@@ -632,9 +641,7 @@ pub async fn oidc_callback(
     }
 
     // Build 302 redirect with embyr_session cookie (same attributes as signin).
-    let cookie = format!(
-        "embyr_session={token}; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age=86400"
-    );
+    let cookie = build_session_cookie(&token);
     let cookie_value = match HeaderValue::from_str(&cookie) {
         Ok(v) => v,
         Err(e) => return internal_err("oidc_callback: build cookie header", e),

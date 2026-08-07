@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! Account domain types: AccountId, UserId, User, Role, AccountMember.
 
 use uuid::Uuid;
@@ -21,10 +20,6 @@ pub enum Role {
 }
 
 /// A user in the system.
-///
-/// # RED scaffold
-/// Argon2id password hash, AES-GCM TOTP secret, and lockout fields
-/// are placeholders until the B-01 implementation is wired in.
 #[derive(Debug, Clone)]
 pub struct User {
     pub id: UserId,

@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! IEmailSender port trait and supporting types.
 //!
 //! V1: NoopEmailSender (logs and returns Ok).

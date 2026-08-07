@@ -5,29 +5,41 @@ use axum::{
 
 use crate::admin::state::OperatorState;
 
-pub async fn suspend_project(
-    Path(project_id): Path<String>,
-    State(state): State<OperatorState>,
+/// Apply a lifecycle status transition to a project and evict the credential cache.
+///
+/// Updates `status` and `updated_at` where the current status is in
+/// `('active', 'suspended')`. Returns `NOT_FOUND` when the project does not
+/// exist or has already been deleted; `INTERNAL_SERVER_ERROR` on DB failure.
+async fn set_project_status(
+    project_id: &str,
+    new_status: &str,
+    state: &OperatorState,
 ) -> StatusCode {
-    // Auth is enforced by operator_auth_middleware applied at the router layer.
-
-    // Idempotent: UPDATE succeeds if project is 'active' OR already 'suspended'.
     let result = sqlx::query(
-        "UPDATE projects SET status='suspended', updated_at=now() \
-         WHERE id=$1 AND status IN ('active','suspended')",
+        "UPDATE projects SET status = $2, updated_at = now() \
+         WHERE id = $1 AND status IN ('active', 'suspended')",
     )
-    .bind(&project_id)
+    .bind(project_id)
+    .bind(new_status)
     .execute(state.system_db.pool())
     .await;
 
     match result {
         Ok(r) if r.rows_affected() > 0 => {
-            state.credential_cache.evict_project(&project_id).await;
+            state.credential_cache.evict_project(project_id).await;
             StatusCode::OK
         }
-        Ok(_) => StatusCode::NOT_FOUND, // project does not exist or is deleted
+        Ok(_) => StatusCode::NOT_FOUND,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+pub async fn suspend_project(
+    Path(project_id): Path<String>,
+    State(state): State<OperatorState>,
+) -> StatusCode {
+    // Auth is enforced by operator_auth_middleware applied at the router layer.
+    set_project_status(&project_id, "suspended", &state).await
 }
 
 pub async fn activate_project(
@@ -35,24 +47,7 @@ pub async fn activate_project(
     State(state): State<OperatorState>,
 ) -> StatusCode {
     // Auth is enforced by operator_auth_middleware applied at the router layer.
-
-    // Idempotent: UPDATE succeeds if project is 'suspended' OR already 'active'.
-    let result = sqlx::query(
-        "UPDATE projects SET status='active', updated_at=now() \
-         WHERE id=$1 AND status IN ('active','suspended')",
-    )
-    .bind(&project_id)
-    .execute(state.system_db.pool())
-    .await;
-
-    match result {
-        Ok(r) if r.rows_affected() > 0 => {
-            state.credential_cache.evict_project(&project_id).await;
-            StatusCode::OK
-        }
-        Ok(_) => StatusCode::NOT_FOUND,
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
+    set_project_status(&project_id, "active", &state).await
 }
 
 pub async fn delete_project(
@@ -71,8 +66,8 @@ pub async fn delete_project(
     .await;
 
     let result = sqlx::query(
-        "UPDATE projects SET status='deleted', deleted_at=now(), updated_at=now() \
-         WHERE id=$1 AND status != 'deleted'",
+        "UPDATE projects SET status = 'deleted', deleted_at = now(), updated_at = now() \
+         WHERE id = $1 AND status != 'deleted'",
     )
     .bind(&project_id)
     .execute(state.system_db.pool())

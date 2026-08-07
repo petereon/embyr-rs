@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! Email adapter implementations.
 //!
 //! NoopEmailSender (V1): re-exported from embyr-core; logs and returns Ok.
@@ -10,8 +9,6 @@
 pub use embyr_core::admin::email::NoopEmailSender;
 
 /// SMTP email sender — V2 (lettre). Not yet implemented.
-///
-/// # RED scaffold
 pub struct SmtpEmailSender;
 
 impl SmtpEmailSender {

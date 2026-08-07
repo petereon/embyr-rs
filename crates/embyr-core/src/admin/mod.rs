@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! Admin domain types and port traits for BC-1 (Tenant Management).
 //!
 //! This module is the inner-hexagon home for all admin identity types.

@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! RBAC: pure domain function `check_rbac` + supporting types.
 //!
 //! No IO. Testable without Axum or a database connection.

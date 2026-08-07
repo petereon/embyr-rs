@@ -1,12 +1,13 @@
 //! PostgresQueryLogAdapter — implements IQueryLogWriter.
 //!
-//! Bounded channel (1000) + background consumer task inserts into the
-//! partitioned `query_logs` table. Fire-and-forget: a full channel silently
-//! drops the entry. Insert failures are logged but never fatal to the caller.
+//! Bounded channel (`QUERY_LOG_CHANNEL_CAPACITY`) + background consumer task
+//! inserts into the partitioned `query_logs` table. Fire-and-forget: a full
+//! channel silently drops the entry. Insert failures are logged but never fatal
+//! to the caller.
 //!
 //! QueryLogSweeper: daily tokio task that acquires `pg_try_advisory_lock`
-//! (lock id 0x656d627972716c73) before dropping expired partitions, preventing
-//! concurrent sweep races across multiple embyr-server instances.
+//! (lock id `SWEEP_ADVISORY_LOCK`) before dropping expired partitions,
+//! preventing concurrent sweep races across multiple embyr-server instances.
 
 use std::sync::Arc;
 
@@ -15,6 +16,13 @@ use tokio::sync::mpsc;
 use embyr_core::admin::query_log::{IQueryLogWriter, OperationType, OpStatus, QueryLogEntry};
 
 use crate::adapters::system_db::SystemDb;
+
+/// Bounded channel capacity for the background log consumer.
+/// When full, new entries are silently dropped (fire-and-forget contract).
+const QUERY_LOG_CHANNEL_CAPACITY: usize = 1_000;
+
+/// Sweep task interval in seconds (24 hours).
+const SWEEP_INTERVAL_SECS: u64 = 86_400;
 
 // ---------------------------------------------------------------------------
 // PostgresQueryLogAdapter
@@ -31,7 +39,7 @@ pub struct PostgresQueryLogAdapter {
 impl PostgresQueryLogAdapter {
     /// Creates the adapter and spawns the background consumer task.
     pub fn new(system_db: Arc<SystemDb>) -> Self {
-        let (tx, mut rx) = mpsc::channel::<QueryLogEntry>(1000);
+        let (tx, mut rx) = mpsc::channel::<QueryLogEntry>(QUERY_LOG_CHANNEL_CAPACITY);
 
         tokio::spawn(async move {
             while let Some(entry) = rx.recv().await {
@@ -137,7 +145,7 @@ impl QueryLogSweeper {
     pub fn start(self) {
         tokio::spawn(async move {
             let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(86_400));
+                tokio::time::interval(std::time::Duration::from_secs(SWEEP_INTERVAL_SECS));
             loop {
                 interval.tick().await;
                 self.run_sweep().await;
@@ -164,15 +172,15 @@ impl QueryLogSweeper {
         }
 
         // Max retention across all live projects (default 90 days when none set).
-        let max_retention: Option<i32> = sqlx::query_scalar::<_, Option<i32>>(
+        let retention_days: i32 = sqlx::query_scalar::<_, Option<i32>>(
             "SELECT MAX(COALESCE(log_retention_days, 90)) \
              FROM projects WHERE status != 'deleted'",
         )
         .fetch_one(pool)
         .await
-        .unwrap_or(None);
-
-        let retention_days = max_retention.unwrap_or(90);
+        .ok()
+        .flatten()
+        .unwrap_or(90);
         let cutoff =
             chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
         let cutoff_date = cutoff.format("%Y_%m_%d").to_string();
@@ -204,7 +212,6 @@ impl QueryLogSweeper {
             }
         }
 
-        // Release the advisory lock.
         let _ = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
             .bind(SWEEP_ADVISORY_LOCK)
             .fetch_one(pool)

@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! IQueryLogWriter port trait and supporting types.
 //!
 //! Fire-and-forget append-only write path.

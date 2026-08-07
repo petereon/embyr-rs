@@ -60,6 +60,27 @@ fn err(code: StatusCode, error: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": error })))
 }
 
+/// Connect to a customer Postgres DSN and verify it is reachable.
+///
+/// Uses a 2-connection pool with a 5-second acquire timeout.
+/// Returns `backend_unavailable` (400) if the connection or the liveness
+/// query fails. The returned pool should be used immediately for migrations.
+async fn probe_customer_db(dsn: &str) -> ApiResult<sqlx::PgPool> {
+    let customer_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(dsn)
+        .await
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+
+    sqlx::query("SELECT 1")
+        .execute(&customer_pool)
+        .await
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+
+    Ok(customer_pool)
+}
+
 pub async fn provision(
     State(state): State<OperatorState>,
     Json(req): Json<ProvisionRequest>,
@@ -116,26 +137,14 @@ pub async fn provision(
             AwsSecretError::Sdk(_) => err(StatusCode::BAD_REQUEST, "backend_secret_fetch_failed"),
         })?;
 
-        // Probe customer DSN
-        let customer_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(&dsn)
-            .await
-            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+        let customer_pool = probe_customer_db(&dsn).await?;
 
-        sqlx::query("SELECT 1")
-            .execute(&customer_pool)
-            .await
-            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
-
-        // Apply customer migrations
         sqlx::migrate!("../../migrations/customer")
             .run(&customer_pool)
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        // Insert project row: store ARN only, ecies_encrypted_dsn stays NULL
+        // Store ARN only — ecies_encrypted_dsn stays NULL.
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, backend_secret_arn) \
@@ -168,26 +177,14 @@ pub async fn provision(
             GcpSecretError::Http(_) => err(StatusCode::BAD_REQUEST, "backend_secret_fetch_failed"),
         })?;
 
-        // Probe customer DSN
-        let customer_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(&dsn)
-            .await
-            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+        let customer_pool = probe_customer_db(&dsn).await?;
 
-        sqlx::query("SELECT 1")
-            .execute(&customer_pool)
-            .await
-            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
-
-        // Apply customer migrations
         sqlx::migrate!("../../migrations/customer")
             .run(&customer_pool)
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        // Insert project row: store resource_name only, ecies_encrypted_dsn stays NULL
+        // Store resource_name only — ecies_encrypted_dsn stays NULL.
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, backend_secret_gcp) \
@@ -234,7 +231,7 @@ pub async fn provision(
         let encrypted_bundle = ecies::encrypt(&pubkey, tls_bundle.as_bytes())
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        // Insert agent-mode project row — backend_pg_creds_enc stays NULL.
+        // backend_pg_creds_enc stays NULL for agent-mode.
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, \
@@ -256,25 +253,13 @@ pub async fn provision(
             .filter(|s| !s.is_empty())
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, "dsn_required"))?;
 
-        // Probe customer DSN — connect with short timeout
-        let customer_pool = PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .connect(dsn)
-            .await
-            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
-
-        sqlx::query("SELECT 1")
-            .execute(&customer_pool)
-            .await
-            .map_err(|_| err(StatusCode::BAD_REQUEST, "backend_unavailable"))?;
+        let customer_pool = probe_customer_db(dsn).await?;
 
         // ECIES encrypt DSN using api_key bytes as the seed
         let pubkey = ecies::derive_public_key(api_key.as_bytes());
         let encrypted_dsn = ecies::encrypt(&pubkey, dsn.as_bytes())
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        // Insert project row
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
@@ -288,7 +273,6 @@ pub async fn provision(
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        // Apply customer migrations
         sqlx::migrate!("../../migrations/customer")
             .run(&customer_pool)
             .await

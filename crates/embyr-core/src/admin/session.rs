@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! Session domain types: SessionToken, SessionContext.
 
 use crate::admin::account::{AccountId, Role, UserId};

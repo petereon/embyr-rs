@@ -18,6 +18,9 @@ use uuid::Uuid;
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::state::UserAdminState;
 
+/// Number of hourly buckets in the sparkline (V1 equal-bucket approximation).
+const SPARKLINE_HOURS: u8 = 24;
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -105,10 +108,10 @@ pub async fn get_project_metrics(
     })
     .unwrap_or((0, 0, 0));
 
-    // Step 3: build 24-element sparkline with equal buckets (V1 simplification).
-    let reads_per_hour = read_ops / 24;
-    let writes_per_hour = write_ops / 24;
-    let sparkline: Vec<SparklinePoint> = (0u8..24)
+    // Step 3: build equal-bucket sparkline (V1 simplification: one bucket per hour).
+    let reads_per_hour = read_ops / i64::from(SPARKLINE_HOURS);
+    let writes_per_hour = write_ops / i64::from(SPARKLINE_HOURS);
+    let sparkline: Vec<SparklinePoint> = (0u8..SPARKLINE_HOURS)
         .map(|hour| SparklinePoint {
             hour,
             reads: reads_per_hour,
