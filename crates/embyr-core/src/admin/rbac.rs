@@ -288,4 +288,157 @@ mod tests {
         );
         assert_eq!(result, Ok(()));
     }
+
+    // Behavior 7: Admin can remove a non-owner member.
+    // Kills: L74 `< → <=` mutation (Admin satisfies <= Admin, would get InsufficientRole).
+    #[test]
+    fn admin_can_remove_viewer_member() {
+        let admin = admin_id();
+        let viewer = viewer_id();
+        let members = vec![
+            make_member(owner_id(), Role::Owner),
+            make_member(admin.clone(), Role::Admin),
+            make_member(viewer.clone(), Role::Viewer),
+        ];
+        let result = check_rbac(
+            RbacAction::RemoveMember { target_id: viewer.clone() },
+            Role::Admin,
+            &admin,
+            &members,
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    // Behavior 8: Admin cannot remove any Owner, even when multiple owners exist.
+    // Kills: L82 `< → >` mutation (> Owner is always false, Admin bypasses guard).
+    #[test]
+    fn admin_cannot_remove_owner_even_when_not_sole_owner() {
+        let admin = admin_id();
+        let second_owner = second_owner_id();
+        let members = vec![
+            make_member(owner_id(), Role::Owner),
+            make_member(second_owner.clone(), Role::Owner),
+            make_member(admin.clone(), Role::Admin),
+        ];
+        let result = check_rbac(
+            RbacAction::RemoveMember { target_id: second_owner.clone() },
+            Role::Admin,
+            &admin,
+            &members,
+        );
+        assert_eq!(result, Err(RbacError::AdminCannotModifyOwner));
+    }
+
+    // Behavior 9: Sole Owner cannot be demoted to Admin via ChangeMemberRole.
+    // Kills: L111 `< → >` and `< → ==` mutations (condition becomes false, skips last-owner check).
+    #[test]
+    fn sole_owner_cannot_be_demoted_via_change_role() {
+        let owner = owner_id();
+        let members = vec![make_member(owner.clone(), Role::Owner)];
+        let result = check_rbac(
+            RbacAction::ChangeMemberRole { target_id: owner.clone(), new_role: Role::Admin },
+            Role::Owner,
+            &owner,
+            &members,
+        );
+        assert_eq!(result, Err(RbacError::LastOwner));
+    }
+
+    // Behavior 10: Owner-to-Owner no-op reassignment on a sole owner is allowed.
+    // Kills: L111 `< → <=` mutation (Owner <= Owner = true triggers spurious last-owner check).
+    #[test]
+    fn sole_owner_owner_to_owner_reassignment_is_allowed() {
+        let owner = owner_id();
+        let members = vec![make_member(owner.clone(), Role::Owner)];
+        let result = check_rbac(
+            RbacAction::ChangeMemberRole { target_id: owner.clone(), new_role: Role::Owner },
+            Role::Owner,
+            &owner,
+            &members,
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    // Behavior 11: Viewer cannot create any admin key.
+    // Kills: L123 `< → >` mutation (> Admin is false for Viewer, bypasses the guard).
+    #[test]
+    fn viewer_cannot_create_admin_key() {
+        let viewer = viewer_id();
+        let result = check_rbac(
+            RbacAction::CreateAdminKey { requested_role: Role::Viewer },
+            Role::Viewer,
+            &viewer,
+            &[],
+        );
+        assert_eq!(
+            result,
+            Err(RbacError::InsufficientRole { actor: Role::Viewer, required: Role::Admin })
+        );
+    }
+
+    // Behavior 12: Admin can create a key at their own role level (same-level is not escalation).
+    // Kills: L129 `> → >=` mutation (Admin >= Admin = true, incorrectly returns RoleEscalation).
+    #[test]
+    fn admin_can_create_admin_level_key() {
+        let admin = admin_id();
+        let result = check_rbac(
+            RbacAction::CreateAdminKey { requested_role: Role::Admin },
+            Role::Admin,
+            &admin,
+            &[],
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    // Behavior 13: Viewer cannot delete a service account.
+    // Kills: L138 `< → ==` (Viewer == Admin is false, bypass) and `< → >` (Viewer > Admin false, bypass).
+    #[test]
+    fn viewer_cannot_delete_service_account() {
+        let viewer = viewer_id();
+        let sa_id = Uuid::new_v4();
+        let result = check_rbac(
+            RbacAction::DeleteServiceAccount { service_account_id: sa_id },
+            Role::Viewer,
+            &viewer,
+            &[],
+        );
+        assert_eq!(
+            result,
+            Err(RbacError::InsufficientRole { actor: Role::Viewer, required: Role::Admin })
+        );
+    }
+
+    // Behavior 14: Admin can delete a service account.
+    // Kills: L138 `< → <=` mutation (Admin <= Admin = true, incorrectly returns InsufficientRole).
+    #[test]
+    fn admin_can_delete_service_account() {
+        let admin = admin_id();
+        let sa_id = Uuid::new_v4();
+        let result = check_rbac(
+            RbacAction::DeleteServiceAccount { service_account_id: sa_id },
+            Role::Admin,
+            &admin,
+            &[],
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    // Behavior 15: Display representations for all RbacError variants are non-empty.
+    // Kills: L39 `fmt → Ok(Default::default())` mutation (produces empty string for all variants).
+    #[test]
+    fn rbac_error_display_is_non_empty_for_all_variants() {
+        let errors = [
+            RbacError::InsufficientRole { actor: Role::Viewer, required: Role::Admin },
+            RbacError::LastOwner,
+            RbacError::AdminCannotModifyOwner,
+            RbacError::RoleEscalation { actor: Role::Admin, requested: Role::Owner },
+        ];
+        for err in &errors {
+            assert!(
+                !err.to_string().is_empty(),
+                "Display for {:?} must produce a non-empty string",
+                err
+            );
+        }
+    }
 }
