@@ -14,6 +14,7 @@ use crate::adapters::{
 };
 
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
+use super::handlers::billing::get_billing;
 use super::handlers::oidc_providers::{
     create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
 };
@@ -149,6 +150,8 @@ pub fn build_admin_router(
             "/admin/v1/oidc_providers/:provider_id",
             patch(patch_oidc_provider).delete(delete_oidc_provider),
         )
+        // Billing route (step 06-03).
+        .route("/admin/v1/billing", get(get_billing))
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
             session_auth_middleware,
