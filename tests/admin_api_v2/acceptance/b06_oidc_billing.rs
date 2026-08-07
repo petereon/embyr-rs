@@ -25,7 +25,6 @@ use common::AdminTestContext;
 ///
 /// AC-B06-01
 // @US-B06 @AC-B06-01 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn oidc_provider_list_excludes_client_secret() {
     let ctx = AdminTestContext::new().await;
@@ -74,7 +73,6 @@ async fn oidc_provider_list_excludes_client_secret() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B06 @AC-B06-01 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn viewer_cannot_list_oidc_providers() {
     let ctx = AdminTestContext::new().await;
@@ -104,7 +102,6 @@ async fn viewer_cannot_list_oidc_providers() {
 ///
 /// AC-B06-02
 // @US-B06 @AC-B06-02 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn owner_creates_oidc_provider_and_secret_encrypted() {
     let ctx = AdminTestContext::new().await;
@@ -154,10 +151,29 @@ async fn owner_creates_oidc_provider_and_secret_encrypted() {
     );
 
     // DB verification: verify plaintext secret never stored.
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        verify client_secret_enc contains AES-GCM ciphertext, not plaintext"
+    let account_uuid = uuid::Uuid::parse_str(&ctx.account_id).unwrap();
+    let enc_bytes: Vec<u8> = sqlx::query_scalar(
+        "SELECT client_secret_enc FROM oidc_providers \
+         WHERE issuer = 'https://accounts.google.com' AND account_id = $1",
     )
+    .bind(account_uuid)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("fetch client_secret_enc");
+
+    let plaintext = b"plaintext-secret-that-must-not-be-stored";
+
+    // enc_bytes = 12-byte nonce || AES-GCM ciphertext+tag
+    assert!(
+        enc_bytes.len() > plaintext.len(),
+        "AC-B06-02: enc_bytes must be longer than plaintext (nonce overhead)"
+    );
+    // Plaintext must not appear as a subsequence in the enc bytes
+    let found = enc_bytes.windows(plaintext.len()).any(|w| w == plaintext);
+    assert!(
+        !found,
+        "AC-B06-02: plaintext secret must not appear in client_secret_enc bytes"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,7 +185,6 @@ async fn owner_creates_oidc_provider_and_secret_encrypted() {
 ///
 /// AC-B06-03
 // @US-B06 @AC-B06-03 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn owner_disables_oidc_provider_without_signing_out_existing_sessions() {
     let ctx = AdminTestContext::new().await;
@@ -223,7 +238,6 @@ async fn owner_disables_oidc_provider_without_signing_out_existing_sessions() {
 ///
 /// AC-B06-04
 // @US-B06 @AC-B06-04 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn owner_deletes_oidc_provider_and_existing_sessions_remain_valid() {
     let ctx = AdminTestContext::new().await;
@@ -267,20 +281,157 @@ async fn owner_deletes_oidc_provider_and_existing_sessions_remain_valid() {
 /// OIDC callback with a valid id_token from a configured provider:
 /// 302 redirect to /admin/; Set-Cookie: embyr_session set.
 ///
-/// Uses a local mock JWKS endpoint via wiremock or axum test server.
+/// Uses a local mock JWKS endpoint via axum test server.
 ///
 /// AC-B06-05
 // @US-B06 @AC-B06-05 @real-io @adapter-integration
-#[ignore]
 #[tokio::test]
 async fn oidc_callback_with_valid_id_token_grants_session() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use rsa::pkcs1::EncodeRsaPrivateKey;
+    use rsa::traits::PublicKeyParts;
+
     let ctx = AdminTestContext::new().await;
-    // Setup: configure an OIDC provider pointing at a local mock JWKS server.
-    // Generate a test id_token signed by the mock key.
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        OIDC callback integration test requires local mock JWKS server + id_token generation"
-    )
+    let owner_cookie = sign_in_as_owner(&ctx).await;
+
+    // ── 1. Generate RSA-2048 test key pair ────────────────────────────────────
+    let private_key = rsa::RsaPrivateKey::new(&mut rand_core::OsRng, 2048)
+        .expect("generate RSA key");
+    let public_key = private_key.to_public_key();
+
+    // Extract modulus (n) and exponent (e) for JWK
+    let n_bytes = public_key.n().to_bytes_be();
+    let e_bytes = public_key.e().to_bytes_be();
+    let n_b64 = URL_SAFE_NO_PAD.encode(&n_bytes);
+    let e_b64 = URL_SAFE_NO_PAD.encode(&e_bytes);
+
+    // ── 2. Start local JWKS server ────────────────────────────────────────────
+    let jwks = serde_json::json!({
+        "keys": [{
+            "kty": "RSA",
+            "n": n_b64,
+            "e": e_b64,
+            "alg": "RS256",
+            "use": "sig",
+            "kid": "test-key-1"
+        }]
+    });
+
+    let jwks_clone = jwks.clone();
+    let jwks_router = axum::Router::new().route(
+        "/.well-known/jwks.json",
+        axum::routing::get(move || {
+            let j = jwks_clone.clone();
+            async move { axum::Json(j) }
+        }),
+    );
+    let jwks_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind JWKS port");
+    let jwks_port = jwks_listener.local_addr().unwrap().port();
+    let jwks_issuer = format!("http://127.0.0.1:{}", jwks_port);
+    tokio::spawn(async move {
+        axum::serve(jwks_listener, jwks_router)
+            .await
+            .expect("JWKS server error");
+    });
+    tokio::task::yield_now().await;
+
+    // ── 3. Register OIDC provider pointing at local JWKS server ──────────────
+    let client_id = "test-oidc-client-id";
+    let create_resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/oidc_providers"))
+        .header("Cookie", &owner_cookie)
+        .json(&serde_json::json!({
+            "issuer":        &jwks_issuer,
+            "client_id":     client_id,
+            "client_secret": "test-client-secret"
+        }))
+        .send()
+        .await
+        .expect("POST oidc_provider failed");
+    assert_eq!(
+        create_resp.status().as_u16(),
+        201,
+        "must create OIDC provider; got: {}",
+        create_resp.status()
+    );
+
+    // ── 4. Generate a valid JWT signed with the private key ───────────────────
+    let private_pem = private_key
+        .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+        .expect("to_pkcs1_pem");
+    let encoding_key = EncodingKey::from_rsa_pem(private_pem.as_bytes())
+        .expect("EncodingKey::from_rsa_pem");
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("test-key-1".to_string());
+
+    let exp = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+    let claims = serde_json::json!({
+        "iss": &jwks_issuer,
+        "sub": "oidc-test-user@example.com",
+        "aud": client_id,
+        "exp": exp,
+        "iat": chrono::Utc::now().timestamp()
+    });
+
+    let id_token = encode(&header, &claims, &encoding_key).expect("encode JWT");
+
+    // ── 5. Call the OIDC callback ─────────────────────────────────────────────
+    // Use redirect(false) so reqwest does not auto-follow the 302.
+    let no_redirect_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build no-redirect client");
+
+    let resp = no_redirect_client
+        .get(ctx.url("/admin/v1/auth/oidc/callback"))
+        .query(&[
+            ("id_token", id_token.as_str()),
+            ("state", "csrf-test-nonce"),
+            ("code", "unused-auth-code"),
+        ])
+        .send()
+        .await
+        .expect("OIDC callback request failed");
+
+    // ── 6. Assertions ─────────────────────────────────────────────────────────
+    assert_eq!(
+        resp.status().as_u16(),
+        302,
+        "AC-B06-05: valid id_token must return 302 redirect; got status {}",
+        resp.status().as_u16()
+    );
+
+    let location = resp
+        .headers()
+        .get("location")
+        .or_else(|| resp.headers().get("Location"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        location, "/admin/",
+        "AC-B06-05: redirect must go to /admin/"
+    );
+
+    let cookie_header = resp
+        .headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        cookie_header.contains("embyr_session="),
+        "AC-B06-05: Set-Cookie must contain embyr_session; got: {}",
+        cookie_header
+    );
+    assert!(
+        cookie_header.contains("HttpOnly"),
+        "AC-B06-05: cookie must be HttpOnly"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -288,7 +439,6 @@ async fn oidc_callback_with_valid_id_token_grants_session() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B06 @AC-B06-05 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn oidc_callback_with_invalid_signature_redirects_with_oidc_failed() {
     let ctx = AdminTestContext::new().await;
@@ -336,7 +486,6 @@ async fn oidc_callback_with_invalid_signature_redirects_with_oidc_failed() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B06 @AC-B06-05 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn oidc_callback_with_unknown_issuer_returns_401() {
     let ctx = AdminTestContext::new().await;
@@ -369,7 +518,6 @@ async fn oidc_callback_with_unknown_issuer_returns_401() {
 ///
 /// AC-B06-06
 // @US-B06 @AC-B06-06 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn billing_returns_per_database_breakdown_for_requested_range() {
     let ctx = AdminTestContext::new().await;
@@ -433,7 +581,6 @@ async fn billing_returns_per_database_breakdown_for_requested_range() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B06 @AC-B06-06 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn billing_accepts_all_valid_range_values() {
     let ctx = AdminTestContext::new().await;
@@ -462,7 +609,6 @@ async fn billing_accepts_all_valid_range_values() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B06 @AC-B06-06 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn billing_with_invalid_range_returns_422() {
     let ctx = AdminTestContext::new().await;
@@ -492,7 +638,6 @@ async fn billing_with_invalid_range_returns_422() {
 ///
 /// AC-B06-07
 // @US-B06 @AC-B06-07 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn billing_peak_connections_always_null_in_v1() {
     let ctx = AdminTestContext::new().await;
@@ -527,13 +672,12 @@ async fn billing_peak_connections_always_null_in_v1() {
 ///
 /// AC-B06-08
 // @US-B06 @AC-B06-08 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn zero_metric_projects_appear_in_billing_with_zero_counters() {
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_as_owner(&ctx).await;
-    // Seed: one project with no metric rows in daily_project_metrics.
-    let zero_metric_project_id = "seeded-zero-metric-project-id";
+    // "test-project-seeded-for-account" is seeded in AdminTestContext with no metric rows
+    let zero_metric_project_id = "test-project-seeded-for-account";
 
     let resp = ctx
         .client
@@ -594,14 +738,26 @@ async fn sign_in_as_owner(ctx: &AdminTestContext) -> String {
         .expect("no cookie in sign-in response")
 }
 
-/// Sign in as a seeded Viewer and return the session cookie.
-///
-/// # Panics (RED scaffold)
+/// Sign in as the seeded Viewer and return the session cookie.
 async fn sign_in_as_viewer(ctx: &AdminTestContext) -> String {
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        sign_in_as_viewer requires seeded Viewer in AdminTestContext"
-    )
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/auth/signin"))
+        .json(&serde_json::json!({
+            "email":     ctx.viewer_email,
+            "password":  ctx.viewer_password,
+            "totp_code": ctx.viewer_totp_code_now(),
+        }))
+        .send()
+        .await
+        .expect("sign-in as viewer failed");
+
+    resp.headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(';').next())
+        .map(|s| s.trim().to_string())
+        .expect("no cookie in sign-in as viewer response")
 }
 
 /// Create a test OIDC provider and return its ID.

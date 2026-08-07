@@ -173,3 +173,5 @@ rand_core = { workspace = true }
 argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 totp-rs = { workspace = true }
+jsonwebtoken = { workspace = true }
+rsa = { version = "0.9", features = ["sha2"] }
