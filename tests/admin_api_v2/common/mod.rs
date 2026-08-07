@@ -95,6 +95,16 @@ pub struct AdminTestContext {
     pub viewer_password: String,
     /// TOTP secret for the Viewer user (base64url-no-pad of raw 20 bytes).
     pub viewer_totp_secret_b32: String,
+    /// UUID of the seeded Viewer user (string form).
+    pub viewer_id: String,
+    /// Email of the seeded Admin role user.
+    pub admin_email: String,
+    /// Plain-text password of the seeded Admin role user.
+    pub admin_password: String,
+    /// TOTP secret for the Admin user (base64url-no-pad of raw 20 bytes).
+    pub admin_totp_secret_b32: String,
+    /// UUID of the seeded Admin user (string form).
+    pub admin_id: String,
 }
 
 impl AdminTestContext {
@@ -252,6 +262,51 @@ impl AdminTestContext {
         .await
         .expect("insert viewer account_member");
 
+        // ── Seed Admin user ───────────────────────────────────────────────────
+        let admin_password = "admin-password-789".to_string();
+        let admin_salt = SaltString::generate(&mut OsRng);
+        let admin_password_hash = argon2
+            .hash_password(admin_password.as_bytes(), &admin_salt)
+            .expect("Argon2id hash failed for admin")
+            .to_string();
+
+        let mut admin_totp_raw = [0u8; 20];
+        OsRng.fill_bytes(&mut admin_totp_raw);
+        let admin_totp_secret_b32 = URL_SAFE_NO_PAD.encode(&admin_totp_raw);
+
+        let mut admin_nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut admin_nonce_bytes);
+        let admin_nonce = Nonce::from_slice(&admin_nonce_bytes);
+        let admin_ct = cipher
+            .encrypt(admin_nonce, admin_totp_raw.as_ref())
+            .expect("AES-256-GCM encrypt failed for admin TOTP");
+        let mut admin_totp_enc = admin_nonce_bytes.to_vec();
+        admin_totp_enc.extend_from_slice(&admin_ct);
+
+        let admin_email = "admin@example.com".to_string();
+        let admin_user_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO users (account_id, email, display_name, password_hash, totp_secret_enc) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        )
+        .bind(account_id)
+        .bind(&admin_email)
+        .bind("Admin User")
+        .bind(&admin_password_hash)
+        .bind(&admin_totp_enc)
+        .fetch_one(&pool)
+        .await
+        .expect("insert admin user");
+
+        sqlx::query(
+            "INSERT INTO account_members (user_id, account_id, role, joined_at) \
+             VALUES ($1, $2, 'Admin', now())",
+        )
+        .bind(admin_user_id)
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .expect("insert admin account_member");
+
         // ── 11. Build admin router and start Axum server ──────────────────────
         let credential_cache = Arc::new(CredentialCache::new(1024));
         let email_sender = Arc::new(NoopEmailSender);
@@ -344,6 +399,11 @@ impl AdminTestContext {
             viewer_email,
             viewer_password,
             viewer_totp_secret_b32,
+            viewer_id: viewer_user_id.to_string(),
+            admin_email,
+            admin_password,
+            admin_totp_secret_b32,
+            admin_id: admin_user_id.to_string(),
         }
     }
 
@@ -386,6 +446,24 @@ impl AdminTestContext {
         )
         .expect("TOTP::new failed for viewer");
         totp.generate_current().expect("generate_current failed for viewer")
+    }
+
+    /// Generate a valid TOTP code for the seeded Admin user's secret at the current system time.
+    pub fn admin_totp_code_now(&self) -> String {
+        let totp_raw = URL_SAFE_NO_PAD
+            .decode(&self.admin_totp_secret_b32)
+            .expect("admin_totp_secret_b32 must be valid base64url-no-pad");
+        let totp = TOTP::new(
+            TotpAlgorithm::SHA1,
+            6,
+            1,
+            30,
+            totp_raw,
+            None,
+            String::new(),
+        )
+        .expect("TOTP::new failed for admin");
+        totp.generate_current().expect("generate_current failed for admin")
     }
 
     /// Returns the full URL for the given admin API path.

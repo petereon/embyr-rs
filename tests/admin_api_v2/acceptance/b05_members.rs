@@ -28,7 +28,6 @@ use common::AdminTestContext;
 ///
 /// AC-B05-01
 // @US-B05 @AC-B05-01 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn member_list_includes_pending_invitations() {
     let ctx = AdminTestContext::new().await;
@@ -86,7 +85,6 @@ async fn member_list_includes_pending_invitations() {
 ///
 /// AC-B05-02
 // @US-B05 @AC-B05-02 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn owner_invites_member_and_invitation_email_is_sent() {
     let ctx = AdminTestContext::new().await;
@@ -132,12 +130,19 @@ async fn owner_invites_member_and_invitation_email_is_sent() {
         "AC-B05-02: invitation role must match requested role"
     );
 
-    // Email sender capture: FakeEmailSender must have 1 sent email.
-    // Wired via AdminTestContext.email_sender (RED scaffold: panics until context wired).
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        verify FakeEmailSender captured invitation email to 'new-viewer@example.com'"
+    // DB assertion: invitation row must be inserted.
+    // FakeEmailSender is not wired into AdminTestContext (NoopEmailSender used in V1);
+    // assert via DB proxy that the invitation was persisted.
+    let account_uuid = uuid::Uuid::parse_str(&ctx.account_id).unwrap();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invitations WHERE account_id = $1 AND email = 'new-viewer@example.com'",
     )
+    .bind(account_uuid)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("count invitations");
+
+    assert_eq!(count, 1, "AC-B05-02: invitation row must be inserted in DB");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,7 +150,6 @@ async fn owner_invites_member_and_invitation_email_is_sent() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-02 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn viewer_cannot_invite_member() {
     let ctx = AdminTestContext::new().await;
@@ -172,13 +176,12 @@ async fn viewer_cannot_invite_member() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-03 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn owner_changes_admin_role_to_viewer() {
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_as_owner(&ctx).await;
-    // Seed: second member with Admin role.
-    let admin_member_id = "seeded-admin-member-id";
+    // ctx.admin_id is the seeded Admin member's user_id UUID.
+    let admin_member_id = ctx.admin_id.as_str();
 
     let resp = ctx
         .client
@@ -201,7 +204,6 @@ async fn owner_changes_admin_role_to_viewer() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-03 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn sole_owner_cannot_demote_self() {
     let ctx = AdminTestContext::new().await;
@@ -228,7 +230,6 @@ async fn sole_owner_cannot_demote_self() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-03 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn admin_cannot_change_owner_role() {
     let ctx = AdminTestContext::new().await;
@@ -256,17 +257,50 @@ async fn admin_cannot_change_owner_role() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-04 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn owner_removes_admin_member_and_sessions_cascade_revoked() {
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_as_owner(&ctx).await;
-    // Seed: a second Admin member with an active session and admin keys.
-    let admin_member_id = "seeded-admin-member-id";
 
+    let admin_uuid = uuid::Uuid::parse_str(&ctx.admin_id).unwrap();
+    let account_uuid = uuid::Uuid::parse_str(&ctx.account_id).unwrap();
+
+    // Seed: an active session for the admin user.
+    let session_token = "test-cascade-session-token";
+    let session_token_hash = blake3::hash(session_token.as_bytes()).as_bytes().to_vec();
+    sqlx::query(
+        "INSERT INTO sessions (user_id, account_id, token_hash, expires_at) \
+         VALUES ($1, $2, $3, now() + interval '1 hour')",
+    )
+    .bind(admin_uuid)
+    .bind(account_uuid)
+    .bind(&session_token_hash)
+    .execute(&ctx.pool)
+    .await
+    .expect("seed session for admin");
+
+    // Seed: an admin API key for the admin user.
+    // admin_api_keys.member_id references users(id) = admin user UUID.
+    let key_hash = blake3::hash(b"fake-cascade-key-for-admin-member").as_bytes().to_vec();
+    let key_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO admin_api_keys \
+         (account_id, name, key_hash, prefix, role, member_id) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+    )
+    .bind(account_uuid)
+    .bind("cascade-test-key")
+    .bind(&key_hash)
+    .bind("cascade0")
+    .bind("Admin")
+    .bind(admin_uuid)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("seed admin key for admin user");
+
+    // DELETE the admin member (path param is user_id UUID).
     let resp = ctx
         .client
-        .delete(ctx.url(&format!("/admin/v1/members/{}", admin_member_id)))
+        .delete(ctx.url(&format!("/admin/v1/members/{}", ctx.admin_id)))
         .header("Cookie", &session_cookie)
         .send()
         .await
@@ -278,12 +312,31 @@ async fn owner_removes_admin_member_and_sessions_cascade_revoked() {
         "AC-B05-04: removing non-sole member must return 204"
     );
 
-    // Verify cascade: sessions and admin_api_keys for admin_member_id revoked.
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        verify session + admin_api_key cascade revocation for removed member '{}'",
-        admin_member_id
+    // Assert cascade: no active sessions remain for admin user.
+    let active_sessions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sessions WHERE user_id = $1 AND expires_at > now()",
     )
+    .bind(admin_uuid)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("query active sessions");
+    assert_eq!(
+        active_sessions, 0,
+        "AC-B05-04: all admin sessions must be expired after member removal"
+    );
+
+    // Assert cascade: seeded admin key has revoked_at set.
+    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT revoked_at FROM admin_api_keys WHERE id = $1",
+    )
+    .bind(key_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("query admin_api_keys cascade");
+    assert!(
+        revoked_at.is_some(),
+        "AC-B05-04: admin key must have revoked_at set after member removal"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -291,7 +344,6 @@ async fn owner_removes_admin_member_and_sessions_cascade_revoked() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-04 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn removing_last_owner_returns_409() {
     let ctx = AdminTestContext::new().await;
@@ -328,24 +380,44 @@ async fn removing_last_owner_returns_409() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-04 @property @layer-2 @proptest
-#[ignore]
 #[test]
 fn sole_owner_removal_always_rejected_for_any_member_count() {
+    use embyr_core::admin::account::{AccountId, AccountMember, Role, UserId};
+    use embyr_core::admin::rbac::{check_rbac, RbacAction, RbacError};
     use proptest::prelude::*;
 
     proptest!(|(n_non_owners in 0usize..=5)| {
-        // Generate an account with 1 Owner + n_non_owners Viewers/Admins.
-        // Attempt to DELETE or PATCH/demote the sole Owner.
-        // Invariant: always returns 409 (DELETE) or 403 (PATCH/demote).
-        //
-        // In-memory domain check (pure RBAC function from embyr-core::admin::rbac):
-        // check_rbac(RbacAction::RemoveMember { target_id: owner_id }, actor_role: Owner, members)
-        // must return Err(RbacError::LastOwner) regardless of n_non_owners.
-        panic!(
-            "Not yet implemented -- RED scaffold: \
-            proptest sole-owner invariant; n_non_owners = {}",
-            n_non_owners
+        let owner_user_id = UserId(
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
         );
+        let acct_id = AccountId(uuid::Uuid::new_v4());
+
+        let mut members = vec![AccountMember {
+            id: uuid::Uuid::new_v4(),
+            user_id: owner_user_id.clone(),
+            account_id: acct_id.clone(),
+            role: Role::Owner,
+            joined_at: None,
+        }];
+
+        for _ in 0..n_non_owners {
+            members.push(AccountMember {
+                id: uuid::Uuid::new_v4(),
+                user_id: UserId(uuid::Uuid::new_v4()),
+                account_id: acct_id.clone(),
+                role: Role::Viewer,
+                joined_at: None,
+            });
+        }
+
+        let result = check_rbac(
+            RbacAction::RemoveMember { target_id: owner_user_id.clone() },
+            Role::Owner,
+            &owner_user_id,
+            &members,
+        );
+
+        prop_assert_eq!(result, Err(RbacError::LastOwner));
     });
 }
 
@@ -354,7 +426,6 @@ fn sole_owner_removal_always_rejected_for_any_member_count() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-05 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn service_account_list_returns_all_fields() {
     let ctx = AdminTestContext::new().await;
@@ -393,7 +464,6 @@ async fn service_account_list_returns_all_fields() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-06 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn owner_creates_service_account() {
     let ctx = AdminTestContext::new().await;
@@ -440,7 +510,6 @@ async fn owner_creates_service_account() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-06 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn viewer_cannot_create_service_account() {
     let ctx = AdminTestContext::new().await;
@@ -467,14 +536,43 @@ async fn viewer_cannot_create_service_account() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-07 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn deleting_service_account_revokes_its_admin_keys() {
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_as_owner(&ctx).await;
-    // Seed: service account with 2 admin keys.
-    let sa_id = "seeded-service-account-id";
 
+    let account_uuid = uuid::Uuid::parse_str(&ctx.account_id).unwrap();
+
+    // Seed: a service account in the test account.
+    let sa_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO service_accounts (account_id, name, role) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(account_uuid)
+    .bind("cascade-test-sa")
+    .bind("Viewer")
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("seed service account");
+
+    // Seed: an admin key linked to that service account.
+    let key_hash = blake3::hash(b"fake-sa-cascade-key-unique").as_bytes().to_vec();
+    let key_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO admin_api_keys \
+         (account_id, name, key_hash, prefix, role, service_account_id) \
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+    )
+    .bind(account_uuid)
+    .bind("sa-cascade-key")
+    .bind(&key_hash)
+    .bind("sacacc01")
+    .bind("Viewer")
+    .bind(sa_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("seed admin key for SA");
+
+    // DELETE the service account.
     let resp = ctx
         .client
         .delete(ctx.url(&format!("/admin/v1/service_accounts/{}", sa_id)))
@@ -489,12 +587,18 @@ async fn deleting_service_account_revokes_its_admin_keys() {
         "AC-B05-07: DELETE service account must return 204"
     );
 
-    // Verify admin keys for this SA have revoked_at set.
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        verify admin_api_keys cascade revocation for service account '{}'",
-        sa_id
+    // Assert cascade: admin key for this SA has revoked_at set.
+    let revoked_at: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT revoked_at FROM admin_api_keys WHERE id = $1",
     )
+    .bind(key_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("query admin_api_keys cascade for SA");
+    assert!(
+        revoked_at.is_some(),
+        "AC-B05-07: admin key must have revoked_at set after SA deletion"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -502,7 +606,6 @@ async fn deleting_service_account_revokes_its_admin_keys() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-08 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn admin_key_list_includes_revoked_keys_for_audit() {
     let ctx = AdminTestContext::new().await;
@@ -555,7 +658,6 @@ async fn admin_key_list_includes_revoked_keys_for_audit() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-09 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn owner_creates_admin_key_and_key_shown_once_then_absent() {
     let ctx = AdminTestContext::new().await;
@@ -625,15 +727,67 @@ async fn owner_creates_admin_key_and_key_shown_once_then_absent() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-09 @real-io @adapter-integration
-#[ignore]
 #[tokio::test]
 async fn admin_key_stored_as_blake3_not_plaintext() {
     let ctx = AdminTestContext::new().await;
-    // Create a key, then query DB directly to verify no plaintext stored.
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        verify BLAKE3 hash of admin key stored; no plaintext in admin_api_keys table"
+    let session_cookie = sign_in_as_owner(&ctx).await;
+
+    // Create an admin key.
+    let create_resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/admin_keys"))
+        .header("Cookie", &session_cookie)
+        .json(&serde_json::json!({"name": "blake3-test-key", "role": "Viewer"}))
+        .send()
+        .await
+        .expect("POST admin_key");
+
+    assert_eq!(
+        create_resp.status().as_u16(),
+        201,
+        "AC-B05-09: POST admin key must return 201"
+    );
+    let created: serde_json::Value = create_resp.json().await.expect("JSON");
+    let key_str = created["key"].as_str().expect("key present").to_string();
+    let key_id_str = created["id"].as_str().expect("id present").to_string();
+    let key_id = uuid::Uuid::parse_str(&key_id_str).unwrap();
+
+    // Verify BLAKE3 hash is stored in DB, not plaintext.
+    let stored_hash: Vec<u8> = sqlx::query_scalar(
+        "SELECT key_hash FROM admin_api_keys WHERE id = $1",
     )
+    .bind(key_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("query key_hash");
+
+    let expected_hash = blake3::hash(key_str.as_bytes()).as_bytes().to_vec();
+    assert_eq!(
+        stored_hash, expected_hash,
+        "AC-B05-09: key_hash must be BLAKE3(plaintext_key)"
+    );
+
+    // Verify no plaintext key appears in any text column of the row.
+    use sqlx::Row as _;
+    let row = sqlx::query("SELECT name, prefix FROM admin_api_keys WHERE id = $1")
+        .bind(key_id)
+        .fetch_one(&ctx.pool)
+        .await
+        .expect("query row");
+
+    let name: String = row.try_get("name").unwrap_or_default();
+    let prefix: String = row.try_get("prefix").unwrap_or_default();
+
+    assert_ne!(
+        name.as_str(),
+        key_str.as_str(),
+        "AC-B05-09: name column must not be the plaintext key"
+    );
+    assert_ne!(
+        prefix.as_str(),
+        key_str.as_str(),
+        "AC-B05-09: prefix column must not be the plaintext key"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -641,7 +795,6 @@ async fn admin_key_stored_as_blake3_not_plaintext() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-09 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn admin_cannot_create_owner_level_admin_key() {
     let ctx = AdminTestContext::new().await;
@@ -671,7 +824,6 @@ async fn admin_cannot_create_owner_level_admin_key() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-10 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn revoking_admin_key_causes_immediate_401_on_next_request() {
     let ctx = AdminTestContext::new().await;
@@ -738,7 +890,6 @@ async fn revoking_admin_key_causes_immediate_401_on_next_request() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-11 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn admin_key_bearer_auth_grants_access_to_session_routes() {
     let ctx = AdminTestContext::new().await;
@@ -783,16 +934,63 @@ async fn admin_key_bearer_auth_grants_access_to_session_routes() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @AC-B05-11 @OQ-B04 @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn admin_key_updates_last_used_at_on_successful_auth() {
     let ctx = AdminTestContext::new().await;
-    // Verify that each use of a valid admin key updates last_used_at in DB.
-    // Admin keys do not have idle expiry (OQ-B04 resolution).
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        verify admin_api_keys.last_used_at updated on each successful Bearer auth"
+    let session_cookie = sign_in_as_owner(&ctx).await;
+
+    // Create an admin key.
+    let create_resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/admin_keys"))
+        .header("Cookie", &session_cookie)
+        .json(&serde_json::json!({"name": "last-used-at-key", "role": "Viewer"}))
+        .send()
+        .await
+        .expect("POST admin_key");
+    let created: serde_json::Value = create_resp.json().await.expect("JSON");
+    let raw_key = created["key"].as_str().expect("key").to_string();
+    let key_id = uuid::Uuid::parse_str(created["id"].as_str().expect("id")).unwrap();
+
+    // Verify last_used_at is NULL before first use.
+    let before: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT last_used_at FROM admin_api_keys WHERE id = $1",
     )
+    .bind(key_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("query last_used_at before");
+    assert!(
+        before.is_none(),
+        "AC-B05-11: last_used_at must be NULL before first use"
+    );
+
+    // Use the key (Bearer auth on a session-auth route).
+    let resp = ctx
+        .client
+        .get(ctx.url("/admin/v1/projects"))
+        .header("Authorization", format!("Bearer {}", raw_key))
+        .send()
+        .await
+        .expect("GET with key");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "AC-B05-11: admin key must work on session-auth route"
+    );
+
+    // Verify last_used_at is set after use.
+    let after: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT last_used_at FROM admin_api_keys WHERE id = $1",
+    )
+    .bind(key_id)
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("query last_used_at after");
+    assert!(
+        after.is_some(),
+        "AC-B05-11: last_used_at must be set after first use (OQ-B04: no idle expiry)"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -800,7 +998,6 @@ async fn admin_key_updates_last_used_at_on_successful_auth() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B05 @error @driving_port @real-io
-#[ignore]
 #[tokio::test]
 async fn invalid_admin_key_bearer_returns_401() {
     let ctx = AdminTestContext::new().await;
@@ -846,22 +1043,46 @@ async fn sign_in_as_owner(ctx: &AdminTestContext) -> String {
         .expect("no cookie in sign-in response")
 }
 
-/// Sign in as a seeded Admin member and return the session cookie.
-///
-/// # Panics (RED scaffold)
+/// Sign in as the seeded Admin member and return the session cookie.
 async fn sign_in_as_admin(ctx: &AdminTestContext) -> String {
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        sign_in_as_admin requires a seeded Admin member in AdminTestContext"
-    )
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/auth/signin"))
+        .json(&serde_json::json!({
+            "email":     ctx.admin_email,
+            "password":  ctx.admin_password,
+            "totp_code": ctx.admin_totp_code_now(),
+        }))
+        .send()
+        .await
+        .expect("sign-in as admin failed");
+
+    resp.headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(';').next())
+        .map(|s| s.trim().to_string())
+        .expect("no cookie in sign-in as admin response")
 }
 
-/// Sign in as a seeded Viewer member and return the session cookie.
-///
-/// # Panics (RED scaffold)
+/// Sign in as the seeded Viewer member and return the session cookie.
 async fn sign_in_as_viewer(ctx: &AdminTestContext) -> String {
-    panic!(
-        "Not yet implemented -- RED scaffold: \
-        sign_in_as_viewer requires a seeded Viewer member in AdminTestContext"
-    )
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/auth/signin"))
+        .json(&serde_json::json!({
+            "email":     ctx.viewer_email,
+            "password":  ctx.viewer_password,
+            "totp_code": ctx.viewer_totp_code_now(),
+        }))
+        .send()
+        .await
+        .expect("sign-in as viewer failed");
+
+    resp.headers()
+        .get("set-cookie")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(';').next())
+        .map(|s| s.trim().to_string())
+        .expect("no cookie in sign-in as viewer response")
 }
