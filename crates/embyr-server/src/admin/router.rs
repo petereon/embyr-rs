@@ -14,6 +14,9 @@ use crate::adapters::{
 };
 
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
+use super::handlers::oidc_providers::{
+    create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
+};
 use super::handlers::auth::{signin, signout};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
@@ -137,6 +140,15 @@ pub fn build_admin_router(
             get(list_admin_keys).post(create_admin_key),
         )
         .route("/admin/v1/admin_keys/:key_id", delete(revoke_admin_key))
+        // OIDC provider routes (step 06-01).
+        .route(
+            "/admin/v1/oidc_providers",
+            get(list_oidc_providers).post(create_oidc_provider),
+        )
+        .route(
+            "/admin/v1/oidc_providers/:provider_id",
+            patch(patch_oidc_provider).delete(delete_oidc_provider),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
             session_auth_middleware,
