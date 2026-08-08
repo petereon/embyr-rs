@@ -145,6 +145,23 @@ path = "../../tests/admin_api_v2/acceptance/b05_members.rs"
 name = "admin_api_v2_b06_oidc_billing"
 path = "../../tests/admin_api_v2/acceptance/b06_oidc_billing.rs"
 
+# distributed-rate-limiting acceptance tests
+[[test]]
+name = "drl_b11_provision_initializes_bucket"
+path = "../../tests/distributed_rate_limiting/acceptance/b11_provision_initializes_bucket.rs"
+
+[[test]]
+name = "drl_b12_postgres_rate_limit"
+path = "../../tests/distributed_rate_limiting/acceptance/b12_postgres_rate_limit.rs"
+
+[[test]]
+name = "drl_b13_fallback_on_pg_failure"
+path = "../../tests/distributed_rate_limiting/acceptance/b13_fallback_on_pg_failure.rs"
+
+[[test]]
+name = "drl_b14_ratelimit_headers"
+path = "../../tests/distributed_rate_limiting/acceptance/b14_ratelimit_headers.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

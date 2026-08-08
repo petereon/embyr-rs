@@ -1,6 +1,6 @@
 version: "1.0"
 feature: embyr-rs
-updated: "2026-05-23"
+updated: "2026-08-07"
 
 jobs:
   - id: JOB-01
@@ -197,3 +197,48 @@ jobs:
         mental model); CLI-only access creates friction and slows new-member onboarding
     opportunity_score: 16
     priority: critical
+
+  - id: JOB-11
+    name: fair-multitenancy
+    persona: P2
+    persona_name: Sam Chen (Service Operator / Platform Engineer)
+    feature: distributed-rate-limiting
+    job_story: >
+      When I am running multiple customer projects on the same embyr deployment,
+      I want per-project rate limits to be enforced consistently regardless of how
+      many server instances are running, so that one project cannot consume more
+      than its fair share when I scale horizontally.
+    dimensions:
+      functional: >
+        Cluster-wide aggregate request count for any project is bounded at
+        EMBYR_RATE_LIMIT_RPS; RESOURCE_EXHAUSTED returned when aggregate exceeds
+        limit across all nodes; x-ratelimit-* headers on every gRPC response;
+        retry-after-ms on rejections; per-instance fallback caps at 1x limit
+        when system DB unreachable (not uncapped, not 2x)
+      emotional: >
+        Feel confident that adding a second embyr node does not inadvertently
+        double each tenant's effective rate allowance; feel in control of the
+        fairness guarantee without needing a separate coordination plane
+      social: >
+        Be trusted by all tenants that their rate-limit SLA is meaningful
+        regardless of deployment topology; demonstrate to auditors that
+        per-project limits are enforced cluster-wide
+    four_forces:
+      push: >
+        Current per-instance token buckets mean a 3-node cluster allows 3x
+        the configured RPS per project — a noisy tenant can starve others at
+        scale and the operator has no enforceable guarantee to offer tenants
+      pull: >
+        Postgres rate_buckets atomic UPDATE means the same rate_buckets row
+        is the single authority regardless of node count; Sam can confidently
+        quote tenants a real per-project RPS limit
+      anxiety: >
+        "What if the Postgres UPDATE adds too much latency to every request?"
+        — mitigated by 20ms hard timeout with in-process fallback; AC-14c
+        p99 < 500us property test must remain green
+      habit: >
+        Sam is used to deploying stateless services and expects horizontal
+        scaling to be purely additive for capacity; the distributed limiter
+        must not require sticky routing or per-node configuration
+    opportunity_score: 11
+    priority: high

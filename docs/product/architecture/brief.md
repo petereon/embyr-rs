@@ -28,7 +28,7 @@ Ranked by forcing constraint from user stories and SPEC.md invariants:
 - Three distinct TCP listeners per instance: gRPC port (8080), REST port (8081), admin port (9090). Port conflicts are a hard startup validation failure.
 - Postgres is the only supported production backend for both system DB and customer DBs. SQLite is dev/test only (single-node system DB exclusively).
 - BrowserChannel session state and Listen stream registries are in-process. These are not externalized to a shared store — this is a deliberate scope constraint (D09, D10 from feature-delta locked decisions).
-- Per-project rate limiting is per-instance token bucket. No distributed rate-limiting coordination.
+- Per-project rate limiting is per-instance token bucket. No distributed rate-limiting coordination. *(Superseded by ADR-015 — distributed-rate-limiting feature.)*
 - Resume token retention window is bounded by the 24-hour tombstone sweep. Tokens older than 24 h trigger a full re-snapshot, not an error.
 - `backend_mode=direct_pg` requires `auth_mode=key` without exception (SPEC invariant 14). The API key is the sole ECIES key material.
 
@@ -451,7 +451,7 @@ C4Container
 | SD-01 | Single binary for all transports | Accepted | SPEC requires gRPC, gRPC-Web, BrowserChannel, REST served simultaneously. Separate processes would require shared session state externalization (Redis), which is explicitly out of scope (D09). Single binary eliminates IPC, reduces operational surface, and satisfies AC-13d ("no separate server process required for browser transports"). |
 | SD-02 | In-process Listen registry (no Redis pub/sub) | Accepted | Postgres LISTEN/NOTIFY delivers `DocChange` events to one embyr instance per customer DB connection. The registry fans out in-process to all Listen stream handlers on that instance. Trade-off: live changes for a project only reach clients connected to the instance holding the NOTIFY listener for that project. In practice, all instances hold NOTIFY listeners for all active projects, so all clients on any instance get changes. Rejected alternative: Redis pub/sub would enable cross-instance fan-out but adds operational dependency and distributed failure mode. At the stated scale (p99 ≤ 2 s KPI), in-process fan-out is sufficient. |
 | SD-03 | Credential cache keyed by `(project_id, BLAKE3(api_key))` | Accepted | API key is re-presented on every request (Bearer token). BLAKE3 is collision-resistant and fast (~1 ns) — suitable as a cache key. The BLAKE3 fingerprint is not a security boundary; Argon2id handles authentication. This prevents the cache from being poisoned by a key that passes fingerprint matching but fails Argon2id verification: the credential cache is only populated after successful Argon2id verify. Trade-off: cache miss on any new API key value (including after rotation) requires a full credential fetch + Argon2id verify cycle. |
-| SD-04 | Per-instance token bucket rate limiting (no distributed coordination) | Accepted | D10 (locked decision): distributed rate limiting is out of scope. Per-instance bucket means a project can exceed the configured per-project limit by a factor of N (number of instances). Operators must set per-instance limits conservatively at 1/N of the intended cluster-wide limit. This is a deliberate simplicity trade-off. The KPI for rate limiting (AC-14c: p99 latency increase < 0.5 ms) is achievable only with in-memory token buckets; a Redis round-trip would add ~0.5–2 ms per request. |
+| SD-04 | Per-instance token bucket rate limiting (no distributed coordination) | **Superseded by ADR-015** | Original rationale: simplicity trade-off; per-instance bucket acceptable at launch. Superseded by the `distributed-rate-limiting` feature: the `rate_buckets` table in the system Postgres DB now provides cluster-wide enforcement. The in-process `TokenBucket` is retained as the 20ms-timeout fallback (D3). See ADR-015 for the full context and alternatives considered. |
 | SD-05 | Postgres LISTEN/NOTIFY for real-time change delivery (no Kafka / Redis Streams) | Accepted | The data source is Postgres. Adding a separate message broker (Kafka, Redis) would require a CDC pipeline, adding operational complexity and a new failure mode. NOTIFY fires within the committing transaction, guaranteeing that no write is visible without a notification. Trade-off: NOTIFY payload capped at 8 KB — addressed by re-fetching the document via GetDocument in the Listen handler (SPEC explicitly specifies this re-fetch). NOTIFY is regional (one cluster per region) — consistent with SPEC multi-region model. KPI: p99 ≤ 2 s for write → callback; in-process fan-out after NOTIFY adds < 1 ms. |
 | SD-06 | OCC via `version` column (no pessimistic locking) | Accepted | Firestore's transaction model is OCC. The `version` column on documents enables lightweight conflict detection without holding Postgres row locks across RPC round-trips. SDK retries on `Aborted`. Trade-off: high-contention writes on hot documents produce higher abort rates. At the stated concurrency (100 concurrent transactions KPI, AC-06a), OCC abort rate is acceptable without additional coordination. Pessimistic locking would require session-affine connections (incompatible with connection pooling). |
 | SD-07 | Separate admin port (9090) with no cross-contamination from data ports | Accepted | SPEC requires admin API inaccessible from public network. The isolation is implemented at the TCP listener level (bind to different port, potentially different interface). This is structurally simpler and more auditable than path-based routing (where a routing bug could expose admin endpoints). AC-07f requires admin endpoints not accessible on data port. |
@@ -1166,6 +1166,87 @@ C4Component
     Rel(awsFetcher, awsSecretsManager, "calls GetSecretValue on")
     Rel(gcpFetcher, gcpSecretManager, "calls AccessSecretVersion on")
     Rel(metricsAdapter, systemDB, "upserts metrics to")
+```
+
+---
+
+### Wave: DESIGN / [REF] Rate Limiting
+
+> Feature: distributed-rate-limiting | ADR-015 | Updated: 2026-08-07
+
+**Prior state (SD-04, now superseded):** Per-instance `TokenBucket` in a `HashMap<ProjectId, TokenBucket>`. Each embyr node enforced limits independently — a project configured for 1000 RPS could fire N × 1000 RPS cluster-wide across N nodes.
+
+**Current design:** Postgres-backed distributed token bucket with in-process fallback.
+
+#### Coordination mechanism
+
+The system Postgres DB (`rate_buckets` table, migration `0018_rate_buckets.sql`) is the coordination point. Each gRPC request that passes authentication executes an atomic UPDATE against `rate_buckets` for its project, consuming one token and returning the remaining count:
+
+```sql
+UPDATE rate_buckets
+SET tokens = LEAST($1::float8,
+                   tokens + EXTRACT(EPOCH FROM (now() - last_refill)) * $2::float8
+             ) - 1.0,
+    last_refill = now()
+WHERE project_id = $3
+  AND tokens + EXTRACT(EPOCH FROM (now() - last_refill)) * $2::float8 >= 1.0
+RETURNING tokens;
+```
+
+- 1 row returned → request allowed. `RETURNING tokens` provides the remaining count for response headers.
+- 0 rows returned → rate limited (`RESOURCE_EXHAUSTED`, gRPC code 8).
+- Row lock is at the `project_id` PK level — no cross-project contention.
+
+#### Failure mode — 20ms timeout + in-process fallback (D3)
+
+The Postgres UPDATE is wrapped in `tokio::time::timeout(Duration::from_millis(20), ...)`. On timeout:
+1. `rate_limit_pg_timeout_total` counter increments (Prometheus, admin port `/metrics`).
+2. The per-instance `TokenBucket` for `project_id` is used instead, capped at exactly 1× `EMBYR_RATE_LIMIT_RPS`.
+3. When Postgres recovers, the next request succeeds within 20ms and distributed coordination resumes automatically — no restart required.
+
+This is a "fail open" posture: the cluster enforces at most 1× capacity per node during fallback (not unlimited). A degradation event is observable via the `rate_limit_pg_timeout_total` counter.
+
+#### Configuration (`EMBYR_RATE_LIMIT_RPS`)
+
+Read once at startup; default `1000.0`. Operator-wide — no per-project granularity (D4). Changing the value requires a process restart. The same value is used for both `capacity` (burst size) and `refill_rate` (tokens/second), giving a 1-second window token bucket.
+
+#### Scope
+
+- gRPC port `:8080` — rate limited (all 9 Firestore RPCs).
+- REST/gRPC-Web port `:8081` — rate limited (shares the same `Arc<RateLimiter>` as gRPC via `FirestoreService`).
+- Admin port `:9090` — **NOT rate limited** (D9). Admin is operator-only, low-volume; exclusion prevents self-DoS during provisioning bursts.
+
+#### Response headers
+
+All 9 gRPC handler call sites attach trailing metadata (tonic 0.12, `Response::metadata_mut()` for unary handlers, `Status::metadata_mut()` for error responses) with:
+- `x-ratelimit-limit` — configured capacity
+- `x-ratelimit-remaining` — tokens remaining (floored at 0)
+- `x-ratelimit-reset` — epoch milliseconds when the next token is available
+- `retry-after-ms` — (rejection only) milliseconds the SDK should wait before retrying
+
+Headers are attached inline at each call site using `attach_rate_limit_headers()` and `attach_retry_after()` helper functions — not in tower middleware (D6, because `project_id` lives in the proto body, not metadata; middleware cannot extract it before auth).
+
+#### Provisioning integration
+
+`POST /admin/v1/projects` (provisioning handler) inserts a `rate_buckets` row with `tokens = EMBYR_RATE_LIMIT_RPS` and `last_refill = now()` in the **same transaction** as the `projects` row. FK `ON DELETE CASCADE` removes the row when a project is hard-deleted by the sweeper (168h after soft-deletion). No sweeper code change required.
+
+#### `RateLimitInfo` domain type
+
+`embyr-core::rate_limit::RateLimitInfo { remaining: f64, limit: f64, reset_ms: u64 }` — pure value type in `embyr-core`, zero IO imports. Both the allowed (`Ok`) and rejected (`Err`) arms of `RateLimiter::check()` return this type, enabling header attachment on every response regardless of outcome.
+
+#### Data flow (updated write path, step [2])
+
+The rate-limit step in the gRPC write path (see Data Flow section above) changes from:
+```
+[2] Rate limit check (per-project token bucket, in-process)
+```
+to:
+```
+[2] Rate limit check (RateLimiter::check)
+    ├─ Attempt atomic UPDATE rate_buckets (20ms timeout)
+    │   ├─ 1 row RETURNING tokens → Ok(RateLimitInfo) — allowed; attach headers to response
+    │   └─ 0 rows → Err(RateLimitInfo) — rate limited; RESOURCE_EXHAUSTED + headers
+    └─ On timeout/error: per-instance TokenBucket fallback (1× cap) + counter increment
 ```
 
 ---

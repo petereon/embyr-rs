@@ -51,6 +51,18 @@ impl Drop for TestServer {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Read `EMBYR_RATE_LIMIT_RPS` from the environment (default 1000.0).
+///
+/// Parsed once per function call — callers cache the value in a local variable.
+/// Returns the default if the variable is absent, non-numeric, non-finite, or ≤ 0.
+fn default_rate_limit_capacity() -> f64 {
+    std::env::var("EMBYR_RATE_LIMIT_RPS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1000.0)
+}
+
 /// Shared wiring allocated by every test server variant.
 struct TestComponents {
     grpc_listener: tokio::net::TcpListener,
@@ -171,7 +183,8 @@ pub async fn start_test_server_with_keepalive(
     let c = alloc_test_components(&system_db).await;
     let listen_registry_ret = Arc::clone(&c.listen_registry);
 
-    let rate_limiter = RateLimiter::new(1000.0, 1000.0);
+    let rate_limit_rps = default_rate_limit_capacity();
+    let rate_limiter = RateLimiter::new(rate_limit_rps, rate_limit_rps);
     let rate_limiter_ret = Arc::clone(&rate_limiter);
 
     let service = FirestoreService {
@@ -228,7 +241,8 @@ pub async fn start_test_server_with_aws_fetcher(
     let c = alloc_test_components(&system_db).await;
     let listen_registry_ret = Arc::clone(&c.listen_registry);
 
-    let rate_limiter = RateLimiter::new(1000.0, 1000.0);
+    let rate_limit_rps = default_rate_limit_capacity();
+    let rate_limiter = RateLimiter::new(rate_limit_rps, rate_limit_rps);
     let rate_limiter_ret = Arc::clone(&rate_limiter);
 
     let service = FirestoreService {
@@ -277,7 +291,8 @@ pub async fn start_test_server_with_gcp_fetcher(
     let c = alloc_test_components(&system_db).await;
     let listen_registry_ret = Arc::clone(&c.listen_registry);
 
-    let rate_limiter = RateLimiter::new(1000.0, 1000.0);
+    let rate_limit_rps = default_rate_limit_capacity();
+    let rate_limiter = RateLimiter::new(rate_limit_rps, rate_limit_rps);
     let rate_limiter_ret = Arc::clone(&rate_limiter);
 
     let service = FirestoreService {
@@ -298,6 +313,61 @@ pub async fn start_test_server_with_gcp_fetcher(
         "test-admin-key-secret".to_string(),
         c.cache_for_admin,
         Some(gcp_fetcher),
+    );
+
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx,
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    TestServer {
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
+    }
+}
+
+/// Start an in-process server with distributed (Postgres-backed) rate limiting.
+///
+/// Used by DRL acceptance tests (b12, b13, b14).  Wires `RateLimiter::with_pg` so
+/// the server enforces rate limits via the shared `rate_buckets` table.
+///
+/// - `capacity`:  token bucket capacity (burst size, also the refill_rate in tokens/s)
+/// - `pg_pool`:   pool connected to the system DB — same DB that holds `rate_buckets`
+pub async fn start_test_server_with_distributed_rate_limit(
+    system_db: Arc<SystemDb>,
+    capacity: f64,
+    pg_pool: sqlx::PgPool,
+) -> TestServer {
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
+
+    let rate_limiter = RateLimiter::with_pg(capacity, capacity, pg_pool);
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
+    let service = FirestoreService {
+        system_db: Arc::clone(&system_db),
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
+        keepalive_interval: std::time::Duration::from_secs(30),
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
+        aws_secret_fetcher: None,
+        gcp_secret_fetcher: None,
+        rate_limiter,
+    };
+
+    let admin_app = admin::router::build_with_aws(
+        system_db,
+        "test-admin-key-secret".to_string(),
+        c.cache_for_admin,
+        None,
     );
 
     spawn_all_servers(

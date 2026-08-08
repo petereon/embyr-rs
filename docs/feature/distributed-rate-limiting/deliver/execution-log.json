@@ -1,0 +1,118 @@
+{
+  "schema_version": "3.0",
+  "feature_id": "distributed-rate-limiting",
+  "events": [
+    {
+      "sid": "DRL-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS: b11_provision_initializes_bucket walking skeleton in place",
+      "t": "2026-08-08T06:35:48Z"
+    },
+    {
+      "sid": "DRL-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS: 0018_rate_buckets.sql; EMBYR_RATE_LIMIT_RPS env var; default_rate_limit_capacity() helper",
+      "t": "2026-08-08T06:36:05Z"
+    },
+    {
+      "sid": "DRL-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: DRL-01 green; cargo check --tests clean",
+      "t": "2026-08-08T06:36:05Z"
+    },
+    {
+      "sid": "DRL-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS: distributed_rate_limit_rejects_when_bucket_exhausted walking skeleton RED",
+      "t": "2026-08-08T06:36:06Z"
+    },
+    {
+      "sid": "DRL-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS: RateLimitInfo domain struct; RateLimiter::with_pg; check_pg with 20ms timeout; gRPC handler rate-limit-before-auth; walking skeleton GREEN",
+      "t": "2026-08-08T06:36:06Z"
+    },
+    {
+      "sid": "DRL-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: DRL-02 green; test passes",
+      "t": "2026-08-08T06:36:07Z"
+    },
+    {
+      "sid": "DRL-03",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS: check_in_process fallback wired in check(); tracing::warn on PG timeout",
+      "t": "2026-08-08T06:36:08Z"
+    },
+    {
+      "sid": "DRL-03",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: DRL-03 green; fallback compiles",
+      "t": "2026-08-08T06:36:08Z"
+    },
+    {
+      "sid": "DRL-04",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS: b14_ratelimit_headers tests scaffold in place",
+      "t": "2026-08-08T06:36:08Z"
+    },
+    {
+      "sid": "DRL-04",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS: attach_rate_limit_headers + rate_limit_rejection in handler; all 9 handlers updated",
+      "t": "2026-08-08T06:36:09Z"
+    },
+    {
+      "sid": "DRL-04",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: DRL-04 green; cargo check --tests clean",
+      "t": "2026-08-08T06:36:09Z"
+    },
+    {
+      "sid": "DRL-05",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS: b11_provision_initializes_bucket test in place",
+      "t": "2026-08-08T06:36:10Z"
+    },
+    {
+      "sid": "DRL-05",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS: provision handler transaction + insert_rate_bucket_in_tx; OperatorState.rate_limit_capacity; build_admin_router 8th param; admin_api_v2 test updated",
+      "t": "2026-08-08T06:36:10Z"
+    },
+    {
+      "sid": "DRL-05",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: DRL-05 green; all acceptance tests passing",
+      "t": "2026-08-08T06:36:10Z"
+    },
+    {
+      "sid": "DRL-02",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: RateLimitInfo is a plain data struct with no domain logic to unit-test",
+      "t": "2026-08-08T06:36:17Z"
+    },
+    {
+      "sid": "DRL-03",
+      "p": "RED_ACCEPTANCE",
+      "s": "SKIPPED",
+      "d": "APPROVED_SKIP: b13 fallback tests are #[ignore] per blueprint constraint - must not be unskipped",
+      "t": "2026-08-08T06:36:17Z"
+    }
+  ]
+}
