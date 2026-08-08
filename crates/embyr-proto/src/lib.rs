@@ -2,6 +2,10 @@
 // This crate contains protobuf-generated types only.
 // IO crates (tokio, sqlx, axum) are intentionally absent.
 
+// Suppress clippy warnings for protobuf-generated enums; the generated code
+// creates large enums that cannot be trivially boxed without breaking prost.
+#![allow(clippy::large_enum_variant)]
+
 /// Firestore v1 protobuf types and gRPC service stubs.
 pub mod firestore {
     tonic::include_proto!("google.firestore.v1");

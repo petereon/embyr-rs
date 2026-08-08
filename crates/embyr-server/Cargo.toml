@@ -48,6 +48,7 @@ config.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 base64.workspace = true
+hex.workspace = true
 rand_core.workspace = true
 totp-rs.workspace = true
 jsonwebtoken.workspace = true
@@ -163,6 +164,11 @@ path = "../../tests/distributed_rate_limiting/acceptance/b13_fallback_on_pg_fail
 [[test]]
 name = "drl_b14_ratelimit_headers"
 path = "../../tests/distributed_rate_limiting/acceptance/b14_ratelimit_headers.rs"
+
+# production-readiness acceptance tests
+[[test]]
+name = "production_readiness"
+path = "../../tests/production_readiness/mod.rs"
 
 # observability acceptance tests
 [[test]]

@@ -1,0 +1,22 @@
+# Build artifacts — excluded to minimise Docker build context and avoid stale binaries
+target/
+
+# Version control history
+.git/
+.gitignore
+
+# Documentation (not needed at compile time)
+docs/
+
+# Tests (not needed in the production image)
+tests/
+
+# Editor / IDE state
+.vscode/
+.idea/
+
+# nWave / DES tooling (project management files)
+.nwave/
+
+# macOS metadata
+.DS_Store

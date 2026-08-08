@@ -1,6 +1,7 @@
 // embyr-server: composition root and gRPC adapter layer.
 pub mod adapters;
 pub mod admin;
+pub mod config;
 pub mod encoding;
 pub mod grpc;
 pub mod middleware;
@@ -152,7 +153,7 @@ async fn alloc_test_components(system_db: &Arc<SystemDb>) -> TestComponents {
 ///
 /// All three share a single `shutdown_rx` oneshot; dropping the returned
 /// `TestServer` sends the shutdown signal.
-fn spawn_all_servers(
+pub fn spawn_all_servers(
     grpc_listener: tokio::net::TcpListener,
     rest_listener: tokio::net::TcpListener,
     admin_listener: tokio::net::TcpListener,

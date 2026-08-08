@@ -1708,6 +1708,7 @@ dependencies = [
  "embyr-core",
  "embyr-pg-storage",
  "embyr-proto",
+ "hex",
  "hkdf",
  "http 1.4.0",
  "http-body 1.0.1",

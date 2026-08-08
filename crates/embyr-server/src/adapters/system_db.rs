@@ -27,9 +27,13 @@ pub struct SystemDb {
 
 impl SystemDb {
     /// Connect to system DB. Does NOT run migrations — call migrate() separately.
+    ///
+    /// Pool acquire timeout is 5 seconds to ensure startup fails fast when the
+    /// database is unreachable (rather than the sqlx default of 30 seconds).
     pub async fn new(database_url: &str) -> Result<Self, CoreError> {
         let pool = PgPoolOptions::new()
             .max_connections(5)
+            .acquire_timeout(std::time::Duration::from_secs(5))
             .connect(database_url)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;

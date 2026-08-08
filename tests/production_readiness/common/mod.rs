@@ -1,0 +1,295 @@
+// SCAFFOLD: true
+//! Common test infrastructure — production-readiness acceptance tests.
+//!
+//! Infrastructure policy (docs/architecture/atdd-infrastructure-policy.md):
+//!   Driving port:    reqwest::Client against the spawned `embyr-server` process
+//!                    via `GET /healthz` on the admin port (subprocess driving adapter).
+//!   Driven internal: testcontainers-rs Postgres 15-alpine; fresh per test.
+//!   Driven external: none in scope for this feature.
+//!
+//! Scaffold state (DISTILL wave, 2026-08-08):
+//!   - `find_free_port()`:             LIVE
+//!   - `embyr_server_binary()`:        LIVE (resolves path; binary absent until DELIVER ships main.rs)
+//!   - `ServerProcess::start()`:       LIVE (spawn fails gracefully when binary missing → RED)
+//!   - `ServerProcess::wait_for_healthy()`: LIVE (polls /healthz; returns false until server up → RED)
+//!   - `start_postgres_container()`:   LIVE
+//!
+//! Items are `#[allow(dead_code)]` — consumed incrementally as each slice is unskipped.
+
+#![allow(dead_code, unused_imports)]
+
+// ─── State-delta re-export ────────────────────────────────────────────────────
+#[path = "../../common/state_delta.rs"]
+pub mod state_delta;
+pub use state_delta::{appended_with, assert_state_delta, containing, set_to, unchanged};
+
+// ─── Universe — port-exposed observable names ─────────────────────────────────
+
+/// Port-exposed observable names for production-readiness acceptance assertions.
+/// All keys are port-exposed (HTTP status codes, process exit codes, stderr content).
+/// Never internal struct fields.
+pub mod universe {
+    /// Whether `GET /healthz` on the admin port returned HTTP 200.
+    pub const PROCESS_HEALTHY: &str = "process.healthz.http_200";
+    /// Integer exit code of the server process (as string: "0", "1", "None").
+    pub const PROCESS_EXIT_CODE: &str = "process.exit_code";
+    /// Whether the admin port accepts a TCP connection (bound = "true"/"false").
+    pub const ADMIN_PORT_BOUND: &str = "process.port.admin_bound";
+    /// Whether stderr output contains the expected error message.
+    pub const STDERR_HAS_ERROR: &str = "process.stderr.required_message_present";
+}
+
+// ─── Imports ─────────────────────────────────────────────────────────────────
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt},
+};
+
+// ─── Port allocation ─────────────────────────────────────────────────────────
+
+/// Bind :0 and return the assigned ephemeral port.
+///
+/// The port is released immediately after binding — there is a small TOCTOU
+/// window before the server claims it. Acceptable for test use on loopback.
+pub fn find_free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind :0 failed")
+        .local_addr()
+        .expect("local_addr")
+        .port()
+}
+
+// ─── Binary path resolution ───────────────────────────────────────────────────
+
+/// Resolve the path to the pre-built `embyr-server` binary.
+///
+/// Prefers the release binary, falls back to debug.
+/// Returns the path regardless of whether the binary exists — `spawn()` will
+/// report the error at runtime, causing the test to fail (RED, not BROKEN).
+///
+/// `CARGO_MANIFEST_DIR` is `crates/embyr-server/` for this integration test;
+/// two `parent()` calls reach the workspace root.
+pub fn embyr_server_binary() -> PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = std::path::Path::new(manifest_dir)
+        .parent() // crates/
+        .expect("crates dir")
+        .parent() // workspace root
+        .expect("workspace root");
+
+    let release = workspace_root.join("target/release/embyr-server");
+    if release.exists() {
+        release
+    } else {
+        workspace_root.join("target/debug/embyr-server")
+    }
+}
+
+// ─── Postgres container helper ────────────────────────────────────────────────
+
+/// Start a Postgres 15-alpine testcontainer and return the connection URL.
+///
+/// The caller must keep the returned `ContainerAsync<Postgres>` alive for
+/// the duration of the server process that connects to it.
+pub async fn start_postgres_container() -> (ContainerAsync<Postgres>, String) {
+    let container = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("failed to start Postgres testcontainer");
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("failed to get host port for Postgres");
+    let db_url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+    (container, db_url)
+}
+
+// ─── ServerProcess harness ────────────────────────────────────────────────────
+
+/// Wraps a spawned `embyr-server` subprocess with its port allocation.
+///
+/// The child process is killed (SIGKILL) on `Drop`. For graceful-shutdown
+/// tests, call `sigterm()` explicitly and then `wait_for_exit()` before the
+/// struct is dropped.
+pub struct ServerProcess {
+    pub child: Child,
+    pub grpc_port: u16,
+    pub rest_port: u16,
+    pub admin_port: u16,
+}
+
+/// 64-hex-char test encryption key (32 bytes, used across tests requiring
+/// `EMBYR_ENCRYPTION_KEY`). Value is arbitrary — not a real secret.
+pub const TEST_ENCRYPTION_KEY: &str =
+    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+
+impl ServerProcess {
+    /// Spawn `embyr-server` with the given database URL and additional env vars.
+    ///
+    /// Allocates three free ports for gRPC, REST, and admin; injects them as
+    /// `GRPC_PORT`, `REST_PORT`, `ADMIN_PORT`. Stderr is piped for capture.
+    ///
+    /// # Panics when binary path not found
+    /// If the binary does not exist at the resolved path, `spawn()` returns an
+    /// `Err` — this test fails (RED: "binary missing" = implementation absent).
+    pub fn start(db_url: &str, extra_env: &[(&str, &str)]) -> Self {
+        let grpc_port = find_free_port();
+        let rest_port = find_free_port();
+        let admin_port = find_free_port();
+
+        let bin = embyr_server_binary();
+        let mut cmd = Command::new(&bin);
+        cmd.env("DATABASE_URL", db_url)
+            .env("GRPC_PORT", grpc_port.to_string())
+            .env("REST_PORT", rest_port.to_string())
+            .env("ADMIN_PORT", admin_port.to_string())
+            .env("RUST_LOG", "info")
+            .stderr(Stdio::piped())
+            .stdout(Stdio::piped());
+
+        for (key, val) in extra_env {
+            cmd.env(key, val);
+        }
+
+        let child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn embyr-server at {bin:?}: {e}"));
+
+        ServerProcess {
+            child,
+            grpc_port,
+            rest_port,
+            admin_port,
+        }
+    }
+
+    /// Spawn `embyr-server` with ONLY the provided env vars (no DATABASE_URL injection).
+    ///
+    /// Use for testing missing-required-var scenarios where `DATABASE_URL` must
+    /// be absent from the environment.
+    pub fn start_env_only(env_vars: &[(&str, &str)]) -> Self {
+        let grpc_port = find_free_port();
+        let rest_port = find_free_port();
+        let admin_port = find_free_port();
+
+        let bin = embyr_server_binary();
+        let mut cmd = Command::new(&bin);
+        // Clear inherited env to avoid surprising defaults from the test runner.
+        cmd.env_clear()
+            .env("GRPC_PORT", grpc_port.to_string())
+            .env("REST_PORT", rest_port.to_string())
+            .env("ADMIN_PORT", admin_port.to_string())
+            .env("RUST_LOG", "info")
+            .stderr(Stdio::piped())
+            .stdout(Stdio::piped());
+
+        for (key, val) in env_vars {
+            cmd.env(key, val);
+        }
+
+        let child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn embyr-server at {bin:?}: {e}"));
+
+        ServerProcess {
+            child,
+            grpc_port,
+            rest_port,
+            admin_port,
+        }
+    }
+
+    /// Poll `GET /healthz` on the admin port until HTTP 200 or timeout.
+    ///
+    /// Returns `true` if 200 received within `timeout`, `false` otherwise.
+    pub async fn wait_for_healthy(&self, timeout: Duration) -> bool {
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/healthz", self.admin_port);
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().as_u16() == 200 => return true,
+                _ => {}
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// Send SIGTERM to the child process.
+    ///
+    /// On Unix, uses `kill -TERM <pid>`. On non-Unix, falls back to SIGKILL
+    /// (acceptable: Docker/Linux CI is the production target per D-PR-3).
+    pub fn sigterm(&mut self) {
+        let pid = self.child.id();
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows: no SIGTERM — use TerminateProcess as fallback.
+            let _ = self.child.kill();
+        }
+    }
+
+    /// Poll `child.try_wait()` until the process exits or timeout elapses.
+    ///
+    /// Returns the exit code, or `None` if the process did not exit in time.
+    pub async fn wait_for_exit(&mut self, timeout: Duration) -> Option<i32> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return status.code(),
+                Ok(None) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Consume stderr output. Call after the process has exited.
+    ///
+    /// # Panics
+    /// Panics if stderr was not piped (use `Stdio::piped()` on spawn).
+    pub fn drain_stderr(&mut self) -> String {
+        use std::io::Read;
+        let mut stderr = self.child.stderr.take().expect("stderr not piped");
+        let mut buf = String::new();
+        let _ = stderr.read_to_string(&mut buf);
+        buf
+    }
+
+    /// Check whether the given TCP port currently accepts connections.
+    pub fn port_is_bound(port: u16) -> bool {
+        std::net::TcpStream::connect_timeout(
+            &format!("127.0.0.1:{port}").parse().expect("valid addr"),
+            Duration::from_millis(100),
+        )
+        .is_ok()
+    }
+}
+
+impl Drop for ServerProcess {
+    fn drop(&mut self) {
+        // Best-effort SIGKILL to avoid zombie processes. Errors ignored.
+        let _ = self.child.kill();
+        // Reap the child to release OS resources.
+        let _ = self.child.wait();
+    }
+}
