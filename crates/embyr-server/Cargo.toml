@@ -55,6 +55,8 @@ async-trait.workspace = true
 aws-config.workspace = true
 aws-sdk-secretsmanager.workspace = true
 reqwest.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 
 [[test]]
 name = "us_13_browser_transport"
@@ -161,6 +163,27 @@ path = "../../tests/distributed_rate_limiting/acceptance/b13_fallback_on_pg_fail
 [[test]]
 name = "drl_b14_ratelimit_headers"
 path = "../../tests/distributed_rate_limiting/acceptance/b14_ratelimit_headers.rs"
+
+# observability acceptance tests
+[[test]]
+name = "obs01_prometheus_endpoint"
+path = "../../tests/observability/acceptance/obs01_prometheus_endpoint.rs"
+
+[[test]]
+name = "obs02_grpc_request_counters"
+path = "../../tests/observability/acceptance/obs02_grpc_request_counters.rs"
+
+[[test]]
+name = "obs03_grpc_latency_histograms"
+path = "../../tests/observability/acceptance/obs03_grpc_latency_histograms.rs"
+
+[[test]]
+name = "obs04_rate_limit_metrics"
+path = "../../tests/observability/acceptance/obs04_rate_limit_metrics.rs"
+
+[[test]]
+name = "obs05_postgres_pool_metrics"
+path = "../../tests/observability/acceptance/obs05_postgres_pool_metrics.rs"
 
 [dev-dependencies]
 embyr-proto.workspace = true

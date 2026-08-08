@@ -47,7 +47,7 @@ use crate::{
         system_db::SystemDb,
     },
     encoding::firestore_proto::{document_to_proto, fields_to_proto, proto_fields_to_domain},
-    middleware::rate_limit::RateLimiter,
+    middleware::{obs_helpers, rate_limit::RateLimiter},
     realtime::listen_registry::ListenRegistry,
 };
 
@@ -414,9 +414,22 @@ impl FirestoreService {
     }
 }
 
-#[tonic::async_trait]
-impl Firestore for FirestoreService {
-    async fn get_document(
+// ---------------------------------------------------------------------------
+// Inner handler implementations (private methods on FirestoreService).
+//
+// Each `handle_*` method contains the original handler logic verbatim.
+// The tonic trait impl below is a thin wrapper that:
+//   1. Records the wall-clock start time (OBS-03).
+//   2. Calls the corresponding `handle_*` method.
+//   3. Records counter + histogram via `obs_helpers::record_grpc_call` (OBS-02, OBS-03).
+//   4. Returns the result.
+//
+// This pattern ensures all exit paths (including `?`-propagated errors) are
+// instrumented without duplicating code at every return site.
+// ---------------------------------------------------------------------------
+
+impl FirestoreService {
+    async fn handle_get_document(
         &self,
         request: Request<GetDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
@@ -453,7 +466,7 @@ impl Firestore for FirestoreService {
         }
     }
 
-    async fn create_document(
+    async fn handle_create_document(
         &self,
         request: Request<CreateDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
@@ -516,7 +529,7 @@ impl Firestore for FirestoreService {
         Ok(response)
     }
 
-    async fn update_document(
+    async fn handle_update_document(
         &self,
         request: Request<UpdateDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
@@ -565,7 +578,7 @@ impl Firestore for FirestoreService {
         Ok(response)
     }
 
-    async fn delete_document(
+    async fn handle_delete_document(
         &self,
         request: Request<DeleteDocumentRequest>,
     ) -> Result<Response<()>, Status> {
@@ -597,17 +610,14 @@ impl Firestore for FirestoreService {
         Ok(response)
     }
 
-    type BatchGetDocumentsStream =
-        tonic::codegen::BoxStream<BatchGetDocumentsResponse>;
-
-    async fn batch_get_documents(
+    async fn handle_batch_get_documents(
         &self,
         _: Request<BatchGetDocumentsRequest>,
-    ) -> Result<Response<Self::BatchGetDocumentsStream>, Status> {
+    ) -> Result<Response<tonic::codegen::BoxStream<BatchGetDocumentsResponse>>, Status> {
         Err(Status::unimplemented("not implemented"))
     }
 
-    async fn begin_transaction(
+    async fn handle_begin_transaction(
         &self,
         request: Request<BeginTransactionRequest>,
     ) -> Result<Response<BeginTransactionResponse>, Status> {
@@ -647,7 +657,7 @@ impl Firestore for FirestoreService {
         Ok(response)
     }
 
-    async fn commit(
+    async fn handle_commit(
         &self,
         request: Request<CommitRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
@@ -733,7 +743,10 @@ impl Firestore for FirestoreService {
         Ok(response)
     }
 
-    async fn rollback(&self, request: Request<RollbackRequest>) -> Result<Response<()>, Status> {
+    async fn handle_rollback(
+        &self,
+        request: Request<RollbackRequest>,
+    ) -> Result<Response<()>, Status> {
         let req = request.get_ref();
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
@@ -763,12 +776,10 @@ impl Firestore for FirestoreService {
         Ok(response)
     }
 
-    type RunQueryStream = tonic::codegen::BoxStream<RunQueryResponse>;
-
-    async fn run_query(
+    async fn handle_run_query(
         &self,
         request: Request<RunQueryRequest>,
-    ) -> Result<Response<Self::RunQueryStream>, Status> {
+    ) -> Result<Response<tonic::codegen::BoxStream<RunQueryResponse>>, Status> {
         let req = request.get_ref();
 
         // Extract project_id from parent: "projects/{pid}/databases/(default)/documents"
@@ -896,18 +907,17 @@ impl Firestore for FirestoreService {
             ..Default::default()
         }));
 
-        let stream: Self::RunQueryStream = Box::pin(tokio_stream::iter(responses));
+        let stream: tonic::codegen::BoxStream<RunQueryResponse> =
+            Box::pin(tokio_stream::iter(responses));
         let mut response = Response::new(stream);
         Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
         Ok(response)
     }
 
-    type ListenStream = tonic::codegen::BoxStream<ListenResponse>;
-
-    async fn listen(
+    async fn handle_listen(
         &self,
         request: Request<tonic::Streaming<ListenRequest>>,
-    ) -> Result<Response<Self::ListenStream>, Status> {
+    ) -> Result<Response<tonic::codegen::BoxStream<ListenResponse>>, Status> {
         let api_key = Self::extract_api_key(&request)?;
         let mut in_stream = request.into_inner();
 
@@ -994,12 +1004,133 @@ impl Firestore for FirestoreService {
             while (in_stream.next().await).is_some() {}
         });
 
-        let stream: Self::ListenStream = Box::pin(
+        let stream: tonic::codegen::BoxStream<ListenResponse> = Box::pin(
             tokio_stream::wrappers::ReceiverStream::new(rx),
         );
         let mut response = Response::new(stream);
         Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
         Ok(response)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Firestore trait impl — thin wrappers that add OBS-02 / OBS-03 instrumentation.
+// ---------------------------------------------------------------------------
+
+#[tonic::async_trait]
+impl Firestore for FirestoreService {
+    async fn get_document(
+        &self,
+        request: Request<GetDocumentRequest>,
+    ) -> Result<Response<Document>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_get_document(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_GET_DOCUMENT, &result, obs_start);
+        result
+    }
+
+    async fn create_document(
+        &self,
+        request: Request<CreateDocumentRequest>,
+    ) -> Result<Response<Document>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_create_document(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_CREATE_DOCUMENT, &result, obs_start);
+        result
+    }
+
+    async fn update_document(
+        &self,
+        request: Request<UpdateDocumentRequest>,
+    ) -> Result<Response<Document>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_update_document(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_UPDATE_DOCUMENT, &result, obs_start);
+        result
+    }
+
+    async fn delete_document(
+        &self,
+        request: Request<DeleteDocumentRequest>,
+    ) -> Result<Response<()>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_delete_document(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_DELETE_DOCUMENT, &result, obs_start);
+        result
+    }
+
+    type BatchGetDocumentsStream = tonic::codegen::BoxStream<BatchGetDocumentsResponse>;
+
+    async fn batch_get_documents(
+        &self,
+        request: Request<BatchGetDocumentsRequest>,
+    ) -> Result<Response<Self::BatchGetDocumentsStream>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_batch_get_documents(request).await;
+        obs_helpers::record_grpc_call(
+            obs_helpers::METHOD_BATCH_GET_DOCUMENTS,
+            &result,
+            obs_start,
+        );
+        result
+    }
+
+    async fn begin_transaction(
+        &self,
+        request: Request<BeginTransactionRequest>,
+    ) -> Result<Response<BeginTransactionResponse>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_begin_transaction(request).await;
+        obs_helpers::record_grpc_call(
+            obs_helpers::METHOD_BEGIN_TRANSACTION,
+            &result,
+            obs_start,
+        );
+        result
+    }
+
+    async fn commit(
+        &self,
+        request: Request<CommitRequest>,
+    ) -> Result<Response<CommitResponse>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_commit(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_COMMIT, &result, obs_start);
+        result
+    }
+
+    async fn rollback(
+        &self,
+        request: Request<RollbackRequest>,
+    ) -> Result<Response<()>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_rollback(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_ROLLBACK, &result, obs_start);
+        result
+    }
+
+    type RunQueryStream = tonic::codegen::BoxStream<RunQueryResponse>;
+
+    async fn run_query(
+        &self,
+        request: Request<RunQueryRequest>,
+    ) -> Result<Response<Self::RunQueryStream>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_run_query(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_RUN_QUERY, &result, obs_start);
+        result
+    }
+
+    type ListenStream = tonic::codegen::BoxStream<ListenResponse>;
+
+    async fn listen(
+        &self,
+        request: Request<tonic::Streaming<ListenRequest>>,
+    ) -> Result<Response<Self::ListenStream>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_listen(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_LISTEN, &result, obs_start);
+        result
     }
 }
 

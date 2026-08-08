@@ -30,6 +30,9 @@ pub struct OperatorState {
     /// at project provisioning time so each new project starts at the right
     /// token count.
     pub rate_limit_capacity: f64,
+    /// Prometheus metrics handle for rendering the `/metrics` scrape response.
+    /// Installed once per process via `observability::get_or_install_prometheus_handle()`.
+    pub prometheus_handle: metrics_exporter_prometheus::PrometheusHandle,
 }
 
 /// State for session-auth user-admin routes.

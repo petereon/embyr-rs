@@ -5,6 +5,7 @@ use axum::{
 use std::sync::Arc;
 
 use embyr_core::admin::email::IEmailSender;
+use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::adapters::{
     aws_secret_fetcher::AwsSecretFetcher,
@@ -25,6 +26,7 @@ use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
 use super::handlers::get_project::get_project;
 use super::handlers::metrics::get_project_metrics;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
+use super::handlers::prometheus_metrics::get_prometheus_metrics;
 use super::handlers::provision::provision;
 use super::handlers::query_logs::list_query_logs;
 use super::handlers::service_accounts::{
@@ -38,7 +40,7 @@ use super::state::{OperatorState, UserAdminState};
 /// Build the admin router with all four sub-routers merged under /admin/v1.
 ///
 /// Sub-router breakdown (ADR-009, AA-01):
-///   - `operator_router`:   Bearer EMBYR_ADMIN_KEY; 4 mutating operator routes.
+///   - `operator_router`:   Bearer EMBYR_ADMIN_KEY; operator routes + GET /metrics.
 ///   - `dual_auth_router`:  GET /projects/:id; session cookie OR operator Bearer (step 02-02).
 ///   - `public_router`:     No auth; signin/signout placeholders replaced in step 01-04.
 ///   - `session_router`:    Session cookie / admin_api_key Bearer; populated in steps 01-04 through 06-03.
@@ -51,6 +53,7 @@ pub fn build_admin_router(
     aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
     rate_limit_capacity: f64,
+    prometheus_handle: PrometheusHandle,
 ) -> Router {
     let operator_state = OperatorState {
         system_db: system_db.clone(),
@@ -59,6 +62,7 @@ pub fn build_admin_router(
         aws_secret_fetcher,
         gcp_secret_fetcher,
         rate_limit_capacity,
+        prometheus_handle,
     };
     let user_state = UserAdminState {
         system_db,
@@ -68,7 +72,8 @@ pub fn build_admin_router(
         admin_key_env: admin_key,
     };
 
-    // Operator sub-router: 4 mutating routes guarded by operator Bearer middleware.
+    // Operator sub-router: mutating operator routes + GET /metrics, all guarded by
+    // operator Bearer middleware (ADR-016 D-OBS-4).
     let operator_router = Router::new()
         .route("/admin/v1/projects", post(provision))
         .route("/admin/v1/projects/:project_id", delete(delete_project))
@@ -80,6 +85,7 @@ pub fn build_admin_router(
             "/admin/v1/projects/:project_id/activate",
             post(activate_project),
         )
+        .route("/metrics", get(get_prometheus_metrics))
         .route_layer(axum::middleware::from_fn_with_state(
             operator_state.clone(),
             operator_auth_middleware,
@@ -172,6 +178,9 @@ pub fn build_admin_router(
 // Backward-compatible wrappers (called by lib.rs test server constructors).
 // Use NoopEmailSender and a zeroed encryption key — test servers do not exercise
 // UserAdminState routes at this stage.
+//
+// Each wrapper calls `get_or_install_prometheus_handle()` internally so no
+// call-site changes are required (ADR-016).
 // ---------------------------------------------------------------------------
 
 pub fn build(
@@ -208,6 +217,7 @@ pub fn build_with_secret_fetchers(
     gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
 ) -> Router {
     use crate::adapters::email::NoopEmailSender;
+    let prometheus_handle = crate::observability::get_or_install_prometheus_handle();
     build_admin_router(
         system_db,
         admin_key,
@@ -217,5 +227,6 @@ pub fn build_with_secret_fetchers(
         aws_secret_fetcher,
         gcp_secret_fetcher,
         1000.0,
+        prometheus_handle,
     )
 }

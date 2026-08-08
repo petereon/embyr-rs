@@ -76,6 +76,10 @@ x509-parser = "0.16"
 serial_test = "3"
 proptest = "1"
 
+# Metrics
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+
 # Internal crates
 embyr-proto = { path = "crates/embyr-proto" }
 embyr-core = { path = "crates/embyr-core" }

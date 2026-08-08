@@ -4,6 +4,7 @@ pub mod admin;
 pub mod encoding;
 pub mod grpc;
 pub mod middleware;
+pub mod observability;
 pub mod realtime;
 pub mod rest;
 pub mod transactions;
@@ -83,6 +84,29 @@ struct TestComponents {
 
 /// Bind three ephemeral TCP listeners and allocate shared service components.
 async fn alloc_test_components(system_db: &Arc<SystemDb>) -> TestComponents {
+    // Install Prometheus recorder before any listener opens (AC-OBS-01-05).
+    // OnceLock ensures install_recorder() is called at most once across all
+    // test server constructors that share the same process.
+    observability::get_or_install_prometheus_handle();
+
+    // OBS-05: spawn pool gauge background task (15-second interval).
+    // Runs for the duration of the test process; no shutdown needed since
+    // gauge values are informational and the background task is fire-and-forget.
+    {
+        let pool_for_metrics = system_db.pool().clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                metrics::gauge!("embyr_pg_pool_size", "pool" => "system")
+                    .set(pool_for_metrics.size() as f64);
+                metrics::gauge!("embyr_pg_pool_idle", "pool" => "system")
+                    .set(pool_for_metrics.num_idle() as f64);
+            }
+        });
+    }
+
     let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind gRPC ephemeral port");

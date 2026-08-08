@@ -7,6 +7,7 @@ pub mod members;
 pub mod metrics;
 pub mod oidc_providers;
 pub mod projects;
+pub mod prometheus_metrics;
 pub mod provision;
 pub mod query_logs;
 pub mod sdk_keys;

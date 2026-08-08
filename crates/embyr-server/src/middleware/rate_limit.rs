@@ -125,7 +125,25 @@ impl RateLimiter {
     /// When a `pg_pool` is configured the check is attempted against Postgres
     /// first.  On timeout the call falls through to the in-process bucket so
     /// gRPC latency is bounded by `RATE_LIMIT_PG_TIMEOUT_MS`.
+    ///
+    /// Increments `embyr_rate_limit_requests_total{project_id, outcome}` on
+    /// every return (OBS-04).  The pg-timeout counter is incremented alongside
+    /// the existing `tracing::warn!` inside `check_inner`.
     pub async fn check(&self, project_id: &str) -> Result<RateLimitInfo, RateLimitInfo> {
+        let result = self.check_inner(project_id).await;
+        let outcome = if result.is_ok() { "allowed" } else { "rejected" };
+        metrics::counter!(
+            "embyr_rate_limit_requests_total",
+            "project_id" => project_id.to_owned(),
+            "outcome" => outcome
+        )
+        .increment(1);
+        result
+    }
+
+    /// Inner implementation of `check` — extracted so the metric wrapper has a
+    /// single call site.
+    async fn check_inner(&self, project_id: &str) -> Result<RateLimitInfo, RateLimitInfo> {
         if !self.enabled {
             return Ok(RateLimitInfo {
                 remaining: self.capacity,
@@ -148,6 +166,8 @@ impl RateLimiter {
                         "rate_limit_pg_timeout: Postgres check exceeded {}ms, falling back to in-process bucket",
                         RATE_LIMIT_PG_TIMEOUT_MS,
                     );
+                    // OBS-04: pg-timeout counter alongside the warn! log (ADR-016).
+                    metrics::counter!("embyr_rate_limit_pg_timeout_total").increment(1);
                     // Fall through to in-process
                 }
             }

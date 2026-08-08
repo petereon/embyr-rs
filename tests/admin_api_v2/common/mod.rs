@@ -356,6 +356,7 @@ impl AdminTestContext {
         .await
         .expect("insert other account project");
 
+        let prometheus_handle = embyr_server::observability::get_or_install_prometheus_handle();
         let router = build_admin_router(
             system_db,
             "test-admin-key-from-env".to_string(),
@@ -365,6 +366,7 @@ impl AdminTestContext {
             None,
             None,
             1000.0,
+            prometheus_handle,
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
