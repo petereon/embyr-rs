@@ -321,6 +321,49 @@ impl FirestoreService {
         }
     }
 
+    /// Build a `RESOURCE_EXHAUSTED` `Status` with rate-limit trailing metadata.
+    ///
+    /// Called when `RateLimiter::check()` returns `Err(info)`.  Attaches
+    /// `x-ratelimit-*` headers plus `retry-after-ms` so clients can back off.
+    fn rate_limit_rejection(info: &embyr_core::rate_limit::RateLimitInfo) -> Status {
+        use tonic::metadata::{Ascii, MetadataValue};
+        let mut md = tonic::metadata::MetadataMap::new();
+        Self::attach_rate_limit_headers(&mut md, info);
+        if let Ok(v) = info.reset_ms.to_string().parse::<MetadataValue<Ascii>>() {
+            let _ = md.insert("retry-after-ms", v);
+        }
+        Status::with_metadata(
+            tonic::Code::ResourceExhausted,
+            "rate limit exceeded",
+            md,
+        )
+    }
+
+    /// Attach `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset`
+    /// headers to the given metadata map.
+    ///
+    /// Called on both allowed and rejected responses.  Header values are ASCII
+    /// integers (floored for `remaining`); a parsing failure silently skips that
+    /// header so it never causes a panic on the hot path.
+    fn attach_rate_limit_headers(
+        md: &mut tonic::metadata::MetadataMap,
+        info: &embyr_core::rate_limit::RateLimitInfo,
+    ) {
+        use tonic::metadata::{Ascii, MetadataValue};
+        if let Ok(v) = info.limit.to_string().parse::<MetadataValue<Ascii>>() {
+            let _ = md.insert("x-ratelimit-limit", v);
+        }
+        if let Ok(v) = (info.remaining.floor() as i64)
+            .to_string()
+            .parse::<MetadataValue<Ascii>>()
+        {
+            let _ = md.insert("x-ratelimit-remaining", v);
+        }
+        if let Ok(v) = info.reset_ms.to_string().parse::<MetadataValue<Ascii>>() {
+            let _ = md.insert("x-ratelimit-reset", v);
+        }
+    }
+
     /// Return `true` if the query requires a composite index.
     ///
     /// A composite index is required when there is at least one field filter
@@ -380,12 +423,14 @@ impl Firestore for FirestoreService {
         let project_id = Self::extract_project_id(&name)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        let rate_info = match self.rate_limiter.check(&project_id).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status, _dsn) = self.authenticate(&project_id, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         // Record read operation — best-effort, fire-and-forget.
@@ -399,7 +444,11 @@ impl Firestore for FirestoreService {
 
         match doc_opt {
             None => Err(Status::not_found(format!("{name} not found"))),
-            Some(doc) => Ok(Response::new(document_to_proto(doc))),
+            Some(doc) => {
+                let mut response = Response::new(document_to_proto(doc));
+                Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+                Ok(response)
+            }
         }
     }
 
@@ -413,12 +462,14 @@ impl Firestore for FirestoreService {
         let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id_str).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         let document_id = if req.document_id.is_empty() {
@@ -454,12 +505,14 @@ impl Firestore for FirestoreService {
         let create_time = write_result.create_time.unwrap_or(write_result.update_time);
         let update_time = write_result.update_time;
 
-        Ok(Response::new(Self::build_document_response(
+        let mut response = Response::new(Self::build_document_response(
             &path,
             &fields,
             create_time,
             update_time,
-        )))
+        ));
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 
     async fn update_document(
@@ -477,12 +530,14 @@ impl Firestore for FirestoreService {
         let project_id_str = path.project_id.as_str().to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id_str).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         let fields = proto_fields_to_domain(&doc.fields)
@@ -499,12 +554,14 @@ impl Firestore for FirestoreService {
         // For updates, create_time not returned by the write op; use update_time as fallback.
         let create_time = write_result.create_time.unwrap_or(update_time);
 
-        Ok(Response::new(Self::build_document_response(
+        let mut response = Response::new(Self::build_document_response(
             &path,
             &fields,
             create_time,
             update_time,
-        )))
+        ));
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 
     async fn delete_document(
@@ -517,12 +574,14 @@ impl Firestore for FirestoreService {
         let project_id_str = path.project_id.as_str().to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id_str).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         let precondition = Self::convert_precondition(req.current_document.clone());
@@ -532,7 +591,9 @@ impl Firestore for FirestoreService {
             .await
             .map_err(core_error_to_status)?;
 
-        Ok(Response::new(()))
+        let mut response = Response::new(());
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 
     type BatchGetDocumentsStream =
@@ -553,12 +614,14 @@ impl Firestore for FirestoreService {
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id_str).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
@@ -576,9 +639,11 @@ impl Firestore for FirestoreService {
             .await
             .map_err(core_error_to_status)?;
 
-        Ok(Response::new(BeginTransactionResponse {
+        let mut response = Response::new(BeginTransactionResponse {
             transaction: txn_id.0,
-        }))
+        });
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 
     async fn commit(
@@ -589,12 +654,14 @@ impl Firestore for FirestoreService {
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id_str).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
@@ -654,13 +721,15 @@ impl Firestore for FirestoreService {
             })
             .collect();
 
-        Ok(Response::new(CommitResponse {
+        let mut response = Response::new(CommitResponse {
             write_results: proto_results,
             commit_time: Some(Timestamp {
                 seconds: now.timestamp(),
                 nanos: now.timestamp_subsec_nanos() as i32,
             }),
-        }))
+        });
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 
     async fn rollback(&self, request: Request<RollbackRequest>) -> Result<Response<()>, Status> {
@@ -668,12 +737,14 @@ impl Firestore for FirestoreService {
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id_str).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
@@ -686,7 +757,9 @@ impl Firestore for FirestoreService {
             .await
             .map_err(core_error_to_status)?;
 
-        Ok(Response::new(()))
+        let mut response = Response::new(());
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 
     type RunQueryStream = tonic::codegen::BoxStream<RunQueryResponse>;
@@ -701,12 +774,14 @@ impl Firestore for FirestoreService {
         let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id_str).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         // Extract the structured query from the request
@@ -820,7 +895,10 @@ impl Firestore for FirestoreService {
             ..Default::default()
         }));
 
-        Ok(Response::new(Box::pin(tokio_stream::iter(responses))))
+        let stream: Self::RunQueryStream = Box::pin(tokio_stream::iter(responses));
+        let mut response = Response::new(stream);
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 
     type ListenStream = tonic::codegen::BoxStream<ListenResponse>;
@@ -840,12 +918,15 @@ impl Firestore for FirestoreService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let project_id = extract_project_id_from_listen_request(&first_msg)?;
+
+        let rate_info = match self.rate_limiter.check(&project_id).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
         let (adapter, status, dsn) = self.authenticate(&project_id, &api_key).await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
-        }
-        if self.rate_limiter.check(&project_id).await.is_err() {
-            return Err(Status::resource_exhausted("rate limit exceeded"));
         }
 
         // Ensure a PostgresNotifyListener is running for this project.
@@ -912,9 +993,12 @@ impl Firestore for FirestoreService {
             while (in_stream.next().await).is_some() {}
         });
 
-        Ok(Response::new(Box::pin(
+        let stream: Self::ListenStream = Box::pin(
             tokio_stream::wrappers::ReceiverStream::new(rx),
-        )))
+        );
+        let mut response = Response::new(stream);
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 }
 
