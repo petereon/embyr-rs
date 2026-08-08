@@ -72,7 +72,7 @@ pub struct RateLimiter {
     buckets: Mutex<HashMap<String, TokenBucket>>,
     capacity: f64,
     refill_rate: f64,
-    pub enabled: bool,
+    enabled: bool,
     pg_pool: Option<sqlx::PgPool>,
 }
 
@@ -186,7 +186,8 @@ impl RateLimiter {
         .bind(project_id)
         .fetch_optional(pool)
         .await
-        .unwrap_or(None);
+        .ok()
+        .flatten();
 
         match allowed {
             Some(remaining) => {

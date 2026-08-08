@@ -70,7 +70,8 @@ pub struct FirestoreService {
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     /// GCP Secret Manager fetcher — Some for servers configured with gcp_secret support.
     pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
-    /// Per-project token bucket rate limiter. Applied after authentication.
+    /// Per-project token bucket rate limiter. Applied before authentication to skip
+    /// Argon2id on requests that would be rate-limited anyway.
     pub rate_limiter: Arc<RateLimiter>,
 }
 
