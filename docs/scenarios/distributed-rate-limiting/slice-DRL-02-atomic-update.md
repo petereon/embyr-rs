@@ -41,7 +41,7 @@ Confirms if succeeds: The distributed enforcement path satisfies the cluster-wid
   to the `match` pattern (header attachment happens in DRL-04; for now, discard `RateLimitInfo` but match both arms):
   ```rust
   match self.rate_limiter.check(&project_id).await {
-      Ok(_info) => { /* TODO DRL-04: attach headers */ }
+      Ok(_info) => { /* attach headers — IMPLEMENTED in DRL-04 */ }
       Err(_info) => return rate_limited_response(),
   }
   ```
@@ -51,7 +51,7 @@ Confirms if succeeds: The distributed enforcement path satisfies the cluster-wid
 - Response headers (DRL-04 — `_info` is intentionally discarded in this slice)
 - 20ms fallback timeout (DRL-03)
 - Provisioning rate_buckets row INSERT (DRL-05)
-- `reset_ms` exact computation (DESIGN wave decision — the field must exist but computation can be a placeholder for now)
+- `reset_ms` exact computation (IMPLEMENTED — see `docs/architecture/distributed-rate-limiting/architecture-decisions.md` for the epoch-ms formula)
 
 ## Acceptance Criteria
 

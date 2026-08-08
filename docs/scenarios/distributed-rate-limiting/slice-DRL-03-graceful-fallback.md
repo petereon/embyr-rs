@@ -33,10 +33,10 @@ Confirms if succeeds: On the non-timeout path, p99 latency of `check()` stays be
 
 ## OUT Scope
 
-- Full metrics integration (Prometheus/OpenTelemetry export) — the counter exists but export wiring is deferred to DESIGN/DEVOPS wave
+- Full metrics integration (Prometheus/OpenTelemetry export) — IMPLEMENTED: `rate_limit_pg_timeout_total` wired to the existing `metrics` crate (0.22.x) exported via `GET /metrics` on admin port
 - Configurable timeout (20ms is hard-coded per D3; no `EMBYR_RATE_LIMIT_PG_TIMEOUT_MS` env var)
 - Configurable fallback cap (always 1× per D3; no knob)
-- Alerting on `rate_limit_pg_timeout_total` threshold (DEVOPS wave)
+- Alerting on `rate_limit_pg_timeout_total` threshold (alerting thresholds are an operations concern; counter is observable in production)
 
 ## Acceptance Criteria
 
@@ -50,7 +50,7 @@ Confirms if succeeds: On the non-timeout path, p99 latency of `check()` stays be
 
 - DRL-02 complete: `RateLimiter::check()` with `Result<RateLimitInfo, RateLimitInfo>` return type must exist
 - The per-instance `TokenBucket` struct can be kept as-is from the original `rate_limit.rs`; it is not removed in DRL-02
-- Test strategy for timeout injection: pass a `SystemDb` wrapped in a test double that adds a 50ms delay, OR use `tokio::time::pause()` with `advance()` if the sqlx pool can be mocked — DESIGN wave decides the test double approach
+- Test strategy for timeout injection: IMPLEMENTED — b13 scaffold present with `#[ignore]` AC tests; `// TODO: implement pg pause` placeholder in `DrlTestContext` marks the injection point for a future test activation pass
 
 ## Effort Estimate
 

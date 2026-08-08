@@ -33,12 +33,12 @@ Confirms if succeeds: A single `attach_rate_limit_headers(metadata_map, &info)` 
       Ok(info) => {
           // attach headers to response later in handler body (before return)
           // or use response extension / wrapper
-          let _ = info; // hold until response is built — DESIGN wave decides the exact attachment point
+          attach_rate_limit_headers(response.metadata_mut(), &info); // IMPLEMENTED — tonic 0.12 inline attachment
       }
       Err(info) => return Err(rate_limited_response(&info)),
   }
   ```
-  Note: the exact mechanism for attaching headers to the response (tonic `Response::metadata_mut()` vs. interceptor vs. wrapper) is a DESIGN wave decision; the requirement is that all 9 methods attach the headers.
+  IMPLEMENTED: inline attachment at each call site via `attach_rate_limit_headers()` and `rate_limit_rejection()`. tonic 0.12 `Response<T>::metadata_mut()` for unary handlers; `Status::metadata_mut()` for rejections. See ADR-015 for streaming handler asymmetry.
 - New acceptance test `us_drl_02_rate_limit_headers.rs`:
   - `GetDocument` response includes `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset`
   - Rate-limited `GetDocument` response includes `retry-after-ms`
@@ -63,7 +63,7 @@ Confirms if succeeds: A single `attach_rate_limit_headers(metadata_map, &info)` 
 
 - DRL-02: `RateLimitInfo` type exists with `remaining`, `limit`, `reset_ms` fields
 - DRL-03: `check()` returns `RateLimitInfo` on the fallback path too — headers must be populated from the fallback path's `TokenBucket` values
-- tonic API for trailing metadata must be confirmed in DESIGN wave (the pattern differs between unary and streaming handlers)
+- tonic 0.12 metadata API CONFIRMED — `Response<T>::metadata_mut()` for unary trailing metadata; `Response<BoxStream>::metadata_mut()` for streaming initial metadata; `Status::metadata_mut()` for error frames. Documented in ADR-015.
 
 ## Effort Estimate
 
