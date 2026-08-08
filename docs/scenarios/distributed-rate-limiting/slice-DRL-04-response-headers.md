@@ -10,7 +10,7 @@
 
 ## Goal
 
-Attach `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` to all gRPC response trailing metadata at all 9 handler call sites. Add `retry-after-ms` to RESOURCE_EXHAUSTED responses only. Replace the `TODO DRL-04` placeholders left in DRL-02.
+Attach `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-reset` to all gRPC response trailing metadata at all 9 handler call sites. Add `retry-after-ms` to RESOURCE_EXHAUSTED responses only. Replaced the placeholder stubs left in DRL-02 with inline header attachment via `attach_rate_limit_headers()`. IMPLEMENTED.
 
 ## Learning Hypothesis
 
