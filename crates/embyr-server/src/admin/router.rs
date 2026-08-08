@@ -50,6 +50,7 @@ pub fn build_admin_router(
     email_sender: Arc<dyn IEmailSender + Send + Sync>,
     aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+    rate_limit_capacity: f64,
 ) -> Router {
     let operator_state = OperatorState {
         system_db: system_db.clone(),
@@ -57,6 +58,7 @@ pub fn build_admin_router(
         credential_cache: credential_cache.clone(),
         aws_secret_fetcher,
         gcp_secret_fetcher,
+        rate_limit_capacity,
     };
     let user_state = UserAdminState {
         system_db,
@@ -214,5 +216,6 @@ pub fn build_with_secret_fetchers(
         Arc::new(NoopEmailSender),
         aws_secret_fetcher,
         gcp_secret_fetcher,
+        1000.0,
     )
 }

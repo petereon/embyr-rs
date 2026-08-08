@@ -81,6 +81,30 @@ async fn probe_customer_db(dsn: &str) -> ApiResult<sqlx::PgPool> {
     Ok(customer_pool)
 }
 
+/// Insert a `rate_buckets` row within the supplied transaction.
+///
+/// Called after the `projects` INSERT in every backend mode so the two writes
+/// are atomic.  The initial token count equals the configured capacity.
+async fn insert_rate_bucket_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    project_id: &str,
+    capacity: f64,
+) -> ApiResult<()> {
+    sqlx::query(
+        "INSERT INTO rate_buckets (project_id, tokens, last_refill) \
+         VALUES ($1, $2, now())",
+    )
+    .bind(project_id)
+    .bind(capacity)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| {
+        tracing::error!("provision: rate_buckets insert: {e}");
+        err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+    })?;
+    Ok(())
+}
+
 pub async fn provision(
     State(state): State<OperatorState>,
     Json(req): Json<ProvisionRequest>,
@@ -116,6 +140,8 @@ pub async fn provision(
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    let rate_limit_capacity = state.rate_limit_capacity;
+
     if req.backend_mode == "aws_secret" {
         // AWS Secrets Manager mode: fetch DSN from ARN, probe customer DB,
         // apply migrations, store only the ARN (never the DSN).
@@ -144,7 +170,12 @@ pub async fn provision(
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        // Store ARN only — ecies_encrypted_dsn stays NULL.
+        // Wrap projects INSERT + rate_buckets INSERT in a transaction.
+        let mut tx = state.system_db.pool().begin().await.map_err(|e| {
+            tracing::error!("provision: begin transaction: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        })?;
+
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, backend_secret_arn) \
@@ -153,9 +184,16 @@ pub async fn provision(
         .bind(&req.project_id)
         .bind(&hash)
         .bind(arn)
-        .execute(state.system_db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        insert_rate_bucket_in_tx(&mut tx, &req.project_id, rate_limit_capacity).await?;
+
+        tx.commit().await.map_err(|e| {
+            tracing::error!("provision: commit: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        })?;
     } else if req.backend_mode == "gcp_secret" {
         // GCP Secret Manager mode: fetch DSN from resource_name via REST API,
         // probe customer DB, apply migrations, store only the resource_name (never the DSN).
@@ -184,7 +222,12 @@ pub async fn provision(
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        // Store resource_name only — ecies_encrypted_dsn stays NULL.
+        // Wrap projects INSERT + rate_buckets INSERT in a transaction.
+        let mut tx = state.system_db.pool().begin().await.map_err(|e| {
+            tracing::error!("provision: begin transaction: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        })?;
+
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, backend_secret_gcp) \
@@ -193,9 +236,16 @@ pub async fn provision(
         .bind(&req.project_id)
         .bind(&hash)
         .bind(resource_name)
-        .execute(state.system_db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        insert_rate_bucket_in_tx(&mut tx, &req.project_id, rate_limit_capacity).await?;
+
+        tx.commit().await.map_err(|e| {
+            tracing::error!("provision: commit: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        })?;
     } else if req.backend_mode == "agent" {
         // Agent-mode: store endpoint + mTLS bundle (ECIES-encrypted); DSN must be NULL.
         let endpoint = req
@@ -231,7 +281,12 @@ pub async fn provision(
         let encrypted_bundle = ecies::encrypt(&pubkey, tls_bundle.as_bytes())
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-        // backend_pg_creds_enc stays NULL for agent-mode.
+        // Wrap projects INSERT + rate_buckets INSERT in a transaction.
+        let mut tx = state.system_db.pool().begin().await.map_err(|e| {
+            tracing::error!("provision: begin transaction: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        })?;
+
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, \
@@ -242,9 +297,16 @@ pub async fn provision(
         .bind(&hash)
         .bind(endpoint)
         .bind(&encrypted_bundle)
-        .execute(state.system_db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        insert_rate_bucket_in_tx(&mut tx, &req.project_id, rate_limit_capacity).await?;
+
+        tx.commit().await.map_err(|e| {
+            tracing::error!("provision: commit: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        })?;
     } else {
         // Direct-PG mode: existing behavior.
         let dsn = req
@@ -260,6 +322,12 @@ pub async fn provision(
         let encrypted_dsn = ecies::encrypt(&pubkey, dsn.as_bytes())
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+        // Wrap projects INSERT + rate_buckets INSERT in a transaction.
+        let mut tx = state.system_db.pool().begin().await.map_err(|e| {
+            tracing::error!("provision: begin transaction: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        })?;
+
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
@@ -269,9 +337,16 @@ pub async fn provision(
         .bind(&req.backend_mode)
         .bind(&hash)
         .bind(&encrypted_dsn)
-        .execute(state.system_db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        insert_rate_bucket_in_tx(&mut tx, &req.project_id, rate_limit_capacity).await?;
+
+        tx.commit().await.map_err(|e| {
+            tracing::error!("provision: commit: {e}");
+            err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+        })?;
 
         sqlx::migrate!("../../migrations/customer")
             .run(&customer_pool)

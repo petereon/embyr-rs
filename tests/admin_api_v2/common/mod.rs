@@ -364,6 +364,7 @@ impl AdminTestContext {
             email_sender,
             None,
             None,
+            1000.0,
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -26,6 +26,10 @@ pub struct OperatorState {
     pub credential_cache: Arc<CredentialCache>,
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+    /// Configured rate-limit capacity (tokens/s).  Written into `rate_buckets`
+    /// at project provisioning time so each new project starts at the right
+    /// token count.
+    pub rate_limit_capacity: f64,
 }
 
 /// State for session-auth user-admin routes.
