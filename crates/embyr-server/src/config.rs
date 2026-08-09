@@ -28,6 +28,11 @@
 //! one of {`EMBYR_ADMIN_KEY`, `EMBYR_ADMIN_KEY_AWS_SECRET_ARN`} must resolve
 //! to a value — today's missing-var validation still applies when neither is
 //! set.
+//!
+//! `EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN` (optional) sources `encryption_key`
+//! from AWS Secrets Manager the same way. The fetched value is validated via
+//! the identical [`ConfigError::InvalidEncryptionKey`] path as the plain
+//! `EMBYR_ENCRYPTION_KEY` case.
 
 use std::fmt;
 
@@ -38,6 +43,11 @@ use crate::adapters::aws_secret_fetcher::AwsSecretFetcher;
 /// entirely (D-SM-4: startup-only, no TTL benefit) — but the fetcher's
 /// constructor requires a value.
 const ADMIN_KEY_AWS_FETCHER_TTL_SECS: u64 = 300;
+
+/// Cache TTL passed to `AwsSecretFetcher::new` when resolving `encryption_key`
+/// from AWS Secrets Manager. Same rationale as [`ADMIN_KEY_AWS_FETCHER_TTL_SECS`]
+/// — `get_raw_secret` bypasses the cache entirely.
+const ENCRYPTION_KEY_AWS_FETCHER_TTL_SECS: u64 = 300;
 
 /// Full configuration for embyr-server loaded from environment variables.
 #[derive(Debug)]
@@ -65,8 +75,11 @@ pub struct ServerConfig {
 pub enum ConfigError {
     /// One or more required environment variables are absent or empty.
     MissingVars(Vec<String>),
-    /// `EMBYR_ENCRYPTION_KEY` is present but not a valid 64-hex-char string.
-    InvalidEncryptionKey { reason: String },
+    /// The resolved encryption-key variable (`EMBYR_ENCRYPTION_KEY` today;
+    /// `EMBYR_ENCRYPTION_KEY_PREVIOUS` in a later step) is present but not a
+    /// valid 64-hex-char string. `var` names which variable failed so the
+    /// same validation function serves both.
+    InvalidEncryptionKey { var: String, reason: String },
     /// A port variable is present but cannot be parsed as a `u16`.
     InvalidPort { var: String, value: String },
     /// `EMBYR_RATE_LIMIT_RPS` is present but not a finite positive number.
@@ -93,8 +106,8 @@ impl fmt::Display for ConfigError {
                     .collect();
                 write!(f, "{}", lines.join("\n"))
             }
-            ConfigError::InvalidEncryptionKey { reason } => {
-                write!(f, "invalid EMBYR_ENCRYPTION_KEY: {reason}")
+            ConfigError::InvalidEncryptionKey { var, reason } => {
+                write!(f, "invalid {var}: {reason}")
             }
             ConfigError::InvalidPort { var, value } => {
                 write!(
@@ -140,27 +153,14 @@ impl ServerConfig {
 
         let db_url_opt = collect_required("DATABASE_URL", &mut missing);
         let admin_key_opt = resolve_admin_key(&mut missing).await?;
-        let enc_hex_opt = collect_required("EMBYR_ENCRYPTION_KEY", &mut missing);
+        let enc_hex_opt = resolve_encryption_key_hex(&mut missing).await?;
 
         if !missing.is_empty() {
             return Err(ConfigError::MissingVars(missing));
         }
 
-        // EMBYR_ENCRYPTION_KEY: must be exactly 64 hex chars → 32 bytes.
-        let enc_hex = enc_hex_opt.unwrap();
-        if enc_hex.len() != 64 {
-            return Err(ConfigError::InvalidEncryptionKey {
-                reason: format!(
-                    "expected 64 hex characters (32 bytes), got {} characters",
-                    enc_hex.len()
-                ),
-            });
-        }
-        let enc_bytes = hex::decode(&enc_hex).map_err(|e| ConfigError::InvalidEncryptionKey {
-            reason: format!("not valid hex: {e}"),
-        })?;
-        let mut encryption_key = [0u8; 32];
-        encryption_key.copy_from_slice(&enc_bytes);
+        let encryption_key =
+            validate_encryption_key_hex("EMBYR_ENCRYPTION_KEY", &enc_hex_opt.unwrap())?;
 
         // Optional vars with defaults.
         let rate_limit_rps = parse_rate_limit_rps()?;
@@ -227,6 +227,80 @@ async fn resolve_admin_key(missing: &mut Vec<String>) -> Result<Option<String>, 
             Ok(None)
         }
     }
+}
+
+/// Resolve the raw hex string for `encryption_key` from plain
+/// `EMBYR_ENCRYPTION_KEY` when present; otherwise, if
+/// `EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN` is set, fetch the raw secret value
+/// from AWS Secrets Manager. When neither is set, pushes `EMBYR_ENCRYPTION_KEY`
+/// onto `missing` — preserving today's missing-var validation byte-for-byte.
+/// When BOTH are set, returns `AmbiguousSecretSource` before any I/O.
+/// Mirrors [`resolve_admin_key`]'s shape (D-SM-1: reuse the existing pattern).
+async fn resolve_encryption_key_hex(
+    missing: &mut Vec<String>,
+) -> Result<Option<String>, ConfigError> {
+    let plain = std::env::var("EMBYR_ENCRYPTION_KEY")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let aws_arn = std::env::var("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN")
+        .ok()
+        .filter(|v| !v.is_empty());
+
+    let resolved = resolve_secret_source(
+        "EMBYR_ENCRYPTION_KEY",
+        vec![
+            ("EMBYR_ENCRYPTION_KEY", plain),
+            ("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN", aws_arn),
+        ],
+    )?;
+
+    match resolved {
+        Some((source, value)) if source == "EMBYR_ENCRYPTION_KEY" => Ok(Some(value)),
+        Some((_, arn)) => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let fetcher =
+                AwsSecretFetcher::new(&aws_config, ENCRYPTION_KEY_AWS_FETCHER_TTL_SECS).await;
+            let value =
+                fetcher
+                    .get_raw_secret(&arn)
+                    .await
+                    .map_err(|e| ConfigError::SecretFetchFailed {
+                        var: "EMBYR_ENCRYPTION_KEY".to_string(),
+                        reason: e.to_string(),
+                    })?;
+            eprintln!("fetched EMBYR_ENCRYPTION_KEY from AWS Secrets Manager");
+            Ok(Some(value))
+        }
+        None => {
+            missing.push("EMBYR_ENCRYPTION_KEY".to_string());
+            Ok(None)
+        }
+    }
+}
+
+/// Validate and decode a resolved encryption-key hex string: must be exactly
+/// 64 hex chars → 32 bytes. `var` names the variable that produced `hex` (in
+/// the `ConfigError::InvalidEncryptionKey` it may return) so the identical
+/// validation logic serves any resolved-encryption-key variable — today only
+/// `EMBYR_ENCRYPTION_KEY`, trivially reusable for `EMBYR_ENCRYPTION_KEY_PREVIOUS`
+/// in a later step.
+fn validate_encryption_key_hex(var: &str, hex_str: &str) -> Result<[u8; 32], ConfigError> {
+    if hex_str.len() != 64 {
+        return Err(ConfigError::InvalidEncryptionKey {
+            var: var.to_string(),
+            reason: format!(
+                "expected 64 hex characters (32 bytes), got {} characters",
+                hex_str.len()
+            ),
+        });
+    }
+    let bytes = hex::decode(hex_str).map_err(|e| ConfigError::InvalidEncryptionKey {
+        var: var.to_string(),
+        reason: format!("not valid hex: {e}"),
+    })?;
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(key)
 }
 
 /// Resolve a single logical secret from a set of `(source_name, resolved_value)`
@@ -331,6 +405,7 @@ mod tests {
         let short = "tooshort";
         let result: Result<(), ConfigError> = if short.len() != 64 {
             Err(ConfigError::InvalidEncryptionKey {
+                var: "EMBYR_ENCRYPTION_KEY".into(),
                 reason: format!("expected 64 hex chars, got {}", short.len()),
             })
         } else {
@@ -379,6 +454,7 @@ mod tests {
     #[test]
     fn config_error_display_invalid_encryption_key() {
         let err = ConfigError::InvalidEncryptionKey {
+            var: "EMBYR_ENCRYPTION_KEY".into(),
             reason: "too short".into(),
         };
         let msg = err.to_string();
