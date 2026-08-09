@@ -2,15 +2,15 @@
   "roadmap": {
     "project_id": "production-readiness",
     "created_at": "2026-08-09T00:00:00Z",
-    "total_steps": 7
+    "total_steps": 9
   },
   "phases": [
     {
-      "phase": "01",
+      "id": "01",
       "name": "Walking Skeleton",
       "steps": [
         {
-          "step_id": "01-01",
+          "id": "01-01",
           "name": "ServerConfig::from_env() + real main.rs",
           "criteria": "server_starts_with_all_required_env_vars_set passes; server exits 1 on missing DATABASE_URL/EMBYR_ADMIN_KEY/EMBYR_ENCRYPTION_KEY",
           "test_file": "tests/production_readiness/acceptance/pr01_config_from_env.rs",
@@ -27,11 +27,11 @@
       ]
     },
     {
-      "phase": "02",
+      "id": "02",
       "name": "Config Error Paths",
       "steps": [
         {
-          "step_id": "02-01",
+          "id": "02-01",
           "name": "Exit 1 on missing/invalid env vars",
           "criteria": "exits_1_when_database_url_missing, exits_1_when_admin_key_missing, exits_1_when_encryption_key_missing, exits_1_when_encryption_key_not_64_hex_chars all pass",
           "test_file": "tests/production_readiness/acceptance/pr01_config_from_env.rs",
@@ -44,7 +44,7 @@
           "deps": ["01-01"]
         },
         {
-          "step_id": "02-02",
+          "id": "02-02",
           "name": "Exit 1 on DB unreachable / probe failure",
           "criteria": "exits_1_when_database_unreachable, exits_1_when_db_probe_fails_projects_table_missing pass",
           "test_file": "tests/production_readiness/acceptance/pr01_config_from_env.rs",
@@ -58,11 +58,11 @@
       ]
     },
     {
-      "phase": "03",
+      "id": "03",
       "name": "Port / startup verification",
       "steps": [
         {
-          "step_id": "03-01",
+          "id": "03-01",
           "name": "Non-default ports + healthz",
           "criteria": "non_default_ports_respected, grpc_port_env_var_respected, rest_port_env_var_respected pass",
           "test_file": "tests/production_readiness/acceptance/pr01_config_from_env.rs",
@@ -77,11 +77,11 @@
       ]
     },
     {
-      "phase": "04",
+      "id": "04",
       "name": "Graceful Shutdown",
       "steps": [
         {
-          "step_id": "04-01",
+          "id": "04-01",
           "name": "SIGTERM graceful drain",
           "criteria": "sigterm_causes_graceful_shutdown passes",
           "test_file": "tests/production_readiness/acceptance/pr04_graceful_shutdown.rs",
@@ -91,15 +91,29 @@
             "crates/embyr-server/src/main.rs"
           ],
           "deps": ["03-01"]
+        },
+        {
+          "id": "04-02",
+          "name": "In-flight request completes before shutdown",
+          "criteria": "in_flight_request_completes_before_shutdown passes: a slow gRPC request issued before SIGTERM must still receive its response after SIGTERM is sent, and the server must exit 0 only after that response is delivered",
+          "test_file": "tests/production_readiness/acceptance/pr04_graceful_shutdown.rs",
+          "scenario_name": "in_flight_request_completes_before_shutdown",
+          "implementation_notes": "Test currently has a todo!() stub. Implement: start server, open a long-lived gRPC call (e.g. Listen stream, or a handler with an injected delay reachable via existing test scaffolding), send SIGTERM while the call is in flight, assert the client still receives a valid response/frame after SIGTERM, then assert the process exits 0 within the drain timeout. Production code: verify spawn_all_servers' shutdown wiring actually waits for in-flight tonic handlers to complete (tonic's built-in graceful shutdown via axum::serve/Server::serve with a shutdown future) rather than aborting connections immediately. May require no production code changes if graceful drain already works — in that case this step is pure test authoring plus verification.",
+          "files_to_modify": [
+            "tests/production_readiness/acceptance/pr04_graceful_shutdown.rs",
+            "crates/embyr-server/src/main.rs",
+            "crates/embyr-server/src/lib.rs"
+          ],
+          "deps": ["04-01"]
         }
       ]
     },
     {
-      "phase": "05",
+      "id": "05",
       "name": "Dockerfile",
       "steps": [
         {
-          "step_id": "05-01",
+          "id": "05-01",
           "name": "Multi-stage Dockerfile",
           "criteria": "docker_build_succeeds, docker_image_runs_as_non_root, docker_image_under_100mb pass (when Docker available)",
           "test_file": "tests/production_readiness/acceptance/pr02_dockerfile.rs",
@@ -114,11 +128,11 @@
       ]
     },
     {
-      "phase": "06",
+      "id": "06",
       "name": "CI Pipeline",
       "steps": [
         {
-          "step_id": "06-01",
+          "id": "06-01",
           "name": "GitHub Actions CI",
           "criteria": "ci_yaml_has_test_job_with_postgres_service, ci_yaml_has_lint_job_with_clippy_and_deny, ci_yaml_has_docker_job_depending_on_test pass",
           "test_file": "tests/production_readiness/acceptance/pr03_ci.rs",
@@ -132,11 +146,11 @@
       ]
     },
     {
-      "phase": "07",
+      "id": "07",
       "name": "Integrity + Finalize",
       "steps": [
         {
-          "step_id": "07-01",
+          "id": "07-01",
           "name": "DES integrity verification",
           "criteria": "des-verify-integrity exits 0",
           "test_file": null,

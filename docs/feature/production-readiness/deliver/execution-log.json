@@ -13,14 +13,14 @@
       "sid": "01-01",
       "p": "RED_ACCEPTANCE",
       "s": "EXECUTED",
-      "d": "FAIL: server_starts_with_all_required_env_vars_set panics at stub main.rs (println only, never binds ports, test times out polling /healthz) — correct RED state",
+      "d": "FAIL: server_starts_with_all_required_env_vars_set panics at stub main.rs (println only, never binds ports, test times out polling /healthz) \u2014 correct RED state",
       "t": "2026-08-09T10:05:00Z"
     },
     {
       "sid": "01-01",
       "p": "RED_UNIT",
       "s": "EXECUTED",
-      "d": "FAIL: config.rs does not exist; unit tests in pr01_config_from_env.rs cannot compile — correct RED state",
+      "d": "FAIL: config.rs does not exist; unit tests in pr01_config_from_env.rs cannot compile \u2014 correct RED state",
       "t": "2026-08-09T10:06:00Z"
     },
     {
@@ -34,7 +34,7 @@
       "sid": "01-01",
       "p": "COMMIT",
       "s": "EXECUTED",
-      "d": "PASS: 6f58e89 — feat(embyr-server): production-ready main.rs, ServerConfig, Dockerfile, GitHub Actions CI",
+      "d": "PASS: 6f58e89 \u2014 feat(embyr-server): production-ready main.rs, ServerConfig, Dockerfile, GitHub Actions CI",
       "t": "2026-08-09T14:00:00Z"
     },
     {
@@ -167,7 +167,7 @@
       "sid": "04-01",
       "p": "GREEN",
       "s": "EXECUTED",
-      "d": "PASS: sigterm_causes_graceful_shutdown passes (server exits 0 after SIGTERM); sigterm_drains_within_30s passes (drain completes within timeout); in_flight_request_completes_before_shutdown remains todo!() + #[ignore] — requires tonic gRPC client, deferred",
+      "d": "PASS: sigterm_causes_graceful_shutdown passes (server exits 0 after SIGTERM); sigterm_drains_within_30s passes (drain completes within timeout); in_flight_request_completes_before_shutdown remains todo!() + #[ignore] \u2014 requires tonic gRPC client, deferred",
       "t": "2026-08-09T12:30:00Z"
     },
     {
@@ -181,7 +181,7 @@
       "sid": "05-01",
       "p": "PREPARE",
       "s": "EXECUTED",
-      "d": "PASS: designed 4-stage Dockerfile (chef→planner→builder→runtime); .dockerignore excludes target/, .git/, docs/, tests/; SQLX_OFFLINE=true for compile-time migration embedding; non-root embyr user; EXPOSE 8080 8081 9090",
+      "d": "PASS: designed 4-stage Dockerfile (chef\u2192planner\u2192builder\u2192runtime); .dockerignore excludes target/, .git/, docs/, tests/; SQLX_OFFLINE=true for compile-time migration embedding; non-root embyr user; EXPOSE 8080 8081 9090",
       "t": "2026-08-09T12:31:00Z"
     },
     {
@@ -223,7 +223,7 @@
       "sid": "06-01",
       "p": "RED_ACCEPTANCE",
       "s": "EXECUTED",
-      "d": "FAIL: ci_yaml_has_test_job_with_postgres_service — .github/workflows/ci.yml did not exist; cargo test exits non-zero — correct RED state",
+      "d": "FAIL: ci_yaml_has_test_job_with_postgres_service \u2014 .github/workflows/ci.yml did not exist; cargo test exits non-zero \u2014 correct RED state",
       "t": "2026-08-09T13:02:00Z"
     },
     {
@@ -244,14 +244,14 @@
       "sid": "06-01",
       "p": "COMMIT",
       "s": "EXECUTED",
-      "d": "PASS: 6f58e89 — feat(embyr-server): production-ready main.rs, ServerConfig, Dockerfile, GitHub Actions CI",
+      "d": "PASS: 6f58e89 \u2014 feat(embyr-server): production-ready main.rs, ServerConfig, Dockerfile, GitHub Actions CI",
       "t": "2026-08-09T14:00:00Z"
     },
     {
       "sid": "07-01",
       "p": "PREPARE",
       "s": "SKIPPED",
-      "d": "NOT_APPLICABLE: des-verify-integrity CLI not available in this environment; integrity verified manually — cargo test --test production_readiness exits 0 (walking skeleton GREEN); all 12 pr01 + 6 pr03 tests GREEN with --include-ignored",
+      "d": "NOT_APPLICABLE: des-verify-integrity CLI not available in this environment; integrity verified manually \u2014 cargo test --test production_readiness exits 0 (walking skeleton GREEN); all 12 pr01 + 6 pr03 tests GREEN with --include-ignored",
       "t": "2026-08-09T14:01:00Z"
     },
     {
@@ -281,6 +281,69 @@
       "s": "EXECUTED",
       "d": "PASS: execution-log.json added to repo as DES artifact",
       "t": "2026-08-09T14:03:00Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "Read pr04_graceful_shutdown.rs (todo! stub at line 84), common/mod.rs (ServerProcess harness), main.rs (14-step startup/shutdown), lib.rs (spawn_all_servers tokio::select! draining), grpc/handler.rs handle_listen + realtime/listen_handler.rs (Listen is an unbounded per-stream loop \u2014 only naturally slow/never-completing gRPC call reachable without production delay), admin/handlers/provision.rs (POST /admin/v1/projects provisioning), observability/DRL common test contexts for gRPC-client-against-subprocess pattern.",
+      "t": "2026-08-09T05:52:32Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "Removed todo!() from in_flight_request_completes_before_shutdown. Real E2E test: subprocess ServerProcess + real Postgres testcontainer + sibling customer DB (avoids sqlx migration-table version collision between system and customer migrators) + POST /admin/v1/projects provisioning + real tonic gRPC Listen bidi stream (unbounded per-connection loop = genuinely still-executing in-flight request, no artificial delay added to production code). Sequence: open Listen stream, sleep 500ms, sigterm(), assert process NOT yet exited (wait_for_exit(2s) == None) while stream still open, read CURRENT+NO_CHANGE handshake after SIGTERM, close stream, assert exit code Some(0). Ran against current (unmodified) main.rs/lib.rs: FAILED for genuine business-logic reason \u2014 assertion left=Some(0) right=None at line 221, proving the server exits via a fixed sleep(200ms) regardless of the still-open in-flight connection (not a compile/import/collection error).",
+      "t": "2026-08-09T05:52:40Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: acceptance test alone covers the behavior",
+      "t": "2026-08-09T05:52:43Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "Root cause confirmed: crates/embyr-server/src/lib.rs spawn_all_servers() raced grpc_fut/rest_task/admin_fut/shutdown_rx in one tokio::select!, dropping grpc_fut immediately on shutdown signal instead of draining it; main.rs then only slept a fixed 200ms before process exit regardless of open connections. Fix: spawn_all_servers now runs the gRPC server (tonic serve_with_incoming_shutdown) as its own task with its own shutdown oneshot \u2014 on the outer signal it stops accepting new connections but keeps already-open streams (e.g. an in-flight Listen subscription) running until they close naturally, then returns a JoinHandle. main.rs Step 14 now awaits that JoinHandle instead of an arbitrary sleep, so the process only exits once genuinely in-flight requests have drained. Ran full pr04_graceful_shutdown suite (3/3 pass) and pr01 walking skeleton (server_starts_with_all_required_env_vars_set, pass) \u2014 no regressions. cargo build --workspace --tests: clean (pre-existing unrelated warnings only). Applied rustfmt to the new/modified region of pr04_graceful_shutdown.rs (lib.rs/main.rs new code already fmt-clean; pre-existing unrelated drift elsewhere in the repo left untouched, out of step scope).",
+      "t": "2026-08-09T05:58:45Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "Committed d578000: feat(production-readiness): drain in-flight gRPC requests on SIGTERM - step 04-02. Files: tests/production_readiness/acceptance/pr04_graceful_shutdown.rs, crates/embyr-server/src/lib.rs, crates/embyr-server/src/main.rs. Full pr04_graceful_shutdown suite (3/3) and pr01 walking skeleton green; no test skips; no mocks inside hexagon (real subprocess/Postgres/gRPC only); test budget: 1 acceptance test for 1 behavior (AC-PR-04-02), 0 new unit tests.",
+      "t": "2026-08-09T05:59:35Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS: read pr04_graceful_shutdown.rs (todo! stub), common/mod.rs (ServerProcess harness), main.rs (14-step shutdown), lib.rs (spawn_all_servers tokio::select! draining), grpc/handler.rs handle_listen + realtime/listen_handler.rs (Listen is an unbounded per-stream loop), admin/handlers/provision.rs (project provisioning), observability/DRL common test contexts (gRPC-client-against-subprocess pattern)",
+      "t": "2026-08-09T06:00:10Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "FAIL: removed todo!() from in_flight_request_completes_before_shutdown; real E2E test (subprocess + Postgres testcontainer + sibling customer DB + admin provisioning + real tonic gRPC Listen stream, unbounded per-connection loop = genuinely in-flight, no artificial delay). Ran against unmodified main.rs/lib.rs: FAILED for genuine business-logic reason \u2014 assertion left=Some(0) right=None, proving server exits via fixed sleep(200ms) regardless of still-open in-flight connection (not a compile/import/collection error)",
+      "t": "2026-08-09T06:00:14Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS: root cause was spawn_all_servers() racing grpc_fut/rest_task/admin_fut/shutdown_rx in one tokio::select!, dropping grpc_fut immediately on shutdown instead of draining, plus main.rs sleeping a fixed 200ms regardless of open connections. Fix: gRPC server runs tonic serve_with_incoming_shutdown as its own task with its own shutdown signal; spawn_all_servers returns a JoinHandle; main.rs Step 14 awaits it instead of sleeping. Full pr04_graceful_shutdown suite (3/3) and pr01 walking skeleton pass, no regressions; cargo build --workspace --tests clean",
+      "t": "2026-08-09T06:00:26Z"
+    },
+    {
+      "sid": "04-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: committed d578000 \u2014 feat(production-readiness): drain in-flight gRPC requests on SIGTERM - step 04-02. Files: tests/production_readiness/acceptance/pr04_graceful_shutdown.rs, crates/embyr-server/src/lib.rs, crates/embyr-server/src/main.rs. Full pr04_graceful_shutdown suite (3/3) and pr01 walking skeleton green; no test skips; no mocks inside hexagon; test budget 1 acceptance test for 1 behavior, 0 new unit tests",
+      "t": "2026-08-09T06:00:33Z"
     }
   ]
 }
