@@ -33,6 +33,12 @@ impl BrowserChannelState {
     }
 }
 
+impl Default for BrowserChannelState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A single BrowserChannel session: pending events queued for back-channel delivery.
 pub struct BrowserChannelSession {
     pub sid: String,

@@ -44,6 +44,10 @@ use super::state::{OperatorState, UserAdminState};
 ///   - `dual_auth_router`:  GET /projects/:id; session cookie OR operator Bearer (step 02-02).
 ///   - `public_router`:     No auth; signin/signout placeholders replaced in step 01-04.
 ///   - `session_router`:    Session cookie / admin_api_key Bearer; populated in steps 01-04 through 06-03.
+// Composition-root wiring function — each parameter is a distinct required
+// dependency for one of the four sub-routers; splitting into a config struct
+// wouldn't reduce the actual coupling, just relocate it.
+#[allow(clippy::too_many_arguments)]
 pub fn build_admin_router(
     system_db: Arc<SystemDb>,
     admin_key: String,

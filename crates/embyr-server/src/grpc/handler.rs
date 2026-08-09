@@ -1,3 +1,9 @@
+// tonic::Status (~176 bytes: code + message + metadata map + source) is the
+// idiomatic error type for gRPC handler functions across this file — boxing
+// it at every one of these call sites would add noise without a real
+// correctness or performance benefit at this request volume.
+#![allow(clippy::result_large_err)]
+
 use std::{collections::HashMap, sync::Arc};
 
 use prost_types::Timestamp;
@@ -384,7 +390,7 @@ impl FirestoreService {
     }
 
     /// Collect all field paths referenced by a filter (recursively).
-    fn collect_filter_fields<'a>(filter: &'a QueryFilter) -> Vec<&'a str> {
+    fn collect_filter_fields(filter: &QueryFilter) -> Vec<&str> {
         match filter {
             QueryFilter::Field(ff) => vec![ff.field_path.as_str()],
             QueryFilter::Composite(sub) => {
@@ -557,7 +563,7 @@ impl FirestoreService {
         let fields = proto_fields_to_domain(&doc.fields)
             .ok_or_else(|| Status::invalid_argument("invalid field value"))?;
 
-        let precondition = Self::convert_precondition(req.current_document.clone());
+        let precondition = Self::convert_precondition(req.current_document);
 
         let write_result = adapter
             .update_document(&path, fields.clone(), precondition)
@@ -598,7 +604,7 @@ impl FirestoreService {
             return Err(Status::permission_denied("project is suspended"));
         }
 
-        let precondition = Self::convert_precondition(req.current_document.clone());
+        let precondition = Self::convert_precondition(req.current_document);
 
         adapter
             .delete_document(&path, precondition)
@@ -683,7 +689,7 @@ impl FirestoreService {
         // Translate proto writes to domain writes
         let mut domain_writes = Vec::with_capacity(req.writes.len());
         for proto_write in &req.writes {
-            let precondition = Self::convert_precondition(proto_write.current_document.clone());
+            let precondition = Self::convert_precondition(proto_write.current_document);
             match &proto_write.operation {
                 Some(embyr_proto::firestore::write::Operation::Update(doc)) => {
                     let path = Self::parse_document_path(&doc.name)?;
@@ -818,9 +824,9 @@ impl FirestoreService {
         let filter = sq_proto
             .r#where
             .as_ref()
-            .and_then(|f| translate_filter(f))
+            .and_then(translate_filter)
             .transpose()
-            .map_err(|e| Status::invalid_argument(e))?;
+            .map_err(Status::invalid_argument)?;
 
         // Translate proto order_by → domain OrderBy
         let order_by: Vec<OrderBy> = sq_proto
@@ -844,7 +850,7 @@ impl FirestoreService {
             let values: Option<Vec<FieldValue>> = c
                 .values
                 .iter()
-                .map(|v| crate::encoding::firestore_proto::proto_value_to_field_value(v))
+                .map(crate::encoding::firestore_proto::proto_value_to_field_value)
                 .collect();
             values.map(|vals| Cursor { values: vals, before: c.before })
         });
@@ -1180,10 +1186,10 @@ fn translate_filter(
             let field_path = uf
                 .operand_type
                 .as_ref()
-                .and_then(|op| match op {
+                .map(|op| match op {
                     embyr_proto::firestore::structured_query::unary_filter::OperandType::Field(
                         fr,
-                    ) => Some(fr.field_path.clone()),
+                    ) => fr.field_path.clone(),
                 })?;
             let op = match UnaryOp::try_from(uf.op).ok()? {
                 UnaryOp::IsNan => FilterOp::IsNan,

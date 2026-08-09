@@ -3,6 +3,12 @@
 //! Implements StorageAgent backed by PostgresBackendAdapter.
 //! Exposes `serve()` for in-process test starts and `run()` for the binary.
 
+// tonic::Status (~176 bytes: code + message + metadata map + source) is the
+// idiomatic error type for gRPC handler functions across this file — boxing
+// it at every one of these call sites would add noise without a real
+// correctness or performance benefit at this request volume.
+#![allow(clippy::result_large_err)]
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

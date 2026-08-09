@@ -69,7 +69,7 @@ pub async fn handle_add_target(
     let since_update_time = resume_token
         .as_deref()
         .filter(|t| !t.is_empty() && !rt::is_stale(t))
-        .and_then(|t| rt::decode_ts(t));
+        .and_then(rt::decode_ts);
 
     let domain_query = DomainQuery {
         collection_id: collection.collection_path.clone(),

@@ -159,6 +159,7 @@ pub async fn create_service_account(
 /// Runs a transaction:
 ///   1. Revoke all un-revoked admin_api_keys for this service account.
 ///   2. Delete the service account row.
+///
 /// Returns 204 on success.
 pub async fn delete_service_account(
     Path(sa_id): Path<String>,
