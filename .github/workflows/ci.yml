@@ -49,8 +49,21 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: jetli/trunk-action@v0.5.0
+        with:
+          version: "latest"
+
+      # tests/user_admin_ui's walking skeleton (admin_spa_http_probe) serves
+      # this dist/ directory via ServeDir and is NOT #[ignore] — it needs the
+      # real trunk-built SPA output to exist before cargo test runs.
+      - name: Build admin SPA (trunk)
+        run: trunk build --release
+        working-directory: crates/embyr-admin-ui
 
       - name: Run workspace tests
         run: cargo test --workspace
@@ -75,8 +88,16 @@ jobs:
       - name: Clippy — deny all warnings
         run: cargo clippy --workspace -- -D warnings
 
+      # EmbarkStudios/cargo-deny-action@v1 runs its own bundled/containerized
+      # cargo, isolated from the dtolnay/rust-toolchain step above — that
+      # bundled toolchain can't parse this workspace's Cargo.lock (v4 format).
+      # Installing cargo-deny directly reuses the already-provisioned modern
+      # toolchain instead, consistent with how clippy/tests already run.
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
       - name: cargo deny check
-        uses: EmbarkStudios/cargo-deny-action@v1
+        run: cargo deny check
 
   # ─── docker: build the container image (validates Dockerfile) ────────────────
   docker:
