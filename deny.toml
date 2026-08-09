@@ -25,6 +25,16 @@ ignore = [
     "RUSTSEC-2026-0002",
     # paste 1.x unmaintained — transitive via sqlx 0.7.x, no safe upgrade
     "RUSTSEC-2024-0436",
+    # rsa 0.9.10 Marvin Attack (timing sidechannel key recovery) — dev-only,
+    # via testcontainers' x509-parser chain (mTLS test fixtures). Never
+    # ships in the production binary; not network-observable in CI. No
+    # patched rsa release exists yet upstream.
+    "RUSTSEC-2023-0071",
+    # tokio-tar 0.3.1 PAX header tar-smuggling (CVE-2025-62518) — dev-only,
+    # via testcontainers pulling container images in tests. Never ships in
+    # the production binary. Crate is archived/unmaintained with no safe
+    # upgrade; real fix is testcontainers migrating off it upstream.
+    "RUSTSEC-2025-0111",
 ]
 
 # ---------------------------------------------------------------------------
@@ -43,6 +53,9 @@ allow = [
     "CC0-1.0",
     "Zlib",
     "MPL-2.0",
+    # webpki-roots (transitive via aws-config's TLS stack) — permissive,
+    # data-only license (bundles Mozilla's CA root list), no copyleft terms.
+    "CDLA-Permissive-2.0",
 ]
 
 [sources]
@@ -66,21 +79,36 @@ deny = [
     { name = "tokio", wrappers = [
         "embyr-server",
         "embyr-admin",
+        "embyr-admin-ui",
         "embyr-agent",
+        "embyr-pg-storage",
         "tokio-util",
         "tokio-stream",
+        "tokio-tar",
         "tonic",
         "axum",
-        "axum-core",
         "hyper",
         "hyper-util",
         "hyper-timeout",
+        "hyper-rustls",
+        "hyper-named-pipe",
+        "hyperlocal",
         "sqlx-core",
         "sqlx-macros-core",
         "h2",
         "tower",
+        "tower-http",
         "reqwest",
         "tokio-rustls",
+        "bollard",
+        "testcontainers",
+        "metrics-exporter-prometheus",
+        "aws-config",
+        "aws-smithy-async",
+        "aws-smithy-http-client",
+        "aws-smithy-runtime",
+        "aws-smithy-runtime-api",
+        "aws-smithy-types",
     ] },
 
     # gRPC framework — banned from embyr-core
@@ -88,32 +116,37 @@ deny = [
         "embyr-proto",
         "embyr-server",
         "embyr-agent",
+        "tonic-web",
     ] },
 
     # HTTP framework — banned from embyr-core
     { name = "axum", wrappers = [
         "embyr-server",
         "embyr-admin",
+        "embyr-admin-ui",
         "tonic",
     ] },
 
     # Database driver — banned from embyr-core
     { name = "sqlx", wrappers = [
         "embyr-server",
-        "embyr-admin",
         "embyr-agent",
+        "embyr-pg-storage",
     ] },
 
     # Low-level HTTP — banned from embyr-core
     { name = "hyper", wrappers = [
         "embyr-server",
-        "embyr-admin",
         "axum",
-        "axum-core",
         "hyper-util",
         "hyper-timeout",
+        "hyper-rustls",
+        "hyper-named-pipe",
+        "hyperlocal",
         "tonic",
         "reqwest",
-        "tower-http",
+        "bollard",
+        "metrics-exporter-prometheus",
+        "aws-smithy-http-client",
     ] },
 ]
