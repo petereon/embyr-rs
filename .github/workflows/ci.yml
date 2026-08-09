@@ -91,10 +91,12 @@ jobs:
       # EmbarkStudios/cargo-deny-action@v1 runs its own bundled/containerized
       # cargo, isolated from the dtolnay/rust-toolchain step above — that
       # bundled toolchain can't parse this workspace's Cargo.lock (v4 format).
-      # Installing cargo-deny directly reuses the already-provisioned modern
-      # toolchain instead, consistent with how clippy/tests already run.
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
+      # taiki-e/install-action downloads a prebuilt cargo-deny binary instead
+      # of compiling from source (`cargo install` took 2-4 min every run with
+      # no cross-run cache) — same fix as the action swap, just fast.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
 
       - name: cargo deny check
         run: cargo deny check
@@ -110,5 +112,14 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # GitHub-hosted runners are ephemeral — cargo-chef's dependency-layer
+      # caching inside the Dockerfile only helps within a single build; without
+      # an external cache backend every run rebuilds the entire dependency
+      # layer from scratch. --cache-to/--cache-from type=gha persists layers
+      # in GitHub's Actions cache across runs, so unchanged Cargo.toml/lock
+      # layers are reused instead of recompiling every dependency every time.
       - name: Build Docker image
-        run: docker build -t embyr-server:ci .
+        run: >
+          docker build . -t embyr-server:ci
+          --cache-from type=gha
+          --cache-to type=gha,mode=max
