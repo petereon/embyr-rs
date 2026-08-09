@@ -25,7 +25,8 @@ use std::time::Duration;
 
 use crate::common::{
     create_raw_secret, localstack_aws_env, make_sm_client, nonexistent_secret_arn,
-    start_localstack, start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY,
+    seed_signed_in_session, start_localstack, start_postgres_container, ServerProcess,
+    TEST_ENCRYPTION_KEY,
 };
 
 // ─── AC-SM-02-01: AWS-sourced encryption key ─────────────────────────────────
@@ -87,12 +88,77 @@ async fn server_starts_with_encryption_key_from_aws_secrets_manager() {
 ///
 /// @real-io @US-SM-02 @AC-SM-02-02 @AC-SM-02-06
 #[tokio::test]
-#[ignore]
 async fn oidc_client_secret_encryption_succeeds_with_secrets_manager_sourced_key() {
-    unimplemented!(
-        "requires session-auth seeding harness (account/user/session row) -- \
-         see doc comment for the DELIVER implementation note"
+    let (_localstack, endpoint_url) = start_localstack().await;
+    let (_pg, db_url) = start_postgres_container().await;
+
+    let sm_client = make_sm_client(&endpoint_url).await;
+    let arn = create_raw_secret(&sm_client, "sm02-oidc-encryption-key", TEST_ENCRYPTION_KEY).await;
+
+    let mut env: Vec<(&str, String)> = localstack_aws_env(&endpoint_url);
+    env.push(("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN", arn));
+    env.push(("EMBYR_ADMIN_KEY", "testkey".to_string()));
+
+    let mut server = ServerProcess::start_owned(&db_url, &env);
+
+    let healthy = server.wait_for_healthy(Duration::from_secs(30)).await;
+    assert!(
+        healthy,
+        "server must start with an AWS-sourced EMBYR_ENCRYPTION_KEY before the OIDC write path can be exercised"
     );
+
+    // Server subprocess already ran migrations at startup; connect our own
+    // pool against the same DB to seed a signed-in session and query results.
+    let system_db = embyr_server::adapters::system_db::SystemDb::new(&db_url)
+        .await
+        .expect("connect to system DB for session seeding");
+    let pool = system_db.pool();
+
+    let (_account_id, _user_id, cookie_value) =
+        seed_signed_in_session(pool, "owner@sm02-oidc-test.example").await;
+
+    let client_secret_plaintext = "okta-client-secret-9f2c";
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "http://127.0.0.1:{}/admin/v1/oidc_providers",
+            server.admin_port
+        ))
+        .header("Cookie", format!("embyr_session={cookie_value}"))
+        .json(&serde_json::json!({
+            "issuer": "https://sm02-oidc-test.okta.com",
+            "client_id": "sm02-oidc-client-id",
+            "client_secret": client_secret_plaintext,
+        }))
+        .send()
+        .await
+        .expect("POST /admin/v1/oidc_providers");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "OIDC provider creation must succeed unmodified with a secrets-manager-sourced encryption key"
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("response body JSON");
+    let provider_id = body["id"].as_str().expect("id field present").to_string();
+    let provider_uuid = uuid::Uuid::parse_str(&provider_id).expect("valid provider id UUID");
+
+    let client_secret_enc: Vec<u8> =
+        sqlx::query_scalar("SELECT client_secret_enc FROM oidc_providers WHERE id = $1")
+            .bind(provider_uuid)
+            .fetch_one(pool)
+            .await
+            .expect("fetch stored client_secret_enc");
+
+    assert_ne!(
+        client_secret_enc,
+        client_secret_plaintext.as_bytes(),
+        "stored client_secret_enc must differ from the submitted plaintext"
+    );
+
+    server.sigterm();
+    let _ = server.wait_for_exit(Duration::from_secs(15)).await;
 }
 
 // ─── AC-SM-02-03: plain env var unchanged ────────────────────────────────────
