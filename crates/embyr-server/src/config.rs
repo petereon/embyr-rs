@@ -232,9 +232,13 @@ async fn resolve_admin_key(missing: &mut Vec<String>) -> Result<Option<String>, 
 /// Resolve the raw hex string for `encryption_key` from plain
 /// `EMBYR_ENCRYPTION_KEY` when present; otherwise, if
 /// `EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN` is set, fetch the raw secret value
-/// from AWS Secrets Manager. When neither is set, pushes `EMBYR_ENCRYPTION_KEY`
+/// from AWS Secrets Manager. When none are set, pushes `EMBYR_ENCRYPTION_KEY`
 /// onto `missing` — preserving today's missing-var validation byte-for-byte.
-/// When BOTH are set, returns `AmbiguousSecretSource` before any I/O.
+/// When more than one of {plain, AWS ARN, GCP secret name} is set, returns
+/// `AmbiguousSecretSource` before any I/O. `EMBYR_ENCRYPTION_KEY_GCP_SECRET_NAME`
+/// is recognised here as an ambiguity-detection candidate only — GCP fetching
+/// itself is out of scope until a later step (06-01); a GCP name set alone
+/// (no plain, no AWS ARN) is not yet reachable from any acceptance scenario.
 /// Mirrors [`resolve_admin_key`]'s shape (D-SM-1: reuse the existing pattern).
 async fn resolve_encryption_key_hex(
     missing: &mut Vec<String>,
@@ -245,12 +249,16 @@ async fn resolve_encryption_key_hex(
     let aws_arn = std::env::var("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN")
         .ok()
         .filter(|v| !v.is_empty());
+    let gcp_name = std::env::var("EMBYR_ENCRYPTION_KEY_GCP_SECRET_NAME")
+        .ok()
+        .filter(|v| !v.is_empty());
 
     let resolved = resolve_secret_source(
         "EMBYR_ENCRYPTION_KEY",
         vec![
             ("EMBYR_ENCRYPTION_KEY", plain),
             ("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN", aws_arn),
+            ("EMBYR_ENCRYPTION_KEY_GCP_SECRET_NAME", gcp_name),
         ],
     )?;
 

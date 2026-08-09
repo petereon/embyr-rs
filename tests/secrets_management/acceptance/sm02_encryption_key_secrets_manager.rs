@@ -109,7 +109,6 @@ async fn oidc_client_secret_encryption_succeeds_with_secrets_manager_sourced_key
 ///
 /// @US-SM-02 @AC-SM-02-03 @backward-compat
 #[tokio::test]
-#[ignore]
 async fn plain_env_var_still_works_for_encryption_key() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -185,7 +184,6 @@ async fn fetched_encryption_key_of_invalid_length_is_rejected_at_startup() {
 ///
 /// @error @US-SM-02 @AC-SM-02-05
 #[tokio::test]
-#[ignore]
 async fn startup_refuses_ambiguous_encryption_key_sourcing() {
     let mut server = ServerProcess::start_env_only(&[
         (
@@ -228,7 +226,6 @@ async fn startup_refuses_ambiguous_encryption_key_sourcing() {
 ///
 /// @error @real-io @US-SM-02 @AC-SM-02-05
 #[tokio::test]
-#[ignore]
 async fn exits_1_when_encryption_key_secret_fetch_fails() {
     let (_localstack, endpoint_url) = start_localstack().await;
 
