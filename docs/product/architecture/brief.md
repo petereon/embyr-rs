@@ -1043,7 +1043,7 @@ trait AgentClient: Send + Sync {
 | Serialization | `serde` + `serde_json` | 1.x | MIT / Apache 2.0 | JSON serialization for JSONB fields, admin API request/response bodies, and secret payload parsing. |
 | Error handling | `thiserror` | 1.x | MIT / Apache 2.0 | Derive macros for domain-typed error enums. Used in `embyr-core` for `StorageError`, `AuthError`, `NotifyError`, `AdapterProbeError`. |
 | Logging / tracing | `tracing` + `tracing-subscriber` | 0.1.x | MIT | Structured logging with spans. `tracing` spans wrap each gRPC handler call with `project_id`, `rpc_name`, and `trace_id`. Outputs JSON for log aggregation. |
-| Metrics | `metrics` + `metrics-exporter-prometheus` | 0.22.x | MIT | Prometheus metrics export on admin port (`GET /metrics`). Counters for requests, auth failures, cache hits/misses, NOTIFY events, sweeper runs. |
+| Metrics | `metrics` + `metrics-exporter-prometheus` | `metrics = "0.23"`, `metrics-exporter-prometheus = "0.15"` | MIT | Prometheus metrics facade + exporter. `metrics::counter!/histogram!/gauge!` macros resolve through a process-global recorder installed once at startup. Scrape endpoint at `GET :9090/metrics`. See ADR-016. |
 | Migrations | `sqlx-migrate` (included in `sqlx`) | 0.7.x | MIT / Apache 2.0 | Embedded migration files in `embyr-server/migrations/` (system DB) and `embyr-agent/migrations/` (customer DB schema). Runs at startup before listeners open. |
 | Dependency enforcement | `cargo-deny` | 0.14.x | MIT / Apache 2.0 | `deny.toml` per crate. Enforces that `embyr-core` has no IO crate dependencies. Also validates license compliance and known CVEs. |
 
@@ -2282,4 +2282,309 @@ External Integrations Requiring Contract Tests (V2):
 ```
 
 OIDC providers are configured at runtime by the account Owner — they are not a fixed external integration at the infrastructure layer. No contract tests needed at the platform level.
+
+---
+
+## Application Architecture — observability
+
+> Updated: 2026-08-08
+> Feature: observability (JOB-12 — service operator visibility)
+> ADRs: `docs/product/architecture/adr-016-prometheus-metrics.md`
+
+---
+
+### Wave: DESIGN / [REF] Observability
+
+embyr-rs previously had no Prometheus metrics infrastructure. All observability was
+unstructured `tracing::warn!/info!` log lines. The `metrics` crate appeared in the
+technology table as `0.22.x` (planned but never added to `Cargo.toml`). The observability
+feature delivers five metric families via `metrics = "0.23"` + `metrics-exporter-prometheus = "0.15"`.
+
+#### Prometheus endpoint
+
+`GET /metrics` on the admin port (:9090), guarded by Bearer `EMBYR_ADMIN_KEY`.
+
+This route is added to the `operator_router` in `build_admin_router` — the same sub-router
+that guards project provisioning and lifecycle routes. Prometheus's `prometheus.yml`
+supports `bearer_token` for scrape authentication; no custom configuration needed on the
+Prometheus side beyond the token.
+
+The endpoint is NOT available on the data ports (:8080, :8081). Admin port network
+isolation (firewall/ACL) is an operator responsibility per the operational constraint in
+the System Architecture section. The auth requirement provides defense-in-depth.
+
+#### PrometheusHandle lifecycle
+
+`PrometheusBuilder::new().install_recorder()` installs a process-global recorder and
+returns a `PrometheusHandle`. Installed once via `std::sync::OnceLock` in
+`crates/embyr-server/src/observability.rs` before any TCP listener opens.
+
+`PrometheusHandle` is `Clone`. It is stored in `OperatorState.prometheus_handle` and
+used by the `get_prometheus_metrics` handler to call `handle.render()` — which produces
+the Prometheus text exposition format.
+
+Startup ordering constraint: recorder installation precedes DB migration, adapter probes,
+and listener binding. This ensures startup events are captured in metrics.
+
+#### Metric families
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `embyr_grpc_requests_total` | counter | `method`, `status` | gRPC requests by method and tonic status code |
+| `embyr_grpc_request_duration_seconds` | histogram | `method` | Wall-clock request duration |
+| `embyr_rate_limit_requests_total` | counter | `project_id`, `outcome` | Rate-limit decisions per project (HIGH CARDINALITY — see below) |
+| `embyr_rate_limit_pg_timeout_total` | counter | none | Postgres token-bucket fallback events |
+| `embyr_pg_pool_size` | gauge | `pool` | System DB total connection count |
+| `embyr_pg_pool_idle` | gauge | `pool` | System DB idle connection count |
+
+`method` label values: `GetDocument`, `CreateDocument`, `UpdateDocument`, `DeleteDocument`,
+`BatchGetDocuments`, `BeginTransaction`, `Commit`, `Rollback`, `RunQuery`, `Listen`.
+
+`status` label values (tonic Code → lowercase): `ok`, `not_found`, `unauthenticated`,
+`permission_denied`, `resource_exhausted`, `internal`, `unavailable`, `aborted`,
+`already_exists`, `invalid_argument`, `failed_precondition`, `unimplemented`.
+
+`outcome` values: `allowed`, `rejected`.
+
+`pool` values: `system` (system DB pool only; customer DB pools are not instrumented in
+V1 — unbounded cardinality; V2 concern).
+
+#### Histogram bucket configuration
+
+Boundaries for `embyr_grpc_request_duration_seconds`:
+`[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0]` seconds.
+
+The `2.0` boundary enables `histogram_quantile(0.99, rate(...[5m])) > 2.0` as the SLO
+alert expression aligned to the Firestore SLA (p99 ≤ 2 s, AC-05c).
+
+Applied at recorder installation time via `Matcher::Prefix("embyr_grpc_request_duration")`
+in `PrometheusBuilder`.
+
+#### HIGH CARDINALITY: `project_id` label
+
+`embyr_rate_limit_requests_total{project_id, outcome}` produces one time series per
+project per outcome. For deployments up to ~10,000 projects, the resulting ~20,000 series
+is within Prometheus defaults. Above that, operators must use recording rules to aggregate
+(D-OBS-7 from DISCUSS wave locked decisions). See ADR-016 for the full cardinality analysis.
+
+#### `rate_limit_pg_timeout_total` conversion
+
+The `tracing::warn!` at `rate_limit.rs:146` (the "rate_limit_pg_timeout" log line) is
+retained. A `metrics::counter!("embyr_rate_limit_pg_timeout_total").increment(1)` call is
+added alongside it. This converts a log-only signal into a Prometheus-queryable counter,
+enabling alerting on rate-limit fallback events without log grep.
+
+#### Pool gauge update strategy (D-OBS-8)
+
+Pool gauges are updated by two mechanisms:
+1. A 15-second Tokio background task spawned at server startup alongside the existing
+   sweeper tasks. Receives a `sqlx::PgPool` clone from the system DB.
+2. Immediately before `handle.render()` in the `get_prometheus_metrics` handler, ensuring
+   scrape freshness at the moment of the HTTP request.
+
+#### New components
+
+| Component | Location | Responsibility |
+|-----------|----------|---------------|
+| `get_or_install_prometheus_handle()` | `embyr-server::observability` | OnceLock-backed idempotent recorder installation; histogram bucket config |
+| `get_prometheus_metrics` handler | `embyr-server::admin::handlers::prometheus_metrics` | Pool gauge update + `handle.render()` + Content-Type header |
+| `obs_helpers` | `embyr-server::middleware::obs_helpers` | `grpc_status_label()` mapping; gRPC method name constants |
+| `OperatorState.prometheus_handle` | `embyr-server::admin::state` | Handle storage; passed via `State<OperatorState>` to handler |
+
+#### Architecture enforcement
+
+- `embyr-core/deny.toml`: `metrics` and `metrics-exporter-prometheus` added to disallowed
+  crates. Instrumentation is an `embyr-server` concern only; domain layer must not emit metrics.
+- Behavioral probe: OBS-01 acceptance test scrapes `GET /metrics` and asserts HTTP 200 +
+  `# HELP` / `# TYPE` lines (Earned Trust layer for the `PrometheusHandle` dependency).
+
+---
+
+## Application Architecture — production-readiness
+
+> Updated: 2026-08-08
+> Feature: production-readiness (JOB-13 — production deployment)
+> ADRs: `docs/product/architecture/adr-017-production-startup.md`
+
+---
+
+### Wave: DESIGN / [REF] Production Deployment
+
+This section documents the production deployment architecture for embyr-server. It resolves
+the three blockers that prevented any production deployment: the `main.rs` stub, the missing
+Dockerfile, and the missing CI pipeline.
+
+No changes to the domain model, bounded contexts, port traits, or adapter implementations
+are required. This is a composition root and infrastructure-only change.
+
+---
+
+#### Config: `ServerConfig::from_env()`
+
+New module `crates/embyr-server/src/config.rs`. Mirrors `embyr_agent::config::AgentConfig`.
+
+| Variable | Required | Default | Validation |
+|----------|----------|---------|------------|
+| `DATABASE_URL` | Yes | — | Non-empty string; Postgres DSN |
+| `EMBYR_ADMIN_KEY` | Yes | — | Non-empty string |
+| `EMBYR_ENCRYPTION_KEY` | Yes | — | Exactly 64 hex chars (32 bytes); validated at parse time |
+| `EMBYR_RATE_LIMIT_RPS` | No | 1000.0 | Finite float > 0 |
+| `GRPC_PORT` | No | 8080 | Valid u16 |
+| `REST_PORT` | No | 8081 | Valid u16 |
+| `ADMIN_PORT` | No | 9090 | Valid u16 |
+| `RUST_LOG` | No | "info" | Tracing level filter string |
+
+All errors are accumulated before returning. The operator sees every missing or invalid
+variable in a single stderr message (exit code 1).
+
+`EMBYR_ENCRYPTION_KEY` is parsed to `[u8; 32]` at startup — invalid format causes exit 1
+before any port is bound. This satisfies the admin-api-v2 requirement that the encryption
+key is validated before user-admin routes can function.
+
+---
+
+#### Production Startup Sequence (14 steps)
+
+```
+1.  ServerConfig::from_env()
+    → on ConfigError: eprintln! + exit(1)
+
+2.  tracing_subscriber::fmt()
+        .with_env_filter(RUST_LOG env or config.log_level fallback)
+        .with_writer(stderr).init()
+
+3.  observability::get_or_install_prometheus_handle()
+    [ADR-016: recorder installed before any TCP listener opens]
+
+4.  SystemDb::new(&config.db_url).await
+    → on Err: tracing::error! + exit(1)
+
+5.  system_db.migrate().await
+    [18 migrations embedded via sqlx::migrate!("../../migrations")]
+    → on Err: tracing::error! + exit(1)
+
+6.  system_db.probe().await
+    [SELECT 1 + projects table existence check]
+    → on Err: tracing::error! "startup probe failed" + exit(1)
+
+7.  alloc_production_components(Arc::clone(&system_db), &config)
+    → ProductionComponents { cache, idx_mgr, metrics, listen_registry,
+                              active_listeners, rate_limiter (Postgres-backed),
+                              shutdown_tx, shutdown_rx }
+    + pool gauge background task (15-second interval) spawned
+
+8.  TcpListener::bind("0.0.0.0:{grpc_port}")
+    TcpListener::bind("0.0.0.0:{rest_port}")
+    TcpListener::bind("0.0.0.0:{admin_port}")
+    → on any Err: tracing::error! + exit(1)
+    [All three ports or none — D-PR-6]
+
+9.  Build FirestoreService (system_db, adapters, RateLimiter::with_pg, keepalive 30s)
+
+10. Build admin_app via build_admin_router(system_db, admin_key, cache,
+        encryption_key, NoopEmailSender, None, None, rate_limit_rps, prometheus_handle)
+
+11. spawn_all_servers(grpc_listener, rest_listener, admin_listener,
+                      service, admin_app, shutdown_rx)
+
+12. tracing::info!("embyr-server ready" grpc=0.0.0.0:8080 rest=0.0.0.0:8081
+                                         admin=0.0.0.0:9090)
+
+13. tokio::select! on ctrl_c + SIGTERM
+    → shutdown_tx.send(())
+    → tracing::info!("shutdown signal received, draining...")
+
+14. tracing::info!("embyr-server stopped")    [exit code 0]
+```
+
+Steps 4–8 are hard gates: any failure exits non-zero before a single port is bound.
+
+**Graceful shutdown and drain behavior:** When `shutdown_tx` fires (step 13), the
+`tokio::select!` in `spawn_all_servers` cancels the accept loops for all three listeners.
+In-flight gRPC requests that are already executing continue until their handlers return;
+new connections and new gRPC streams are rejected immediately. Kubernetes sends SIGTERM and
+waits `terminationGracePeriodSeconds` (default 30 seconds) before sending SIGKILL. The
+embyr-server process exits 0 when all active handlers complete. If the Kubernetes grace
+period expires before all handlers finish, SIGKILL terminates the process — clients receive
+an `Unavailable` error and the Firebase SDK retries. Operators deploying in Kubernetes
+should set `terminationGracePeriodSeconds: 30` (default) or higher for workloads with
+long-lived Listen streams.
+
+---
+
+#### Docker: Multi-Stage Dockerfile
+
+File location: repository root (`Dockerfile`). Four stages:
+
+| Stage | Base Image | Purpose |
+|-------|-----------|---------|
+| `chef` | `rust:1.80-slim` | Install `cargo-chef` for dependency caching |
+| `planner` | `chef` | `cargo chef prepare --recipe-path recipe.json` |
+| `builder` | `chef` | `cargo chef cook --release` then `cargo build --release --bin embyr-server` |
+| `runtime` | `debian:bookworm-slim` | Minimal runtime: binary + `ca-certificates` + non-root user |
+
+Non-root: `useradd -r -s /bin/false embyr`. The process runs as `embyr` (UID != 0).
+
+`EXPOSE 8080 8081 9090`. `ENTRYPOINT ["/app/embyr-server"]`.
+
+No `COPY migrations/` is required. `sqlx::migrate!("../../migrations")` embeds all 18
+migration files into the binary at compile time — they are not needed at runtime.
+
+Target final image size: < 100 MB. `ca-certificates` is required for TLS handshakes to
+AWS Secrets Manager and GCP Secret Manager.
+
+Dependency caching: cargo-chef caches the `cook` layer separately from application source.
+A source-only change (no `Cargo.toml`/`Cargo.lock` modification) rebuilds in < 60 seconds
+on a warm cache, satisfying the US-PR-02 AC for rebuild time.
+
+---
+
+#### CI: GitHub Actions
+
+File: `.github/workflows/ci.yml`. Three jobs:
+
+| Job | What it runs | Gate |
+|-----|-------------|------|
+| `test` | `cargo test --workspace` with Postgres 15 service container | All tests pass |
+| `lint` | `cargo clippy --workspace -- -D warnings` + `cargo deny check` | Zero warnings; license + advisory compliance |
+| `docker` | `docker build -t embyr-server:ci .` (depends on `test`) | Image builds without error |
+
+Triggers: `push: branches: [master]` and `pull_request: branches: [master]`.
+
+Dependency caching via `Swatinem/rust-cache@v2`. All three jobs must pass for a PR to be
+mergeable. Workflow runtime target: < 10 minutes total (with warm cache).
+
+`cargo deny check` uses the existing `deny.toml` — no new configuration required.
+
+---
+
+#### lib.rs Changes (Minimal)
+
+Two additions with zero impact on existing tests:
+
+1. `pub fn alloc_production_components(system_db: Arc<SystemDb>, config: &ServerConfig) -> ProductionComponents`
+   — wires the same components as `alloc_test_components` but uses `ServerConfig` values
+   (real admin_key, encryption_key, rate_limit_rps) and `RateLimiter::with_pg` (Postgres-backed).
+
+2. `spawn_all_servers` visibility changed from `fn` to `pub fn` — one keyword.
+
+All `start_test_server_*` constructors remain private and unchanged.
+
+---
+
+#### External Integrations Requiring Contract Tests
+
+No new external integrations are introduced by this feature. The Postgres system DB,
+AWS Secrets Manager, and GCP Secret Manager integrations are unchanged from prior features.
+
+---
+
+#### Architecture Enforcement
+
+| Concern | Mechanism |
+|---------|-----------|
+| `embyr-core` IO-free invariant | `cargo deny check` in CI `lint` job — `deny.toml` unchanged; no new IO crate added to `embyr-core` |
+| Startup sequence ordering | Unit tests for `ServerConfig::from_env()` in `config.rs` test module; US-PR-01 integration test asserts `healthz` 200 only after full startup |
+| No partial startup | Integration tests assert no port is bound when required env var is missing (process exits before bind) |
+| Non-root Docker process | CI `docker` job builds image; can be verified with `docker inspect --format '{{.Config.User}}'` |
 

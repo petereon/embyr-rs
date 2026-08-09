@@ -16,6 +16,7 @@ rewrite with `--policy=fresh`. Git history is the audit trail.
 | Admin port (:9090) | `reqwest::Client` against the Axum admin server bound on an ephemeral port | Admin bearer token injected per test |
 | Browser WASM SPA (`/admin/` path) | `reqwest::Client::get("/admin/")` against embyr-admin on ephemeral port; asserts 200 + HTML body contains WASM boot `<script>`; separate `#[test]` asserts `.wasm` file in `admin-ui/dist/` is < 5,000,000 bytes. Pure `update()` proptest runs via `cargo test` directly (no browser, no WASM needed). | Walking skeleton = HTTP probe + bundle size gate; TEA state machine = proptest on the pure function. Added: 2026-06-14 (DISTILL wave, feature user-admin-ui) |
 | Agent gRPC (:9191) | In-process tonic mTLS test client; test CA + leaf certs generated via `rcgen` in `tests/common/tls.rs` | Client cert required; no-cert test asserts TLS failure |
+| `embyr-server` binary (subprocess) | `std::process::Command::new(target/debug/embyr-server)` spawned with env vars; `reqwest::Client` polls `GET :{admin_port}/healthz → 200`; SIGTERM via `kill -TERM <pid>`. Testcontainers Postgres as the driven-internal port for the DB connection. | Added: 2026-08-08 (DISTILL wave, feature production-readiness). Tests live at `tests/production_readiness/`. Binary resolved from workspace `target/debug/` or `target/release/`. |
 
 ---
 

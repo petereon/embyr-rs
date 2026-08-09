@@ -1,6 +1,6 @@
 version: "1.0"
 feature: embyr-rs
-updated: "2026-08-07"
+updated: "2026-08-08"
 
 jobs:
   - id: JOB-01
@@ -242,3 +242,93 @@ jobs:
         must not require sticky routing or per-node configuration
     opportunity_score: 11
     priority: high
+
+  - id: JOB-12
+    name: observability
+    persona: P2
+    persona_name: Sam Chen (Service Operator / Platform Engineer)
+    feature: observability
+    job_story: >
+      When I am running embyr in production and a customer reports slow queries
+      or anomalous behaviour, I want to query a Prometheus /metrics endpoint on
+      the admin port and see gRPC request counts, error rates, latency
+      histograms, rate-limit allow/reject counts, and Postgres pool stats, so
+      I can diagnose the problem before the customer escalates and set SLO
+      alerts that fire before customers notice.
+    dimensions:
+      functional: >
+        GET :9090/metrics returns valid Prometheus text format;
+        embyr_grpc_requests_total{method,status} increments on every RPC;
+        embyr_grpc_request_duration_seconds_bucket{method} updated on every RPC;
+        embyr_rate_limit_requests_total{project_id,outcome} updated on every
+        rate-limit check; embyr_pg_pool_{idle,size} gauges updated each scrape
+      emotional: >
+        Feel in control when a customer calls — have data to diagnose in
+        minutes, not hours; feel confident quoting SLOs to customers because
+        the metrics prove the system is behaving correctly
+      social: >
+        Be seen by customers as a professional operator who catches problems
+        before they do; demonstrate to auditors that rate-limiting is enforced
+        per tenant by showing embyr_rate_limit_requests_total per project_id
+    four_forces:
+      push: >
+        No visibility beyond tracing::warn! log lines — Sam must grep logs
+        to count events; customer complaints arrive before any internal signal;
+        JOB-11 fair-multitenancy has no observable proof beyond the rate_buckets
+        table which Sam cannot query in real time
+      pull: >
+        Prometheus scrape + Grafana dashboard = proactive alerting; Sam sets
+        an alert on embyr_grpc_request_duration_seconds p99 > 2s and gets
+        paged before the customer knows; rate-limit chart per project proves
+        fair-multitenancy to auditors without ad-hoc SQL queries
+      anxiety: >
+        "Adding instrumentation adds latency to every gRPC hot path" —
+        mitigated by using the metrics crate's lock-free atomic counters;
+        histogram recording is a single u64 increment after the handler returns
+      habit: >
+        Sam is used to Prometheus + Grafana from other infrastructure; the
+        metrics endpoint must produce standard Prometheus exposition format
+        so existing dashboards and alert rules work without modification
+    opportunity_score: 13
+    priority: high
+
+  - id: JOB-13
+    name: production-deployment
+    persona: P2
+    persona_name: Sam Chen (Service Operator / Platform Engineer)
+    feature: production-readiness
+    job_story: >
+      When I want to deploy embyr to production, I want a single `docker run` command
+      to start the server, so I can ship without writing infrastructure from scratch.
+    dimensions:
+      functional: >
+        DATABASE_URL + EMBYR_ADMIN_KEY + EMBYR_ENCRYPTION_KEY env vars configure everything;
+        server exits non-zero with named missing var; server runs 18 migrations, probes system
+        DB, binds gRPC :8080 + REST :8081 + Admin :9090, logs "embyr-server ready";
+        docker build succeeds from a clean checkout in < 5 minutes; final image < 100 MB;
+        CI gates every PR with cargo test + clippy + docker build
+      emotional: >
+        Feel in control — startup errors are named and specific, no cryptic failures;
+        feel confident that every merge is tested before it ships; feel productive
+        deploying without needing to install a Rust toolchain on the target host
+      social: >
+        Show the team a clean green CI badge on every PR; demonstrate to stakeholders
+        that embyr has a production-ready deployment path, not just a test suite
+    four_forces:
+      push: >
+        main.rs is a stub — the binary exits immediately; no Dockerfile exists;
+        no CI exists; a broken build can reach master and block the entire team
+      pull: >
+        docker run with three env vars starts the full server; CI green badge on
+        every PR means Sam can merge with confidence; first production deployment
+        takes < 30 minutes from a clean checkout
+      anxiety: >
+        "What if the container starts but the DB migrations didn't run?" —
+        mitigated by migration-before-port-bind ordering and exit 1 on migration failure;
+        no traffic is accepted until migrations and DB probe succeed
+      habit: >
+        Sam is used to Kubernetes + Docker deployments with env-var configuration;
+        the embyr-server must follow 12-factor app conventions — no config files,
+        no hardcoded defaults for security-critical values, clean exit codes
+    opportunity_score: 15
+    priority: critical
