@@ -20,8 +20,24 @@
 //! | `REST_PORT`            | 8081    | REST/gRPC-Web listener port         |
 //! | `ADMIN_PORT`           | 9090    | Admin HTTP listener port            |
 //! | `RUST_LOG`             | "info"  | Tracing level filter                |
+//!
+//! # Secrets-manager-sourced admin key (ADR-018)
+//!
+//! `EMBYR_ADMIN_KEY_AWS_SECRET_ARN` (optional) sources `admin_key` from AWS
+//! Secrets Manager at startup when plain `EMBYR_ADMIN_KEY` is absent. Exactly
+//! one of {`EMBYR_ADMIN_KEY`, `EMBYR_ADMIN_KEY_AWS_SECRET_ARN`} must resolve
+//! to a value — today's missing-var validation still applies when neither is
+//! set.
 
 use std::fmt;
+
+use crate::adapters::aws_secret_fetcher::AwsSecretFetcher;
+
+/// Cache TTL passed to `AwsSecretFetcher::new` when resolving `admin_key` from
+/// AWS Secrets Manager. Irrelevant here — `get_raw_secret` bypasses the cache
+/// entirely (D-SM-4: startup-only, no TTL benefit) — but the fetcher's
+/// constructor requires a value.
+const ADMIN_KEY_AWS_FETCHER_TTL_SECS: u64 = 300;
 
 /// Full configuration for embyr-server loaded from environment variables.
 #[derive(Debug)]
@@ -55,6 +71,9 @@ pub enum ConfigError {
     InvalidPort { var: String, value: String },
     /// `EMBYR_RATE_LIMIT_RPS` is present but not a finite positive number.
     InvalidRateLimitRps { value: String },
+    /// A secrets-manager-sourced variable's fetch failed (bad ARN, IAM
+    /// denied, malformed secret, etc).
+    SecretFetchFailed { var: String, reason: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -82,6 +101,12 @@ impl fmt::Display for ConfigError {
                     "invalid EMBYR_RATE_LIMIT_RPS: '{value}' (must be a finite positive number)"
                 )
             }
+            ConfigError::SecretFetchFailed { var, reason } => {
+                write!(
+                    f,
+                    "could not fetch {var} from AWS Secrets Manager: {reason}"
+                )
+            }
         }
     }
 }
@@ -96,11 +121,11 @@ impl ServerConfig {
     ///
     /// Returns `Err` if any required variable is absent/empty, or if any value
     /// fails validation (encryption key length, port range, RPS validity).
-    pub fn from_env() -> Result<Self, ConfigError> {
+    pub async fn from_env() -> Result<Self, ConfigError> {
         let mut missing: Vec<String> = Vec::new();
 
         let db_url_opt = collect_required("DATABASE_URL", &mut missing);
-        let admin_key_opt = collect_required("EMBYR_ADMIN_KEY", &mut missing);
+        let admin_key_opt = resolve_admin_key(&mut missing).await?;
         let enc_hex_opt = collect_required("EMBYR_ENCRYPTION_KEY", &mut missing);
 
         if !missing.is_empty() {
@@ -144,6 +169,39 @@ impl ServerConfig {
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────
+
+/// Resolve `admin_key` from plain `EMBYR_ADMIN_KEY` when present; otherwise,
+/// if `EMBYR_ADMIN_KEY_AWS_SECRET_ARN` is set, fetch the raw secret value
+/// from AWS Secrets Manager. When neither is set, pushes `EMBYR_ADMIN_KEY`
+/// onto `missing` — preserving today's missing-var validation byte-for-byte.
+async fn resolve_admin_key(missing: &mut Vec<String>) -> Result<Option<String>, ConfigError> {
+    if let Ok(val) = std::env::var("EMBYR_ADMIN_KEY") {
+        if !val.is_empty() {
+            return Ok(Some(val));
+        }
+    }
+
+    match std::env::var("EMBYR_ADMIN_KEY_AWS_SECRET_ARN") {
+        Ok(arn) if !arn.is_empty() => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let fetcher = AwsSecretFetcher::new(&aws_config, ADMIN_KEY_AWS_FETCHER_TTL_SECS).await;
+            let value =
+                fetcher
+                    .get_raw_secret(&arn)
+                    .await
+                    .map_err(|e| ConfigError::SecretFetchFailed {
+                        var: "EMBYR_ADMIN_KEY".to_string(),
+                        reason: e.to_string(),
+                    })?;
+            eprintln!("fetched EMBYR_ADMIN_KEY from AWS Secrets Manager");
+            Ok(Some(value))
+        }
+        _ => {
+            missing.push("EMBYR_ADMIN_KEY".to_string());
+            Ok(None)
+        }
+    }
+}
 
 /// Read a required variable; on failure push the variable name to `missing`.
 fn collect_required(name: &str, missing: &mut Vec<String>) -> Option<String> {
@@ -225,7 +283,10 @@ mod tests {
         } else {
             Ok(())
         };
-        assert!(matches!(result, Err(ConfigError::InvalidEncryptionKey { .. })));
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidEncryptionKey { .. })
+        ));
     }
 
     #[test]

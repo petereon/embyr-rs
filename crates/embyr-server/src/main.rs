@@ -1,7 +1,7 @@
 //! embyr-server production entry point.
 //!
 //! Startup sequence (ADR-017 D-PR-2):
-//!   1.  [`config::ServerConfig::from_env()`]   — fail fast on bad config
+//!   1.  [`config::ServerConfig::from_env()`]   — fail fast on bad config (async, may fetch secrets)
 //!   2.  tracing init                             — structured logging from here
 //!   3.  Prometheus recorder                      — ADR-016: before any TCP listener
 //!   4.  [`adapters::system_db::SystemDb::new()`] — connect to Postgres
@@ -42,7 +42,7 @@ use embyr_server::{
 #[tokio::main]
 async fn main() {
     // ── Step 1: parse and validate all configuration ──────────────────────
-    let cfg = ServerConfig::from_env().unwrap_or_else(|e| {
+    let cfg = ServerConfig::from_env().await.unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });

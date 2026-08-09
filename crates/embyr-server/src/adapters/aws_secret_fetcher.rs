@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use aws_sdk_secretsmanager::{
     error::{ProvideErrorMetadata, SdkError},
@@ -75,7 +71,22 @@ impl AwsSecretFetcher {
         Ok(dsn)
     }
 
+    /// Fetch the secret's raw string value verbatim — no JSON parsing, no
+    /// cache read/write (D-SM-4: startup-only sourcing, no TTL benefit).
+    pub async fn get_raw_secret(&self, arn: &str) -> Result<String, AwsSecretError> {
+        self.fetch_secret_string(arn).await
+    }
+
     async fn fetch_raw(&self, arn: &str) -> Result<String, AwsSecretError> {
+        let secret_str = self.fetch_secret_string(arn).await?;
+        Self::parse_dsn(&secret_str)
+    }
+
+    /// Shared network-call portion: `get_secret_value().send()` + the
+    /// `secret_string()` extraction and error mapping. Both the DSN-JSON
+    /// path (`fetch_raw`) and the raw-string path (`get_raw_secret`) share
+    /// this — only DSN parsing differs afterward.
+    async fn fetch_secret_string(&self, arn: &str) -> Result<String, AwsSecretError> {
         let resp = self
             .client
             .get_secret_value()
@@ -84,16 +95,12 @@ impl AwsSecretFetcher {
             .await
             .map_err(Self::map_sdk_error)?;
 
-        let secret_str = resp
-            .secret_string()
-            .ok_or_else(|| AwsSecretError::FormatInvalid("secret has no string value".into()))?;
-
-        Self::parse_dsn(secret_str)
+        resp.secret_string()
+            .map(|s| s.to_string())
+            .ok_or_else(|| AwsSecretError::FormatInvalid("secret has no string value".into()))
     }
 
-    fn map_sdk_error(
-        err: SdkError<GetSecretValueError>,
-    ) -> AwsSecretError {
+    fn map_sdk_error(err: SdkError<GetSecretValueError>) -> AwsSecretError {
         match &err {
             SdkError::ServiceError(svc) => {
                 match svc.err() {
