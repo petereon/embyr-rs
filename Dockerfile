@@ -14,7 +14,18 @@
 #   Changing Cargo.toml/Cargo.lock → deps are re-cooked from recipe.json.
 
 # ─── Stage 1: install cargo-chef ─────────────────────────────────────────────
-FROM rust:1.80-slim AS chef
+# Pinned to match the workspace's actual MSRV floor, not embyr-rs's own edition
+# (2021): several transitive deps in Cargo.lock require newer rustc than that —
+# crypto-common v0.2.2 needs edition2024 (Rust 1.85+), cargo-chef's own
+# dependency tree needs 1.88+, and the aws-sdk-secretsmanager stack needs
+# 1.91.1+. Keep in lockstep with the toolchain used for local `cargo build`.
+#
+# `-bookworm` suffix pinned explicitly: the untagged `rust:1.93-slim` now
+# resolves to Debian trixie, whose glibc is newer than debian:bookworm-slim
+# (the runtime stage below) — a binary built on trixie fails to run on
+# bookworm with "GLIBC_2.38 not found". Builder and runtime must share a
+# Debian release.
+FROM rust:1.93-slim-bookworm AS chef
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 
@@ -25,10 +36,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # ─── Stage 3: cook dependencies then build the release binary ─────────────────
 FROM chef AS builder
-# Install system build dependencies (needed for sqlx native-tls / ring / etc.)
+# Install system build dependencies: pkg-config/libssl-dev for sqlx native-tls
+# / ring, protobuf-compiler because embyr-proto's build.rs shells out to
+# `protoc` (prost-build) to compile the Firestore .proto definitions.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         libssl-dev \
+        protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
