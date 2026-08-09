@@ -35,6 +35,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # cargo test --workspace builds 7 crates + 6+ separate integration test
+      # binaries with debug symbols, which reliably exceeds the ~14 GB free
+      # on a stock ubuntu-latest runner. Removing unused preinstalled SDKs
+      # frees ~30-40 GB before the build starts.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force
+
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
