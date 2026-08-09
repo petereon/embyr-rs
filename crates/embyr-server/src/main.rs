@@ -177,7 +177,7 @@ async fn main() {
     .route("/healthz", axum::routing::get(healthz_handler));
 
     // ── Step 11: spawn gRPC + REST + admin servers ────────────────────────
-    spawn_all_servers(
+    let server_task = spawn_all_servers(
         grpc_listener,
         rest_listener,
         admin_listener,
@@ -220,7 +220,11 @@ async fn main() {
     // ── Step 14: drain and exit ───────────────────────────────────────────
     let _ = shutdown_tx.send(());
     tracing::info!("shutdown signal received, draining...");
-    // Brief yield to allow in-flight handler tasks to reach completion points.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Wait for the server task's own graceful shutdown: it stops accepting
+    // new connections and waits for genuinely in-flight requests on
+    // already-open connections (e.g. a long-lived gRPC Listen stream) to
+    // complete naturally, rather than exiting after a fixed delay
+    // regardless of open connections (D-PR-5 / AC-PR-04-02).
+    let _ = server_task.await;
     tracing::info!("embyr-server stopped");
 }

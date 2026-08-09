@@ -153,6 +153,19 @@ async fn alloc_test_components(system_db: &Arc<SystemDb>) -> TestComponents {
 ///
 /// All three share a single `shutdown_rx` oneshot; dropping the returned
 /// `TestServer` sends the shutdown signal.
+///
+/// Returns a `JoinHandle` that resolves once shutdown has been requested AND
+/// every gRPC connection that was already in flight (e.g. a still-open
+/// `Listen` stream) has been genuinely drained — not merely after a fixed
+/// delay. Callers that need to guarantee in-flight requests complete before
+/// process exit (D-PR-5) must `.await` this handle after sending the
+/// shutdown signal; callers that only need the servers running (test
+/// harnesses) may ignore the returned handle.
+///
+/// The gRPC server runs its own graceful-shutdown future
+/// (`serve_with_incoming_shutdown`) as an independent task so that, when the
+/// outer signal fires, it stops accepting *new* connections but keeps
+/// serving already-open streams/connections until they close naturally.
 pub fn spawn_all_servers(
     grpc_listener: tokio::net::TcpListener,
     rest_listener: tokio::net::TcpListener,
@@ -160,7 +173,7 @@ pub fn spawn_all_servers(
     service: FirestoreService,
     admin_app: axum::Router,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) {
+) -> tokio::task::JoinHandle<()> {
     let service_for_rest = service.clone();
 
     let bc_state = rest::browser_channel::BrowserChannelState::new();
@@ -178,19 +191,36 @@ pub fn spawn_all_servers(
     tokio::spawn(async move {
         let grpc_incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
 
+        // Own shutdown signal for the gRPC server: firing it tells tonic to
+        // stop accepting new connections while letting already-open streams
+        // (e.g. a long-lived Listen subscription) run to completion, instead
+        // of aborting them the instant the outer signal below resolves.
+        let (grpc_shutdown_tx, grpc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
         let grpc_fut = tonic::transport::Server::builder()
             .add_service(FirestoreServer::new(service))
-            .serve_with_incoming(grpc_incoming);
+            .serve_with_incoming_shutdown(grpc_incoming, async {
+                let _ = grpc_shutdown_rx.await;
+            });
+
+        // Drive the gRPC server as its own task so it keeps accepting and
+        // servicing connections concurrently with rest/admin below, and so
+        // it can keep draining after this task moves on to the join below.
+        let grpc_handle = tokio::spawn(grpc_fut);
 
         let admin_fut = axum::serve(admin_listener, admin_app);
 
         tokio::select! {
-            _ = grpc_fut => {},
             _ = rest_task => {},
             _ = admin_fut => {},
             _ = async { let _ = shutdown_rx.await; } => {},
         }
-    });
+
+        // Stop accepting new gRPC connections; wait for in-flight requests
+        // on already-open connections to finish naturally before returning.
+        let _ = grpc_shutdown_tx.send(());
+        let _ = grpc_handle.await;
+    })
 }
 
 // ---------------------------------------------------------------------------
