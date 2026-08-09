@@ -74,6 +74,13 @@ pub enum ConfigError {
     /// A secrets-manager-sourced variable's fetch failed (bad ARN, IAM
     /// denied, malformed secret, etc).
     SecretFetchFailed { var: String, reason: String },
+    /// More than one source is set for the same logical secret (e.g. plain
+    /// `EMBYR_ADMIN_KEY` and `EMBYR_ADMIN_KEY_AWS_SECRET_ARN` both present).
+    /// `sources` names every variable that was set — never the resolved value.
+    AmbiguousSecretSource {
+        var_base: String,
+        sources: Vec<String>,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -105,6 +112,13 @@ impl fmt::Display for ConfigError {
                 write!(
                     f,
                     "could not fetch {var} from AWS Secrets Manager: {reason}"
+                )
+            }
+            ConfigError::AmbiguousSecretSource { var_base, sources } => {
+                write!(
+                    f,
+                    "ambiguous configuration for {var_base}: more than one source is set ({})",
+                    sources.join(", ")
                 )
             }
         }
@@ -174,15 +188,27 @@ impl ServerConfig {
 /// if `EMBYR_ADMIN_KEY_AWS_SECRET_ARN` is set, fetch the raw secret value
 /// from AWS Secrets Manager. When neither is set, pushes `EMBYR_ADMIN_KEY`
 /// onto `missing` — preserving today's missing-var validation byte-for-byte.
+/// When BOTH are set, returns `AmbiguousSecretSource` before any I/O
+/// (`resolve_secret_source` is checked before the AWS fetch is attempted).
 async fn resolve_admin_key(missing: &mut Vec<String>) -> Result<Option<String>, ConfigError> {
-    if let Ok(val) = std::env::var("EMBYR_ADMIN_KEY") {
-        if !val.is_empty() {
-            return Ok(Some(val));
-        }
-    }
+    let plain = std::env::var("EMBYR_ADMIN_KEY")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let aws_arn = std::env::var("EMBYR_ADMIN_KEY_AWS_SECRET_ARN")
+        .ok()
+        .filter(|v| !v.is_empty());
 
-    match std::env::var("EMBYR_ADMIN_KEY_AWS_SECRET_ARN") {
-        Ok(arn) if !arn.is_empty() => {
+    let resolved = resolve_secret_source(
+        "EMBYR_ADMIN_KEY",
+        vec![
+            ("EMBYR_ADMIN_KEY", plain),
+            ("EMBYR_ADMIN_KEY_AWS_SECRET_ARN", aws_arn),
+        ],
+    )?;
+
+    match resolved {
+        Some((source, value)) if source == "EMBYR_ADMIN_KEY" => Ok(Some(value)),
+        Some((_, arn)) => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let fetcher = AwsSecretFetcher::new(&aws_config, ADMIN_KEY_AWS_FETCHER_TTL_SECS).await;
             let value =
@@ -196,10 +222,37 @@ async fn resolve_admin_key(missing: &mut Vec<String>) -> Result<Option<String>, 
             eprintln!("fetched EMBYR_ADMIN_KEY from AWS Secrets Manager");
             Ok(Some(value))
         }
-        _ => {
+        None => {
             missing.push("EMBYR_ADMIN_KEY".to_string());
             Ok(None)
         }
+    }
+}
+
+/// Resolve a single logical secret from a set of `(source_name, resolved_value)`
+/// candidates. At most one source may be set — more than one is a startup
+/// config error naming every variable that was set (never the resolved
+/// value). Generic over the candidate list so a third source (e.g. a future
+/// GCP secret-ref var) is a one-line addition at each call site.
+///
+/// Returns `Ok(None)` when no source is set, `Ok(Some((source_name, value)))`
+/// when exactly one is set, `Err(AmbiguousSecretSource)` when more than one is set.
+fn resolve_secret_source(
+    var_base: &str,
+    sources: Vec<(&str, Option<String>)>,
+) -> Result<Option<(String, String)>, ConfigError> {
+    let set: Vec<(String, String)> = sources
+        .into_iter()
+        .filter_map(|(name, val)| val.map(|v| (name.to_string(), v)))
+        .collect();
+
+    match set.len() {
+        0 => Ok(None),
+        1 => Ok(Some(set.into_iter().next().unwrap())),
+        _ => Err(ConfigError::AmbiguousSecretSource {
+            var_base: var_base.to_string(),
+            sources: set.into_iter().map(|(name, _)| name).collect(),
+        }),
     }
 }
 
@@ -331,5 +384,85 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("EMBYR_ENCRYPTION_KEY"), "got: {msg}");
         assert!(msg.contains("too short"), "got: {msg}");
+    }
+
+    // ── resolve_secret_source ───────────────────────────────────────────────
+
+    #[test]
+    fn resolve_secret_source_none_set_returns_none() {
+        let result = resolve_secret_source(
+            "EMBYR_ADMIN_KEY",
+            vec![
+                ("EMBYR_ADMIN_KEY", None),
+                ("EMBYR_ADMIN_KEY_AWS_SECRET_ARN", None),
+            ],
+        );
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_secret_source_exactly_one_set_returns_it() {
+        let cases: Vec<Vec<(&str, Option<String>)>> = vec![
+            vec![
+                ("EMBYR_ADMIN_KEY", Some("literal-key".to_string())),
+                ("EMBYR_ADMIN_KEY_AWS_SECRET_ARN", None),
+            ],
+            vec![
+                ("EMBYR_ADMIN_KEY", None),
+                (
+                    "EMBYR_ADMIN_KEY_AWS_SECRET_ARN",
+                    Some("arn:aws:...".to_string()),
+                ),
+            ],
+        ];
+        for sources in cases {
+            let expected = sources
+                .iter()
+                .find_map(|(name, val)| val.clone().map(|v| (name.to_string(), v)))
+                .unwrap();
+            let result = resolve_secret_source("EMBYR_ADMIN_KEY", sources);
+            assert_eq!(result.unwrap(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn resolve_secret_source_multiple_set_returns_ambiguous_error_naming_all() {
+        let result = resolve_secret_source(
+            "EMBYR_ADMIN_KEY",
+            vec![
+                ("EMBYR_ADMIN_KEY", Some("literal-key".to_string())),
+                (
+                    "EMBYR_ADMIN_KEY_AWS_SECRET_ARN",
+                    Some("arn:aws:...".to_string()),
+                ),
+            ],
+        );
+        match result {
+            Err(ConfigError::AmbiguousSecretSource { var_base, sources }) => {
+                assert_eq!(var_base, "EMBYR_ADMIN_KEY");
+                assert_eq!(
+                    sources,
+                    vec![
+                        "EMBYR_ADMIN_KEY".to_string(),
+                        "EMBYR_ADMIN_KEY_AWS_SECRET_ARN".to_string()
+                    ]
+                );
+            }
+            other => panic!("expected AmbiguousSecretSource, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_error_display_ambiguous_secret_source_names_both_vars() {
+        let err = ConfigError::AmbiguousSecretSource {
+            var_base: "EMBYR_ADMIN_KEY".into(),
+            sources: vec![
+                "EMBYR_ADMIN_KEY".into(),
+                "EMBYR_ADMIN_KEY_AWS_SECRET_ARN".into(),
+            ],
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("EMBYR_ADMIN_KEY"), "got: {msg}");
+        assert!(msg.contains("EMBYR_ADMIN_KEY_AWS_SECRET_ARN"), "got: {msg}");
     }
 }
