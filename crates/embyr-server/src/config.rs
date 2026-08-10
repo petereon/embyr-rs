@@ -23,15 +23,19 @@
 //!
 //! # Secrets-manager-sourced admin key (ADR-018)
 //!
-//! `EMBYR_ADMIN_KEY_AWS_SECRET_ARN` (optional) sources `admin_key` from AWS
-//! Secrets Manager at startup when plain `EMBYR_ADMIN_KEY` is absent. Exactly
-//! one of {`EMBYR_ADMIN_KEY`, `EMBYR_ADMIN_KEY_AWS_SECRET_ARN`} must resolve
-//! to a value — today's missing-var validation still applies when neither is
-//! set.
+//! `EMBYR_ADMIN_KEY_AWS_SECRET_ARN` / `EMBYR_ADMIN_KEY_GCP_SECRET_NAME`
+//! (optional) source `admin_key` from AWS/GCP Secrets Manager at startup when
+//! plain `EMBYR_ADMIN_KEY` is absent. Exactly one of
+//! {`EMBYR_ADMIN_KEY`, `EMBYR_ADMIN_KEY_AWS_SECRET_ARN`,
+//! `EMBYR_ADMIN_KEY_GCP_SECRET_NAME`} must resolve to a value — today's
+//! missing-var validation still applies when none is set. The GCP path
+//! additionally requires `EMBYR_GCP_ACCESS_TOKEN` (bearer token for
+//! `GcpSecretFetcher`; an interim static-token stopgap, see OQ-SM-4).
 //!
-//! `EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN` (optional) sources `encryption_key`
-//! from AWS Secrets Manager the same way. The fetched value is validated via
-//! the identical [`ConfigError::InvalidEncryptionKey`] path as the plain
+//! `EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN` / `EMBYR_ENCRYPTION_KEY_GCP_SECRET_NAME`
+//! (optional) source `encryption_key` from AWS/GCP Secrets Manager the same
+//! way. The fetched value is validated via the identical
+//! [`ConfigError::InvalidEncryptionKey`] path as the plain
 //! `EMBYR_ENCRYPTION_KEY` case.
 //!
 //! `EMBYR_ADMIN_KEY_PREVIOUS` (optional; also sourceable via
@@ -42,6 +46,19 @@
 use std::fmt;
 
 use crate::adapters::aws_secret_fetcher::AwsSecretFetcher;
+use crate::adapters::gcp_secret_fetcher::GcpSecretFetcher;
+
+/// GCP Secret Manager REST API base URL used by every GCP-sourced secret
+/// fetch in `from_env()`. No env-var override exists yet (OQ-SM-4 / ADR-018
+/// Alternatives A6) — out of scope for this feature.
+const GCP_SECRET_MANAGER_BASE_URL: &str = "https://secretmanager.googleapis.com";
+
+/// Cache TTL passed to `GcpSecretFetcher::new` for every GCP-sourced secret
+/// resolved in `from_env()`. Irrelevant — `get_raw_secret` bypasses the cache
+/// entirely (D-SM-4: startup-only, no TTL benefit) — but the fetcher's
+/// constructor requires a value. Shared across all four resolvers since the
+/// value is unused either way.
+const GCP_FETCHER_TTL_SECS: u64 = 300;
 
 /// Cache TTL passed to `AwsSecretFetcher::new` when resolving `admin_key` from
 /// AWS Secrets Manager. Irrelevant here — `get_raw_secret` bypasses the cache
@@ -153,10 +170,10 @@ impl fmt::Display for ConfigError {
                 )
             }
             ConfigError::SecretFetchFailed { var, reason } => {
-                write!(
-                    f,
-                    "could not fetch {var} from AWS Secrets Manager: {reason}"
-                )
+                // Generic: `var`/`reason` now cover both AWS- and
+                // GCP-sourced fetch failures (ADR-018 §3); the specific
+                // secrets-manager kind is already named inside `reason`.
+                write!(f, "could not fetch {var}: {reason}")
             }
             ConfigError::AmbiguousSecretSource { var_base, sources } => {
                 write!(
@@ -247,17 +264,101 @@ impl ServerConfig {
 
 // ── Private helpers ──────────────────────────────────────────────────────────
 
+/// Which secrets-manager kind a resolved `source` variable name refers to.
+/// Recognised suffixes: `_AWS_SECRET_ARN`, `_GCP_SECRET_NAME`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretManagerSource {
+    Aws,
+    Gcp,
+}
+
+/// Dispatch a resolved `source` variable name to its secrets-manager kind by
+/// suffix. Extracted as a pure function — independent of any network I/O —
+/// so the "which cloud" decision is directly unit-testable and the
+/// once-present bug (any non-plain source silently treated as AWS,
+/// regardless of which var actually matched) cannot recur silently.
+fn secret_manager_source_kind(source: &str) -> SecretManagerSource {
+    if source.ends_with("_GCP_SECRET_NAME") {
+        SecretManagerSource::Gcp
+    } else if source.ends_with("_AWS_SECRET_ARN") {
+        SecretManagerSource::Aws
+    } else {
+        unreachable!(
+            "resolve_secret_source only returns the plain var or a recognized \
+             *_AWS_SECRET_ARN/*_GCP_SECRET_NAME suffix, got: {source}"
+        )
+    }
+}
+
+/// Read `EMBYR_GCP_ACCESS_TOKEN`, requiring it non-empty. `var` names the
+/// logical secret being resolved (e.g. `EMBYR_ADMIN_KEY`) and `source` names
+/// the specific `*_GCP_SECRET_NAME` variable that triggered the requirement,
+/// so the resulting error is actionable without any network I/O attempted.
+fn require_gcp_access_token(var: &str, source: &str) -> Result<String, ConfigError> {
+    std::env::var("EMBYR_GCP_ACCESS_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| ConfigError::SecretFetchFailed {
+            var: var.to_string(),
+            reason: format!("EMBYR_GCP_ACCESS_TOKEN is required when {source} is set"),
+        })
+}
+
+/// Fetch a logical secret's raw value from whichever secrets-manager
+/// `source` names, dispatching by [`secret_manager_source_kind`]. Shared by
+/// all four resolvers (D-SM-1: reuse the existing pattern) — fixes the
+/// pre-existing bug where every resolver's match arm discarded `source` and
+/// silently treated any non-plain source as AWS.
+async fn fetch_from_secret_manager(
+    var: &str,
+    source: &str,
+    resolved_value: &str,
+    aws_ttl_secs: u64,
+) -> Result<String, ConfigError> {
+    match secret_manager_source_kind(source) {
+        SecretManagerSource::Gcp => {
+            let token = require_gcp_access_token(var, source)?;
+            let fetcher =
+                GcpSecretFetcher::new(GCP_SECRET_MANAGER_BASE_URL, &token, GCP_FETCHER_TTL_SECS);
+            let value = fetcher.get_raw_secret(resolved_value).await.map_err(|e| {
+                ConfigError::SecretFetchFailed {
+                    var: var.to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+            eprintln!("fetched {var} from GCP Secret Manager");
+            Ok(value)
+        }
+        SecretManagerSource::Aws => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let fetcher = AwsSecretFetcher::new(&aws_config, aws_ttl_secs).await;
+            let value = fetcher.get_raw_secret(resolved_value).await.map_err(|e| {
+                ConfigError::SecretFetchFailed {
+                    var: var.to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+            eprintln!("fetched {var} from AWS Secrets Manager");
+            Ok(value)
+        }
+    }
+}
+
 /// Resolve `admin_key` from plain `EMBYR_ADMIN_KEY` when present; otherwise,
-/// if `EMBYR_ADMIN_KEY_AWS_SECRET_ARN` is set, fetch the raw secret value
-/// from AWS Secrets Manager. When neither is set, pushes `EMBYR_ADMIN_KEY`
+/// if `EMBYR_ADMIN_KEY_AWS_SECRET_ARN`/`EMBYR_ADMIN_KEY_GCP_SECRET_NAME` is
+/// set, fetch the raw secret value from AWS/GCP Secrets Manager
+/// ([`fetch_from_secret_manager`]). When none is set, pushes `EMBYR_ADMIN_KEY`
 /// onto `missing` — preserving today's missing-var validation byte-for-byte.
-/// When BOTH are set, returns `AmbiguousSecretSource` before any I/O
-/// (`resolve_secret_source` is checked before the AWS fetch is attempted).
+/// When more than one is set, returns `AmbiguousSecretSource` before any I/O
+/// (`resolve_secret_source` is checked before any fetch is attempted).
 async fn resolve_admin_key(missing: &mut Vec<String>) -> Result<Option<String>, ConfigError> {
     let plain = std::env::var("EMBYR_ADMIN_KEY")
         .ok()
         .filter(|v| !v.is_empty());
     let aws_arn = std::env::var("EMBYR_ADMIN_KEY_AWS_SECRET_ARN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let gcp_name = std::env::var("EMBYR_ADMIN_KEY_GCP_SECRET_NAME")
         .ok()
         .filter(|v| !v.is_empty());
 
@@ -266,23 +367,20 @@ async fn resolve_admin_key(missing: &mut Vec<String>) -> Result<Option<String>, 
         vec![
             ("EMBYR_ADMIN_KEY", plain),
             ("EMBYR_ADMIN_KEY_AWS_SECRET_ARN", aws_arn),
+            ("EMBYR_ADMIN_KEY_GCP_SECRET_NAME", gcp_name),
         ],
     )?;
 
     match resolved {
         Some((source, value)) if source == "EMBYR_ADMIN_KEY" => Ok(Some(value)),
-        Some((_, arn)) => {
-            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            let fetcher = AwsSecretFetcher::new(&aws_config, ADMIN_KEY_AWS_FETCHER_TTL_SECS).await;
-            let value =
-                fetcher
-                    .get_raw_secret(&arn)
-                    .await
-                    .map_err(|e| ConfigError::SecretFetchFailed {
-                        var: "EMBYR_ADMIN_KEY".to_string(),
-                        reason: e.to_string(),
-                    })?;
-            eprintln!("fetched EMBYR_ADMIN_KEY from AWS Secrets Manager");
+        Some((source, resolved_value)) => {
+            let value = fetch_from_secret_manager(
+                "EMBYR_ADMIN_KEY",
+                &source,
+                &resolved_value,
+                ADMIN_KEY_AWS_FETCHER_TTL_SECS,
+            )
+            .await?;
             Ok(Some(value))
         }
         None => {
@@ -327,19 +425,14 @@ async fn resolve_encryption_key_hex(
 
     match resolved {
         Some((source, value)) if source == "EMBYR_ENCRYPTION_KEY" => Ok(Some(value)),
-        Some((_, arn)) => {
-            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            let fetcher =
-                AwsSecretFetcher::new(&aws_config, ENCRYPTION_KEY_AWS_FETCHER_TTL_SECS).await;
-            let value =
-                fetcher
-                    .get_raw_secret(&arn)
-                    .await
-                    .map_err(|e| ConfigError::SecretFetchFailed {
-                        var: "EMBYR_ENCRYPTION_KEY".to_string(),
-                        reason: e.to_string(),
-                    })?;
-            eprintln!("fetched EMBYR_ENCRYPTION_KEY from AWS Secrets Manager");
+        Some((source, resolved_value)) => {
+            let value = fetch_from_secret_manager(
+                "EMBYR_ENCRYPTION_KEY",
+                &source,
+                &resolved_value,
+                ENCRYPTION_KEY_AWS_FETCHER_TTL_SECS,
+            )
+            .await?;
             Ok(Some(value))
         }
         None => {
@@ -382,19 +475,14 @@ async fn resolve_admin_key_previous() -> Result<Option<String>, ConfigError> {
 
     match resolved {
         Some((source, value)) if source == "EMBYR_ADMIN_KEY_PREVIOUS" => Ok(Some(value)),
-        Some((_, arn)) => {
-            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            let fetcher =
-                AwsSecretFetcher::new(&aws_config, ADMIN_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS).await;
-            let value =
-                fetcher
-                    .get_raw_secret(&arn)
-                    .await
-                    .map_err(|e| ConfigError::SecretFetchFailed {
-                        var: "EMBYR_ADMIN_KEY_PREVIOUS".to_string(),
-                        reason: e.to_string(),
-                    })?;
-            eprintln!("fetched EMBYR_ADMIN_KEY_PREVIOUS from AWS Secrets Manager");
+        Some((source, resolved_value)) => {
+            let value = fetch_from_secret_manager(
+                "EMBYR_ADMIN_KEY_PREVIOUS",
+                &source,
+                &resolved_value,
+                ADMIN_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS,
+            )
+            .await?;
             Ok(Some(value))
         }
         None => Ok(None),
@@ -433,19 +521,14 @@ async fn resolve_encryption_key_previous_hex() -> Result<Option<String>, ConfigE
 
     match resolved {
         Some((source, value)) if source == "EMBYR_ENCRYPTION_KEY_PREVIOUS" => Ok(Some(value)),
-        Some((_, arn)) => {
-            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            let fetcher = AwsSecretFetcher::new(&aws_config, ENCRYPTION_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS)
-                .await;
-            let value =
-                fetcher
-                    .get_raw_secret(&arn)
-                    .await
-                    .map_err(|e| ConfigError::SecretFetchFailed {
-                        var: "EMBYR_ENCRYPTION_KEY_PREVIOUS".to_string(),
-                        reason: e.to_string(),
-                    })?;
-            eprintln!("fetched EMBYR_ENCRYPTION_KEY_PREVIOUS from AWS Secrets Manager");
+        Some((source, resolved_value)) => {
+            let value = fetch_from_secret_manager(
+                "EMBYR_ENCRYPTION_KEY_PREVIOUS",
+                &source,
+                &resolved_value,
+                ENCRYPTION_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS,
+            )
+            .await?;
             Ok(Some(value))
         }
         None => Ok(None),
@@ -730,6 +813,96 @@ mod tests {
         assert!(msg.contains("differ"), "got: {msg}");
     }
 
+    // ── GCP resolver dispatch (06-01) ───────────────────────────────────────
+
+    #[test]
+    fn secret_manager_source_kind_dispatches_by_suffix_not_silently_aws() {
+        // Parametrized across all four logical secrets' var-name shapes:
+        // the dispatch decision must key off the suffix, never assume AWS.
+        let cases = [
+            ("EMBYR_ADMIN_KEY_AWS_SECRET_ARN", SecretManagerSource::Aws),
+            ("EMBYR_ADMIN_KEY_GCP_SECRET_NAME", SecretManagerSource::Gcp),
+            (
+                "EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN",
+                SecretManagerSource::Aws,
+            ),
+            (
+                "EMBYR_ENCRYPTION_KEY_GCP_SECRET_NAME",
+                SecretManagerSource::Gcp,
+            ),
+            (
+                "EMBYR_ADMIN_KEY_PREVIOUS_AWS_SECRET_ARN",
+                SecretManagerSource::Aws,
+            ),
+            (
+                "EMBYR_ADMIN_KEY_PREVIOUS_GCP_SECRET_NAME",
+                SecretManagerSource::Gcp,
+            ),
+            (
+                "EMBYR_ENCRYPTION_KEY_PREVIOUS_AWS_SECRET_ARN",
+                SecretManagerSource::Aws,
+            ),
+            (
+                "EMBYR_ENCRYPTION_KEY_PREVIOUS_GCP_SECRET_NAME",
+                SecretManagerSource::Gcp,
+            ),
+        ];
+        for (source, expected) in cases {
+            assert_eq!(
+                secret_manager_source_kind(source),
+                expected,
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn require_gcp_access_token_absent_returns_actionable_error() {
+        std::env::remove_var("EMBYR_GCP_ACCESS_TOKEN");
+        let result = require_gcp_access_token("EMBYR_ADMIN_KEY", "EMBYR_ADMIN_KEY_GCP_SECRET_NAME");
+        match result {
+            Err(ConfigError::SecretFetchFailed { var, reason }) => {
+                assert_eq!(var, "EMBYR_ADMIN_KEY");
+                assert!(reason.contains("EMBYR_GCP_ACCESS_TOKEN"), "got: {reason}");
+                assert!(
+                    reason.contains("EMBYR_ADMIN_KEY_GCP_SECRET_NAME"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected SecretFetchFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_gcp_access_token_present_returns_value() {
+        std::env::set_var("_EMBYR_TEST_GCP_TOKEN_XYZZY_99", "1");
+        std::env::set_var("EMBYR_GCP_ACCESS_TOKEN", "bearer-token-value");
+        let result = require_gcp_access_token("EMBYR_ADMIN_KEY", "EMBYR_ADMIN_KEY_GCP_SECRET_NAME");
+        std::env::remove_var("EMBYR_GCP_ACCESS_TOKEN");
+        std::env::remove_var("_EMBYR_TEST_GCP_TOKEN_XYZZY_99");
+        assert_eq!(result.unwrap(), "bearer-token-value");
+    }
+
+    #[tokio::test]
+    async fn admin_key_resolver_recognises_gcp_name_as_ambiguity_candidate() {
+        std::env::set_var("EMBYR_ADMIN_KEY", "literal-key");
+        std::env::set_var("EMBYR_ADMIN_KEY_GCP_SECRET_NAME", "projects/p/secrets/s");
+        let mut missing = Vec::new();
+        let result = resolve_admin_key(&mut missing).await;
+        std::env::remove_var("EMBYR_ADMIN_KEY");
+        std::env::remove_var("EMBYR_ADMIN_KEY_GCP_SECRET_NAME");
+        match result {
+            Err(ConfigError::AmbiguousSecretSource { var_base, sources }) => {
+                assert_eq!(var_base, "EMBYR_ADMIN_KEY");
+                assert!(
+                    sources.contains(&"EMBYR_ADMIN_KEY_GCP_SECRET_NAME".to_string()),
+                    "got: {sources:?}"
+                );
+            }
+            other => panic!("expected AmbiguousSecretSource, got {other:?}"),
+        }
+    }
+
     #[test]
     fn duplicate_rotation_key_compares_resolved_bytes_not_env_text() {
         // Different hex text (upper vs lower case) that decodes to identical
@@ -739,8 +912,7 @@ mod tests {
         let upper = "0102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20";
         assert_ne!(lower, upper, "precondition: env text differs");
         let current = validate_encryption_key_hex("EMBYR_ENCRYPTION_KEY", lower).unwrap();
-        let previous =
-            validate_encryption_key_hex("EMBYR_ENCRYPTION_KEY_PREVIOUS", upper).unwrap();
+        let previous = validate_encryption_key_hex("EMBYR_ENCRYPTION_KEY_PREVIOUS", upper).unwrap();
         assert_eq!(
             current, previous,
             "resolved bytes must be equal despite differing env text case"

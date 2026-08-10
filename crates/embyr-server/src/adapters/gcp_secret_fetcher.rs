@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tokio::sync::Mutex;
@@ -87,20 +83,34 @@ impl GcpSecretFetcher {
 
     /// Return the list of AccessSecretVersion call paths (for audit test).
     pub fn call_log_snapshot(&self) -> Vec<String> {
-        self.call_log.try_lock().map(|g| g.clone()).unwrap_or_default()
+        self.call_log
+            .try_lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Fetch the secret's raw string value verbatim — no JSON-DSN parsing,
+    /// no cache read/write (D-SM-4: startup-only sourcing, no TTL benefit).
+    pub async fn get_raw_secret(&self, resource_name: &str) -> Result<String, GcpSecretError> {
+        self.fetch_secret_string(resource_name).await
     }
 
     async fn fetch_raw(&self, resource_name: &str) -> Result<String, GcpSecretError> {
+        let secret_str = self.fetch_secret_string(resource_name).await?;
+        Self::parse_dsn(&secret_str)
+    }
+
+    /// Shared network-call portion: HTTP GET + base64 decode. Both the
+    /// DSN-JSON path (`fetch_raw`) and the raw-string path (`get_raw_secret`)
+    /// share this — only DSN parsing differs afterward.
+    async fn fetch_secret_string(&self, resource_name: &str) -> Result<String, GcpSecretError> {
         let url = format!(
             "{}/v1/{}/versions/latest:access",
             self.base_url, resource_name
         );
 
         // Record this call for audit verification.
-        self.call_log
-            .lock()
-            .await
-            .push(resource_name.to_string());
+        self.call_log.lock().await.push(resource_name.to_string());
 
         let resp = self
             .http
@@ -136,10 +146,8 @@ impl GcpSecretFetcher {
             .decode(encoded)
             .map_err(|e| GcpSecretError::FormatInvalid(format!("base64 decode error: {e}")))?;
 
-        let decoded_str = String::from_utf8(decoded_bytes)
-            .map_err(|_| GcpSecretError::FormatInvalid("decoded value is not valid UTF-8".into()))?;
-
-        Self::parse_dsn(&decoded_str)
+        String::from_utf8(decoded_bytes)
+            .map_err(|_| GcpSecretError::FormatInvalid("decoded value is not valid UTF-8".into()))
     }
 
     fn parse_dsn(secret_str: &str) -> Result<String, GcpSecretError> {
