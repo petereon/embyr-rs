@@ -1,0 +1,419 @@
+{
+  "schema_version": "3.0",
+  "feature_id": "secrets-management",
+  "events": [
+    {
+      "sid": "01-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:08:43Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:08:43Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: pre-authored AT calls decrypt_with_rotation directly as its driving port; direct minimal implementation reaches GREEN without additional unit tests",
+      "t": "2026-08-09T20:08:44Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:12:49Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:13:05Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:27:18Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:27:26Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:27:27Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: AT reached GREEN via production wiring alone; no unit test was required to pin edge behavior beyond what the walking skeleton exercises",
+      "t": "2026-08-09T20:27:27Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:27:44Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:37:04Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:37:16Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "RED_UNIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:37:21Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:37:26Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:38:16Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:41:48Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:41:53Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: encryption_key AWS-sourcing reuses already-unit-tested resolve_secret_source; the two mechanically-updated existing tests (encryption_key_too_short_returns_error, config_error_display_invalid_encryption_key) cover the var-field behavior; ATs cover the rest -- no new unit-test-only gap",
+      "t": "2026-08-09T20:42:15Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:50:42Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:50:49Z"
+    },
+    {
+      "sid": "03-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:56:46Z"
+    },
+    {
+      "sid": "03-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:56:46Z"
+    },
+    {
+      "sid": "03-02",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:56:58Z"
+    },
+    {
+      "sid": "03-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T20:56:58Z"
+    },
+    {
+      "sid": "03-02",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: resolve_secret_source is already generically unit-tested (resolve_secret_source_multiple_set_returns_ambiguous_error_naming_all etc.) for arbitrary source-candidate lists; the GREEN change is a one-line extension of the candidate vector passed to that already-covered function. The AT startup_refuses_ambiguous_encryption_key_sourcing fully exercises the new 3-source ambiguity path at subprocess speed; no additional unit test exercises a code path the AT leaves uncovered.",
+      "t": "2026-08-09T20:56:59Z"
+    },
+    {
+      "sid": "03-03",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T21:03:52Z"
+    },
+    {
+      "sid": "03-03",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T21:03:53Z"
+    },
+    {
+      "sid": "03-03",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: test-only step (3-phase canon RED); AT reached GREEN via harness + scenario body alone, no separate unit tests required (no production code change per ADR-018 ACL boundary)",
+      "t": "2026-08-09T21:03:53Z"
+    },
+    {
+      "sid": "03-03",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T21:03:53Z"
+    },
+    {
+      "sid": "03-03",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-09T21:03:54Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T05:48:20Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T05:48:20Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "RED_UNIT",
+      "s": "EXECUTED",
+      "d": "PASS: 2 unit tests added (config.rs) pinning DuplicateRotationKey Display text and resolved-byte (not env-text) comparison",
+      "t": "2026-08-10T06:00:47Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PARTIAL: 1/5 target scenarios pass (startup_rejects_identical_current_and_previous_encryption_key). 4/5 HTTP TOTP-signin scenarios blocked by pre-existing AT defect unrelated to ADR-018 wiring: JSON body omits required 'password' field causing axum JsonRejection 422 before handler runs (empirically verified via curl); seed_totp_user's placeholder password_hash is also deliberately unverifiable, so no password value would satisfy Argon2 verification either. decrypt_with_rotation wiring itself verified correct via curl with a valid password + direct-call unit tests. No regressions: cargo build/clippy clean, admin_api_v2 b01/walking_skeleton signin suites and secrets_management sm01/sm02 (isolated) all green.",
+      "t": "2026-08-10T06:00:47Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "RED_UNIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T06:05:19Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "FAIL",
+      "t": "2026-08-10T06:05:19Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T06:15:06Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T06:15:57Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T06:35:11Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS: 7/8 sm04 scenarios unignored; all failed for genuine business-logic reasons pre-implementation (401 for both dual-token scenarios; startup check absent for admin-key duplicate). dual_auth_middleware_accepts_previous_admin_key_too left #[ignore]d for step 05-02.",
+      "t": "2026-08-10T06:35:18Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "RED_UNIT",
+      "s": "EXECUTED",
+      "d": "PASS: 1 unit test added (operator_auth.rs::tests::bearer_matches_current_or_previous_key, parametrized over 5 cases covering current-match/previous-match/no-match) pinning the pure bearer_matches(presented, current, previous) helper; failed to compile pre-implementation (function + OperatorState.admin_key_previous field did not exist).",
+      "t": "2026-08-10T06:35:25Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PARTIAL: 4/5 target scenarios pass (operator_route_accepts_current_admin_key, metrics_endpoint_honors_dual_token_window, operator_route_rejects_token_matching_neither, startup_rejects_identical_current_and_previous_admin_key), plus both informational scenarios (hard_cutover_with_no_grace_period_remains_available, retired_admin_token_rejected_once_rotation_window_closed). 1/5 blocked by AT scaffold defect unrelated to ADR-018 wiring: operator_route_accepts_previous_admin_key_during_rotation_window targets GET /admin/v1/projects (list, no :id) which is guarded by session_auth_middleware, not operator_auth_middleware -- confirmed via ADR-018 sec 6 (operator_auth_middleware guards only routes the operator sub-router already guards, e.g. /metrics; dual_auth_middleware for :id is 05-02 scope; the list route is session-only, unrelated to either). Scenario's own docstring documents the Journey as 'GET /metrics' contradicting its actual URL -- a URL typo in the DISTILL scaffold. Manually verified via curl against target/debug/embyr-server that operator_auth_middleware correctly accepts both current and previous admin keys on /metrics and rejects wrong tokens. Fixing requires editing sm04_admin_key_rotation.rs scenario logic, which is out of this step's authorized boundary (unignoring markers only). No regressions: cargo build/clippy --workspace clean, cargo test --workspace --no-run compiles, secrets_management sm01/sm02/sm03 all green (26 passed total across suite excluding the blocked scenario).",
+      "t": "2026-08-10T06:35:37Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "COMMIT",
+      "s": "SKIPPED",
+      "d": "BLOCKED_BY_DEPENDENCY: 4/5 target scenarios green (plus both informational ones) and zero regressions, but quality gate 'all 5 target scenarios pass' is not met -- operator_route_accepts_previous_admin_key_during_rotation_window is blocked by a DISTILL-authored AT scaffold defect (wrong route: GET /admin/v1/projects list endpoint instead of an operator_auth_middleware-guarded route such as /metrics, per ADR-018 sec 6 and the scenario's own docstring). Boundary rules for this step forbid scenario-logic edits to sm04_admin_key_rotation.rs, so no unauthorized fix was made. Production code (config.rs, state.rs, router.rs, operator_auth.rs, main.rs, Cargo.toml/lock) is complete, tested, and verified correct by direct curl against the built binary. Awaiting orchestrator decision: authorize a one-line URL fix in the scenario (test-bug correction, same precedent as 04-01's seed_totp_user harness fix) or reroute this scenario to DISTILL for scaffold correction.",
+      "t": "2026-08-10T06:36:13Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T06:37:35Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "RED_UNIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T06:37:44Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "FAIL",
+      "t": "2026-08-10T06:37:52Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS: all 5 target scenarios green after fixing a DISTILL scaffold defect in sm04_admin_key_rotation.rs (operator_route_accepts_previous_admin_key_during_rotation_window targeted GET /admin/v1/projects, a session_auth_middleware-guarded list route, instead of GET /metrics per the scenario's own docstring and ADR-018 sec 6). Fixed the test URL only, no scenario-logic change. 7/8 sm04 tests pass (1 correctly #[ignore]d for 05-02). No regressions: cargo build/clippy -p embyr-server clean.",
+      "t": "2026-08-10T06:42:17Z"
+    },
+    {
+      "sid": "05-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: 1c060de",
+      "t": "2026-08-10T06:42:50Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T06:45:08Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T06:45:08Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: pure reuse/wiring change \u2014 bearer_matches already unit-tested in operator_auth.rs; field-threading through build_admin_router is exercised end-to-end by the AT (real subprocess), no new branching logic introduced",
+      "t": "2026-08-10T06:45:18Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T07:05:57Z"
+    },
+    {
+      "sid": "05-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T07:06:19Z"
+    },
+    {
+      "sid": "06-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T07:19:15Z"
+    },
+    {
+      "sid": "06-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: no acceptance-level scenario targets this step; the two GCP subprocess scenarios (sm01 AC-SM-01-02) remain deliberately #[ignore]d per OQ-SM-4/A6 and are not unskipped by this step. This step's driving port is unit-level (config.rs resolver dispatch + GcpSecretFetcher::get_raw_secret).",
+      "t": "2026-08-10T07:19:21Z"
+    },
+    {
+      "sid": "06-01",
+      "p": "RED_UNIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T07:19:24Z"
+    },
+    {
+      "sid": "06-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T07:19:27Z"
+    },
+    {
+      "sid": "06-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-10T07:19:40Z"
+    },
+    {
+      "sid": "deliver-phase-3-refactor",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: L1-L2 RPP refactor pass over the 11 secrets-management production files (deliver-level Phase 3, polish only, no behavior change). Changes in 5 of 11 (6 already clean): (1) aws_secret_fetcher.rs + gcp_secret_fetcher.rs -- extracted private fetch_and_cache() helper collapsing duplicate cache-insert tail shared by get_dsn()/fetch_fresh() in each file; (2) config.rs -- consolidated 5 near-identical unused TTL constants (all =300, near-duplicate doc comments) into one SECRET_FETCHER_TTL_SECS_UNUSED, dropped the now-constant aws_ttl_secs parameter from fetch_from_secret_manager; (3) main.rs -- extracted fail_startup() and bind_or_exit() helpers collapsing 3x duplicated TCP-listener-bind-or-exit blocks and 3x duplicated DB-connect/migrate/probe-or-exit blocks; (4) admin/handlers/auth.rs -- added local try_get_or_err! macro collapsing 11 duplicated row.try_get(...) match blocks across signin()/oidc_callback(). No behavior changes: identical log messages/fields, identical TTL value, identical error paths. Deferred (out of 11-file scope): cross-adapter TTL-cache duplication (AWS/GCP, different external systems -- re-architecture risk); 3-way cookie-extraction duplication auth.rs/dual_auth.rs/session_auth.rs (session_auth.rs and mod.rs outside scope); config.rs's 4 parallel resolver functions (documented D-SM-1 intentional pattern, consolidating = redesign). Verification: cargo build --workspace clean, cargo clippy --workspace -- -D warnings clean, cargo test --test secrets_management -- --test-threads=1 = 28 passed/1 ignored/0 failed (matches baseline), cargo test -p embyr-server --lib -- --test-threads=1 = 23 passed/0 failed. git diff --stat confirms only 5 of 11 listed files touched, 0 files outside the list.",
+      "t": "2026-08-10T12:14:58Z"
+    }
+  ]
+}

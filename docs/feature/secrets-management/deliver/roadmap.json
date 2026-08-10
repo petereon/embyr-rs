@@ -1,0 +1,225 @@
+{
+  "roadmap": {
+    "project_id": "secrets-management",
+    "created_at": "2026-08-09T00:00:00Z",
+    "total_steps": 10
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Walking Skeleton",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "decrypt_with_rotation GREEN",
+          "criteria": [
+            "decrypt_with_rotation tries current_key first and succeeds without previous",
+            "Falls back to previous_key on current-key AEAD failure and succeeds",
+            "Returns AuthenticationFailed when neither key decrypts",
+            "Returns Malformed when ciphertext is under 12 bytes",
+            "Correct for TOTP, client-secret, and DSN shaped ciphertext"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm03_encryption_key_rotation.rs",
+          "scenario_name": "decrypt_with_rotation_tries_current_before_previous,decrypt_with_rotation_works_against_oidc_and_dsn_shaped_ciphertext",
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/encryption.rs"
+          ],
+          "implementation_notes": "Replace the RED panic! body per ADR-018 section 5. Try Aes256Gcm decrypt with current_key; on AEAD failure retry previous_key if Some; ciphertext under 12 bytes returns Malformed before any decrypt attempt. Remove #[ignore] from both in-memory tests in sm03. Pure function, no IO."
+        },
+        {
+          "id": "01-02",
+          "name": "Async config plus AWS admin key walking skeleton",
+          "criteria": [
+            "ServerConfig::from_env is async and all existing callers await it",
+            "AwsSecretFetcher::get_raw_secret returns the raw secret string",
+            "EMBYR_ADMIN_KEY_AWS_SECRET_ARN sources the admin key at startup",
+            "Walking skeleton scenario passes with zero literal admin key in env",
+            "main.rs Step 1 awaits from_env before tracing init"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm01_admin_key_secrets_manager.rs",
+          "scenario_name": "server_starts_with_admin_key_from_aws_secrets_manager",
+          "files_to_modify": [
+            "crates/embyr-server/src/config.rs",
+            "crates/embyr-server/src/adapters/aws_secret_fetcher.rs",
+            "crates/embyr-server/src/main.rs"
+          ],
+          "implementation_notes": "ADR-018 section 1-3. Refactor AwsSecretFetcher::fetch_raw to share the network-call portion between get_dsn's parse_dsn path and a new get_raw_secret(arn) -> Result<String, AwsSecretError> that returns the secret string verbatim. ServerConfig::from_env() becomes `pub async fn from_env() -> Result<Self, ConfigError>`; construct AwsSecretFetcher lazily inside from_env only when EMBYR_ADMIN_KEY_AWS_SECRET_ARN is set, via aws_config::load_from_env().await (standard SDK default chain, honours AWS_ENDPOINT_URL for LocalStack). Update main.rs call site to `.await`. Find and update every existing test/call site that calls ServerConfig::from_env() synchronously (grep the whole workspace) to #[tokio::test] + .await -- this is the ADR-018-flagged blast-radius risk, verify with `cargo build --workspace` and `cargo test --workspace --no-run` before declaring GREEN. Do not yet implement ambiguity/fetch-failure/GCP paths -- those are later steps; only the happy-path AWS ARN resolution is required to turn the walking skeleton GREEN."
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "US-SM-01 backward compat and error paths",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "Admin key fallback ambiguity and fetch failure",
+          "criteria": [
+            "Plain EMBYR_ADMIN_KEY still works when no ARN is configured",
+            "Setting both plain and AWS ARN admin key is a startup error",
+            "Nonexistent ARN causes exit 1 with SecretFetchFailed before any port binds",
+            "Fetched admin key value never appears in logs or DB rows",
+            "ConfigError gains AmbiguousSecretSource and SecretFetchFailed variants"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm01_admin_key_secrets_manager.rs",
+          "scenario_name": "plain_env_var_still_works_when_no_arn_configured,startup_refuses_ambiguous_admin_key_sourcing,exits_1_when_admin_key_secret_fetch_fails,admin_key_secret_value_never_appears_in_logs_or_db",
+          "files_to_modify": [
+            "crates/embyr-server/src/config.rs"
+          ],
+          "implementation_notes": "ADR-018 section 3-4. Add ConfigError::AmbiguousSecretSource{var_base, sources} and ConfigError::SecretFetchFailed{var, source, reason}. Introduce the shared private resolve_secret_source helper (plain var vs *_AWS_SECRET_ARN vs *_GCP_SECRET_NAME, at most one set) and use it for admin_key resolution, reusing the get_raw_secret call added in 01-02. Unskip and pass all four listed scenarios. Never interpolate the resolved secret value itself into any error/log message -- only variable names."
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "US-SM-02 encryption key secrets manager sourcing",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "Encryption key AWS sourcing and validation reuse",
+          "criteria": [
+            "EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN sources the encryption key at startup",
+            "Fetched value is validated via the identical InvalidEncryptionKey path",
+            "InvalidEncryptionKey gains a var field naming which variable failed",
+            "Two existing unit tests referencing InvalidEncryptionKey are updated"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm02_encryption_key_secrets_manager.rs",
+          "scenario_name": "server_starts_with_encryption_key_from_aws_secrets_manager,fetched_encryption_key_of_invalid_length_is_rejected_at_startup",
+          "files_to_modify": [
+            "crates/embyr-server/src/config.rs"
+          ],
+          "implementation_notes": "ADR-018 section 3-4. Extend resolve_secret_source usage to encryption_key. ConfigError::InvalidEncryptionKey becomes { var: String, reason: String }; update encryption_key_too_short_returns_error and config_error_display_invalid_encryption_key unit tests mechanically to add the var field (ADR-018 Enforcement, quantified as 2 tests)."
+        },
+        {
+          "id": "03-02",
+          "name": "Encryption key fallback ambiguity and fetch failure",
+          "criteria": [
+            "Plain EMBYR_ENCRYPTION_KEY still works when no source var is set",
+            "Setting both plain and GCP name for encryption key is a startup error",
+            "Nonexistent ARN causes exit 1 with SecretFetchFailed and no bound port"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm02_encryption_key_secrets_manager.rs",
+          "scenario_name": "plain_env_var_still_works_for_encryption_key,startup_refuses_ambiguous_encryption_key_sourcing,exits_1_when_encryption_key_secret_fetch_fails",
+          "files_to_modify": [
+            "crates/embyr-server/src/config.rs"
+          ],
+          "implementation_notes": "Same resolve_secret_source helper as 02-01/03-01, applied to encryption_key. Unskip and pass all three listed scenarios."
+        },
+        {
+          "id": "03-03",
+          "name": "OIDC encryption unaffected by key sourcing",
+          "criteria": [
+            "Session-auth seeding helper exists in the common test harness",
+            "Owner creates an OIDC provider and receives HTTP 201",
+            "Stored client_secret_enc differs from the submitted plaintext"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm02_encryption_key_secrets_manager.rs",
+          "scenario_name": "oidc_client_secret_encryption_succeeds_with_secrets_manager_sourced_key",
+          "files_to_modify": [
+            "tests/secrets_management/common/mod.rs"
+          ],
+          "implementation_notes": "No production code changes expected here -- oidc_providers.rs is DESIGN-classified UNCHANGED (D-SM's ACL boundary). Add a seed_signed_in_session helper to tests/secrets_management/common/mod.rs mirroring tests/admin_api_v2/common/mod.rs's AdminTestContext session seeding (insert account/user/session row, return the embyr_session cookie value), then use it in this scenario. Unskip and pass."
+        }
+      ]
+    },
+    {
+      "id": "04",
+      "name": "US-SM-03 encryption key rotation window",
+      "steps": [
+        {
+          "id": "04-01",
+          "name": "Wire decrypt_with_rotation into TOTP signin",
+          "criteria": [
+            "EMBYR_ENCRYPTION_KEY_PREVIOUS resolves via the same three-source mechanism",
+            "auth.rs signin uses decrypt_with_rotation instead of a single cipher",
+            "Identical current/previous encryption key is rejected at startup",
+            "Absent previous key reproduces today's single-key decrypt exactly"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm03_encryption_key_rotation.rs",
+          "scenario_name": "totp_signin_decrypts_with_current_key,totp_signin_decrypts_with_previous_key_during_rotation_window,totp_signin_fails_when_neither_current_nor_previous_key_decrypts,totp_signin_malformed_ciphertext_below_nonce_minimum_fails_cleanly,startup_rejects_identical_current_and_previous_encryption_key",
+          "files_to_modify": [
+            "crates/embyr-server/src/config.rs",
+            "crates/embyr-server/src/admin/state.rs",
+            "crates/embyr-server/src/admin/router.rs",
+            "crates/embyr-server/src/admin/handlers/auth.rs",
+            "crates/embyr-server/src/main.rs"
+          ],
+          "implementation_notes": "ADR-018 section 3,5,6. Add ConfigError::DuplicateRotationKey{var, base_var}, checked after both values resolve by comparing resolved bytes (not env text). UserAdminState gains encryption_key_previous: Option<[u8;32]>. build_admin_router gains the encryption_key_previous parameter (threaded from cfg); four backward-compat wrapper functions in router.rs pass None. Replace auth.rs's inline Aes256Gcm::new_from_slice/decrypt block with a call to adapters::encryption::decrypt_with_rotation(&state.encryption_key, state.encryption_key_previous.as_ref(), &enc_bytes) -- preserve the existing status-code mapping (Malformed-shaped -> invalid_code() 401 via the existing <12-byte guard already in auth.rs, AuthenticationFailed -> existing 500 INTERNAL_SERVER_ERROR). main.rs Step 2 emits tracing::warn! when encryption_key_previous is Some (OQ-3)."
+        }
+      ]
+    },
+    {
+      "id": "05",
+      "name": "US-SM-04 admin key rotation window",
+      "steps": [
+        {
+          "id": "05-01",
+          "name": "Dual-token operator_auth_middleware",
+          "criteria": [
+            "EMBYR_ADMIN_KEY_PREVIOUS resolves via the same three-source mechanism",
+            "operator_auth_middleware accepts admin_key or admin_key_previous",
+            "GET /metrics honors the same dual-token window as other routes",
+            "Identical current/previous admin key is rejected at startup",
+            "A token matching neither key still returns 401"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm04_admin_key_rotation.rs",
+          "scenario_name": "operator_route_accepts_current_admin_key,operator_route_accepts_previous_admin_key_during_rotation_window,metrics_endpoint_honors_dual_token_window,operator_route_rejects_token_matching_neither,hard_cutover_with_no_grace_period_remains_available,startup_rejects_identical_current_and_previous_admin_key,retired_admin_token_rejected_once_rotation_window_closed",
+          "files_to_modify": [
+            "crates/embyr-server/src/config.rs",
+            "crates/embyr-server/src/admin/state.rs",
+            "crates/embyr-server/src/admin/router.rs",
+            "crates/embyr-server/src/admin/middleware/operator_auth.rs",
+            "crates/embyr-server/src/main.rs"
+          ],
+          "implementation_notes": "ADR-018 section 3,6,7. OperatorState gains admin_key_previous: Option<String>. build_admin_router signature gains admin_key_previous: Option<String>, threaded from cfg; four wrapper fns pass None. operator_auth_middleware accepts a bearer equal to state.admin_key OR state.admin_key_previous (Some). Use the constant-time comparison discipline already established in this codebase for secret comparisons -- grep for constant_time/ct_eq/subtle usage in the auth/Argon2id code paths and match that pattern for the bearer-token comparison rather than a plain == on secret bytes."
+        },
+        {
+          "id": "05-02",
+          "name": "dual_auth_middleware consistency fix",
+          "criteria": [
+            "UserAdminState gains admin_key_previous_env matching admin_key_env",
+            "dual_auth_middleware Bearer arm accepts either admin key value",
+            "Cookie path priority over Bearer path is unchanged"
+          ],
+          "test_file": "tests/secrets_management/acceptance/sm04_admin_key_rotation.rs",
+          "scenario_name": "dual_auth_middleware_accepts_previous_admin_key_too",
+          "files_to_modify": [
+            "crates/embyr-server/src/admin/state.rs",
+            "crates/embyr-server/src/admin/router.rs",
+            "crates/embyr-server/src/admin/middleware/dual_auth.rs"
+          ],
+          "implementation_notes": "ADR-018 section 6, the DESIGN-added consistency fix. Mirror 05-01's dual-token comparison discipline (same constant-time approach) in dual_auth_middleware's Bearer arm."
+        }
+      ]
+    },
+    {
+      "id": "06",
+      "name": "GCP interim stopgap sourcing",
+      "steps": [
+        {
+          "id": "06-01",
+          "name": "GcpSecretFetcher raw secret and resolver wiring",
+          "criteria": [
+            "GcpSecretFetcher::get_raw_secret returns the raw secret string",
+            "EMBYR_GCP_ACCESS_TOKEN is required only when a GCP name var is set",
+            "resolve_secret_source recognises the GCP source for all four secrets",
+            "The two GCP subprocess scenarios remain ignored with the OQ-SM-4 reason"
+          ],
+          "test_file": "crates/embyr-server/src/config.rs",
+          "scenario_name": "config_rs_unit_tests",
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/gcp_secret_fetcher.rs",
+            "crates/embyr-server/src/config.rs"
+          ],
+          "implementation_notes": "ADR-018 section 3, Alternatives A6, OQ-SM-4. Refactor GcpSecretFetcher::fetch_raw to share the HTTP+base64 portion between the existing parse_dsn path and a new get_raw_secret(resource_name) -> Result<String, GcpSecretError>. In config.rs's resolver, recognise *_GCP_SECRET_NAME as a third source alongside plain and AWS for all four logical secrets; construct GcpSecretFetcher lazily using EMBYR_GCP_ACCESS_TOKEN as the bearer token against the production base URL, erroring with a clear ConfigError if a GCP name var is set but EMBYR_GCP_ACCESS_TOKEN is absent. Do not add a test-only base-URL override -- out of scope per OQ-SM-4/A6; the two GCP subprocess scenarios in sm01/sm01-gcp stay #[ignore]d as DISTILL scaffolded them. Add unit-level coverage for the resolver's GCP branch directly in config.rs's #[cfg(test)] module instead."
+        }
+      ]
+    }
+  ],
+  "implementation_scope": {
+    "source_directories": [
+      "crates/embyr-server/src/",
+      "tests/secrets_management/"
+    ]
+  }
+}
