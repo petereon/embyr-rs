@@ -53,6 +53,7 @@ pub fn build_admin_router(
     admin_key: String,
     credential_cache: Arc<CredentialCache>,
     encryption_key: [u8; 32],
+    encryption_key_previous: Option<[u8; 32]>,
     email_sender: Arc<dyn IEmailSender + Send + Sync>,
     aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
@@ -71,6 +72,7 @@ pub fn build_admin_router(
     let user_state = UserAdminState {
         system_db,
         encryption_key,
+        encryption_key_previous,
         email_sender,
         credential_cache,
         admin_key_env: admin_key,
@@ -227,6 +229,7 @@ pub fn build_with_secret_fetchers(
         admin_key,
         credential_cache,
         [0u8; 32],
+        None,
         Arc::new(NoopEmailSender),
         aws_secret_fetcher,
         gcp_secret_fetcher,

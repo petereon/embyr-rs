@@ -11,10 +11,6 @@
 //! GET /admin/v1/auth/oidc/callback
 //!   (RED scaffold — implemented in a later step)
 
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
-};
 use argon2::{Algorithm as Argon2Algorithm, Argon2, Params, PasswordHash, PasswordVerifier, Version};
 use axum::{
     extract::{Json, Query, State},
@@ -28,6 +24,7 @@ use sqlx::Row;
 use totp_rs::{Algorithm as TotpAlgorithm, TOTP};
 use uuid::Uuid;
 
+use crate::adapters::encryption::{decrypt_with_rotation, RotationDecryptError};
 use crate::admin::state::UserAdminState;
 
 /// Session cookie lifetime in seconds (24 hours).
@@ -251,16 +248,24 @@ pub async fn signin(
             return invalid_code();
         }
 
-        // Decrypt AES-256-GCM: first 12 bytes = nonce, remainder = ciphertext + tag.
-        let cipher = match Aes256Gcm::new_from_slice(&state.encryption_key) {
-            Ok(c) => c,
-            Err(e) => return internal_err("build AES-256-GCM cipher", e),
-        };
-        let nonce = Nonce::from_slice(&enc_bytes[..12]);
-        let totp_secret_bytes = match cipher.decrypt(nonce, &enc_bytes[12..]) {
+        // Decrypt AES-256-GCM, trying the current key then falling back to the
+        // previous key during a rotation window (ADR-018 §5).
+        let totp_secret_bytes = match decrypt_with_rotation(
+            &state.encryption_key,
+            state.encryption_key_previous.as_ref(),
+            &enc_bytes,
+        ) {
             Ok(p) => p,
-            Err(_) => {
-                tracing::error!("signin: AES-GCM decryption of totp_secret_enc failed");
+            Err(RotationDecryptError::Malformed) => {
+                tracing::error!(
+                    "signin: totp_secret_enc malformed (< 12-byte nonce)"
+                );
+                return invalid_code();
+            }
+            Err(RotationDecryptError::AuthenticationFailed) => {
+                tracing::error!(
+                    "signin: AES-GCM decryption of totp_secret_enc failed under all configured keys"
+                );
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };

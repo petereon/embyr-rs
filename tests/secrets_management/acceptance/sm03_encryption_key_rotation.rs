@@ -66,7 +66,6 @@ fn hex_to_key(hex: &str) -> [u8; 32] {
 ///
 /// @real-io @US-SM-03 @AC-SM-03-04
 #[tokio::test]
-#[ignore]
 async fn totp_signin_decrypts_with_current_key() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -77,7 +76,7 @@ async fn totp_signin_decrypts_with_current_key() {
     let pool = system_db.pool().clone();
 
     let current_key = hex_to_key(TEST_ENCRYPTION_KEY);
-    let (_account_id, _user_id, totp_raw) =
+    let (_account_id, _user_id, totp_raw, password) =
         seed_totp_user(&pool, "current-key-signin@example.com", &current_key).await;
 
     let mut server = ServerProcess::start(
@@ -102,6 +101,7 @@ async fn totp_signin_decrypts_with_current_key() {
         ))
         .json(&serde_json::json!({
             "email": "current-key-signin@example.com",
+            "password": password,
             "totp_code": totp_code_now(&totp_raw),
         }))
         .send()
@@ -138,7 +138,6 @@ async fn totp_signin_decrypts_with_current_key() {
 ///
 /// @real-io @US-SM-03 @AC-SM-03-02
 #[tokio::test]
-#[ignore]
 async fn totp_signin_decrypts_with_previous_key_during_rotation_window() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -149,7 +148,7 @@ async fn totp_signin_decrypts_with_previous_key_during_rotation_window() {
     let pool = system_db.pool().clone();
 
     let old_key = hex_to_key(TEST_ENCRYPTION_KEY_PREVIOUS);
-    let (_account_id, _user_id, totp_raw) =
+    let (_account_id, _user_id, totp_raw, password) =
         seed_totp_user(&pool, "maria.santos@example.com", &old_key).await;
 
     let mut server = ServerProcess::start(
@@ -174,6 +173,7 @@ async fn totp_signin_decrypts_with_previous_key_during_rotation_window() {
         ))
         .json(&serde_json::json!({
             "email": "maria.santos@example.com",
+            "password": password,
             "totp_code": totp_code_now(&totp_raw),
         }))
         .send()
@@ -204,7 +204,6 @@ async fn totp_signin_decrypts_with_previous_key_during_rotation_window() {
 ///
 /// @error @real-io @US-SM-03 @AC-SM-03-05
 #[tokio::test]
-#[ignore]
 async fn totp_signin_fails_when_neither_current_nor_previous_key_decrypts() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -218,7 +217,7 @@ async fn totp_signin_fails_when_neither_current_nor_previous_key_decrypts() {
     let neither_key = hex_to_key(
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
-    let (_account_id, _user_id, totp_raw) =
+    let (_account_id, _user_id, totp_raw, password) =
         seed_totp_user(&pool, "unrecoverable@example.com", &neither_key).await;
 
     let mut server = ServerProcess::start(
@@ -240,6 +239,7 @@ async fn totp_signin_fails_when_neither_current_nor_previous_key_decrypts() {
         ))
         .json(&serde_json::json!({
             "email": "unrecoverable@example.com",
+            "password": password,
             "totp_code": totp_code_now(&totp_raw),
         }))
         .send()
@@ -272,7 +272,6 @@ async fn totp_signin_fails_when_neither_current_nor_previous_key_decrypts() {
 ///
 /// @error @real-io @US-SM-03 @AC-SM-03-05
 #[tokio::test]
-#[ignore]
 async fn totp_signin_malformed_ciphertext_below_nonce_minimum_fails_cleanly() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -283,7 +282,7 @@ async fn totp_signin_malformed_ciphertext_below_nonce_minimum_fails_cleanly() {
     let pool = system_db.pool().clone();
 
     let current_key = hex_to_key(TEST_ENCRYPTION_KEY);
-    let (_account_id, user_id, totp_raw) =
+    let (_account_id, user_id, totp_raw, password) =
         seed_totp_user(&pool, "corrupted-ciphertext@example.com", &current_key).await;
     corrupt_totp_secret(&pool, user_id).await;
 
@@ -305,6 +304,7 @@ async fn totp_signin_malformed_ciphertext_below_nonce_minimum_fails_cleanly() {
         ))
         .json(&serde_json::json!({
             "email": "corrupted-ciphertext@example.com",
+            "password": password,
             "totp_code": totp_code_now(&totp_raw),
         }))
         .send()
@@ -338,7 +338,6 @@ async fn totp_signin_malformed_ciphertext_below_nonce_minimum_fails_cleanly() {
 ///
 /// @error @US-SM-03 @AC-SM-03-06
 #[tokio::test]
-#[ignore]
 async fn startup_rejects_identical_current_and_previous_encryption_key() {
     let mut server = ServerProcess::start_env_only(&[
         (

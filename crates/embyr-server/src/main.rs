@@ -56,6 +56,14 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    if cfg.encryption_key_previous.is_some() {
+        tracing::warn!(
+            rotation_window_open = true,
+            var = "EMBYR_ENCRYPTION_KEY_PREVIOUS",
+            "decrypt-rotation window is open"
+        );
+    }
+
     // ── Step 3: Prometheus recorder (ADR-016: before any TCP listener) ────
     let prom_handle = get_or_install_prometheus_handle();
 
@@ -168,6 +176,7 @@ async fn main() {
         cfg.admin_key.clone(),
         cache_for_admin,
         cfg.encryption_key,
+        cfg.encryption_key_previous,
         Arc::new(NoopEmailSender),
         None,
         None,

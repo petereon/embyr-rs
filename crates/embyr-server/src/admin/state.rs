@@ -42,6 +42,10 @@ pub struct UserAdminState {
     pub system_db: Arc<SystemDb>,
     /// EMBYR_ENCRYPTION_KEY — 32-byte AES-256-GCM key.
     pub encryption_key: [u8; 32],
+    /// EMBYR_ENCRYPTION_KEY_PREVIOUS — optional 32-byte AES-256-GCM key that
+    /// opens a decrypt-rotation window (ADR-018 §5); `None` outside a
+    /// rotation window.
+    pub encryption_key_previous: Option<[u8; 32]>,
     /// Email delivery port — V1 uses NoopEmailSender; V2 uses SmtpEmailSender.
     pub email_sender: Arc<dyn IEmailSender + Send + Sync>,
     pub credential_cache: Arc<CredentialCache>,

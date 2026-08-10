@@ -362,6 +362,7 @@ impl AdminTestContext {
             "test-admin-key-from-env".to_string(),
             credential_cache,
             [0u8; 32], // test encryption key (matches TOTP encryption above)
+            None,
             email_sender,
             None,
             None,

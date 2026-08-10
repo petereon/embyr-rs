@@ -245,16 +245,25 @@ pub fn corrupt_below_nonce_minimum(enc: &[u8]) -> Vec<u8> {
     enc[..8.min(enc.len())].to_vec()
 }
 
-/// Seed one account + one user (Argon2id-free: password hash is irrelevant to
-/// these scenarios, a fixed placeholder is used) with a `totp_secret_enc` row
+/// Seed one account + one user with a real Argon2id-hashed password (same
+/// production params as `admin/handlers/auth.rs::signin` — matches the
+/// pattern in `tests/admin_api_v2/common/mod.rs`) and a `totp_secret_enc` row
 /// encrypted under `encrypted_under_key`. Returns `(account_id, user_id,
-/// totp_raw_secret)` — the raw 20-byte secret is needed to compute a live TOTP
-/// code via [`totp_code_now`].
+/// totp_raw_secret, password)` — the raw 20-byte TOTP secret is needed to
+/// compute a live TOTP code via [`totp_code_now`]; `password` is the
+/// plaintext the caller must send in the `POST /admin/v1/auth/signin` JSON
+/// body (signin's Argon2id check verifies it, so it must be sent for the
+/// request to pass JSON validation and reach the TOTP branch under test).
 pub async fn seed_totp_user(
     pool: &sqlx::PgPool,
     email: &str,
     encrypted_under_key: &[u8; 32],
-) -> (uuid::Uuid, uuid::Uuid, [u8; 20]) {
+) -> (uuid::Uuid, uuid::Uuid, [u8; 20], String) {
+    use argon2::{
+        password_hash::SaltString, Algorithm as Argon2Algorithm, Argon2, Params, PasswordHasher,
+        Version,
+    };
+
     let account_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO accounts (name) VALUES ('Secrets Rotation Test Account') RETURNING id",
     )
@@ -266,12 +275,20 @@ pub async fn seed_totp_user(
     OsRng.fill_bytes(&mut totp_raw);
     let totp_secret_enc = encrypt_totp_secret(encrypted_under_key, &totp_raw);
 
-    // Placeholder Argon2id-shaped hash string — signin's password check is not
-    // exercised by these rotation scenarios (TOTP decrypt is the surface under
-    // test); a syntactically valid PHC string avoids parse panics if the
-    // handler validates the column shape before reaching the TOTP branch.
-    let password_hash =
-        "$argon2id$v=19$m=65536,t=3,p=4$c2VjcmV0c21hbmFnZW1lbnQ$placeholderplaceholderplaceholder";
+    // Real Argon2id hash (production params) so signin's password-verification
+    // step succeeds — the rotation scenarios exercise the TOTP-decrypt branch,
+    // which is only reachable after a genuine password check passes.
+    let password = "sm03-rotation-test-password".to_string();
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::new(
+        Argon2Algorithm::Argon2id,
+        Version::V0x13,
+        Params::new(65536, 3, 4, None).expect("valid Argon2id params"),
+    );
+    let password_hash = argon2
+        .hash_password(password.as_bytes(), &salt)
+        .expect("Argon2id hash failed")
+        .to_string();
 
     let user_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO users (account_id, email, display_name, password_hash, totp_secret_enc) \
@@ -280,7 +297,7 @@ pub async fn seed_totp_user(
     .bind(account_id)
     .bind(email)
     .bind("Secrets Rotation Test User")
-    .bind(password_hash)
+    .bind(&password_hash)
     .bind(&totp_secret_enc)
     .fetch_one(pool)
     .await
@@ -296,7 +313,7 @@ pub async fn seed_totp_user(
     .await
     .expect("insert account_member");
 
-    (account_id, user_id, totp_raw)
+    (account_id, user_id, totp_raw, password)
 }
 
 /// Overwrite an existing user's `totp_secret_enc` column with a corrupted

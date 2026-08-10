@@ -49,6 +49,12 @@ const ADMIN_KEY_AWS_FETCHER_TTL_SECS: u64 = 300;
 /// — `get_raw_secret` bypasses the cache entirely.
 const ENCRYPTION_KEY_AWS_FETCHER_TTL_SECS: u64 = 300;
 
+/// Cache TTL passed to `AwsSecretFetcher::new` when resolving
+/// `encryption_key_previous` from AWS Secrets Manager. Same rationale as
+/// [`ADMIN_KEY_AWS_FETCHER_TTL_SECS`] — `get_raw_secret` bypasses the cache
+/// entirely.
+const ENCRYPTION_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS: u64 = 300;
+
 /// Full configuration for embyr-server loaded from environment variables.
 #[derive(Debug)]
 pub struct ServerConfig {
@@ -58,6 +64,11 @@ pub struct ServerConfig {
     pub admin_key: String,
     /// `EMBYR_ENCRYPTION_KEY` — 32-byte AES-256-GCM key encoded as 64 hex chars; required.
     pub encryption_key: [u8; 32],
+    /// `EMBYR_ENCRYPTION_KEY_PREVIOUS` — optional 32-byte AES-256-GCM key encoded
+    /// as 64 hex chars; opens a decrypt-rotation window (ADR-018 §5). `None`
+    /// means no rotation window — `decrypt_with_rotation` degrades to today's
+    /// single-key behavior byte-for-byte.
+    pub encryption_key_previous: Option<[u8; 32]>,
     /// `EMBYR_RATE_LIMIT_RPS` — token bucket capacity and refill rate; default 1000.0.
     pub rate_limit_rps: f64,
     /// `GRPC_PORT` — gRPC listener port; default 8080.
@@ -94,6 +105,10 @@ pub enum ConfigError {
         var_base: String,
         sources: Vec<String>,
     },
+    /// The resolved `EMBYR_ENCRYPTION_KEY_PREVIOUS` bytes are identical to the
+    /// resolved `EMBYR_ENCRYPTION_KEY` bytes (ADR-018 §6) — checked after both
+    /// values are resolved, comparing resolved bytes, never raw env text.
+    DuplicateRotationKey { var: String, base_var: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -134,6 +149,9 @@ impl fmt::Display for ConfigError {
                     sources.join(", ")
                 )
             }
+            ConfigError::DuplicateRotationKey { var, base_var } => {
+                write!(f, "{var} must differ from {base_var}")
+            }
         }
     }
 }
@@ -154,6 +172,7 @@ impl ServerConfig {
         let db_url_opt = collect_required("DATABASE_URL", &mut missing);
         let admin_key_opt = resolve_admin_key(&mut missing).await?;
         let enc_hex_opt = resolve_encryption_key_hex(&mut missing).await?;
+        let enc_prev_hex_opt = resolve_encryption_key_previous_hex().await?;
 
         if !missing.is_empty() {
             return Err(ConfigError::MissingVars(missing));
@@ -161,6 +180,21 @@ impl ServerConfig {
 
         let encryption_key =
             validate_encryption_key_hex("EMBYR_ENCRYPTION_KEY", &enc_hex_opt.unwrap())?;
+        let encryption_key_previous = match enc_prev_hex_opt {
+            Some(hex_str) => Some(validate_encryption_key_hex(
+                "EMBYR_ENCRYPTION_KEY_PREVIOUS",
+                &hex_str,
+            )?),
+            None => None,
+        };
+        if let Some(prev) = encryption_key_previous {
+            if prev == encryption_key {
+                return Err(ConfigError::DuplicateRotationKey {
+                    var: "EMBYR_ENCRYPTION_KEY_PREVIOUS".to_string(),
+                    base_var: "EMBYR_ENCRYPTION_KEY".to_string(),
+                });
+            }
+        }
 
         // Optional vars with defaults.
         let rate_limit_rps = parse_rate_limit_rps()?;
@@ -173,6 +207,7 @@ impl ServerConfig {
             db_url: db_url_opt.unwrap(),
             admin_key: admin_key_opt.unwrap(),
             encryption_key,
+            encryption_key_previous,
             rate_limit_rps,
             grpc_port,
             rest_port,
@@ -283,6 +318,57 @@ async fn resolve_encryption_key_hex(
             missing.push("EMBYR_ENCRYPTION_KEY".to_string());
             Ok(None)
         }
+    }
+}
+
+/// Resolve the raw hex string for the OPTIONAL `encryption_key_previous`
+/// (ADR-018 §3, §5) from plain `EMBYR_ENCRYPTION_KEY_PREVIOUS` when present;
+/// otherwise, if `EMBYR_ENCRYPTION_KEY_PREVIOUS_AWS_SECRET_ARN` is set, fetch
+/// the raw secret value from AWS Secrets Manager.
+/// `EMBYR_ENCRYPTION_KEY_PREVIOUS_GCP_SECRET_NAME` is recognised as an
+/// ambiguity-detection candidate only, mirroring
+/// [`resolve_encryption_key_hex`]'s GCP handling. Unlike the required
+/// `encryption_key` resolver, absence of every source is NOT an error —
+/// `Ok(None)` means no rotation window is open (`decrypt_with_rotation`
+/// degrades to single-key behavior byte-for-byte).
+async fn resolve_encryption_key_previous_hex() -> Result<Option<String>, ConfigError> {
+    let plain = std::env::var("EMBYR_ENCRYPTION_KEY_PREVIOUS")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let aws_arn = std::env::var("EMBYR_ENCRYPTION_KEY_PREVIOUS_AWS_SECRET_ARN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let gcp_name = std::env::var("EMBYR_ENCRYPTION_KEY_PREVIOUS_GCP_SECRET_NAME")
+        .ok()
+        .filter(|v| !v.is_empty());
+
+    let resolved = resolve_secret_source(
+        "EMBYR_ENCRYPTION_KEY_PREVIOUS",
+        vec![
+            ("EMBYR_ENCRYPTION_KEY_PREVIOUS", plain),
+            ("EMBYR_ENCRYPTION_KEY_PREVIOUS_AWS_SECRET_ARN", aws_arn),
+            ("EMBYR_ENCRYPTION_KEY_PREVIOUS_GCP_SECRET_NAME", gcp_name),
+        ],
+    )?;
+
+    match resolved {
+        Some((source, value)) if source == "EMBYR_ENCRYPTION_KEY_PREVIOUS" => Ok(Some(value)),
+        Some((_, arn)) => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let fetcher = AwsSecretFetcher::new(&aws_config, ENCRYPTION_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS)
+                .await;
+            let value =
+                fetcher
+                    .get_raw_secret(&arn)
+                    .await
+                    .map_err(|e| ConfigError::SecretFetchFailed {
+                        var: "EMBYR_ENCRYPTION_KEY_PREVIOUS".to_string(),
+                        reason: e.to_string(),
+                    })?;
+            eprintln!("fetched EMBYR_ENCRYPTION_KEY_PREVIOUS from AWS Secrets Manager");
+            Ok(Some(value))
+        }
+        None => Ok(None),
     }
 }
 
@@ -548,5 +634,36 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("EMBYR_ADMIN_KEY"), "got: {msg}");
         assert!(msg.contains("EMBYR_ADMIN_KEY_AWS_SECRET_ARN"), "got: {msg}");
+    }
+
+    // ── DuplicateRotationKey ─────────────────────────────────────────────────
+
+    #[test]
+    fn config_error_display_duplicate_rotation_key_names_var_and_differ() {
+        let err = ConfigError::DuplicateRotationKey {
+            var: "EMBYR_ENCRYPTION_KEY_PREVIOUS".into(),
+            base_var: "EMBYR_ENCRYPTION_KEY".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("EMBYR_ENCRYPTION_KEY_PREVIOUS"), "got: {msg}");
+        assert!(msg.contains("EMBYR_ENCRYPTION_KEY"), "got: {msg}");
+        assert!(msg.contains("differ"), "got: {msg}");
+    }
+
+    #[test]
+    fn duplicate_rotation_key_compares_resolved_bytes_not_env_text() {
+        // Different hex text (upper vs lower case) that decodes to identical
+        // 32-byte resolved values must still be treated as a duplicate — the
+        // comparison is over resolved bytes, never the raw env string.
+        let lower = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let upper = "0102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20";
+        assert_ne!(lower, upper, "precondition: env text differs");
+        let current = validate_encryption_key_hex("EMBYR_ENCRYPTION_KEY", lower).unwrap();
+        let previous =
+            validate_encryption_key_hex("EMBYR_ENCRYPTION_KEY_PREVIOUS", upper).unwrap();
+        assert_eq!(
+            current, previous,
+            "resolved bytes must be equal despite differing env text case"
+        );
     }
 }
