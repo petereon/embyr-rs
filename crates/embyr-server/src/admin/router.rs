@@ -64,7 +64,7 @@ pub fn build_admin_router(
     let operator_state = OperatorState {
         system_db: system_db.clone(),
         admin_key: admin_key.clone(),
-        admin_key_previous,
+        admin_key_previous: admin_key_previous.clone(),
         credential_cache: credential_cache.clone(),
         aws_secret_fetcher,
         gcp_secret_fetcher,
@@ -78,6 +78,7 @@ pub fn build_admin_router(
         email_sender,
         credential_cache,
         admin_key_env: admin_key,
+        admin_key_previous_env: admin_key_previous,
     };
 
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by

@@ -55,4 +55,8 @@ pub struct UserAdminState {
     pub credential_cache: Arc<CredentialCache>,
     /// EMBYR_ADMIN_KEY value — retained for dual-auth bearer check.
     pub admin_key_env: String,
+    /// EMBYR_ADMIN_KEY_PREVIOUS value — mirrors `admin_key_env`, keeps
+    /// `dual_auth_middleware`'s Bearer arm rotation-aware like its sibling
+    /// `operator_auth_middleware` (ADR-018 §6, B-SM-07 consistency fix).
+    pub admin_key_previous_env: Option<String>,
 }

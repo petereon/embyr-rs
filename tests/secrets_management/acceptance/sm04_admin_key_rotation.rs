@@ -317,7 +317,6 @@ async fn startup_rejects_identical_current_and_previous_admin_key() {
 ///
 /// @real-io @US-SM-04 @AC-SM-04-02 @consistency-fix
 #[tokio::test]
-#[ignore]
 async fn dual_auth_middleware_accepts_previous_admin_key_too() {
     let (_pg, db_url) = start_postgres_container().await;
 

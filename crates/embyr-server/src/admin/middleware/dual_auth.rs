@@ -2,7 +2,8 @@
 //!
 //! Accepts:
 //!   - Session cookie `embyr_session`: BLAKE3 lookup → sessions JOIN account_members.
-//!   - Bearer EMBYR_ADMIN_KEY: exact string match against `UserAdminState::admin_key_env`.
+//!   - Bearer EMBYR_ADMIN_KEY (or EMBYR_ADMIN_KEY_PREVIOUS during a rotation
+//!     window, ADR-018 §6): constant-time match via `bearer_matches`.
 //!
 //! Inserts `AuthPrincipal` into request extensions on success.
 //! Returns 401 if neither credential is valid.
@@ -21,6 +22,7 @@ use uuid::Uuid;
 use embyr_core::admin::account::Role;
 
 use crate::admin::extractors::dual_auth_principal::AuthPrincipal;
+use crate::admin::middleware::operator_auth::bearer_matches;
 use crate::admin::state::UserAdminState;
 
 /// Extract a named cookie value from the `Cookie` request header.
@@ -114,11 +116,11 @@ pub async fn dual_auth_middleware(
         .map(|v| v.to_string());
 
     if let Some(key) = bearer {
-        if key == state.admin_key_env {
+        if bearer_matches(&key, &state.admin_key_env, state.admin_key_previous_env.as_deref()) {
             request.extensions_mut().insert(AuthPrincipal::Operator);
             return next.run(request).await;
         }
-        // Non-empty Bearer that doesn't match operator key: 401.
+        // Non-empty Bearer that doesn't match operator key (current or previous): 401.
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
