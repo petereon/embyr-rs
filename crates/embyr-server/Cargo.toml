@@ -38,6 +38,7 @@ blake3.workspace = true
 x25519-dalek.workspace = true
 hkdf.workspace = true
 aes-gcm.workspace = true
+subtle.workspace = true
 lru.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -169,6 +170,10 @@ path = "../../tests/distributed_rate_limiting/acceptance/b14_ratelimit_headers.r
 [[test]]
 name = "production_readiness"
 path = "../../tests/production_readiness/mod.rs"
+
+[[test]]
+name = "secrets_management"
+path = "../../tests/secrets_management/mod.rs"
 
 # observability acceptance tests
 [[test]]

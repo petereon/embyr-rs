@@ -51,6 +51,7 @@ use super::state::{OperatorState, UserAdminState};
 pub fn build_admin_router(
     system_db: Arc<SystemDb>,
     admin_key: String,
+    admin_key_previous: Option<String>,
     credential_cache: Arc<CredentialCache>,
     encryption_key: [u8; 32],
     encryption_key_previous: Option<[u8; 32]>,
@@ -63,6 +64,7 @@ pub fn build_admin_router(
     let operator_state = OperatorState {
         system_db: system_db.clone(),
         admin_key: admin_key.clone(),
+        admin_key_previous,
         credential_cache: credential_cache.clone(),
         aws_secret_fetcher,
         gcp_secret_fetcher,
@@ -227,6 +229,7 @@ pub fn build_with_secret_fetchers(
     build_admin_router(
         system_db,
         admin_key,
+        None,
         credential_cache,
         [0u8; 32],
         None,

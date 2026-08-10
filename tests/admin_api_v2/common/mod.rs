@@ -360,6 +360,7 @@ impl AdminTestContext {
         let router = build_admin_router(
             system_db,
             "test-admin-key-from-env".to_string(),
+            None,
             credential_cache,
             [0u8; 32], // test encryption key (matches TOTP encryption above)
             None,

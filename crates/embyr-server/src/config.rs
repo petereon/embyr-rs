@@ -33,6 +33,11 @@
 //! from AWS Secrets Manager the same way. The fetched value is validated via
 //! the identical [`ConfigError::InvalidEncryptionKey`] path as the plain
 //! `EMBYR_ENCRYPTION_KEY` case.
+//!
+//! `EMBYR_ADMIN_KEY_PREVIOUS` (optional; also sourceable via
+//! `_AWS_SECRET_ARN` / `_GCP_SECRET_NAME`) opens an admin-token rotation
+//! window (ADR-018 §6): `operator_auth_middleware` accepts either the
+//! current or the previous admin key while both are configured.
 
 use std::fmt;
 
@@ -55,6 +60,12 @@ const ENCRYPTION_KEY_AWS_FETCHER_TTL_SECS: u64 = 300;
 /// entirely.
 const ENCRYPTION_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS: u64 = 300;
 
+/// Cache TTL passed to `AwsSecretFetcher::new` when resolving
+/// `admin_key_previous` from AWS Secrets Manager. Same rationale as
+/// [`ADMIN_KEY_AWS_FETCHER_TTL_SECS`] — `get_raw_secret` bypasses the cache
+/// entirely.
+const ADMIN_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS: u64 = 300;
+
 /// Full configuration for embyr-server loaded from environment variables.
 #[derive(Debug)]
 pub struct ServerConfig {
@@ -62,6 +73,11 @@ pub struct ServerConfig {
     pub db_url: String,
     /// `EMBYR_ADMIN_KEY` — non-empty admin Bearer token; required.
     pub admin_key: String,
+    /// `EMBYR_ADMIN_KEY_PREVIOUS` — optional Bearer token; opens an
+    /// auth-rotation window (ADR-018 §6). `None` means no rotation window —
+    /// `operator_auth_middleware` degrades to today's single-key behavior
+    /// byte-for-byte.
+    pub admin_key_previous: Option<String>,
     /// `EMBYR_ENCRYPTION_KEY` — 32-byte AES-256-GCM key encoded as 64 hex chars; required.
     pub encryption_key: [u8; 32],
     /// `EMBYR_ENCRYPTION_KEY_PREVIOUS` — optional 32-byte AES-256-GCM key encoded
@@ -171,11 +187,22 @@ impl ServerConfig {
 
         let db_url_opt = collect_required("DATABASE_URL", &mut missing);
         let admin_key_opt = resolve_admin_key(&mut missing).await?;
+        let admin_key_previous = resolve_admin_key_previous().await?;
         let enc_hex_opt = resolve_encryption_key_hex(&mut missing).await?;
         let enc_prev_hex_opt = resolve_encryption_key_previous_hex().await?;
 
         if !missing.is_empty() {
             return Err(ConfigError::MissingVars(missing));
+        }
+
+        let admin_key = admin_key_opt.unwrap();
+        if let Some(prev) = &admin_key_previous {
+            if prev == &admin_key {
+                return Err(ConfigError::DuplicateRotationKey {
+                    var: "EMBYR_ADMIN_KEY_PREVIOUS".to_string(),
+                    base_var: "EMBYR_ADMIN_KEY".to_string(),
+                });
+            }
         }
 
         let encryption_key =
@@ -205,7 +232,8 @@ impl ServerConfig {
 
         Ok(ServerConfig {
             db_url: db_url_opt.unwrap(),
-            admin_key: admin_key_opt.unwrap(),
+            admin_key,
+            admin_key_previous,
             encryption_key,
             encryption_key_previous,
             rate_limit_rps,
@@ -318,6 +346,58 @@ async fn resolve_encryption_key_hex(
             missing.push("EMBYR_ENCRYPTION_KEY".to_string());
             Ok(None)
         }
+    }
+}
+
+/// Resolve the OPTIONAL `admin_key_previous` (ADR-018 §3, §6) from plain
+/// `EMBYR_ADMIN_KEY_PREVIOUS` when present; otherwise, if
+/// `EMBYR_ADMIN_KEY_PREVIOUS_AWS_SECRET_ARN` is set, fetch the raw secret
+/// value from AWS Secrets Manager. `EMBYR_ADMIN_KEY_PREVIOUS_GCP_SECRET_NAME`
+/// is recognised as an ambiguity-detection candidate only, mirroring
+/// [`resolve_encryption_key_hex`]'s GCP handling — GCP fetching itself is out
+/// of scope until step 06-01. Unlike the required `admin_key` resolver,
+/// absence of every source is NOT an error — `Ok(None)` means no rotation
+/// window is open (`operator_auth_middleware` degrades to single-key
+/// behavior byte-for-byte). Mirrors [`resolve_encryption_key_previous_hex`]'s
+/// shape (D-SM-1: reuse the existing pattern).
+async fn resolve_admin_key_previous() -> Result<Option<String>, ConfigError> {
+    let plain = std::env::var("EMBYR_ADMIN_KEY_PREVIOUS")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let aws_arn = std::env::var("EMBYR_ADMIN_KEY_PREVIOUS_AWS_SECRET_ARN")
+        .ok()
+        .filter(|v| !v.is_empty());
+    let gcp_name = std::env::var("EMBYR_ADMIN_KEY_PREVIOUS_GCP_SECRET_NAME")
+        .ok()
+        .filter(|v| !v.is_empty());
+
+    let resolved = resolve_secret_source(
+        "EMBYR_ADMIN_KEY_PREVIOUS",
+        vec![
+            ("EMBYR_ADMIN_KEY_PREVIOUS", plain),
+            ("EMBYR_ADMIN_KEY_PREVIOUS_AWS_SECRET_ARN", aws_arn),
+            ("EMBYR_ADMIN_KEY_PREVIOUS_GCP_SECRET_NAME", gcp_name),
+        ],
+    )?;
+
+    match resolved {
+        Some((source, value)) if source == "EMBYR_ADMIN_KEY_PREVIOUS" => Ok(Some(value)),
+        Some((_, arn)) => {
+            let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let fetcher =
+                AwsSecretFetcher::new(&aws_config, ADMIN_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS).await;
+            let value =
+                fetcher
+                    .get_raw_secret(&arn)
+                    .await
+                    .map_err(|e| ConfigError::SecretFetchFailed {
+                        var: "EMBYR_ADMIN_KEY_PREVIOUS".to_string(),
+                        reason: e.to_string(),
+                    })?;
+            eprintln!("fetched EMBYR_ADMIN_KEY_PREVIOUS from AWS Secrets Manager");
+            Ok(Some(value))
+        }
+        None => Ok(None),
     }
 }
 

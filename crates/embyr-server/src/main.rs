@@ -64,6 +64,14 @@ async fn main() {
         );
     }
 
+    if cfg.admin_key_previous.is_some() {
+        tracing::warn!(
+            rotation_window_open = true,
+            var = "EMBYR_ADMIN_KEY_PREVIOUS",
+            "admin-key rotation window is open"
+        );
+    }
+
     // ── Step 3: Prometheus recorder (ADR-016: before any TCP listener) ────
     let prom_handle = get_or_install_prometheus_handle();
 
@@ -174,6 +182,7 @@ async fn main() {
     let admin_app = build_admin_router(
         Arc::clone(&system_db),
         cfg.admin_key.clone(),
+        cfg.admin_key_previous.clone(),
         cache_for_admin,
         cfg.encryption_key,
         cfg.encryption_key_previous,

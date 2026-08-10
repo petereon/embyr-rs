@@ -23,6 +23,10 @@ use crate::adapters::{
 pub struct OperatorState {
     pub system_db: Arc<SystemDb>,
     pub admin_key: String,
+    /// `EMBYR_ADMIN_KEY_PREVIOUS` — optional Bearer token that opens an
+    /// auth-rotation window (ADR-018 §6); `None` means no rotation window —
+    /// `operator_auth_middleware` degrades to today's single-key behavior.
+    pub admin_key_previous: Option<String>,
     pub credential_cache: Arc<CredentialCache>,
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
