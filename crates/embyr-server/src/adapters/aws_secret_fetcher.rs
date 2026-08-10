@@ -53,16 +53,17 @@ impl AwsSecretFetcher {
                 }
             }
         }
-        let dsn = self.fetch_raw(arn).await?;
-        self.cache
-            .lock()
-            .await
-            .insert(arn.to_string(), (Instant::now(), dsn.clone()));
-        Ok(dsn)
+        self.fetch_and_cache(arn).await
     }
 
     /// Fetch DSN bypassing the cache — used at provision time to validate access.
     pub async fn fetch_fresh(&self, arn: &str) -> Result<String, AwsSecretError> {
+        self.fetch_and_cache(arn).await
+    }
+
+    /// Fetch the DSN over the network and refresh the cache entry.
+    /// Shared tail of [`get_dsn`]'s cache-miss path and [`fetch_fresh`].
+    async fn fetch_and_cache(&self, arn: &str) -> Result<String, AwsSecretError> {
         let dsn = self.fetch_raw(arn).await?;
         self.cache
             .lock()

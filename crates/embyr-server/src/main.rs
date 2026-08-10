@@ -39,6 +39,27 @@ use embyr_server::{
     spawn_all_servers,
 };
 
+/// Log `error` under `message` at ERROR level, then exit the process with
+/// status 1. Shared by every fail-fast startup step (DB connect, migrate,
+/// probe) so the log-then-exit shape is written once.
+fn fail_startup(error: impl std::fmt::Display, message: &str) -> ! {
+    tracing::error!(error = %error, "{message}");
+    std::process::exit(1);
+}
+
+/// Bind a TCP listener on `0.0.0.0:{port}`, exiting the process with a
+/// structured error log on failure. Shared by the three startup listener
+/// binds (gRPC, REST, admin) — all three or none is the desired behavior
+/// (D-PR-6), so each bind independently fails fast.
+async fn bind_or_exit(port: u16, label: &str) -> tokio::net::TcpListener {
+    tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(port, error = %e, "startup failed: {label} port bind");
+            std::process::exit(1);
+        })
+}
+
 #[tokio::main]
 async fn main() {
     // ── Step 1: parse and validate all configuration ──────────────────────
@@ -77,23 +98,22 @@ async fn main() {
 
     // ── Step 4: connect to system DB ──────────────────────────────────────
     let system_db = Arc::new(
-        SystemDb::new(&cfg.db_url).await.unwrap_or_else(|e| {
-            tracing::error!(error = %e, "startup failed: system DB connection");
-            std::process::exit(1);
-        }),
+        SystemDb::new(&cfg.db_url)
+            .await
+            .unwrap_or_else(|e| fail_startup(e, "startup failed: system DB connection")),
     );
 
     // ── Step 5: run migrations ────────────────────────────────────────────
-    system_db.migrate().await.unwrap_or_else(|e| {
-        tracing::error!(error = %e, "startup failed: migration");
-        std::process::exit(1);
-    });
+    system_db
+        .migrate()
+        .await
+        .unwrap_or_else(|e| fail_startup(e, "startup failed: migration"));
 
     // ── Step 6: probe (schema hard gate — D-PR-6) ─────────────────────────
-    system_db.probe().await.unwrap_or_else(|e| {
-        tracing::error!(error = %e, "startup probe failed");
-        std::process::exit(1);
-    });
+    system_db
+        .probe()
+        .await
+        .unwrap_or_else(|e| fail_startup(e, "startup probe failed"));
 
     // ── Step 7: allocate production components ────────────────────────────
     // Pool gauge background task (15-second interval, fire-and-forget).
@@ -126,41 +146,9 @@ async fn main() {
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     // ── Step 8: bind all three TCP listeners (all or none — D-PR-6) ──────
-    let grpc_listener =
-        tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cfg.grpc_port))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(
-                    port = cfg.grpc_port,
-                    error = %e,
-                    "startup failed: gRPC port bind"
-                );
-                std::process::exit(1);
-            });
-
-    let rest_listener =
-        tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cfg.rest_port))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(
-                    port = cfg.rest_port,
-                    error = %e,
-                    "startup failed: REST port bind"
-                );
-                std::process::exit(1);
-            });
-
-    let admin_listener =
-        tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cfg.admin_port))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(
-                    port = cfg.admin_port,
-                    error = %e,
-                    "startup failed: admin port bind"
-                );
-                std::process::exit(1);
-            });
+    let grpc_listener = bind_or_exit(cfg.grpc_port, "gRPC").await;
+    let rest_listener = bind_or_exit(cfg.rest_port, "REST").await;
+    let admin_listener = bind_or_exit(cfg.admin_port, "admin").await;
 
     // ── Step 9: build FirestoreService ────────────────────────────────────
     let service = FirestoreService {

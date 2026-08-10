@@ -53,35 +53,13 @@ use crate::adapters::gcp_secret_fetcher::GcpSecretFetcher;
 /// Alternatives A6) — out of scope for this feature.
 const GCP_SECRET_MANAGER_BASE_URL: &str = "https://secretmanager.googleapis.com";
 
-/// Cache TTL passed to `GcpSecretFetcher::new` for every GCP-sourced secret
-/// resolved in `from_env()`. Irrelevant — `get_raw_secret` bypasses the cache
-/// entirely (D-SM-4: startup-only, no TTL benefit) — but the fetcher's
-/// constructor requires a value. Shared across all four resolvers since the
-/// value is unused either way.
-const GCP_FETCHER_TTL_SECS: u64 = 300;
-
-/// Cache TTL passed to `AwsSecretFetcher::new` when resolving `admin_key` from
-/// AWS Secrets Manager. Irrelevant here — `get_raw_secret` bypasses the cache
-/// entirely (D-SM-4: startup-only, no TTL benefit) — but the fetcher's
-/// constructor requires a value.
-const ADMIN_KEY_AWS_FETCHER_TTL_SECS: u64 = 300;
-
-/// Cache TTL passed to `AwsSecretFetcher::new` when resolving `encryption_key`
-/// from AWS Secrets Manager. Same rationale as [`ADMIN_KEY_AWS_FETCHER_TTL_SECS`]
-/// — `get_raw_secret` bypasses the cache entirely.
-const ENCRYPTION_KEY_AWS_FETCHER_TTL_SECS: u64 = 300;
-
-/// Cache TTL passed to `AwsSecretFetcher::new` when resolving
-/// `encryption_key_previous` from AWS Secrets Manager. Same rationale as
-/// [`ADMIN_KEY_AWS_FETCHER_TTL_SECS`] — `get_raw_secret` bypasses the cache
-/// entirely.
-const ENCRYPTION_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS: u64 = 300;
-
-/// Cache TTL passed to `AwsSecretFetcher::new` when resolving
-/// `admin_key_previous` from AWS Secrets Manager. Same rationale as
-/// [`ADMIN_KEY_AWS_FETCHER_TTL_SECS`] — `get_raw_secret` bypasses the cache
-/// entirely.
-const ADMIN_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS: u64 = 300;
+/// Cache TTL passed to `GcpSecretFetcher::new` / `AwsSecretFetcher::new` for
+/// every secret resolved in `from_env()` (admin_key, encryption_key, and
+/// their `_previous` counterparts, AWS and GCP alike). Irrelevant in every
+/// case — `get_raw_secret` bypasses the cache entirely (D-SM-4: startup-only
+/// sourcing, no TTL benefit) — but each fetcher's constructor requires a
+/// value, so one shared constant serves all resolvers.
+const SECRET_FETCHER_TTL_SECS_UNUSED: u64 = 300;
 
 /// Full configuration for embyr-server loaded from environment variables.
 #[derive(Debug)]
@@ -313,13 +291,15 @@ async fn fetch_from_secret_manager(
     var: &str,
     source: &str,
     resolved_value: &str,
-    aws_ttl_secs: u64,
 ) -> Result<String, ConfigError> {
     match secret_manager_source_kind(source) {
         SecretManagerSource::Gcp => {
             let token = require_gcp_access_token(var, source)?;
-            let fetcher =
-                GcpSecretFetcher::new(GCP_SECRET_MANAGER_BASE_URL, &token, GCP_FETCHER_TTL_SECS);
+            let fetcher = GcpSecretFetcher::new(
+                GCP_SECRET_MANAGER_BASE_URL,
+                &token,
+                SECRET_FETCHER_TTL_SECS_UNUSED,
+            );
             let value = fetcher.get_raw_secret(resolved_value).await.map_err(|e| {
                 ConfigError::SecretFetchFailed {
                     var: var.to_string(),
@@ -331,7 +311,8 @@ async fn fetch_from_secret_manager(
         }
         SecretManagerSource::Aws => {
             let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-            let fetcher = AwsSecretFetcher::new(&aws_config, aws_ttl_secs).await;
+            let fetcher =
+                AwsSecretFetcher::new(&aws_config, SECRET_FETCHER_TTL_SECS_UNUSED).await;
             let value = fetcher.get_raw_secret(resolved_value).await.map_err(|e| {
                 ConfigError::SecretFetchFailed {
                     var: var.to_string(),
@@ -374,13 +355,8 @@ async fn resolve_admin_key(missing: &mut Vec<String>) -> Result<Option<String>, 
     match resolved {
         Some((source, value)) if source == "EMBYR_ADMIN_KEY" => Ok(Some(value)),
         Some((source, resolved_value)) => {
-            let value = fetch_from_secret_manager(
-                "EMBYR_ADMIN_KEY",
-                &source,
-                &resolved_value,
-                ADMIN_KEY_AWS_FETCHER_TTL_SECS,
-            )
-            .await?;
+            let value =
+                fetch_from_secret_manager("EMBYR_ADMIN_KEY", &source, &resolved_value).await?;
             Ok(Some(value))
         }
         None => {
@@ -426,13 +402,9 @@ async fn resolve_encryption_key_hex(
     match resolved {
         Some((source, value)) if source == "EMBYR_ENCRYPTION_KEY" => Ok(Some(value)),
         Some((source, resolved_value)) => {
-            let value = fetch_from_secret_manager(
-                "EMBYR_ENCRYPTION_KEY",
-                &source,
-                &resolved_value,
-                ENCRYPTION_KEY_AWS_FETCHER_TTL_SECS,
-            )
-            .await?;
+            let value =
+                fetch_from_secret_manager("EMBYR_ENCRYPTION_KEY", &source, &resolved_value)
+                    .await?;
             Ok(Some(value))
         }
         None => {
@@ -480,7 +452,6 @@ async fn resolve_admin_key_previous() -> Result<Option<String>, ConfigError> {
                 "EMBYR_ADMIN_KEY_PREVIOUS",
                 &source,
                 &resolved_value,
-                ADMIN_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS,
             )
             .await?;
             Ok(Some(value))
@@ -526,7 +497,6 @@ async fn resolve_encryption_key_previous_hex() -> Result<Option<String>, ConfigE
                 "EMBYR_ENCRYPTION_KEY_PREVIOUS",
                 &source,
                 &resolved_value,
-                ENCRYPTION_KEY_PREVIOUS_AWS_FETCHER_TTL_SECS,
             )
             .await?;
             Ok(Some(value))

@@ -102,6 +102,21 @@ fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
+// ── Row-decode helper ────────────────────────────────────────────────────────
+
+/// Read column `$field` from `$row`, returning `internal_err($context, e)`
+/// from the enclosing handler on decode failure. Collapses the repeated
+/// `match row.try_get(...) { Ok(v) => v, Err(e) => return internal_err(...) }`
+/// boilerplate used throughout `signin` and `oidc_callback`.
+macro_rules! try_get_or_err {
+    ($row:expr, $field:literal, $context:literal) => {
+        match $row.try_get($field) {
+            Ok(v) => v,
+            Err(e) => return internal_err($context, e),
+        }
+    };
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// POST /admin/v1/auth/signin
@@ -137,35 +152,16 @@ pub async fn signin(
         Err(e) => return internal_err("DB error fetching user", e),
     };
 
-    let user_id: Uuid = match row.try_get("id") {
-        Ok(v) => v,
-        Err(e) => return internal_err("read user id", e),
-    };
-    let account_id: Uuid = match row.try_get("account_id") {
-        Ok(v) => v,
-        Err(e) => return internal_err("read account_id", e),
-    };
-    let display_name: String = match row.try_get("display_name") {
-        Ok(v) => v,
-        Err(e) => return internal_err("read display_name", e),
-    };
-    let password_hash: String = match row.try_get("password_hash") {
-        Ok(v) => v,
-        Err(e) => return internal_err("read password_hash", e),
-    };
-    let totp_secret_enc: Option<Vec<u8>> = match row.try_get("totp_secret_enc") {
-        Ok(v) => v,
-        Err(e) => return internal_err("read totp_secret_enc", e),
-    };
-    let failed_totp_attempts: i32 = match row.try_get("failed_totp_attempts") {
-        Ok(v) => v,
-        Err(e) => return internal_err("read failed_totp_attempts", e),
-    };
+    let user_id: Uuid = try_get_or_err!(row, "id", "read user id");
+    let account_id: Uuid = try_get_or_err!(row, "account_id", "read account_id");
+    let display_name: String = try_get_or_err!(row, "display_name", "read display_name");
+    let password_hash: String = try_get_or_err!(row, "password_hash", "read password_hash");
+    let totp_secret_enc: Option<Vec<u8>> =
+        try_get_or_err!(row, "totp_secret_enc", "read totp_secret_enc");
+    let failed_totp_attempts: i32 =
+        try_get_or_err!(row, "failed_totp_attempts", "read failed_totp_attempts");
     let locked_until: Option<chrono::DateTime<chrono::Utc>> =
-        match row.try_get("locked_until") {
-            Ok(v) => v,
-            Err(e) => return internal_err("read locked_until", e),
-        };
+        try_get_or_err!(row, "locked_until", "read locked_until");
 
     // ── 2. Lockout check ──────────────────────────────────────────────────────
     // AC-5: fourth attempt after 3 consecutive TOTP failures returns 429.
@@ -219,10 +215,7 @@ pub async fn signin(
             Err(e) => return internal_err("DB error fetching recovery code", e),
         };
 
-        let rc_id: Uuid = match rc_row.try_get("id") {
-            Ok(v) => v,
-            Err(e) => return internal_err("read recovery code id", e),
-        };
+        let rc_id: Uuid = try_get_or_err!(rc_row, "id", "read recovery code id");
 
         // Mark as used (AC-6: second use of same code → 401)
         if let Err(e) = sqlx::query(
@@ -342,10 +335,7 @@ pub async fn signin(
         }
         Err(e) => return internal_err("fetch member role", e),
     };
-    let role: String = match role_row.try_get("role") {
-        Ok(v) => v,
-        Err(e) => return internal_err("read role", e),
-    };
+    let role: String = try_get_or_err!(role_row, "role", "read role");
 
     // ── 7. Generate session token ─────────────────────────────────────────────
     // 32 random bytes → base64url (no padding) → opaque token string.
@@ -509,14 +499,10 @@ pub async fn oidc_callback(
         Err(e) => return internal_err("oidc_callback: DB lookup provider", e),
     };
 
-    let account_id: Uuid = match provider_row.try_get("account_id") {
-        Ok(v) => v,
-        Err(e) => return internal_err("oidc_callback: read account_id", e),
-    };
-    let client_id: String = match provider_row.try_get("client_id") {
-        Ok(v) => v,
-        Err(e) => return internal_err("oidc_callback: read client_id", e),
-    };
+    let account_id: Uuid =
+        try_get_or_err!(provider_row, "account_id", "oidc_callback: read account_id");
+    let client_id: String =
+        try_get_or_err!(provider_row, "client_id", "oidc_callback: read client_id");
 
     // Step 8: Verify token not expired.
     let exp = claims.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -621,10 +607,7 @@ pub async fn oidc_callback(
         Err(e) => return internal_err("oidc_callback: DB lookup user", e),
     };
 
-    let user_id: Uuid = match user_row.try_get("user_id") {
-        Ok(v) => v,
-        Err(e) => return internal_err("oidc_callback: read user_id", e),
-    };
+    let user_id: Uuid = try_get_or_err!(user_row, "user_id", "oidc_callback: read user_id");
 
     // Generate 32-byte random session token (same pattern as signin).
     let mut token_bytes = [0u8; 32];

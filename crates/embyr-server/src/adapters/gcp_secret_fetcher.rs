@@ -63,16 +63,17 @@ impl GcpSecretFetcher {
                 }
             }
         }
-        let dsn = self.fetch_raw(resource_name).await?;
-        self.cache
-            .lock()
-            .await
-            .insert(resource_name.to_string(), (Instant::now(), dsn.clone()));
-        Ok(dsn)
+        self.fetch_and_cache(resource_name).await
     }
 
     /// Fetch DSN bypassing the cache — used at provision time to validate access.
     pub async fn fetch_fresh(&self, resource_name: &str) -> Result<String, GcpSecretError> {
+        self.fetch_and_cache(resource_name).await
+    }
+
+    /// Fetch the DSN over the network and refresh the cache entry.
+    /// Shared tail of [`get_dsn`]'s cache-miss path and [`fetch_fresh`].
+    async fn fetch_and_cache(&self, resource_name: &str) -> Result<String, GcpSecretError> {
         let dsn = self.fetch_raw(resource_name).await?;
         self.cache
             .lock()
