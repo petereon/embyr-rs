@@ -25,18 +25,26 @@ use common::{database_with_daily_usage, model_on_plan, model_with_payment_failur
 fn cap_exceeded_shows_amber_banner_with_upgrade_cta() {
     // Given: Solstice Analytics' effective status is "free_cap_exceeded".
     let mut model = model_on_plan(Plan::Free);
-    model.databases = vec![database_with_daily_usage("db-1", 500_000, 100_000, 20_000, 50.0)];
+    model.databases = vec![database_with_daily_usage(
+        "db-1", 500_000, 100_000, 20_000, 50.0,
+    )];
 
     // When: Priya views any section of the console.
     let banner = model.suspension_banner_view();
 
     // Then: an amber banner with an "Upgrade to Pro" CTA is shown.
     let banner = banner.expect("AC-108-01/02: a suspended account must show a banner");
-    assert_eq!(banner.status, EffectiveStatus::FreeCapExceeded, "AC-108-02: status must be FreeCapExceeded");
-    assert!(banner.cta_opens_upgrade_modal, "AC-108-02: CTA must open the Upgrade modal");
     assert_eq!(
-        banner.message,
-        "You've reached your Free plan limits for this cycle.",
+        banner.status,
+        EffectiveStatus::FreeCapExceeded,
+        "AC-108-02: status must be FreeCapExceeded"
+    );
+    assert!(
+        banner.cta_opens_upgrade_modal,
+        "AC-108-02: CTA must open the Upgrade modal"
+    );
+    assert_eq!(
+        banner.message, "You've reached your Free plan limits for this cycle.",
         "AC-108-02: amber banner copy must match verbatim"
     );
 }
@@ -53,11 +61,17 @@ fn payment_failed_shows_red_banner_with_payment_cta() {
 
     // Then: a red banner with an "Update payment method" CTA is shown.
     let banner = banner.expect("AC-108-01/03: a suspended account must show a banner");
-    assert_eq!(banner.status, EffectiveStatus::PastDue, "AC-108-03: status must be PastDue");
-    assert!(!banner.cta_opens_upgrade_modal, "AC-108-03: CTA must open the Card modal, not Upgrade");
     assert_eq!(
-        banner.message,
-        "We couldn't process your last payment.",
+        banner.status,
+        EffectiveStatus::PastDue,
+        "AC-108-03: status must be PastDue"
+    );
+    assert!(
+        !banner.cta_opens_upgrade_modal,
+        "AC-108-03: CTA must open the Card modal, not Upgrade"
+    );
+    assert_eq!(
+        banner.message, "We couldn't process your last payment.",
         "AC-108-03: red banner copy must match verbatim"
     );
 }
@@ -73,7 +87,10 @@ fn healthy_account_shows_no_banner() {
     let banner = model.suspension_banner_view();
 
     // Then: no suspension banner renders on any page.
-    assert!(banner.is_none(), "AC-108-01: an active account must never show a banner");
+    assert!(
+        banner.is_none(),
+        "AC-108-01: an active account must never show a banner"
+    );
 }
 
 /// AC-108-04 (model-layer guarantee): the banner projection is independent
@@ -84,9 +101,14 @@ fn healthy_account_shows_no_banner() {
 fn banner_visible_regardless_of_active_section() {
     // Given: Solstice Analytics is suspended, viewing Billing.
     let mut model = model_on_plan(Plan::Free);
-    model.databases = vec![database_with_daily_usage("db-1", 500_000, 100_000, 20_000, 50.0)];
+    model.databases = vec![database_with_daily_usage(
+        "db-1", 500_000, 100_000, 20_000, 50.0,
+    )];
     update(&mut model, Msg::NavigateTo(Section::Billing));
-    assert!(model.suspension_banner_view().is_some(), "precondition: banner visible on Billing");
+    assert!(
+        model.suspension_banner_view().is_some(),
+        "precondition: banner visible on Billing"
+    );
 
     // When: Priya navigates from Billing to the Databases section.
     update(&mut model, Msg::NavigateTo(Section::Databases));
@@ -105,14 +127,19 @@ fn clicking_upgrade_cta_opens_upgrade_modal() {
     // Given: Solstice Analytics is suspended with status
     // "free_cap_exceeded".
     let mut model = model_on_plan(Plan::Free);
-    model.databases = vec![database_with_daily_usage("db-1", 500_000, 100_000, 20_000, 50.0)];
+    model.databases = vec![database_with_daily_usage(
+        "db-1", 500_000, 100_000, 20_000, 50.0,
+    )];
 
     // When: Priya clicks "Upgrade to Pro" on the banner.
     update(&mut model, Msg::OpenUpgradeModal);
 
     // Then: the Upgrade modal opens directly (US-106) — no intermediate
     // navigation to Billing required.
-    assert!(model.upgrade_modal_open, "AC-108-05: banner CTA must open the Upgrade modal directly");
+    assert!(
+        model.upgrade_modal_open,
+        "AC-108-05: banner CTA must open the Upgrade modal directly"
+    );
 }
 
 /// AC-108-05: clicking a `past_due` banner's "Update payment method" CTA
@@ -126,7 +153,10 @@ fn clicking_payment_cta_opens_card_modal() {
     update(&mut model, Msg::OpenCardModal);
 
     // Then: the Card modal opens directly (US-105).
-    assert!(model.card_modal_open, "AC-108-05: past_due banner CTA must open the Card modal directly");
+    assert!(
+        model.card_modal_open,
+        "AC-108-05: past_due banner CTA must open the Card modal directly"
+    );
 }
 
 /// AC-108-06, Error/Boundary: when BOTH `free_cap_exceeded` and
@@ -138,8 +168,13 @@ fn clicking_payment_cta_opens_card_modal() {
 fn both_conditions_true_prioritizes_cap_exceeded() {
     // Given: an account is both cap-exceeded AND has a failed payment.
     let mut model = model_with_payment_failure(Plan::Free);
-    model.databases = vec![database_with_daily_usage("db-1", 500_000, 100_000, 20_000, 50.0)];
-    assert!(model.subscription.payment_failure, "precondition: payment_failure is true");
+    model.databases = vec![database_with_daily_usage(
+        "db-1", 500_000, 100_000, 20_000, 50.0,
+    )];
+    assert!(
+        model.subscription.payment_failure,
+        "precondition: payment_failure is true"
+    );
 
     // When: the effective status is derived.
     let status = model.effective_status();

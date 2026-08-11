@@ -1,7 +1,8 @@
 //! AppModel and all domain types for the embyr admin UI.
 //!
-//! Minimal field set — sufficient for `update()` logic to compile and for
-//! proptest strategies to construct values. Expand during DELIVER.
+//! `AppModel` is the single source of truth for UI state. Production code
+//! mutates it only via `update(&mut AppModel, Msg)` (see `update.rs`); all
+//! other reads flow through the pure projection methods below.
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -166,10 +167,10 @@ pub struct Database {
     pub logging_enabled: bool,
     pub log_retention: Option<LogRetention>,
     pub created_at: Option<DateTime<Utc>>,
-    /// card-payments (DISTILL, 2026-08-10): per-database daily usage counters.
-    /// `AppModel::usage_totals()` sums and projects these to monthly (×30),
-    /// mirroring the design-reference.md prototype's `sum(db.reads) * 30`.
-    /// Extended per DESIGN DDD-3 / feature-delta.md Model Changes.
+    /// Per-database daily usage counters. `AppModel::usage_totals()` sums
+    /// and projects these to monthly (×30), mirroring the
+    /// design-reference.md prototype's `sum(db.reads) * 30`. Extended per
+    /// DESIGN DDD-3 / feature-delta.md Model Changes.
     pub usage: UsageStats,
 }
 
@@ -279,10 +280,10 @@ pub struct Invoice {
 }
 
 // ── card-payments: pure projection/view-model types ─────────────────────────
-// DISTILL-introduced (not literally named in DESIGN's 5-method list) to give
-// each AC a concrete, testable driving-port surface per Mandate 1/4. DELIVER
-// may refine field shapes; the *existence* of a single-sourced projection per
-// card/component is the DISTILL contract, not these exact field names.
+// Not literally named in DESIGN's 5-method list — introduced to give each AC
+// a concrete, testable driving-port surface per Mandate 1/4. One
+// single-sourced projection per UI card/component; field shapes may evolve
+// with the views that consume them.
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageTotals {
@@ -290,6 +291,20 @@ pub struct UsageTotals {
     pub writes: u64,
     pub deletes: u64,
     pub storage_gb: f64,
+}
+
+/// Field-for-field conversion from the data layer's `FreeCaps` shape.
+/// Shared by `plan_summary()` and `upgrade_modal_view()`, both of which
+/// project `data::FREE_CAPS`/`data::PLAN_FEATURES` into a `UsageTotals`.
+impl From<crate::data::FreeCaps> for UsageTotals {
+    fn from(caps: crate::data::FreeCaps) -> Self {
+        UsageTotals {
+            reads: caps.reads,
+            writes: caps.writes,
+            deletes: caps.deletes,
+            storage_gb: caps.storage_gb,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -373,7 +388,7 @@ pub struct AppModel {
     pub totp_failures: u8,
     /// Whether the account is temporarily locked.
     pub account_locked: bool,
-    /// card-payments (DISTILL, 2026-08-10): plan/card/renewal snapshot.
+    /// Plan/card/renewal snapshot.
     pub subscription: Subscription,
     /// card-payments: invoice history (persists across plan changes, AC-107-04).
     pub invoices: Vec<Invoice>,
@@ -493,12 +508,7 @@ impl AppModel {
         match self.subscription.plan {
             Plan::Free => PlanSummary {
                 plan: Plan::Free,
-                included: Some(UsageTotals {
-                    reads: crate::data::FREE_CAPS.reads,
-                    writes: crate::data::FREE_CAPS.writes,
-                    deletes: crate::data::FREE_CAPS.deletes,
-                    storage_gb: crate::data::FREE_CAPS.storage_gb,
-                }),
+                included: Some(crate::data::FREE_CAPS.into()),
                 base_price: None,
                 renews_at: None,
             },
@@ -569,12 +579,7 @@ impl AppModel {
         let plan_features = crate::data::PLAN_FEATURES;
         UpgradeModalView {
             step: self.upgrade_modal_step.clone(),
-            free_included: UsageTotals {
-                reads: plan_features.free_included.reads,
-                writes: plan_features.free_included.writes,
-                deletes: plan_features.free_included.deletes,
-                storage_gb: plan_features.free_included.storage_gb,
-            },
+            free_included: plan_features.free_included.into(),
             pro_base_price: plan_features.pro_base,
             shows_downgrade_warning: self.upgrade_modal_step == UpgradeModalStep::ConfirmDowngrade,
         }

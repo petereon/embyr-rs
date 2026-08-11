@@ -7,11 +7,11 @@
 //! `Msg::OpenCardModal` directly — no intermediate navigation to Billing.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
-#[cfg(feature = "csr")]
 use crate::model::AppModel;
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
+#[cfg(feature = "csr")]
+use leptos::prelude::*;
 
 #[cfg(feature = "csr")]
 #[component]

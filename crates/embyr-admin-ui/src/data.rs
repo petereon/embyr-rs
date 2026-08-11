@@ -121,8 +121,8 @@ pub mod mock {
                 logging_enabled: true,
                 log_retention: Some(crate::model::LogRetention::SevenDays),
                 created_at: None,
-                // card-payments (DELIVER, 02-02): healthy daily usage — well
-                // under every FREE_CAPS dimension once projected ×30.
+                // Healthy daily usage — well under every FREE_CAPS dimension
+                // once projected ×30.
                 usage: crate::model::UsageStats {
                     reads: 20_000,
                     writes: 3_000,
@@ -138,9 +138,9 @@ pub mod mock {
                 logging_enabled: false,
                 log_retention: None,
                 created_at: None,
-                // card-payments (DELIVER, 02-02): near-cap daily usage on
-                // writes/deletes (84%/90% of FREE_CAPS ×30) for a realistic
-                // amber demo on the Cap Usage card.
+                // Near-cap daily usage on writes/deletes (84%/90% of
+                // FREE_CAPS ×30) for a realistic amber demo on the Cap Usage
+                // card.
                 usage: crate::model::UsageStats {
                     reads: 15_000,
                     writes: 14_000,
@@ -378,8 +378,12 @@ pub fn next_invoice_estimate(usage: &crate::model::UsageTotals) -> InvoiceEstima
     let overage_storage =
         (usage.storage_gb - included.storage_gb).max(0.0) * PRICING.overage_rate_per_gb_storage;
 
-    let total = PRICING.pro_base + overage_reads + overage_writes + overage_deletes + overage_storage;
-    let has_overage = overage_reads > 0.0 || overage_writes > 0.0 || overage_deletes > 0.0 || overage_storage > 0.0;
+    let total =
+        PRICING.pro_base + overage_reads + overage_writes + overage_deletes + overage_storage;
+    let has_overage = overage_reads > 0.0
+        || overage_writes > 0.0
+        || overage_deletes > 0.0
+        || overage_storage > 0.0;
 
     InvoiceEstimate {
         base: PRICING.pro_base,
@@ -403,11 +407,16 @@ pub fn bar_color(ratio: f64) -> BarColor {
     BarColor::Accent
 }
 
+/// Strip all non-digit characters (spaces, dashes) from a raw card number
+/// input. Shared by `detect_card_brand` and `card_number_is_complete`.
+fn digits_only(number: &str) -> String {
+    number.chars().filter(char::is_ascii_digit).collect()
+}
+
 /// AC-105-02: brand auto-detected from the card number prefix (e.g. "4" →
 /// Visa, "5" → Mastercard).
 pub fn detect_card_brand(number: &str) -> crate::model::CardBrand {
-    let digits: String = number.chars().filter(char::is_ascii_digit).collect();
-    match digits.chars().next() {
+    match digits_only(number).chars().next() {
         Some('4') => crate::model::CardBrand::Visa,
         Some('5') => crate::model::CardBrand::Mastercard,
         Some('3') => crate::model::CardBrand::Amex,
@@ -419,6 +428,5 @@ pub fn detect_card_brand(number: &str) -> crate::model::CardBrand {
 /// AC-105-05: true only for a complete, plausible card number (V1: length
 /// check sufficient — no Luhn/real validation, Rust-native form only).
 pub fn card_number_is_complete(number: &str) -> bool {
-    let digits: String = number.chars().filter(char::is_ascii_digit).collect();
-    digits.len() == 16
+    digits_only(number).len() == 16
 }
