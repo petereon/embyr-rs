@@ -327,8 +327,30 @@ pub enum BarColor {
 /// `total = base + sum(overage)`; storage overage uses `usage_gb *
 /// overage_rate_per_gb_storage` directly (no /100k unit, per DESIGN's
 /// literal formula: `storage = usage_gb * storagePerGB`).
-pub fn next_invoice_estimate(_usage: &crate::model::UsageTotals) -> InvoiceEstimate {
-    panic!("RED scaffold (card-payments): data::next_invoice_estimate not yet implemented")
+pub fn next_invoice_estimate(usage: &crate::model::UsageTotals) -> InvoiceEstimate {
+    let included = PRICING.pro_included;
+
+    let overage_reads = (usage.reads.saturating_sub(included.reads)) as f64 / 100_000.0
+        * PRICING.overage_rate_per_100k_reads;
+    let overage_writes = (usage.writes.saturating_sub(included.writes)) as f64 / 100_000.0
+        * PRICING.overage_rate_per_100k_writes;
+    let overage_deletes = (usage.deletes.saturating_sub(included.deletes)) as f64 / 100_000.0
+        * PRICING.overage_rate_per_100k_deletes;
+    let overage_storage =
+        (usage.storage_gb - included.storage_gb).max(0.0) * PRICING.overage_rate_per_gb_storage;
+
+    let total = PRICING.pro_base + overage_reads + overage_writes + overage_deletes + overage_storage;
+    let has_overage = overage_reads > 0.0 || overage_writes > 0.0 || overage_deletes > 0.0 || overage_storage > 0.0;
+
+    InvoiceEstimate {
+        base: PRICING.pro_base,
+        overage_reads,
+        overage_writes,
+        overage_deletes,
+        overage_storage,
+        total,
+        has_overage,
+    }
 }
 
 /// AC-102-02: maps a cap ratio (0.0 = 0%, 1.0 = 100%) to a bar color.

@@ -26,7 +26,6 @@ use common::{database_with_daily_usage, model_on_plan};
 /// reads beyond the Pro-included allowance = $0.31 (620,000 / 100,000 ×
 /// $0.05), matching the DISCUSS domain example verbatim.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn overage_estimate_breaks_down_by_dimension_for_reads() {
     // Given: Northwind Data (Pro plan) has used 620,000 reads beyond its
     // included allowance this period (2,000,000 included + 620,000 over).
@@ -51,7 +50,6 @@ fn overage_estimate_breaks_down_by_dimension_for_reads() {
 /// AC-103-04: no overage (usage fully within the Pro included allowance)
 /// projects a base-only invoice.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn no_overage_projects_base_only_invoice() {
     // Given: Northwind Data has stayed within its Pro included allowance
     // for reads, writes, and deletes this period.
@@ -72,7 +70,6 @@ fn no_overage_projects_base_only_invoice() {
 
 /// AC-103-03: total always equals base + sum of every overage line item.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn total_equals_base_plus_sum_of_overage_line_items() {
     // Given: usage with overage on multiple dimensions simultaneously.
     let usage = UsageTotals {
@@ -103,7 +100,6 @@ fn total_equals_base_plus_sum_of_overage_line_items() {
 /// reads/writes/deletes. A naive copy-paste of the /100k formula to storage
 /// would silently under/over-charge by orders of magnitude.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn storage_overage_uses_flat_gb_rate_not_per_100k_unit() {
     // Given: 1.5 GB of storage beyond the Pro included allowance.
     let usage = UsageTotals {
