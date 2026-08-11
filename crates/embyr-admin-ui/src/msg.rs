@@ -5,8 +5,9 @@
 //! `update(&mut AppModel, Msg)` handles all variants with an exhaustive match.
 
 use crate::model::{
-    AdminKey, Database, DbId, DbPatch, KeyId, LogRetention, Member, OidcId, OidcProvider,
-    Role, SdkKey, ServiceAccount, ServiceAccountId, Toast, ToastId, UserId,
+    AdminKey, Card, Database, DbId, DbPatch, Invoice, KeyId, LogRetention, Member, OidcId,
+    OidcProvider, Plan, Role, SdkKey, ServiceAccount, ServiceAccountId, Subscription, Toast,
+    ToastId, UpgradeModalStep, UserId,
 };
 
 /// All messages that can be dispatched to the TEA update loop.
@@ -100,4 +101,34 @@ pub enum Msg {
     // ── Navigation ─────────────────────────────────────────────────────────
     /// Navigate to a top-level section.
     NavigateTo(crate::model::Section),
+
+    // ── US-101..109: Billing / Payments (card-payments) ────────────────────
+    /// Async data load: replace subscription snapshot (mock init V1;
+    /// `#[server]` V2, ADR-007).
+    SetSubscription(Subscription),
+    /// Async data load: replace invoice history (mock init V1; `#[server]`
+    /// V2, ADR-007).
+    SetInvoices(Vec<Invoice>),
+    /// CardModal submit: replaces (never appends) the card on file.
+    /// AC-105-03/04.
+    SetCard(Card),
+    /// UpgradeModal confirm: change subscription plan. AC-106-02/04. No
+    /// separate "clear suspension" message needed — `effective_status()`
+    /// re-derives automatically. AC-106-05.
+    SetPlan(Plan),
+    /// TestClockCard Segmented toggle (dev-only, US-109). Mirrors the JSX
+    /// prototype's `setPaymentFailure` directly.
+    SetPaymentFailure(bool),
+    /// Open the Card modal. Dispatched from PaymentMethodCard's Add/Update
+    /// button AND from SuspensionBanner's past_due CTA — global state, not
+    /// view-local (ADR-019).
+    OpenCardModal,
+    CloseCardModal,
+    /// Open the Upgrade modal (resets step to Compare). Dispatched from
+    /// PlanCard's Upgrade button AND from SuspensionBanner's
+    /// free_cap_exceeded CTA (ADR-019).
+    OpenUpgradeModal,
+    CloseUpgradeModal,
+    /// Drive the UpgradeModal's compare → confirm-downgrade step transition.
+    SetUpgradeModalStep(UpgradeModalStep),
 }

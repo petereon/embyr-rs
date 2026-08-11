@@ -165,7 +165,11 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             model.oidc_providers.push(provider);
         }
         Msg::ToggleOidc(id) => {
-            if let Some(provider) = model.oidc_providers.iter_mut().find(|provider| provider.id == id) {
+            if let Some(provider) = model
+                .oidc_providers
+                .iter_mut()
+                .find(|provider| provider.id == id)
+            {
                 provider.enabled = !provider.enabled;
             }
         }
@@ -185,6 +189,43 @@ pub fn update(model: &mut AppModel, msg: Msg) {
         Msg::NavigateTo(section) => {
             model.nav.section = section;
         }
+
+        // ── US-101..109: Billing / Payments (card-payments) ─────────────────────
+        // SCAFFOLD: true — RED scaffold (DISTILL, 2026-08-10). DELIVER replaces
+        // each panic! with the field mutation described in feature-delta.md
+        // § Wave: DESIGN / [REF] Component Decomposition → Update Changes,
+        // one variant at a time (one #[ignore] test enabled per increment).
+        Msg::SetSubscription(_) => {
+            panic!("RED scaffold (card-payments): Msg::SetSubscription not yet implemented")
+        }
+        Msg::SetInvoices(_) => {
+            panic!("RED scaffold (card-payments): Msg::SetInvoices not yet implemented")
+        }
+        Msg::SetCard(_) => {
+            panic!("RED scaffold (card-payments): Msg::SetCard not yet implemented")
+        }
+        Msg::SetPlan(_) => {
+            panic!("RED scaffold (card-payments): Msg::SetPlan not yet implemented")
+        }
+        Msg::SetPaymentFailure(_) => {
+            panic!("RED scaffold (card-payments): Msg::SetPaymentFailure not yet implemented")
+        }
+        Msg::OpenCardModal => {
+            model.card_modal_open = true;
+        }
+        Msg::CloseCardModal => {
+            model.card_modal_open = false;
+        }
+        Msg::OpenUpgradeModal => {
+            model.upgrade_modal_open = true;
+            model.upgrade_modal_step = crate::model::UpgradeModalStep::Compare;
+        }
+        Msg::CloseUpgradeModal => {
+            model.upgrade_modal_open = false;
+        }
+        Msg::SetUpgradeModalStep(step) => {
+            model.upgrade_modal_step = step;
+        }
     }
 }
 
@@ -192,5 +233,8 @@ pub fn update(model: &mut AppModel, msg: Msg) {
 ///
 /// Used by the sole-Owner invariant guards in `SetMemberRole` and `RemoveMember`.
 fn count_owners(members: &[Member]) -> usize {
-    members.iter().filter(|member| member.role == Role::Owner).count()
+    members
+        .iter()
+        .filter(|member| member.role == Role::Owner)
+        .count()
 }

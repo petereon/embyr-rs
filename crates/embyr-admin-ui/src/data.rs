@@ -97,8 +97,8 @@ pub fn bar_chart_points(ops: &[u16]) -> Vec<(f32, f32, f32)> {
 }
 
 use crate::model::{
-    AdminKey, Database, DbBackendMode, DbId, DbStatus, KeyId, Member, OidcId, OidcProvider, Role,
-    SdkKey, ServiceAccount, ServiceAccountId,
+    AdminKey, Card, Database, DbBackendMode, DbId, DbStatus, Invoice, KeyId, Member, OidcId,
+    OidcProvider, Plan, Role, SdkKey, ServiceAccount, ServiceAccountId, Subscription,
 };
 use uuid::Uuid;
 
@@ -119,6 +119,10 @@ pub mod mock {
                 logging_enabled: true,
                 log_retention: Some(crate::model::LogRetention::SevenDays),
                 created_at: None,
+                // card-payments (DISTILL, 2026-08-10): zero-usage placeholder.
+                // DELIVER: vary per D2's demo requirement (healthy/near-cap/
+                // at-cap scenarios) once mock::subscription() is implemented.
+                usage: Default::default(),
             },
             Database {
                 id: DbId(Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()),
@@ -128,6 +132,7 @@ pub mod mock {
                 logging_enabled: false,
                 log_retention: None,
                 created_at: None,
+                usage: Default::default(),
             },
         ]
     }
@@ -197,4 +202,136 @@ pub mod mock {
             enabled: false,
         }]
     }
+
+    // ── card-payments (DISTILL RED scaffold, 2026-08-10) ────────────────────
+    // SCAFFOLD: true
+    //
+    // DESIGN's literal Model Changes snippet names these `mock::subscription(
+    // scenario) -> Subscription` / `mock::invoices(plan) -> Vec<Invoice>`.
+    // Left RED (panicking) deliberately: `AppModel::from_mock()` was NOT
+    // wired to call these (see model.rs comment) so the already-shipped app
+    // and user-admin-ui test suite keep compiling and passing. DELIVER
+    // implements these, then wires `from_mock()` to call them.
+
+    pub fn subscription(_plan: Plan, _card: Option<Card>, _payment_failure: bool) -> Subscription {
+        panic!("RED scaffold (card-payments): mock::subscription not yet implemented")
+    }
+
+    pub fn invoices(_plan: &Plan) -> Vec<Invoice> {
+        panic!("RED scaffold (card-payments): mock::invoices not yet implemented")
+    }
+}
+
+// ── card-payments (DISTILL RED scaffold, 2026-08-10) ────────────────────────
+// Constants placed here per DESIGN DDD-4 / D7 (Shared Artifacts Registry):
+// "FREE_CAPS/PRICING constants live in data.rs, matching the DISCUSS Shared
+// Artifacts Registry's explicit source-of-truth assignment." Real (non-
+// panicking) constant data — only the *derivation logic* consuming them is
+// RED-scaffolded (see model.rs's `impl AppModel` block, and the pure
+// functions below).
+
+/// Per-dimension monthly volume shape shared by `FREE_CAPS` and
+/// `Pricing::pro_included`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeCaps {
+    pub reads: u64,
+    pub writes: u64,
+    pub deletes: u64,
+    pub storage_gb: f64,
+}
+
+/// Free plan included monthly volume per dimension (D-7: all 4 dimensions
+/// metered separately). Illustrative placeholder values (feature-delta.md
+/// § Out of Scope: "Actual price points and included allowances ... are
+/// illustrative placeholders throughout").
+pub const FREE_CAPS: FreeCaps = FreeCaps {
+    reads: 2_000_000,
+    writes: 500_000,
+    deletes: 100_000,
+    storage_gb: 2.0,
+};
+
+/// Pro plan pricing: base + per-dimension overage rate beyond `pro_included`.
+/// AC-103-02 worked example: 620,000 overage reads / 100,000 ×
+/// `overage_rate_per_100k_reads` ($0.05) = $0.31.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pricing {
+    pub pro_base: f64,
+    pub pro_included: FreeCaps,
+    pub overage_rate_per_100k_reads: f64,
+    pub overage_rate_per_100k_writes: f64,
+    pub overage_rate_per_100k_deletes: f64,
+    pub overage_rate_per_gb_storage: f64,
+}
+
+pub const PRICING: Pricing = Pricing {
+    pro_base: 49.00,
+    pro_included: FREE_CAPS,
+    overage_rate_per_100k_reads: 0.05,
+    overage_rate_per_100k_writes: 0.05,
+    overage_rate_per_100k_deletes: 0.05,
+    overage_rate_per_gb_storage: 0.10,
+};
+
+/// Free vs Pro feature comparison content for UpgradeModal's compare step
+/// (AC-106-01). D-4: Free + Pro tiers only, never a third tier.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanFeatures {
+    pub free_included: FreeCaps,
+    pub pro_base: f64,
+}
+
+pub const PLAN_FEATURES: PlanFeatures = PlanFeatures {
+    free_included: FREE_CAPS,
+    pro_base: PRICING.pro_base,
+};
+
+/// AC-103-02/03: per-dimension overage line items + total for the Next
+/// Invoice card estimate.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InvoiceEstimate {
+    pub base: f64,
+    pub overage_reads: f64,
+    pub overage_writes: f64,
+    pub overage_deletes: f64,
+    pub overage_storage: f64,
+    pub total: f64,
+    /// AC-103-04: true when any overage line item is > 0.
+    pub has_overage: bool,
+}
+
+/// AC-102-02: bar color thresholds — accent <80%, amber 80-99%, red ≥100%.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BarColor {
+    Accent,
+    Amber,
+    Red,
+}
+
+// SCAFFOLD: true — pure functions below panic (RED), per Mandate 7. DELIVER
+// implements the formula documented in each doc comment.
+
+/// AC-103-02/03: `overage = max(0, usage - pro_included) / unit * rate`;
+/// `total = base + sum(overage)`; storage overage uses `usage_gb *
+/// overage_rate_per_gb_storage` directly (no /100k unit, per DESIGN's
+/// literal formula: `storage = usage_gb * storagePerGB`).
+pub fn next_invoice_estimate(_usage: &crate::model::UsageTotals) -> InvoiceEstimate {
+    panic!("RED scaffold (card-payments): data::next_invoice_estimate not yet implemented")
+}
+
+/// AC-102-02: maps a cap ratio (0.0 = 0%, 1.0 = 100%) to a bar color.
+pub fn bar_color(_ratio: f64) -> BarColor {
+    panic!("RED scaffold (card-payments): data::bar_color not yet implemented")
+}
+
+/// AC-105-02: brand auto-detected from the card number prefix (e.g. "4" →
+/// Visa, "5" → Mastercard).
+pub fn detect_card_brand(_number: &str) -> crate::model::CardBrand {
+    panic!("RED scaffold (card-payments): data::detect_card_brand not yet implemented")
+}
+
+/// AC-105-05: true only for a complete, plausible card number (V1: length
+/// check sufficient — no Luhn/real validation, Rust-native form only).
+pub fn card_number_is_complete(_number: &str) -> bool {
+    panic!("RED scaffold (card-payments): data::card_number_is_complete not yet implemented")
 }

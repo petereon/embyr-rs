@@ -3,7 +3,11 @@
 //! All items gated behind #[cfg(feature = "csr")].
 
 #[cfg(feature = "csr")]
+pub mod api_keys;
+#[cfg(feature = "csr")]
 pub mod auth;
+#[cfg(feature = "csr")]
+pub mod billing;
 #[cfg(feature = "csr")]
 pub mod dashboard;
 #[cfg(feature = "csr")]
@@ -13,14 +17,14 @@ pub mod db_detail;
 #[cfg(feature = "csr")]
 pub mod identities;
 #[cfg(feature = "csr")]
-pub mod api_keys;
-#[cfg(feature = "csr")]
-pub mod billing;
-#[cfg(feature = "csr")]
 pub mod settings;
 
 #[cfg(feature = "csr")]
+pub use api_keys::ApiKeysView;
+#[cfg(feature = "csr")]
 pub use auth::AuthView;
+#[cfg(feature = "csr")]
+pub use billing::BillingView;
 #[cfg(feature = "csr")]
 pub use dashboard::DashboardView;
 #[cfg(feature = "csr")]
@@ -29,10 +33,6 @@ pub use databases::DatabasesView;
 pub use db_detail::DbDetailView;
 #[cfg(feature = "csr")]
 pub use identities::IdentitiesView;
-#[cfg(feature = "csr")]
-pub use api_keys::ApiKeysView;
-#[cfg(feature = "csr")]
-pub use billing::BillingView;
 #[cfg(feature = "csr")]
 pub use settings::SettingsView;
 #[cfg(feature = "csr")]
@@ -44,16 +44,16 @@ pub use shell::ShellView;
 /// `model.nav.section`.
 #[cfg(feature = "csr")]
 mod shell {
-    use leptos::prelude::*;
     use crate::components::{Sidebar, Topbar};
     use crate::model::{AppModel, Section};
-    use crate::views::billing::BillingView;
+    use crate::views::api_keys::ApiKeysView;
+    use crate::views::billing::{BillingView, CardModal, UpgradeModal};
     use crate::views::dashboard::DashboardView;
     use crate::views::databases::DatabasesView;
     use crate::views::db_detail::DbDetailView;
     use crate::views::identities::IdentitiesView;
-    use crate::views::api_keys::ApiKeysView;
     use crate::views::settings::SettingsView;
+    use leptos::prelude::*;
 
     #[component]
     pub fn ShellView() -> impl IntoView {
@@ -81,6 +81,12 @@ mod shell {
                         }}
                     </main>
                 </div>
+                // card-payments (ADR-019): global modal state — mounted here
+                // (not nested inside BillingView) so a cross-cutting caller
+                // (SuspensionBanner, Slice 07) can open either modal from any
+                // Section via the same Msg dispatch.
+                <CardModal />
+                <UpgradeModal />
             </div>
 
         }
