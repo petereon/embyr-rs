@@ -62,7 +62,6 @@ fn brand_unknown_for_unrecognized_prefix() {
 /// AC-105-03: first-time card capture completes successfully — submitting
 /// updates `model.subscription.card`.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn submitting_valid_card_updates_subscription_card() {
     // Given: Chris Okafor's account has no card on file.
     let mut model = model_on_plan(Plan::Free);
@@ -84,7 +83,6 @@ fn submitting_valid_card_updates_subscription_card() {
 /// AC-105-04: updating an existing card replaces it, not duplicates it —
 /// no trace of the old Mastercard remains.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn submitting_replaces_not_appends_existing_card() {
     // Given: Dana Whitfield's account has a Mastercard ending in 9012 on
     // file.

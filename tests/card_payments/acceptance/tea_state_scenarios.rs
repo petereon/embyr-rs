@@ -152,7 +152,6 @@ proptest! {
     /// before. Generalizes the single worked example (Mastercard → Visa)
     /// in slice_04 to arbitrary card pairs.
     #[test]
-    #[ignore] // RED — enable in DELIVER
     fn set_card_always_replaces_never_accumulates(first in arb_card(), second in arb_card()) {
         let mut model = AppModel::default();
         model.authed = true;
