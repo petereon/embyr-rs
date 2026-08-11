@@ -198,8 +198,8 @@ pub fn update(model: &mut AppModel, msg: Msg) {
         Msg::SetSubscription(_) => {
             panic!("RED scaffold (card-payments): Msg::SetSubscription not yet implemented")
         }
-        Msg::SetInvoices(_) => {
-            panic!("RED scaffold (card-payments): Msg::SetInvoices not yet implemented")
+        Msg::SetInvoices(invoices) => {
+            model.invoices = invoices;
         }
         Msg::SetCard(card) => {
             model.subscription.card = Some(card);
