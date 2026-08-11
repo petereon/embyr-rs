@@ -46,6 +46,12 @@ happy_path:
     action: "Navigate to Billing → Last 30 days"
     output: "Per-database read/write/delete breakdown table"
     emotion: informed
+    superseded_by: docs/product/journeys/billing-management.yaml
+    superseded_note: >
+      card-payments DISCUSS (2026-08-10) extends this step from read-only usage reporting
+      into full subscription/payment management (plan, payment method, usage-vs-cap,
+      invoices, suspension recovery). This step is preserved historically; the current
+      Billing experience is documented in billing-management.yaml steps 1-9.
   - step: 10
     action: "Sign out"
     output: "Session invalidated; redirected to login form"

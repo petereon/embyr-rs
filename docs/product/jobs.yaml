@@ -197,6 +197,13 @@ jobs:
         mental model); CLI-only access creates friction and slows new-member onboarding
     opportunity_score: 16
     priority: critical
+    # NOTE (card-payments DISCUSS, 2026-08-10): the "view billing breakdown"
+    # functional item above (read-only usage reporting, feature=user-admin-ui)
+    # is extended by JOB-14 (manage-subscription) into full subscription and
+    # payment self-service. JOB-10 itself is unchanged; JOB-14 is a distinct
+    # job because it carries financial/trust stakes (card capture, hard-stop
+    # suspension, upgrade/downgrade decisions) that "view usage costs" alone
+    # does not. See docs/feature/card-payments/feature-delta.md.
 
   - id: JOB-11
     name: fair-multitenancy
@@ -331,4 +338,52 @@ jobs:
         the embyr-server must follow 12-factor app conventions — no config files,
         no hardcoded defaults for security-critical values, clean exit codes
     opportunity_score: 15
+    priority: critical
+
+  - id: JOB-14
+    name: manage-subscription
+    persona: P5
+    persona_name: Chris (Account Admin / Platform Engineer)
+    feature: card-payments
+    job_story: >
+      When my account's usage is approaching or has exceeded my plan's limits, or my
+      payment method needs updating, I want to see my current plan, my usage against
+      caps, and my payment status clearly in one place, and be able to upgrade my plan
+      or update my card myself, so I can avoid unexpected service interruption and stay
+      in control of what I'm paying for — without contacting the embyr operator.
+    dimensions:
+      functional: >
+        View current plan (Free/Pro) + payment method + per-dimension usage-against-cap
+        breakdown (reads/writes/deletes/storage) + upcoming invoice estimate; add/update
+        a card via Stripe Elements (PCI SAQ-A); upgrade Free→Pro or downgrade Pro→Free
+        with explicit confirmation; view invoice history; see a clear reason and one-click
+        recovery path when the console is suspended
+      emotional: >
+        Feel in control of spend — no surprise charges; feel reassured card data is
+        handled securely; feel confident that approaching a cap won't silently drain
+        more money, and that hitting a hard-stop won't blindside them without warning
+      social: >
+        Be seen internally by their own team as running a well-managed, cost-predictable
+        data platform; never have to explain a surprise invoice or an unexplained outage
+        to their own stakeholders
+    four_forces:
+      push: >
+        Zero billing visibility exists today — crates/embyr-admin-ui/src/views/billing.rs
+        shows only "—" placeholders; there is no way to add a card, no way to know
+        proximity to a cap, and the only signal of trouble is the console suddenly
+        refusing writes (D-6 hard-stop with no warning)
+      pull: >
+        A billing tab showing exact plan, usage-vs-cap bars with amber/red thresholds,
+        and a clear "Upgrade to Pro" button removes the mystery — Chris can self-serve
+        before hitting the wall instead of after
+      anxiety: >
+        "What if adding my card gets me charged for something I didn't agree to?" —
+        mitigated by D-6's explicit no-auto-upgrade rule and the downgrade-confirmation
+        warning. "Is my card data safe?" — mitigated by Stripe Elements PCI SAQ-A
+        messaging ("embyr never sees the raw number")
+      habit: >
+        Chris expects SaaS billing patterns from AWS Console / Vercel / Stripe's own
+        billing portal — plan card, payment-method card, usage bars, invoice table are
+        all familiar idioms; the design should not invent a new mental model
+    opportunity_score: 17
     priority: critical

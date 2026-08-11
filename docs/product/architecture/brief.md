@@ -2588,3 +2588,105 @@ AWS Secrets Manager, and GCP Secret Manager integrations are unchanged from prio
 | No partial startup | Integration tests assert no port is bound when required env var is missing (process exits before bind) |
 | Non-root Docker process | CI `docker` job builds image; can be verified with `docker inspect --format '{{.Config.User}}'` |
 
+---
+
+## Application Architecture — card-payments
+
+> Updated: 2026-08-10
+> Feature: card-payments (JOB-14 — self-service subscription/payment management, frontend-only per DISCUSS Scope Assessment split)
+> Mode: Propose (autonomous analysis)
+> ADRs: `docs/product/architecture/adr-019-billing-modal-global-state.md` (new); ADR-005/006/007/008 apply unchanged (no re-litigation)
+
+---
+
+### Wave: DESIGN / [REF] Summary
+
+This feature extends `embyr-admin-ui` (Leptos 0.8 CSR WASM, established by `user-admin-ui` —
+see § Application Architecture — user-admin-ui above) with self-service billing/subscription
+management for the account admin persona (P5/Chris). It introduces **no new architectural
+pattern, no new crate, no new external dependency, and no backend changes**. It is a pure
+extension of the existing TEA skeleton (`AppModel`/`Msg`/`update()`), the existing mock-first
+data layer (ADR-007), and the existing `views/{feature}/` multi-file subdirectory precedent
+(`views/db_detail/`).
+
+Full detail (component decomposition, model/msg/update changes, driving/driven ports, Reuse
+Analysis, Decisions table, C4 Component diagram) lives in
+`docs/feature/card-payments/feature-delta.md` § Wave: DESIGN — this section is the SSOT summary
+per the multi-architect brief convention.
+
+### Wave: DESIGN / [REF] Component Decomposition (Summary)
+
+| File Path | Change | Responsibility |
+|-----------|--------|-----------------|
+| `crates/embyr-admin-ui/src/views/billing/{mod,overview,usage,invoices,modals}.rs` | **NEW** (replaces `views/billing.rs`) | Billing tab shell + Plan/PaymentMethod/CapUsage/NextInvoice/TestClock cards + Usage table + Invoice history + Card/Upgrade modals |
+| `crates/embyr-admin-ui/src/components/suspension_banner.rs` | **NEW** | Cross-cutting read-only-state banner, rendered in `ShellView` above all routed `Section` content |
+| `crates/embyr-admin-ui/src/components/primitives/segmented.rs` | **NEW** | N-way value-select control (TestClockCard) |
+| `crates/embyr-admin-ui/src/model.rs`, `msg.rs`, `update.rs`, `data.rs` | **EXTEND** | New billing domain types (`Subscription`, `Card`, `Invoice`, `UsageStats` on `Database`), pure `impl AppModel` derivation methods (`usage_totals`/`cap_ratios`/`cap_exceeded`/`effective_status`/`read_only`), 10 new `Msg` variants, mock constructors |
+| `crates/embyr-admin-ui/src/components/icons.rs` | **EXTEND** | `"trash"` icon (deletes-dimension) |
+| `crates/embyr-admin-ui/src/views/mod.rs` | **EXTEND** | `billing` module promoted to directory; `ShellView` mounts `SuspensionBanner`/`CardModal`/`UpgradeModal` above routed content |
+
+No changes to `embyr-admin`, `embyr-server`, `embyr-core`, or any other crate.
+
+### Wave: DESIGN / [REF] Key Decision — Cross-Cutting Modal State (ADR-019)
+
+`CardModal`/`UpgradeModal` open/step state is **global `AppModel` state** dispatched via `Msg`,
+not view-local `RwSignal` (which is the existing `db_detail` confirm-modal precedent). This is
+required because `SuspensionBanner` (cross-cutting, rendered in `ShellView`) must be able to open
+either modal directly regardless of the currently active `Section` (AC-108-05) — a cross-component
+coordination requirement that view-local state cannot satisfy. See ADR-019 for full alternatives
+analysis (view-local + prop-drilling; navigate-then-open; independent context signals — all
+rejected).
+
+### Wave: DESIGN / [REF] Business-Logic Single-Sourcing
+
+Per this feature's DISCUSS constraint (`wave-decisions.md`: *"Status derivation MUST be a pure
+function over `AppModel` fields, not duplicated stored booleans"*), `capExceeded`/
+`effectiveStatus`/`readOnly` are implemented as `impl AppModel` methods in `model.rs` —
+`usage_totals()`, `cap_ratios()`, `cap_exceeded()`, `effective_status()`, `read_only()` — computed
+on every read (`model.with(|m| m.effective_status())`), never stored. This is the single
+implementation of the D-6 (hard-stop) and D-7 (per-dimension metering) business rules, consumed
+identically by `SuspensionBanner`, `CapUsageCard`, and `UpgradeModal`.
+
+### Wave: DESIGN / [REF] Reuse Analysis (Summary)
+
+10 EXTEND (`Tabs`, `Modal`, `Database`, `AppModel`, `Msg`, `update()`, `data.rs`, `views/mod.rs`,
+`Icon`, `components/mod.rs`), 1 REPLACE (`views/billing.rs` → `views/billing/` — content migrated,
+not dropped), 1 PATTERN REUSE (`views/db_detail/` directory shape, no shared code), 2 CREATE NEW
+(`Segmented` primitive; the `views/billing/` file set itself — unavoidable, no prior billing UI
+code existed), 1 explicit NOT APPLICABLE (`Toggle` — no boolean-switch use case in any of the 8
+slices), 1 explicit NOT EXTRACTED (progress/stacked bars kept page-local — YAGNI, single consumer
+each in V1). Zero unjustified CREATE NEW decisions. Full table with per-row justification:
+`docs/feature/card-payments/feature-delta.md` § Wave: DESIGN / [REF] Reuse Analysis.
+
+### Wave: DESIGN / [REF] Driven Ports — Forward Contract for `card-payments-backend`
+
+All V1 driven ports are in-process mock data (`data.rs`) — no external substrate, no `probe()`
+required for this feature (mirrors the identical conclusion already recorded above for
+user-admin-ui). Forward contract for the recommended `card-payments-backend` follow-up feature:
+`fetch_subscription`/`fetch_invoices`/`attach_payment_method`/`change_subscription_plan` as
+`#[server]` functions (ADR-007 migration contract — one-line body substitution, zero component
+changes), plus a real Stripe webhook-sourced payment-failure signal replacing `TestClockCard`'s
+direct setter as the *source* only. **External Integrations Requiring Contract Tests**: none in
+this feature; forward flag for `card-payments-backend` — Stripe REST API + webhooks will be that
+feature's highest-risk external boundary, recommend consumer-driven contract tests (Pact) in CI's
+acceptance stage at that time.
+
+### Wave: DESIGN / [REF] Architecture Enforcement (Addition)
+
+Extends UI-AD-10 (existing `cargo mutants -p embyr-admin-ui` mutation-testing decision, previously
+scoped to `update.rs`/`data.rs`) to also cover `model.rs`'s new `impl AppModel` derivation
+methods — the highest-value mutation target in this feature, since `effective_status()` is the
+literal implementation of the D-6 hard-stop business rule.
+
+### Wave: DESIGN / [REF] Application-Level Decisions Table — card-payments
+
+| ID | Decision | Verdict | Rationale |
+|----|----------|---------|-----------|
+| CP-AD-01 | Extend existing TEA skeleton, zero new architectural pattern | Accepted | Direct reuse of ADR-005/006/007; frontend-only scope per DISCUSS split |
+| CP-AD-02 | `views/billing/` mirrors `views/db_detail/` multi-file precedent | Accepted | Established, working pattern in this exact codebase |
+| CP-AD-03 | `capExceeded`/`effectiveStatus`/`readOnly` as pure `impl AppModel` methods, never stored fields | Accepted | DISCUSS constraint; single-sourced D-6/D-7 logic |
+| CP-AD-04 | `CardModal`/`UpgradeModal` open-state is global `AppModel`, not view-local | Accepted — see ADR-019 | Cross-cutting `SuspensionBanner` trigger requirement (AC-108-05) |
+| CP-AD-05 | `Segmented` new primitive; progress bars NOT extracted as primitives | Accepted | Semantically distinct from `Tabs`/`Toggle`; bars are single-consumer in V1 (YAGNI) |
+| CP-AD-06 | No Stripe.js/Elements JS interop shim in V1 — Rust-native form only | Accepted (inherited from D-3/D-5) | Explicit DISCUSS scope boundary; same-shape swap target for `card-payments-backend` |
+| CP-AD-07 | No new npm/JS dependency, no new Rust crate dependency | Accepted | Zero bundle-size risk beyond incremental application code; existing ≤4.5 MB CI gate applies unchanged |
+

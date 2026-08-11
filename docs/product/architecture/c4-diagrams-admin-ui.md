@@ -131,6 +131,62 @@ C4Component
 
 ---
 
+---
+
+## C4 L3 — Component Diagram (Billing Subsystem — card-payments)
+
+> Feature: card-payments | Updated: 2026-08-10
+> Extends the L1/L2 diagrams above unchanged (no new container, no new external system).
+> Warranted per the mandatory-C4 "complex subsystem" threshold: 9 stories, 8 slices, 1
+> cross-cutting component (`SuspensionBanner`) spanning every other `Section`.
+
+```mermaid
+C4Component
+    title Component Diagram — Billing Subsystem (embyr-admin-ui)
+
+    Container_Boundary(billing, "views/billing/") {
+        Component(billingMod, "views/billing/mod.rs — BillingView", "Leptos component", "Page header 'Plan & Billing'. Routes Overview/Usage/Invoices via existing Tabs primitive (local RwSignal<&'static str> active-tab state).")
+        Component(overview, "views/billing/overview.rs", "Leptos component group", "PlanCard, PaymentMethodCard, CapUsageCard (Free plan), NextInvoiceCard (Pro plan), TestClockCard (dev-only). Reads model.subscription + AppModel derivation methods.")
+        Component(usage, "views/billing/usage.rs — UsageTab", "Leptos component", "Per-database reads/writes/deletes/storage table, 3-color stacked bar, 5 KPI tiles, time-range selector. Supersedes the old billing.rs placeholder table.")
+        Component(invoices, "views/billing/invoices.rs — BillingInvoicesTab", "Leptos component", "Date/Period/Base/Overage/Total/Status table. PDF link on paid rows. Free-plan empty state.")
+        Component(modals, "views/billing/modals.rs", "Leptos component group", "CardModal (Stripe-Elements-styled Rust-native form, PCI SAQ-A copy) + UpgradeModal (compare/confirm two-step, mandatory downgrade warning). Rendered at ShellView level, gated by AppModel.card_modal_open / upgrade_modal_open — not view-local (ADR-019) — so reachable from SuspensionBanner regardless of active Section.")
+    }
+
+    Component(suspensionBanner, "components/suspension_banner.rs — SuspensionBanner", "Leptos component (NEW)", "Cross-cutting. Rendered in ShellView above all routed Section content. Reads AppModel.effective_status()/read_only(). Amber (free_cap_exceeded) or red (past_due) state. CTA dispatches Msg::OpenUpgradeModal or Msg::OpenCardModal.")
+
+    Component(modelBilling, "model.rs — Subscription/Card/Invoice/Database.usage + impl AppModel", "Rust structs + pure methods", "New domain types: Subscription, Card, CardBrand, Plan, Invoice, InvoiceStatus, UsageStats (on Database), UpgradeModalStep, EffectiveStatus. Pure derivation: usage_totals(), cap_ratios(), cap_exceeded(), effective_status(), read_only() — single-sourced D-6/D-7 logic, never duplicated as stored fields.")
+
+    Component(msgBilling, "msg.rs — Billing Msg variants", "Rust enum variants (NEW)", "SetSubscription, SetInvoices, SetCard, SetPlan, SetPaymentFailure, OpenCardModal, CloseCardModal, OpenUpgradeModal, CloseUpgradeModal, SetUpgradeModalStep.")
+
+    Component(updateBilling, "update.rs — Billing match arms", "Pure fn match arms (NEW)", "Direct field mutation only per Billing Msg variant. No IO. No derived business logic here — that lives in model.rs.")
+
+    Component(dataBilling, "data.rs — FREE_CAPS, PRICING, mock::subscription(), mock::invoices()", "Rust module (EXTEND)", "Mock seed data + business constants. V2: mock::subscription()/invoices() replaced by #[server] fn bodies only (ADR-007 migration contract).")
+
+    Component(segmented, "components/primitives/segmented.rs — Segmented", "Leptos primitive (NEW)", "N-way single-select control. Used by TestClockCard ('Payment succeeds'/'Payment fails').")
+
+    Component_Ext(tabs, "components/primitives/tabs.rs — Tabs", "Existing primitive, reused unmodified")
+    Component_Ext(modal, "components/primitives/modal.rs — Modal", "Existing primitive, reused unmodified")
+    Component_Ext(icons, "components/icons.rs — Icon", "Existing component, extended: + 'trash'")
+    Component_Ext(shellView, "views/mod.rs — ShellView", "Existing shell router, extended: renders SuspensionBanner + CardModal + UpgradeModal above routed content")
+
+    Rel(shellView, suspensionBanner, "renders above routed content")
+    Rel(shellView, modals, "renders CardModal/UpgradeModal gated on AppModel open-flags")
+    Rel(billingMod, tabs, "renders Overview/Usage/Invoices via")
+    Rel(overview, modelBilling, "reads subscription + derivation methods from")
+    Rel(overview, msgBilling, "dispatches OpenCardModal/OpenUpgradeModal/SetCard/SetPlan/SetPaymentFailure via")
+    Rel(overview, segmented, "TestClockCard uses")
+    Rel(usage, modelBilling, "reads Database.usage + usage_totals() from")
+    Rel(invoices, modelBilling, "reads model.invoices from")
+    Rel(modals, modal, "wraps content in")
+    Rel(modals, icons, "renders brand icons via")
+    Rel(suspensionBanner, modelBilling, "reads effective_status()/read_only() from")
+    Rel(suspensionBanner, msgBilling, "dispatches OpenUpgradeModal/OpenCardModal via")
+    Rel(updateBilling, modelBilling, "mutates AppModel fields per")
+    Rel(modelBilling, dataBilling, "from_mock() seeds from; derivation methods read FREE_CAPS/PRICING from")
+```
+
+---
+
 ## TEA Dispatch Flow
 
 ```mermaid

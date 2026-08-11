@@ -1,0 +1,42 @@
+version: "1.0"
+persona_id: P5
+name: "Chris Okafor"
+role: "Account Admin / Platform Engineer"
+introduced_by: user-admin-ui
+extended_by: card-payments
+jobs:
+  - JOB-10  # account-admin (primary umbrella job)
+  - JOB-14  # manage-subscription (billing/payment self-service, card-payments)
+  - JOB-04  # credential-isolation (Connections panel)
+  - JOB-05  # cloud-secret (Connections panel)
+
+characteristics:
+  - "Operates embyr on behalf of a small-to-mid-size engineering team (e.g. 'Aperture Labs', 3 databases)"
+  - "Comfortable with AWS Console / Vercel dashboard / Supabase-studio-style admin UIs; expects the same idioms for billing"
+  - "Not a payments specialist — trusts Stripe's PCI messaging rather than wanting to understand card tokenization internals"
+  - "Reports account cost and health upward to their own team/stakeholders; a surprise invoice or unexplained outage reflects badly on them personally"
+
+goals:
+  - "Operate self-sufficiently without contacting the embyr operator for routine account management"
+  - "Know before a Free-plan cap is hit, not after"
+  - "Understand exactly what a Pro-plan bill will look like before it arrives"
+
+frustrations:
+  - "Billing page today (crates/embyr-admin-ui/src/views/billing.rs) is placeholder dashes — zero visibility"
+  - "No way to add a payment method anywhere in the console (blocks D-5's card-required-even-for-Free policy)"
+  - "Fear of a silent hard-stop (D-6) with no warning and no visible reason"
+
+mental_model:
+  - "Expects a 'Plan & Billing' page shaped like every other SaaS billing portal: current plan, payment method, usage vs. limits, invoice history"
+  - "Expects amber/red visual cues before a hard limit, not just a binary pass/fail"
+  - "Expects downgrade actions to warn about consequences before committing (standard SaaS pattern)"
+
+vocabulary:
+  Free plan: "No monthly base fee; hard usage caps per dimension; requires a card on file (D-5)"
+  Pro plan: "$49/mo base + metered overage on reads/writes/deletes/storage beyond included volume"
+  cap-exceeded: "Free plan has hit a hard limit on at least one usage dimension this cycle; console becomes read-only until upgrade"
+  past_due: "Most recent payment attempt failed; console becomes read-only after Stripe Smart Retries are exhausted"
+  read-only / suspended: "Console blocks further usage; SuspensionBanner explains why and how to recover"
+
+updated: "2026-08-10"
+source: docs/feature/card-payments/feature-delta.md

@@ -1,0 +1,104 @@
+version: "1.0"
+feature: card-payments
+persona: P5
+persona_name: Chris (Account Admin / Platform Engineer)
+supersedes: docs/product/journeys/user-admin.yaml (happy_path step 9 — "Billing → Last 30 days" is
+  extended here into full subscription/payment self-service; the original step is preserved
+  in user-admin.yaml with a superseded_by cross-reference, not deleted, per the Document Update
+  / Back-Propagation procedure)
+jobs:
+  - JOB-14  # manage-subscription (primary)
+  - JOB-10  # account-admin (parent umbrella job)
+updated: "2026-08-10"
+source: docs/feature/card-payments/feature-delta.md
+
+scope_note: >
+  This journey covers the frontend billing UI slice only (card-payments, mock-data-first per
+  ADR-007). Steps below render against deterministic mock data in V1. Real Stripe-backed data
+  (subscriptions table, webhook-driven state, live rate-limiter enforcement) is scope for the
+  recommended follow-up feature `card-payments-backend` — see feature-delta.md Scope Assessment.
+
+happy_path:
+  - step: 1
+    action: "Navigate to Billing → Overview tab"
+    output: "Plan card (Free/Pro + status) and Payment Method card (brand/last4/expiry or 'no card') render"
+    emotion: oriented
+  - step: 2
+    action: "Scan Cap Usage card (Free) or Next Invoice card (Pro)"
+    output: "Per-dimension usage bars with amber/red thresholds, or overage estimate breakdown"
+    emotion: informed
+  - step: 3
+    action: "Click 'Add card' / 'Update' → Card modal"
+    output: "Stripe-Elements-styled capture form; PCI SAQ-A reassurance copy; brand auto-detected"
+    emotion: reassured
+  - step: 4
+    action: "Submit card"
+    output: "Payment Method card updates; confirmation toast"
+    emotion: confident
+  - step: 5
+    action: "Click 'Upgrade to Pro' → Upgrade modal (compare step)"
+    output: "Free vs Pro feature comparison side by side"
+    emotion: deciding
+  - step: 6
+    action: "Confirm upgrade (or acknowledge downgrade warning and confirm)"
+    output: "Plan card updates immediately; suspended state clears if previously cap-exceeded"
+    emotion: in_control
+  - step: 7
+    action: "Navigate to Billing → Usage tab"
+    output: "Per-database reads/writes/deletes/storage breakdown with stacked usage bars (supersedes placeholder table)"
+    emotion: informed
+  - step: 8
+    action: "Navigate to Billing → Invoices tab"
+    output: "Invoice history table (Date/Period/Base/Overage/Total/Status) with PDF download; Free-plan empty state when applicable"
+    emotion: satisfied
+  - step: 9
+    action: "(When suspended) See SuspensionBanner above any section"
+    output: "Amber (cap-exceeded) or red (payment-failed) banner with a CTA routing to the correct recovery modal"
+    emotion: relieved  # replaces confusion/frustration with a clear, actionable explanation
+
+shared_artifacts:
+  - name: subscription.plan
+    source: "AppModel.subscription (mock in V1; Stripe subscription webhook in card-payments-backend)"
+    consumed_by: "PlanCard, CapUsageCard/NextInvoiceCard selection, UpgradeModal, SuspensionBanner"
+  - name: subscription.card
+    source: "AppModel.subscription.card (mock in V1; Stripe payment method in card-payments-backend)"
+    consumed_by: "PaymentMethodCard, CardModal"
+  - name: subscription.current_period_end
+    source: "AppModel.subscription"
+    consumed_by: "PlanCard, NextInvoiceCard"
+  - name: subscription.payment_failure
+    source: "AppModel.subscription (TestClockCard mock setter in V1; Stripe webhook in backend)"
+    consumed_by: "SuspensionBanner derivation (effectiveStatus)"
+  - name: usage_totals (reads/writes/deletes/storageGB)
+    source: "pure derivation over model.databases[].usage * 30 (functional-where-practical, no duplicated stored fields)"
+    consumed_by: "CapUsageCard, NextInvoiceCard, UsageTab"
+  - name: capExceeded / effectiveStatus / readOnly
+    source: "pure derivation function over subscription + usage_totals + FREE_CAPS"
+    consumed_by: "SuspensionBanner, CapUsageCard bar coloring, UpgradeModal (pre-selects Pro when capExceeded)"
+  - name: invoices
+    source: "AppModel.invoices (mock)"
+    consumed_by: "BillingInvoicesTab"
+  - name: FREE_CAPS / PRICING
+    source: "constants in embyr-admin-ui/src/data.rs (mirrors design prototype's data.js)"
+    consumed_by: "CapUsageCard, NextInvoiceCard, UpgradeModal PlanColumn"
+
+slices:
+  - id: slice-01
+    path: docs/feature/card-payments/slices/slice-01-billing-overview-shell.md
+  - id: slice-02
+    path: docs/feature/card-payments/slices/slice-02-cap-usage-visibility.md
+  - id: slice-03
+    path: docs/feature/card-payments/slices/slice-03-invoice-forecast-usage-breakdown.md
+  - id: slice-04
+    path: docs/feature/card-payments/slices/slice-04-payment-method-capture.md
+  - id: slice-05
+    path: docs/feature/card-payments/slices/slice-05-plan-change.md
+  - id: slice-06
+    path: docs/feature/card-payments/slices/slice-06-invoice-history.md
+  - id: slice-07
+    path: docs/feature/card-payments/slices/slice-07-suspension-banner.md
+  - id: slice-08
+    path: docs/feature/card-payments/slices/slice-08-test-mode-simulator.md
+  # Recommended follow-up feature (NOT executed by this DISCUSS wave — see feature-delta.md
+  # Scope Assessment): card-payments-backend — Stripe SDK, subscriptions/processed_webhook_events
+  # schema, 5th webhook sub-router, rate-limiter extension, daily batch job, dunning.
