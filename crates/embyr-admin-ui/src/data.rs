@@ -320,8 +320,14 @@ pub fn next_invoice_estimate(_usage: &crate::model::UsageTotals) -> InvoiceEstim
 }
 
 /// AC-102-02: maps a cap ratio (0.0 = 0%, 1.0 = 100%) to a bar color.
-pub fn bar_color(_ratio: f64) -> BarColor {
-    panic!("RED scaffold (card-payments): data::bar_color not yet implemented")
+pub fn bar_color(ratio: f64) -> BarColor {
+    if ratio >= 1.0 {
+        return BarColor::Red;
+    }
+    if ratio >= 0.80 {
+        return BarColor::Amber;
+    }
+    BarColor::Accent
 }
 
 /// AC-105-02: brand auto-detected from the card number prefix (e.g. "4" →

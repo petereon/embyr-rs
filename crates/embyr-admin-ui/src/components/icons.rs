@@ -33,6 +33,7 @@ pub fn Icon(name: &'static str, #[prop(default = 16u32)] size: u32) -> impl Into
         "connection"     => r#"<path d="M2 12h10"/><path d="M9 4v16"/><path d="m3 9-3 3 3 3"/><path d="m14 5 3 3-3 3"/><circle cx="19" cy="7" r="3"/><circle cx="19" cy="17" r="3"/><path d="M14 17h2"/>"#,
         "suspend"        => r#"<circle cx="12" cy="12" r="10"/><path d="M10 15V9"/><path d="M14 15V9"/>"#,
         "play"           => r#"<circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/>"#,
+        "trash"          => r#"<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>"#,
         _               => "",
     };
 
