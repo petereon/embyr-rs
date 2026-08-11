@@ -113,7 +113,6 @@ fn brand_new_account_shows_zero_usage_without_false_alarms() {
 /// AC-102-05: expanding the Writes row lists per-database write counts
 /// that sum to the card's total.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn per_database_write_breakdown_sums_to_card_total() {
     // Given: Aperture Labs has 3 databases contributing to its write count.
     let mut model = model_on_plan(Plan::Free);
@@ -144,7 +143,6 @@ fn per_database_write_breakdown_sums_to_card_total() {
 /// Free thresholds — Pro shows the Next Invoice card instead (US-103), and
 /// D-6's hard-stop is Free-plan-only.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn pro_plan_never_treated_as_cap_exceeded_even_over_free_thresholds() {
     // Given: a Pro-plan account with usage far beyond every Free cap.
     let mut model = model_on_plan(Plan::Pro);

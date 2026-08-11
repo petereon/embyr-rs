@@ -461,7 +461,14 @@ impl AppModel {
 
     /// AC-108-06 (D-6): `subscription.plan == Free && max(cap_ratios()) >= 1.0`.
     pub fn cap_exceeded(&self) -> bool {
-        panic!("RED scaffold (card-payments): AppModel::cap_exceeded not yet implemented")
+        if self.subscription.plan != Plan::Free {
+            return false;
+        }
+        let ratios = self.cap_ratios();
+        ratios.reads >= 1.0
+            || ratios.writes >= 1.0
+            || ratios.deletes >= 1.0
+            || ratios.storage_gb >= 1.0
     }
 
     /// AC-108-06: `cap_exceeded()` → FreeCapExceeded; else `payment_failure`
@@ -510,7 +517,14 @@ impl AppModel {
 
     /// AC-104-01/02/03: per-database Usage tab table rows.
     pub fn usage_table_rows(&self) -> Vec<UsageTableRow> {
-        panic!("RED scaffold (card-payments): AppModel::usage_table_rows not yet implemented")
+        self.databases
+            .iter()
+            .map(|db| UsageTableRow {
+                db_id: db.id.clone(),
+                name: db.name.clone(),
+                usage: db.usage.clone(),
+            })
+            .collect()
     }
 
     /// AC-107-03: `Some(copy)` for Free-plan accounts with no invoice

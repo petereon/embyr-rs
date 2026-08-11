@@ -92,7 +92,6 @@ proptest! {
     /// metered separately — any single dimension crossing its cap is
     /// sufficient to trigger the hard-stop).
     #[test]
-    #[ignore] // RED — enable in DELIVER
     fn free_plan_cap_exceeded_iff_any_dimension_at_or_over_cap(model in arb_free_model_with_databases()) {
         let ratios = model.cap_ratios();
         let any_over = ratios.reads >= 1.0
@@ -197,7 +196,6 @@ proptest! {
     /// a well-defined, non-ambiguous status (Active, since zero usage never
     /// exceeds a cap), not a vacuously-true or panicking edge case.
     #[test]
-    #[ignore] // RED — enable in DELIVER
     fn zero_databases_never_falsely_trip_cap_exceeded(plan in arb_plan(), payment_failure in any::<bool>()) {
         let mut model = AppModel::default();
         model.authed = true;
@@ -217,7 +215,6 @@ proptest! {
 /// under cap. `cap_exceeded()` must be true from this single dimension
 /// alone, not require all 4 dimensions to be over.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn pinned_example_single_dimension_at_cap_is_sufficient() {
     let mut model = AppModel::default();
     model.authed = true;
