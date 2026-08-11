@@ -119,10 +119,14 @@ pub mod mock {
                 logging_enabled: true,
                 log_retention: Some(crate::model::LogRetention::SevenDays),
                 created_at: None,
-                // card-payments (DISTILL, 2026-08-10): zero-usage placeholder.
-                // DELIVER: vary per D2's demo requirement (healthy/near-cap/
-                // at-cap scenarios) once mock::subscription() is implemented.
-                usage: Default::default(),
+                // card-payments (DELIVER, 02-02): healthy daily usage — well
+                // under every FREE_CAPS dimension once projected ×30.
+                usage: crate::model::UsageStats {
+                    reads: 20_000,
+                    writes: 3_000,
+                    deletes: 200,
+                    storage_gb: 0.4,
+                },
             },
             Database {
                 id: DbId(Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()),
@@ -132,7 +136,15 @@ pub mod mock {
                 logging_enabled: false,
                 log_retention: None,
                 created_at: None,
-                usage: Default::default(),
+                // card-payments (DELIVER, 02-02): near-cap daily usage on
+                // writes/deletes (84%/90% of FREE_CAPS ×30) for a realistic
+                // amber demo on the Cap Usage card.
+                usage: crate::model::UsageStats {
+                    reads: 15_000,
+                    writes: 14_000,
+                    deletes: 3_000,
+                    storage_gb: 1.1,
+                },
             },
         ]
     }

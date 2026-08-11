@@ -11,9 +11,15 @@
 //! AC-101-06: clicking the trigger buttons dispatches `Msg::OpenUpgradeModal`
 //! / `Msg::OpenCardModal` (ADR-019 global modal state).
 //!
-//! CapUsageCard / NextInvoiceCard / TestClockCard (Slices 02/03/08) are not
-//! part of this slice — see feature-delta.md Component Decomposition.
+//! AC-102-01/02/03: CapUsageCard renders 4 per-dimension bars (reads/writes/
+//! deletes/storage) sourced from `AppModel::cap_ratios()`, colored via
+//! `data::bar_color()` (accent/amber/red thresholds).
+//!
+//! NextInvoiceCard / TestClockCard (Slices 03/08) are not part of this
+//! slice — see feature-delta.md Component Decomposition.
 
+#[cfg(feature = "csr")]
+use crate::data::{self, BarColor};
 #[cfg(feature = "csr")]
 use crate::model::{AppModel, Plan};
 #[cfg(feature = "csr")]
@@ -29,6 +35,58 @@ pub fn BillingOverviewTab() -> impl IntoView {
         <div class="billing-overview-grid">
             <PlanCard/>
             <PaymentMethodCard/>
+            <CapUsageCard/>
+        </div>
+    }
+}
+
+/// Cap Usage card: reads/writes/deletes/storage bars as % of `FREE_CAPS`,
+/// single-sourced from `AppModel::cap_ratios()` (AC-102-01/02/03).
+#[cfg(feature = "csr")]
+#[component]
+fn CapUsageCard() -> impl IntoView {
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+    let ratios = move || model.with(|m| m.cap_ratios());
+
+    view! {
+        <div class="card billing-card">
+            <h3 class="card-title">"Usage this month"</h3>
+            <div class="billing-card-body">
+                <CapUsageBar label="Reads" ratio=Signal::derive(move || ratios().reads)/>
+                <CapUsageBar label="Writes" ratio=Signal::derive(move || ratios().writes)/>
+                <CapUsageBar label="Deletes" ratio=Signal::derive(move || ratios().deletes)/>
+                <CapUsageBar label="Storage" ratio=Signal::derive(move || ratios().storage_gb)/>
+            </div>
+        </div>
+    }
+}
+
+/// A single cap-usage bar: label, percentage label, and a colored fill
+/// track (AC-102-02: accent <80%, amber 80-99%, red >=100%, via
+/// `data::bar_color()` — the single-sourced threshold logic).
+#[cfg(feature = "csr")]
+#[component]
+fn CapUsageBar(label: &'static str, ratio: Signal<f64>) -> impl IntoView {
+    let color_var = move || match data::bar_color(ratio.get()) {
+        BarColor::Accent => "var(--accent)",
+        BarColor::Amber => "var(--amber)",
+        BarColor::Red => "var(--red)",
+    };
+    let fill_pct = move || (ratio.get() * 100.0).clamp(0.0, 100.0);
+    let pct_label = move || format!("{:.0}%", ratio.get() * 100.0);
+
+    view! {
+        <div style="margin-top:10px">
+            <div class="row" style="justify-content:space-between">
+                <span class="card-sub">{label}</span>
+                <span class="card-sub mono">{pct_label}</span>
+            </div>
+            <div style="height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden;margin-top:4px">
+                <div style=move || format!(
+                    "height:100%;border-radius:3px;width:{:.1}%;background:{}",
+                    fill_pct(), color_var()
+                )></div>
+            </div>
         </div>
     }
 }

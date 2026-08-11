@@ -24,7 +24,6 @@ use common::{database_with_daily_usage, model_on_plan};
 /// cap, adapted from the domain example's 412K/500K = 82% for clean ×30
 /// arithmetic) renders its bar in amber.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn writes_bar_goes_amber_approaching_cap() {
     // Given: Aperture Labs (Free plan) has used 420,000 of 500,000 monthly
     // writes (14,000/day × 30).
@@ -46,7 +45,6 @@ fn writes_bar_goes_amber_approaching_cap() {
 /// AC-102-01/02: a dimension at or above its cap (Solstice Analytics'
 /// deletes, adapted to 102,000/100,000) renders its bar in red.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn deletes_bar_goes_red_at_or_above_cap() {
     // Given: Solstice Analytics (Free plan) has used 102,000 of 100,000
     // monthly deletes (3,400/day × 30) — already `free_cap_exceeded`.
@@ -64,7 +62,6 @@ fn deletes_bar_goes_red_at_or_above_cap() {
 /// AC-102-01/02: usage well under cap (~40% of the Free reads cap) renders
 /// in the default accent color, not amber/red.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn reads_well_under_cap_renders_accent() {
     // Given: Aperture Labs has used 810,000 of 2,000,000 monthly reads
     // (27,000/day × 30).
@@ -84,7 +81,6 @@ fn reads_well_under_cap_renders_accent() {
 /// false amber/red — a naive `ratio >= threshold` check without a
 /// zero-usage guard could misfire on degenerate inputs.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn brand_new_account_shows_zero_usage_without_false_alarms() {
     // Given: Bramble & Co has recorded zero reads, writes, deletes, and
     // storage this cycle (no databases yet).

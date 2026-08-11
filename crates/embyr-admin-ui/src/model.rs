@@ -435,12 +435,28 @@ impl AppModel {
     /// AC-104-01/03: sums `self.databases[].usage`, projects reads/writes/
     /// deletes ×30 (storage_gb stays a point-in-time snapshot, OQ-CP-04).
     pub fn usage_totals(&self) -> UsageTotals {
-        panic!("RED scaffold (card-payments): AppModel::usage_totals not yet implemented")
+        let daily_reads: u64 = self.databases.iter().map(|db| db.usage.reads).sum();
+        let daily_writes: u64 = self.databases.iter().map(|db| db.usage.writes).sum();
+        let daily_deletes: u64 = self.databases.iter().map(|db| db.usage.deletes).sum();
+        let storage_gb: f64 = self.databases.iter().map(|db| db.usage.storage_gb).sum();
+        UsageTotals {
+            reads: daily_reads * 30,
+            writes: daily_writes * 30,
+            deletes: daily_deletes * 30,
+            storage_gb,
+        }
     }
 
     /// AC-102-01: `usage_totals() / data::FREE_CAPS`, per dimension.
     pub fn cap_ratios(&self) -> CapRatios {
-        panic!("RED scaffold (card-payments): AppModel::cap_ratios not yet implemented")
+        let totals = self.usage_totals();
+        let caps = crate::data::FREE_CAPS;
+        CapRatios {
+            reads: totals.reads as f64 / caps.reads as f64,
+            writes: totals.writes as f64 / caps.writes as f64,
+            deletes: totals.deletes as f64 / caps.deletes as f64,
+            storage_gb: totals.storage_gb / caps.storage_gb,
+        }
     }
 
     /// AC-108-06 (D-6): `subscription.plan == Free && max(cap_ratios()) >= 1.0`.
