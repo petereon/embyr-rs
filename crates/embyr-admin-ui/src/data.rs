@@ -344,12 +344,20 @@ pub fn bar_color(ratio: f64) -> BarColor {
 
 /// AC-105-02: brand auto-detected from the card number prefix (e.g. "4" →
 /// Visa, "5" → Mastercard).
-pub fn detect_card_brand(_number: &str) -> crate::model::CardBrand {
-    panic!("RED scaffold (card-payments): data::detect_card_brand not yet implemented")
+pub fn detect_card_brand(number: &str) -> crate::model::CardBrand {
+    let digits: String = number.chars().filter(char::is_ascii_digit).collect();
+    match digits.chars().next() {
+        Some('4') => crate::model::CardBrand::Visa,
+        Some('5') => crate::model::CardBrand::Mastercard,
+        Some('3') => crate::model::CardBrand::Amex,
+        Some('6') => crate::model::CardBrand::Discover,
+        _ => crate::model::CardBrand::Unknown,
+    }
 }
 
 /// AC-105-05: true only for a complete, plausible card number (V1: length
 /// check sufficient — no Luhn/real validation, Rust-native form only).
-pub fn card_number_is_complete(_number: &str) -> bool {
-    panic!("RED scaffold (card-payments): data::card_number_is_complete not yet implemented")
+pub fn card_number_is_complete(number: &str) -> bool {
+    let digits: String = number.chars().filter(char::is_ascii_digit).collect();
+    digits.len() == 16
 }
