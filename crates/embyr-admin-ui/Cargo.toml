@@ -49,6 +49,14 @@ path = "../../tests/user_admin_ui/acceptance/walking_skeleton.rs"
 name = "user_admin_ui_tea_state"
 path = "../../tests/user_admin_ui/user_admin_ui.rs"
 
+[[test]]
+name = "card_payments_walking_skeleton"
+path = "../../tests/card_payments/acceptance/walking_skeleton.rs"
+
+[[test]]
+name = "card_payments_tea_state"
+path = "../../tests/card_payments/card_payments.rs"
+
 [dev-dependencies]
 proptest = "1"
 proptest-derive = "0.4"
