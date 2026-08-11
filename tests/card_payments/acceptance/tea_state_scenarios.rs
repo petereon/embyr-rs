@@ -38,7 +38,6 @@ proptest! {
     /// the literal contract AC-108-01 depends on ("Banner renders only
     /// when derived readOnly is true").
     #[test]
-    #[ignore] // RED — enable in DELIVER
     fn read_only_iff_status_not_active(model in arb_model_with_databases()) {
         let status = model.effective_status();
         let read_only = model.read_only();
@@ -57,7 +56,6 @@ proptest! {
     /// structurally impossible to trigger on Pro, by construction of
     /// `cap_exceeded()`'s own `plan == Free` guard.
     #[test]
-    #[ignore] // RED — enable in DELIVER
     fn free_cap_exceeded_implies_free_plan(model in arb_model_with_databases()) {
         if model.effective_status() == EffectiveStatus::FreeCapExceeded {
             prop_assert_eq!(model.subscription.plan, Plan::Free);
@@ -72,7 +70,6 @@ proptest! {
     /// invariant list ("Pro plan never shows free_cap_exceeded regardless
     /// of usage").
     #[test]
-    #[ignore] // RED — enable in DELIVER
     fn pro_plan_never_shows_free_cap_exceeded(dbs in prop::collection::vec(arb_database_with_usage(), 0..=6)) {
         let mut model = AppModel::default();
         model.authed = true;

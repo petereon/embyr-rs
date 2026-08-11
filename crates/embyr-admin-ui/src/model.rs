@@ -485,7 +485,7 @@ impl AppModel {
 
     /// AC-108-01: `effective_status() != Active`.
     pub fn read_only(&self) -> bool {
-        panic!("RED scaffold (card-payments): AppModel::read_only not yet implemented")
+        self.effective_status() != EffectiveStatus::Active
     }
 
     /// AC-101-01/02/03: Plan card projection (Free included volume from
@@ -546,7 +546,23 @@ impl AppModel {
     /// AC-108-01/02/03: `None` when `effective_status() == Active`; amber
     /// (FreeCapExceeded) or red (PastDue) projection otherwise.
     pub fn suspension_banner_view(&self) -> Option<SuspensionBannerView> {
-        panic!("RED scaffold (card-payments): AppModel::suspension_banner_view not yet implemented")
+        if !self.read_only() {
+            return None;
+        }
+        if self.effective_status() == EffectiveStatus::FreeCapExceeded {
+            return Some(SuspensionBannerView {
+                status: EffectiveStatus::FreeCapExceeded,
+                message: "You've reached your Free plan limits for this cycle.",
+                cta_label: "Upgrade to Pro",
+                cta_opens_upgrade_modal: true,
+            });
+        }
+        Some(SuspensionBannerView {
+            status: EffectiveStatus::PastDue,
+            message: "We couldn't process your last payment.",
+            cta_label: "Update payment method",
+            cta_opens_upgrade_modal: false,
+        })
     }
 
     /// AC-106-01/03: UpgradeModal compare/confirm-downgrade projection.

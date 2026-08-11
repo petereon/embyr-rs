@@ -44,7 +44,7 @@ pub use shell::ShellView;
 /// `model.nav.section`.
 #[cfg(feature = "csr")]
 mod shell {
-    use crate::components::{Sidebar, Topbar};
+    use crate::components::{Sidebar, SuspensionBanner, Topbar};
     use crate::model::{AppModel, Section};
     use crate::views::api_keys::ApiKeysView;
     use crate::views::billing::{BillingView, CardModal, UpgradeModal};
@@ -69,6 +69,10 @@ mod shell {
                 <Sidebar />
                 <div class="main">
                     <Topbar />
+                    // card-payments (D-6, AC-108-04): mounted above the routed
+                    // content, unconditional of the active Section — visible
+                    // on every page whenever `read_only()` is true.
+                    <SuspensionBanner />
                     <main class="content">
                         {move || match section.get() {
                             Section::Databases   => view! { <DatabasesView /> }.into_any(),
