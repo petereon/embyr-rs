@@ -545,6 +545,17 @@ impl AppModel {
 
     /// AC-106-01/03: UpgradeModal compare/confirm-downgrade projection.
     pub fn upgrade_modal_view(&self) -> UpgradeModalView {
-        panic!("RED scaffold (card-payments): AppModel::upgrade_modal_view not yet implemented")
+        let plan_features = crate::data::PLAN_FEATURES;
+        UpgradeModalView {
+            step: self.upgrade_modal_step.clone(),
+            free_included: UsageTotals {
+                reads: plan_features.free_included.reads,
+                writes: plan_features.free_included.writes,
+                deletes: plan_features.free_included.deletes,
+                storage_gb: plan_features.free_included.storage_gb,
+            },
+            pro_base_price: plan_features.pro_base,
+            shows_downgrade_warning: self.upgrade_modal_step == UpgradeModalStep::ConfirmDowngrade,
+        }
     }
 }
