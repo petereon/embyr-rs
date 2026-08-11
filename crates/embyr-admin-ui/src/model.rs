@@ -474,7 +474,13 @@ impl AppModel {
     /// AC-108-06: `cap_exceeded()` → FreeCapExceeded; else `payment_failure`
     /// → PastDue; else Active. Single-sourced D-6/D-12 hard-stop logic.
     pub fn effective_status(&self) -> EffectiveStatus {
-        panic!("RED scaffold (card-payments): AppModel::effective_status not yet implemented")
+        if self.cap_exceeded() {
+            EffectiveStatus::FreeCapExceeded
+        } else if self.subscription.payment_failure {
+            EffectiveStatus::PastDue
+        } else {
+            EffectiveStatus::Active
+        }
     }
 
     /// AC-108-01: `effective_status() != Active`.

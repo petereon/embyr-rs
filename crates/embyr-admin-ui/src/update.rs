@@ -204,8 +204,8 @@ pub fn update(model: &mut AppModel, msg: Msg) {
         Msg::SetCard(card) => {
             model.subscription.card = Some(card);
         }
-        Msg::SetPlan(_) => {
-            panic!("RED scaffold (card-payments): Msg::SetPlan not yet implemented")
+        Msg::SetPlan(plan) => {
+            model.subscription.plan = plan;
         }
         Msg::SetPaymentFailure(_) => {
             panic!("RED scaffold (card-payments): Msg::SetPaymentFailure not yet implemented")

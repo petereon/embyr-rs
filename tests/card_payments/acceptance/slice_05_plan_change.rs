@@ -39,7 +39,6 @@ fn compare_step_shows_free_and_pro_columns_from_plan_features() {
 
 /// AC-106-02: confirming Free → Pro updates the plan and closes the modal.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn confirming_upgrade_updates_plan_to_pro_and_closes_modal() {
     // Given: Chris Okafor's account "Aperture Labs" is on the Free plan
     // with the Upgrade modal open.
@@ -80,7 +79,6 @@ fn selecting_downgrade_shows_mandatory_hard_cap_warning() {
 
 /// AC-106-04: confirming Pro → Free updates the plan and closes the modal.
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn confirming_downgrade_updates_plan_to_free_and_closes_modal() {
     // Given: Dana's account is on Pro, downgrade warning acknowledged
     // (chained from the prior scenario's Given + When).
@@ -102,7 +100,6 @@ fn confirming_downgrade_updates_plan_to_free_and_closes_modal() {
 /// (no separate "clear suspension" message needed, per DESIGN's msg.rs
 /// comment).
 #[test]
-#[ignore] // RED — enable in DELIVER
 fn upgrading_from_cap_exceeded_clears_suspended_state() {
     // Given: Priya Raman's account "Solstice Analytics" is suspended with
     // status "free_cap_exceeded" (usage well beyond every Free cap).

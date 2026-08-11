@@ -170,7 +170,6 @@ proptest! {
     /// model state as dispatching it once — no double-charge/double-toggle
     /// side effect hiding in `update()`.
     #[test]
-    #[ignore] // RED — enable in DELIVER
     fn set_plan_is_idempotent(plan in arb_plan()) {
         let mut once = AppModel::default();
         once.authed = true;
