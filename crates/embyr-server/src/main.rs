@@ -134,6 +134,7 @@ async fn main() {
 
     let cache = Arc::new(CredentialCache::new(256));
     let cache_for_admin = Arc::clone(&cache);
+    let cache_for_cap_refresher = Arc::clone(&cache);
     let idx_mgr = Arc::new(IndexManager::new(system_db.pool().clone()));
     let metrics_adapter = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
     let listen_registry = ListenRegistry::new();
@@ -167,6 +168,25 @@ async fn main() {
     // ── Step 10: build admin router + healthz on admin port ───────────────
     // The admin router (port 9090) does not include /healthz by default;
     // add it here so GET :{admin_port}/healthz returns 200 (US-PR-01 AC).
+    // card-payments-backend: `stripe_secret_key` is optional in V1 (config.rs)
+    // — absent means billing is unwired; a placeholder key is used so the
+    // composition root always constructs successfully (StripeGateway::new
+    // performs no I/O). `StripeGateway::probe()` is a soft-failure/WARN, not
+    // a startup refusal, consistent with billing not being on the
+    // Firestore protocol-serving critical path (ADR-020/021).
+    let stripe_gateway = Arc::new(embyr_server::adapters::stripe_gateway::StripeGateway::new(
+        cfg.stripe_secret_key
+            .clone()
+            .unwrap_or_else(|| "stripe-secret-key-not-configured".to_string()),
+    ));
+
+    if let Err(e) = stripe_gateway.probe().await {
+        tracing::warn!(
+            error = %e,
+            "startup probe failed: stripe API unreachable or misconfigured (soft failure — billing not on critical path)"
+        );
+    }
+
     let admin_app = build_admin_router(
         Arc::clone(&system_db),
         cfg.admin_key.clone(),
@@ -179,8 +199,26 @@ async fn main() {
         None,
         cfg.rate_limit_rps,
         prom_handle,
+        Arc::clone(&stripe_gateway),
+        cfg.stripe_webhook_signing_secret.clone().unwrap_or_default(),
     )
     .route("/healthz", axum::routing::get(healthz_handler));
+
+    // card-payments-backend (ADR-020): background cap-check refresher. Only
+    // meaningful once STRIPE_SECRET_KEY is configured (Free-plan accounts
+    // need a real `subscriptions` row to exist, seeded via US-201) — spawned
+    // unconditionally regardless, mirroring the OBS-05 pool-gauge task's
+    // always-on shape; `run_cycle` is a no-op-safe RED scaffold until
+    // DELIVER implements it.
+    let _cap_usage_refresher = embyr_server::sweepers::cap_usage_refresher::spawn(
+        Arc::clone(&system_db),
+        std::sync::Arc::new(embyr_server::adapters::cap_status_cache::CapStatusCache::new()),
+        embyr_server::admin::handlers::lifecycle::LifecycleDeps {
+            system_db: Arc::clone(&system_db),
+            credential_cache: cache_for_cap_refresher,
+        },
+        std::time::Duration::from_secs(cfg.cap_check_interval_secs),
+    );
 
     // ── Step 11: spawn gRPC + REST + admin servers ────────────────────────
     let server_task = spawn_all_servers(
