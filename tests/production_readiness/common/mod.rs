@@ -82,11 +82,19 @@ pub fn embyr_server_binary() -> PathBuf {
         .parent() // workspace root
         .expect("workspace root");
 
-    let release = workspace_root.join("target/release/embyr-server");
-    if release.exists() {
-        release
+    // `cargo test` always rebuilds every target of the package under test
+    // (lib + [[bin]] + the integration-test binary) as part of its own build
+    // graph, so target/debug/embyr-server is guaranteed fresh on every run.
+    // target/release/embyr-server is NOT — it's only produced by a separate,
+    // explicit `cargo build --release` that `cargo test` never triggers, so
+    // it can silently go stale in a shared target/ directory across
+    // unrelated source/migration changes. Prefer debug; fall back to
+    // release only when debug doesn't exist.
+    let debug = workspace_root.join("target/debug/embyr-server");
+    if debug.exists() {
+        debug
     } else {
-        workspace_root.join("target/debug/embyr-server")
+        workspace_root.join("target/release/embyr-server")
     }
 }
 
