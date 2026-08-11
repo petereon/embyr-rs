@@ -207,8 +207,8 @@ pub fn update(model: &mut AppModel, msg: Msg) {
         Msg::SetPlan(plan) => {
             model.subscription.plan = plan;
         }
-        Msg::SetPaymentFailure(_) => {
-            panic!("RED scaffold (card-payments): Msg::SetPaymentFailure not yet implemented")
+        Msg::SetPaymentFailure(failed) => {
+            model.subscription.payment_failure = failed;
         }
         Msg::OpenCardModal => {
             model.card_modal_open = true;
