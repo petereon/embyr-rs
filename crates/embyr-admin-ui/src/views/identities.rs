@@ -10,15 +10,15 @@
 //! AC-010-02: Service Accounts table with Delete dispatching Msg::DeleteServiceAccount.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
-#[cfg(feature = "csr")]
-use uuid::Uuid;
+use crate::components::primitives::Modal;
 #[cfg(feature = "csr")]
 use crate::model::{AppModel, Member, Role, ServiceAccount, UserId};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::primitives::Modal;
+use leptos::prelude::*;
+#[cfg(feature = "csr")]
+use uuid::Uuid;
 
 // ── IdentitiesView ───────────────────────────────────────────────────────────
 
@@ -220,7 +220,8 @@ fn render_member_row(
         .unwrap_or_else(|| "—".to_string());
 
     let pending_badge = if member.pending {
-        view! { <span class="badge badge-neutral" style="margin-left:6px">"pending"</span> }.into_any()
+        view! { <span class="badge badge-neutral" style="margin-left:6px">"pending"</span> }
+            .into_any()
     } else {
         view! {}.into_any()
     };
@@ -324,10 +325,7 @@ fn ServiceAccountsTab() -> impl IntoView {
 
 /// Render a single service account row.
 #[cfg(feature = "csr")]
-fn render_service_account_row(
-    sa: ServiceAccount,
-    dispatch: Callback<Msg>,
-) -> impl IntoView {
+fn render_service_account_row(sa: ServiceAccount, dispatch: Callback<Msg>) -> impl IntoView {
     let sa_id = sa.id.clone();
     let created_display = sa
         .created_at

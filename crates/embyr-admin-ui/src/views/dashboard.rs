@@ -1,7 +1,7 @@
 //! DashboardView — KPI row + database cards matching the embyr Console design.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
+use crate::components::Icon;
 #[cfg(feature = "csr")]
 use crate::data::{display_stats, fmt_num, sparkline_points};
 #[cfg(feature = "csr")]
@@ -9,26 +9,50 @@ use crate::model::{AppModel, DbStatus, Section};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::Icon;
+use leptos::prelude::*;
 
 #[cfg(feature = "csr")]
 #[component]
 pub fn DashboardView() -> impl IntoView {
-    let model    = use_context::<RwSignal<AppModel>>().expect("model context missing");
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
 
-    let databases     = move || model.with(|m| m.databases.clone());
-    let db_count      = move || model.with(|m| m.databases.len());
-    let total_reads   = move || model.with(|m| {
-        m.databases.iter().enumerate().map(|(i,_)| display_stats(i).reads).sum::<u64>()
-    });
-    let avg_p95 = move || model.with(|m| {
-        let active: Vec<_> = m.databases.iter().enumerate()
-            .filter(|(_,d)| d.status == DbStatus::Active).collect();
-        if active.is_empty() { return 0u32; }
-        active.iter().map(|(i,_)| display_stats(*i).p95).sum::<u32>() / active.len() as u32
-    });
-    let p95_color = move || if avg_p95() > 25 { "var(--amber)" } else { "var(--green)" };
+    let databases = move || model.with(|m| m.databases.clone());
+    let db_count = move || model.with(|m| m.databases.len());
+    let total_reads = move || {
+        model.with(|m| {
+            m.databases
+                .iter()
+                .enumerate()
+                .map(|(i, _)| display_stats(i).reads)
+                .sum::<u64>()
+        })
+    };
+    let avg_p95 = move || {
+        model.with(|m| {
+            let active: Vec<_> = m
+                .databases
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.status == DbStatus::Active)
+                .collect();
+            if active.is_empty() {
+                return 0u32;
+            }
+            active
+                .iter()
+                .map(|(i, _)| display_stats(*i).p95)
+                .sum::<u32>()
+                / active.len() as u32
+        })
+    };
+    let p95_color = move || {
+        if avg_p95() > 25 {
+            "var(--amber)"
+        } else {
+            "var(--green)"
+        }
+    };
 
     view! {
         <div class="page page-wide">

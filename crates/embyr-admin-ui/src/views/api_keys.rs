@@ -6,15 +6,15 @@
 //! AC-010-06: Revoke button dispatches Msg::RevokeAdminKey.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
-#[cfg(feature = "csr")]
-use uuid::Uuid;
+use crate::components::primitives::Modal;
 #[cfg(feature = "csr")]
 use crate::model::{AdminKey, AppModel, KeyId, Role};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::primitives::Modal;
+use leptos::prelude::*;
+#[cfg(feature = "csr")]
+use uuid::Uuid;
 
 // ── ApiKeysView ──────────────────────────────────────────────────────────────
 

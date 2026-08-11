@@ -6,15 +6,15 @@
 //! AC-003-02: CreateDatabaseModal dispatches Msg::DatabaseCreated on submit.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
-#[cfg(feature = "csr")]
-use uuid::Uuid;
+use crate::components::primitives::{Button, Modal};
 #[cfg(feature = "csr")]
 use crate::model::{AppModel, Database, DbBackendMode, DbId, DbStatus};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::primitives::{Modal, Button};
+use leptos::prelude::*;
+#[cfg(feature = "csr")]
+use uuid::Uuid;
 
 // ── CreateDatabaseModal ──────────────────────────────────────────────────────
 
@@ -43,6 +43,9 @@ fn CreateDatabaseModal(on_close: Callback<()>) -> impl IntoView {
             logging_enabled: false,
             log_retention: None,
             created_at: None,
+            // card-payments (DISTILL, 2026-08-10): usage field added to
+            // Database (DDD-3); zero-usage default for a newly created db.
+            usage: Default::default(),
         };
         dispatch.run(Msg::DatabaseCreated(new_db));
         on_close.run(());

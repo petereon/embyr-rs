@@ -1,25 +1,25 @@
 //! DB Detail view — tab router for a selected database.
 
 #[cfg(feature = "csr")]
-pub mod overview;
-#[cfg(feature = "csr")]
 pub mod connections;
 #[cfg(feature = "csr")]
 pub mod keys;
 #[cfg(feature = "csr")]
 pub mod logs;
-
 #[cfg(feature = "csr")]
-pub use overview::DbOverview;
+pub mod overview;
+
 #[cfg(feature = "csr")]
 pub use connections::ConnectionsView;
 #[cfg(feature = "csr")]
 pub use keys::KeysView;
 #[cfg(feature = "csr")]
 pub use logs::LogsView;
+#[cfg(feature = "csr")]
+pub use overview::DbOverview;
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
+use crate::components::Icon;
 #[cfg(feature = "csr")]
 use crate::data::display_stats;
 #[cfg(feature = "csr")]
@@ -27,18 +27,20 @@ use crate::model::{AppModel, DbBackendMode, DbPatch, DbStatus, DbTab, Section};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::Icon;
+use leptos::prelude::*;
 
 #[cfg(feature = "csr")]
 #[component]
 pub fn DbDetailView() -> impl IntoView {
-    let model    = use_context::<RwSignal<AppModel>>().expect("model context missing");
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
 
     let selected_db = move || {
         model.with(|m| {
             if let Section::DbDetail(ref id) = m.nav.section {
-                m.databases.iter().enumerate()
+                m.databases
+                    .iter()
+                    .enumerate()
                     .find(|(_, d)| d.id == *id)
                     .map(|(idx, d)| (idx, d.clone()))
             } else {

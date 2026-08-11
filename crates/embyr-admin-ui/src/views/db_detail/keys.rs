@@ -6,11 +6,11 @@
 //! Gated behind #[cfg(feature = "csr")].
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
-#[cfg(feature = "csr")]
 use crate::model::{AppModel, Database, KeyId};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
+#[cfg(feature = "csr")]
+use leptos::prelude::*;
 
 /// SDK API key management panel for the Keys tab.
 ///
@@ -32,14 +32,8 @@ pub fn KeysView(db: Database) -> impl IntoView {
     let revoke_target: RwSignal<Option<KeyId>> = RwSignal::new(None);
 
     // Derive the key list reactively from the model.
-    let sdk_keys = move || {
-        model.with(|m| {
-            m.sdk_keys
-                .get(&db_id_for_keys)
-                .cloned()
-                .unwrap_or_default()
-        })
-    };
+    let sdk_keys =
+        move || model.with(|m| m.sdk_keys.get(&db_id_for_keys).cloned().unwrap_or_default());
 
     view! {
         <div class="keys-panel fade-in">

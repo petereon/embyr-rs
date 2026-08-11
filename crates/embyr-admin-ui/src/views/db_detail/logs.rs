@@ -1,22 +1,22 @@
 //! LogsView — Query Logs tab for a selected database.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
+use crate::components::Icon;
 #[cfg(feature = "csr")]
 use crate::model::Database;
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::Icon;
+use leptos::prelude::*;
 
 #[cfg(feature = "csr")]
 #[component]
 pub fn LogsView(db: Database) -> impl IntoView {
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
-    let logging  = db.logging_enabled;
-    let db_id    = db.id.clone();
+    let logging = db.logging_enabled;
+    let db_id = db.id.clone();
 
-    let filter   = RwSignal::new(String::new());
+    let filter = RwSignal::new(String::new());
 
     view! {
         <div class="fade-in" style="display:flex;flex-direction:column;gap:16px">

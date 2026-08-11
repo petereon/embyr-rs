@@ -32,6 +32,7 @@ fn new_database_appears_in_list_after_creation() {
         logging_enabled: false,
         log_retention: None,
         created_at: None,
+        usage: Default::default(),
     };
 
     update(&mut m, Msg::DatabaseCreated(new_db));

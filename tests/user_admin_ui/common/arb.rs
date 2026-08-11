@@ -123,6 +123,7 @@ prop_compose! {
             logging_enabled,
             log_retention: None,
             created_at: None,
+            usage: Default::default(),
         }
     }
 }

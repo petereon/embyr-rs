@@ -89,6 +89,7 @@ fn dashboard_shows_all_databases_after_load() {
             logging_enabled: false,
             log_retention: None,
             created_at: None,
+            usage: Default::default(),
         },
         Database {
             id: DbId(Uuid::new_v4()),
@@ -98,6 +99,7 @@ fn dashboard_shows_all_databases_after_load() {
             logging_enabled: false,
             log_retention: None,
             created_at: None,
+            usage: Default::default(),
         },
     ];
 
@@ -129,6 +131,7 @@ fn dashboard_empty_state_when_no_databases() {
             logging_enabled: false,
             log_retention: None,
             created_at: None,
+            usage: Default::default(),
         }
     ];
 
@@ -158,6 +161,7 @@ fn dashboard_suspended_visible_deleted_hidden() {
         logging_enabled: false,
         log_retention: None,
         created_at: None,
+        usage: Default::default(),
     };
     let deleted = Database {
         id: DbId(Uuid::new_v4()),
@@ -167,6 +171,7 @@ fn dashboard_suspended_visible_deleted_hidden() {
         logging_enabled: false,
         log_retention: None,
         created_at: None,
+        usage: Default::default(),
     };
 
     update(&mut m, Msg::SetDatabases(vec![suspended, deleted]));

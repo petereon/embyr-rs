@@ -113,6 +113,7 @@ fn billing_data_source_populated_from_set_databases() {
             logging_enabled: false,
             log_retention: None,
             created_at: None,
+            usage: Default::default(),
         },
         Database {
             id: DbId(Uuid::new_v4()),
@@ -122,6 +123,7 @@ fn billing_data_source_populated_from_set_databases() {
             logging_enabled: false,
             log_retention: None,
             created_at: None,
+            usage: Default::default(),
         },
     ];
 

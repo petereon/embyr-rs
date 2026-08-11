@@ -17,15 +17,15 @@
 //! member by id.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
-#[cfg(feature = "csr")]
-use uuid::Uuid;
+use crate::components::primitives::{Modal, Toggle};
 #[cfg(feature = "csr")]
 use crate::model::{AppModel, OidcId, OidcProvider, Role, Toast, ToastId, ToastLevel};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::primitives::{Modal, Toggle};
+use leptos::prelude::*;
+#[cfg(feature = "csr")]
+use uuid::Uuid;
 
 // ── SettingsView ─────────────────────────────────────────────────────────────
 
@@ -40,9 +40,8 @@ pub fn SettingsView() -> impl IntoView {
     let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
 
     // V1 role inference: treat as Owner when at least one Owner member exists.
-    let is_owner = move || {
-        model.with(|m| m.members.iter().any(|member| member.role == Role::Owner))
-    };
+    let is_owner =
+        move || model.with(|m| m.members.iter().any(|member| member.role == Role::Owner));
 
     view! {
         <div class="page">
@@ -73,9 +72,8 @@ fn OidcSection() -> impl IntoView {
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
 
     // V1 role inference — same as SettingsView.
-    let is_owner = move || {
-        model.with(|m| m.members.iter().any(|member| member.role == Role::Owner))
-    };
+    let is_owner =
+        move || model.with(|m| m.members.iter().any(|member| member.role == Role::Owner));
 
     // Local form state for the Add OIDC Provider form.
     let form_issuer = RwSignal::new(String::new());
@@ -218,11 +216,13 @@ fn render_oidc_row(
                     dispatch.run(Msg::ToggleOidc(toggle_id.clone()))
                 })
             />
-        }.into_any()
+        }
+        .into_any()
     } else {
         view! {
             <span class="badge">{enabled_label}</span>
-        }.into_any()
+        }
+        .into_any()
     };
 
     view! {

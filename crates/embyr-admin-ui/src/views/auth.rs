@@ -1,11 +1,11 @@
 //! AuthView — two-panel sign-in screen matching the embyr Console design.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
+use crate::components::Icon;
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::Icon;
+use leptos::prelude::*;
 
 #[cfg(feature = "csr")]
 #[component]

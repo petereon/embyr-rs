@@ -1,7 +1,7 @@
 //! Connections tab — backend config + active connections panel.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
+use crate::components::Icon;
 #[cfg(feature = "csr")]
 use crate::data::display_stats;
 #[cfg(feature = "csr")]
@@ -9,30 +9,42 @@ use crate::model::{Database, DbBackendMode, DbPatch};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::Icon;
+use leptos::prelude::*;
 
 #[cfg(feature = "csr")]
 #[component]
 pub fn ConnectionsView(db: Database, idx: usize) -> impl IntoView {
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
 
-    let stats    = display_stats(idx);
+    let stats = display_stats(idx);
     let is_direct = db.backend_mode == DbBackendMode::DirectPg;
-    let db_id    = db.id.clone();
-    let db_id2   = db.id.clone();
+    let db_id = db.id.clone();
+    let db_id2 = db.id.clone();
 
     let edit_mode = RwSignal::new(false);
-    let draft     = RwSignal::new(String::new());
+    let draft = RwSignal::new(String::new());
 
     let mode_label = if is_direct { "direct_pg" } else { "agent_mode" };
-    let mode_desc  = if is_direct {
+    let mode_desc = if is_direct {
         "Embyr connects directly to Postgres via TCP. DSN stored encrypted."
     } else {
         "Embyr routes operations through your VPC agent binary. No direct DB access from embyr servers."
     };
-    let field_label     = if is_direct { "Postgres DSN" } else { "Agent endpoint" };
-    let field_placeholder = if is_direct { "postgres://user:pass@host:5432/db" } else { "10.0.0.5:9191" };
-    let masked_value    = if is_direct { "postgres://****@db.internal:5432/embyr_prod" } else { stats.connection_detail };
+    let field_label = if is_direct {
+        "Postgres DSN"
+    } else {
+        "Agent endpoint"
+    };
+    let field_placeholder = if is_direct {
+        "postgres://user:pass@host:5432/db"
+    } else {
+        "10.0.0.5:9191"
+    };
+    let masked_value = if is_direct {
+        "postgres://****@db.internal:5432/embyr_prod"
+    } else {
+        stats.connection_detail
+    };
 
     view! {
         <div class="fade-in" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start">

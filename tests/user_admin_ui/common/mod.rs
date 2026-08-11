@@ -27,6 +27,7 @@ pub fn make_model_with_db() -> AppModel {
         logging_enabled: false,
         log_retention: None,
         created_at: None,
+        usage: Default::default(),
     };
 
     let owner = Member {

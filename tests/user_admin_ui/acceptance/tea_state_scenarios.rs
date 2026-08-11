@@ -112,6 +112,7 @@ fn set_databases_excludes_deleted() {
         logging_enabled: false,
         log_retention: None,
         created_at: None,
+        usage: Default::default(),
     };
     let deleted = Database {
         id: DbId(uuid::Uuid::new_v4()),
@@ -121,6 +122,7 @@ fn set_databases_excludes_deleted() {
         logging_enabled: false,
         log_retention: None,
         created_at: None,
+        usage: Default::default(),
     };
 
     update(&mut m, Msg::SetDatabases(vec![active, deleted]));

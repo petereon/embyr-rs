@@ -1,7 +1,7 @@
 //! DB Detail Overview — KPI tiles + latency area chart + logging row.
 
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
+use crate::components::{primitives::Toggle, Icon};
 #[cfg(feature = "csr")]
 use crate::data::{bar_chart_points, display_stats, fmt_num, sparkline_points};
 #[cfg(feature = "csr")]
@@ -9,27 +9,31 @@ use crate::model::{Database, DbBackendMode, DbPatch, LogRetention};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use crate::components::{Icon, primitives::Toggle};
+use leptos::prelude::*;
 
 #[cfg(feature = "csr")]
 #[component]
 pub fn DbOverview(db: Database, idx: usize) -> impl IntoView {
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
 
-    let stats    = display_stats(idx);
-    let db_id    = db.id.clone();
-    let db_id2   = db.id.clone();
-    let logging  = db.logging_enabled;
+    let stats = display_stats(idx);
+    let db_id = db.id.clone();
+    let db_id2 = db.id.clone();
+    let logging = db.logging_enabled;
     let retention_str = match db.log_retention {
-        Some(LogRetention::OneDay)    => "1 day",
+        Some(LogRetention::OneDay) => "1 day",
         Some(LogRetention::SevenDays) => "7 days",
-        Some(LogRetention::ThirtyDays)=> "30 days",
-        None                          => "—",
+        Some(LogRetention::ThirtyDays) => "30 days",
+        None => "—",
     };
 
-    let points   = sparkline_points(&stats.spark);
-    let bars     = bar_chart_points(&stats.ops);
-    let p95_color = if stats.p95 > 25 { "var(--amber)" } else { "var(--green)" };
+    let points = sparkline_points(&stats.spark);
+    let bars = bar_chart_points(&stats.ops);
+    let p95_color = if stats.p95 > 25 {
+        "var(--amber)"
+    } else {
+        "var(--green)"
+    };
 
     view! {
         <div class="fade-in" style="display:flex;flex-direction:column;gap:20px">
