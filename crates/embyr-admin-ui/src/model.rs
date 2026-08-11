@@ -30,7 +30,6 @@ pub struct AccountId(pub Uuid);
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ServiceAccountId(pub Uuid);
 
-// card-payments (DISTILL RED scaffold, 2026-08-10): new newtype identifier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct InvoiceId(pub Uuid);
 
@@ -97,10 +96,9 @@ pub enum ToastLevel {
     Error,
 }
 
-// ── card-payments (DISTILL RED scaffold, 2026-08-10): new enumerations ─────
+// ── card-payments: billing enumerations ─────────────────────────────────────
 // Source: feature-delta.md § Wave: DESIGN / [REF] Component Decomposition →
-// Model Changes. Pure data types — not scaffolded/panicking, only the
-// `impl AppModel` derivation methods below are RED.
+// Model Changes.
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Plan {
@@ -236,9 +234,9 @@ pub struct NavState {
     pub db_tab: DbTab,
 }
 
-// ── card-payments (DISTILL RED scaffold, 2026-08-10): billing domain structs ─
+// ── card-payments: billing domain structs ───────────────────────────────────
 // Source: feature-delta.md § Wave: DESIGN / [REF] Component Decomposition →
-// Model Changes. Pure data types — not scaffolded/panicking.
+// Model Changes.
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageStats {
@@ -406,13 +404,19 @@ impl AppModel {
             nav: NavState::default(),
             totp_failures: 0,
             account_locked: false,
-            // card-payments (DISTILL, 2026-08-10): seeded with safe defaults,
-            // NOT via `data::mock::subscription()`/`mock::invoices()` — those
-            // mock constructors are themselves RED scaffolds (see data.rs).
-            // DELIVER should wire these to the real mock constructors once
-            // implemented, per feature-delta.md's literal Model Changes intent.
-            subscription: Subscription::default(),
-            invoices: Vec::new(),
+            // card-payments: demo account is Pro-plan with a card on file and
+            // invoice history, to showcase the billing views' full feature set.
+            subscription: mock::subscription(
+                Plan::Pro,
+                Some(Card {
+                    brand: CardBrand::Visa,
+                    last4: "4242".to_string(),
+                    exp_month: 12,
+                    exp_year: 2027,
+                }),
+                false,
+            ),
+            invoices: mock::invoices(&Plan::Pro),
             card_modal_open: false,
             upgrade_modal_open: false,
             upgrade_modal_step: UpgradeModalStep::default(),
@@ -420,17 +424,12 @@ impl AppModel {
     }
 }
 
-// ── card-payments (DISTILL RED scaffold, 2026-08-10) ────────────────────────
-// SCAFFOLD: true
+// ── card-payments ─────────────────────────────────────────────────────────
 //
 // Pure derivation methods over `AppModel` fields — satisfies the DISCUSS/
 // CLAUDE.md constraint verbatim: "Status derivation MUST be a pure function
 // over AppModel fields, not duplicated stored booleans" (see
 // docs/feature/card-payments/discuss/wave-decisions.md and DDD-8).
-//
-// Every method below panics — RED, not BROKEN, per nw-test-design-mandates
-// Mandate 7. DELIVER replaces each panic! with the real derivation, one AC
-// at a time, per docs/feature/card-payments/distill/red-classification.md.
 impl AppModel {
     /// AC-104-01/03: sums `self.databases[].usage`, projects reads/writes/
     /// deletes ×30 (storage_gb stays a point-in-time snapshot, OQ-CP-04).

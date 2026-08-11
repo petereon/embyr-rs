@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! Msg — the exhaustive message enum for the embyr admin UI TEA loop.
 //!
 //! Every user interaction and async data arrival dispatches one of these variants.

@@ -191,12 +191,8 @@ pub fn update(model: &mut AppModel, msg: Msg) {
         }
 
         // ── US-101..109: Billing / Payments (card-payments) ─────────────────────
-        // SCAFFOLD: true — RED scaffold (DISTILL, 2026-08-10). DELIVER replaces
-        // each panic! with the field mutation described in feature-delta.md
-        // § Wave: DESIGN / [REF] Component Decomposition → Update Changes,
-        // one variant at a time (one #[ignore] test enabled per increment).
-        Msg::SetSubscription(_) => {
-            panic!("RED scaffold (card-payments): Msg::SetSubscription not yet implemented")
+        Msg::SetSubscription(sub) => {
+            model.subscription = sub;
         }
         Msg::SetInvoices(invoices) => {
             model.invoices = invoices;

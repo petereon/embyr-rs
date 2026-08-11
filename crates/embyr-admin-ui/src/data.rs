@@ -97,9 +97,11 @@ pub fn bar_chart_points(ops: &[u16]) -> Vec<(f32, f32, f32)> {
 }
 
 use crate::model::{
-    AdminKey, Card, Database, DbBackendMode, DbId, DbStatus, Invoice, KeyId, Member, OidcId,
-    OidcProvider, Plan, Role, SdkKey, ServiceAccount, ServiceAccountId, Subscription,
+    AdminKey, Card, Database, DbBackendMode, DbId, DbStatus, Invoice, InvoiceId, InvoiceStatus,
+    KeyId, Member, OidcId, OidcProvider, Plan, Role, SdkKey, ServiceAccount, ServiceAccountId,
+    Subscription,
 };
+use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
 pub mod mock {
@@ -215,32 +217,72 @@ pub mod mock {
         }]
     }
 
-    // ── card-payments (DISTILL RED scaffold, 2026-08-10) ────────────────────
-    // SCAFFOLD: true
-    //
-    // DESIGN's literal Model Changes snippet names these `mock::subscription(
-    // scenario) -> Subscription` / `mock::invoices(plan) -> Vec<Invoice>`.
-    // Left RED (panicking) deliberately: `AppModel::from_mock()` was NOT
-    // wired to call these (see model.rs comment) so the already-shipped app
-    // and user-admin-ui test suite keep compiling and passing. DELIVER
-    // implements these, then wires `from_mock()` to call them.
-
-    pub fn subscription(_plan: Plan, _card: Option<Card>, _payment_failure: bool) -> Subscription {
-        panic!("RED scaffold (card-payments): mock::subscription not yet implemented")
+    /// Build a mock `Subscription` for the given plan/card/payment-failure state.
+    ///
+    /// `stripe_customer_id` and `current_period_end` are derived from `plan`:
+    /// Free accounts have no Stripe subscription (no renewal date); Pro
+    /// accounts renew monthly.
+    pub fn subscription(plan: Plan, card: Option<Card>, payment_failure: bool) -> Subscription {
+        let stripe_customer_id = match plan {
+            Plan::Free => "cus_free_example".to_string(),
+            Plan::Pro => "cus_pro_example".to_string(),
+        };
+        let current_period_end = match plan {
+            Plan::Free => None,
+            Plan::Pro => Some(Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap()),
+        };
+        Subscription {
+            plan,
+            stripe_customer_id,
+            current_period_end,
+            card,
+            payment_failure,
+        }
     }
 
-    pub fn invoices(_plan: &Plan) -> Vec<Invoice> {
-        panic!("RED scaffold (card-payments): mock::invoices not yet implemented")
+    /// Build mock invoice history for the given plan.
+    ///
+    /// Free plan has no billing history (matches `invoices_empty_state`).
+    /// Pro plan has two paid invoices and one upcoming invoice.
+    pub fn invoices(plan: &Plan) -> Vec<Invoice> {
+        match plan {
+            Plan::Free => Vec::new(),
+            Plan::Pro => vec![
+                Invoice {
+                    id: InvoiceId(Uuid::parse_str("00000000-0000-0000-0000-000000000040").unwrap()),
+                    date: Some(Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap()),
+                    period_label: "May 1 - May 31, 2026".to_string(),
+                    base: 49.00,
+                    overage: 0.31,
+                    total: 49.31,
+                    status: InvoiceStatus::Paid,
+                },
+                Invoice {
+                    id: InvoiceId(Uuid::parse_str("00000000-0000-0000-0000-000000000041").unwrap()),
+                    date: Some(Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap()),
+                    period_label: "Jun 1 - Jun 30, 2026".to_string(),
+                    base: 49.00,
+                    overage: 0.0,
+                    total: 49.00,
+                    status: InvoiceStatus::Paid,
+                },
+                Invoice {
+                    id: InvoiceId(Uuid::parse_str("00000000-0000-0000-0000-000000000042").unwrap()),
+                    date: Some(Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap()),
+                    period_label: "Jul 1 - Jul 31, 2026".to_string(),
+                    base: 49.00,
+                    overage: 0.0,
+                    total: 49.00,
+                    status: InvoiceStatus::Upcoming,
+                },
+            ],
+        }
     }
 }
 
-// ── card-payments (DISTILL RED scaffold, 2026-08-10) ────────────────────────
 // Constants placed here per DESIGN DDD-4 / D7 (Shared Artifacts Registry):
 // "FREE_CAPS/PRICING constants live in data.rs, matching the DISCUSS Shared
-// Artifacts Registry's explicit source-of-truth assignment." Real (non-
-// panicking) constant data — only the *derivation logic* consuming them is
-// RED-scaffolded (see model.rs's `impl AppModel` block, and the pure
-// functions below).
+// Artifacts Registry's explicit source-of-truth assignment."
 
 /// Per-dimension monthly volume shape shared by `FREE_CAPS` and
 /// `Pricing::pro_included`.
@@ -319,9 +361,6 @@ pub enum BarColor {
     Amber,
     Red,
 }
-
-// SCAFFOLD: true — pure functions below panic (RED), per Mandate 7. DELIVER
-// implements the formula documented in each doc comment.
 
 /// AC-103-02/03: `overage = max(0, usage - pro_included) / unit * rate`;
 /// `total = base + sum(overage)`; storage overage uses `usage_gb *
