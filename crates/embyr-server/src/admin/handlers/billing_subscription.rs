@@ -12,7 +12,11 @@
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 
+use embyr_core::admin::account::Role;
+use embyr_core::admin::billing::SubscriptionPlan;
+
 use crate::admin::extractors::session_context::SessionContext;
+use crate::admin::handlers::lifecycle::{self, LifecycleDeps};
 use crate::admin::state::UserAdminState;
 
 // ---------------------------------------------------------------------------
@@ -85,29 +89,33 @@ pub async fn get_subscription(
         None => provision_new_customer(&state, pool, session.account_id).await?,
     };
 
-    let (plan, status, current_period_end) = sqlx::query_as::<
-        _,
-        (String, String, Option<chrono::DateTime<chrono::Utc>>),
-    >("SELECT plan, status, current_period_end FROM subscriptions WHERE account_id = $1")
-    .bind(session.account_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("get_subscription: failed to read subscriptions row: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let (plan, status, current_period_end) =
+        sqlx::query_as::<_, (String, String, Option<chrono::DateTime<chrono::Utc>>)>(
+            "SELECT plan, status, current_period_end FROM subscriptions WHERE account_id = $1",
+        )
+        .bind(session.account_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("get_subscription: failed to read subscriptions row: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
-    let cap_status = state.cap_status_cache.get(session.account_id).await.map(|cs| {
-        cs.entries
-            .into_iter()
-            .map(|entry| CapStatusEntry {
-                dimension: entry.dimension.as_str().to_string(),
-                used: entry.used,
-                cap: entry.cap,
-                pct: entry.pct,
-            })
-            .collect()
-    });
+    let cap_status = state
+        .cap_status_cache
+        .get(session.account_id)
+        .await
+        .map(|cs| {
+            cs.entries
+                .into_iter()
+                .map(|entry| CapStatusEntry {
+                    dimension: entry.dimension.as_str().to_string(),
+                    used: entry.used,
+                    cap: entry.cap,
+                    pct: entry.pct,
+                })
+                .collect()
+        });
 
     Ok(Json(SubscriptionResponse {
         plan,
@@ -130,12 +138,14 @@ async fn provision_new_customer(
     pool: &sqlx::PgPool,
     account_id: uuid::Uuid,
 ) -> Result<String, StatusCode> {
-    let stripe_customer_id = state.stripe_gateway.get_or_create_customer(account_id).await.map_err(
-        |e| {
+    let stripe_customer_id = state
+        .stripe_gateway
+        .get_or_create_customer(account_id)
+        .await
+        .map_err(|e| {
             tracing::error!("get_subscription: stripe customer provisioning failed: {e}");
             StatusCode::BAD_GATEWAY
-        },
-    )?;
+        })?;
 
     let mut tx = pool.begin().await.map_err(|e| {
         tracing::error!("get_subscription: failed to open provisioning transaction: {e}");
@@ -182,15 +192,92 @@ async fn provision_new_customer(
 /// `free_cap_exceeded` clears the status and reactivates the account's
 /// projects via `lifecycle::activate_account_projects` in the same request
 /// (AC-202-04, AC-207-05).
-///
-/// # Panics (RED scaffold)
-/// Always panics. DELIVER implements the real write-through plan-change path.
 pub async fn post_subscription(
-    State(_state): State<UserAdminState>,
-    _session: SessionContext,
-    Json(_body): Json<PlanChangeRequest>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+    Json(body): Json<PlanChangeRequest>,
 ) -> Result<Json<SubscriptionResponse>, StatusCode> {
-    panic!(
-        "SCAFFOLD: true -- billing_subscription::post_subscription not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-202)"
+    // AC-202-01: Owner/Admin only (Viewer → 403). Reuses the existing simple
+    // role-gate pattern (`members::invite_member`).
+    if session.role < Role::Admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // AC-202-05: only "free"/"pro" are valid plan values (D-4).
+    let plan = SubscriptionPlan::parse(&body.plan).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+
+    let pool = state.system_db.pool();
+
+    let stripe_customer_id: String =
+        sqlx::query_scalar("SELECT stripe_customer_id FROM accounts WHERE id = $1")
+            .bind(session.account_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("post_subscription: failed to read accounts row: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+    let previous_status: String =
+        sqlx::query_scalar("SELECT status FROM subscriptions WHERE account_id = $1")
+            .bind(session.account_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("post_subscription: failed to read subscriptions row: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+    // AC-202-02/03: write-through — Stripe call happens BEFORE any local
+    // write; a failed call leaves subscriptions.plan untouched.
+    let subscription_view = state
+        .stripe_gateway
+        .upsert_subscription(&stripe_customer_id, plan)
+        .await
+        .map_err(|e| {
+            tracing::error!("post_subscription: stripe upsert_subscription failed: {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    // AC-202-04: upgrading out of free_cap_exceeded clears the suspension.
+    let new_status = if previous_status == "free_cap_exceeded" {
+        "active"
+    } else {
+        previous_status.as_str()
+    };
+
+    sqlx::query(
+        "UPDATE subscriptions SET plan = $1, status = $2, stripe_subscription_id = $3, \
+         current_period_end = $4, updated_at = now() WHERE account_id = $5",
     )
+    .bind(plan.as_str())
+    .bind(new_status)
+    .bind(&subscription_view.stripe_subscription_id)
+    .bind(subscription_view.current_period_end)
+    .bind(session.account_id)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("post_subscription: failed to persist subscription update: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // AC-202-04: reactivate every suspended project under the account in the
+    // same request (D-12 literal reuse — same path US-207/US-204 will use).
+    if previous_status == "free_cap_exceeded" {
+        let deps = LifecycleDeps {
+            system_db: state.system_db.clone(),
+            credential_cache: state.credential_cache.clone(),
+        };
+        lifecycle::activate_account_projects(session.account_id, &deps).await?;
+    }
+
+    Ok(Json(SubscriptionResponse {
+        plan: plan.as_str().to_string(),
+        status: new_status.to_string(),
+        stripe_customer_id,
+        current_period_end: Some(subscription_view.current_period_end),
+        card: None,
+        cap_status: None,
+    }))
 }

@@ -86,6 +86,16 @@ pub struct WebhookEvent {
 // StripeGateway
 // ---------------------------------------------------------------------------
 
+/// Real Stripe Price id for the Pro plan (D-4: exactly two tiers).
+/// Provisioned once directly against the connected Stripe test-mode account
+/// (D-13) — the vendored `async-stripe-core`/`async-stripe-billing`
+/// companion crates only expose read-only `Product`/`Price` *data shapes*
+/// (`async-stripe-shared`), not request builders to create them, so a Price
+/// is provisioned the same way a real deployment would (Stripe
+/// Dashboard/CLI, once) and referenced here as static config — never
+/// created per-request. `lookup_key = "embyr_pro_monthly"`, $29.00/month USD.
+const PRO_PLAN_STRIPE_PRICE_ID: &str = "price_1U3IuADomd8yk6u5rAtzmWPt";
+
 pub struct StripeGateway {
     /// Typed Stripe HTTP client (holds the `sk_test_...` / `sk_live_...`
     /// secret internally as a redacted, sensitive header value — never
@@ -124,6 +134,11 @@ impl StripeGateway {
     /// only invokes this when `accounts.stripe_customer_id` IS NULL, so a
     /// single Stripe Customer is created per never-provisioned account
     /// (AC-201-03). Returns the real Stripe Customer id (`cus_...`).
+    ///
+    /// Sets a synthetic billing email (`account-<id>@billing.embyr.invalid`)
+    /// — Stripe requires a Customer email to send Subscription invoices to
+    /// under `collection_method=send_invoice` (`upsert_subscription`'s
+    /// no-card path, D-3/D-5 card capture out of scope for this feature).
     pub async fn get_or_create_customer(
         &self,
         account_id: uuid::Uuid,
@@ -133,6 +148,7 @@ impl StripeGateway {
 
         let customer = stripe_core::customer::CreateCustomer::new()
             .metadata(metadata)
+            .email(format!("account-{account_id}@billing.embyr.invalid"))
             .send(&self.client)
             .await
             .map_err(map_stripe_error)?;
@@ -142,17 +158,89 @@ impl StripeGateway {
 
     /// Create or update the Stripe Subscription for `customer_id` to `plan`'s
     /// price. Write-through: callers must not update local state until this
-    /// returns `Ok` (AC-202-02/03).
+    /// returns `Ok` (AC-202-02/03). Lists the customer's active subscriptions
+    /// first — updates the existing one's item price if found, else creates a
+    /// new Subscription (step 01-02, US-202).
     ///
-    /// # Panics (RED scaffold)
+    /// Free-plan downgrade is out of this slice's scope (see
+    /// `slice-02-real-plan-change.md`'s OUT Scope: "downgrade-scheduling
+    /// semantics ... DESIGN decision, not locked here") — returns
+    /// `NotYetImplemented` rather than fabricating unverified behavior.
     pub async fn upsert_subscription(
         &self,
-        _customer_id: &str,
-        _plan: embyr_core::admin::SubscriptionPlan,
+        customer_id: &str,
+        plan: embyr_core::admin::SubscriptionPlan,
     ) -> Result<StripeSubscriptionView, StripeError> {
-        panic!(
-            "SCAFFOLD: true -- StripeGateway::upsert_subscription not yet implemented -- RED scaffold (DISTILL, US-202)"
-        )
+        let price_id = match plan {
+            embyr_core::admin::SubscriptionPlan::Pro => PRO_PLAN_STRIPE_PRICE_ID,
+            embyr_core::admin::SubscriptionPlan::Free => {
+                return Err(StripeError::NotYetImplemented(
+                    "downgrade-to-Free Stripe Subscription scheduling not yet implemented (out of US-202 scope)",
+                ))
+            }
+        };
+
+        let existing = stripe_billing::subscription::ListSubscription::new()
+            .customer(customer_id)
+            .status(stripe_billing::subscription::ListSubscriptionStatus::Active)
+            .limit(1)
+            .send(&self.client)
+            .await
+            .map_err(map_stripe_error)?;
+
+        let subscription = match existing.data.into_iter().next() {
+            Some(existing_subscription) => {
+                let mut item = stripe_billing::subscription::UpdateSubscriptionItems::new();
+                item.id = existing_subscription
+                    .items
+                    .data
+                    .first()
+                    .map(|item| item.id.to_string());
+                item.price = Some(price_id.to_string());
+
+                stripe_billing::subscription::UpdateSubscription::new(existing_subscription.id)
+                    .items(vec![item])
+                    // No card capture in this feature's scope (D-3/D-5) — the
+                    // account's Stripe Customer has no payment method on
+                    // file. `send_invoice` (email an invoice, due in 30
+                    // days) creates/updates the real Subscription without
+                    // requiring one, unlike the `charge_automatically`
+                    // default which 400s with `resource_missing`.
+                    .collection_method(stripe_billing::SubscriptionCollectionMethod::SendInvoice)
+                    .days_until_due(30u32)
+                    .send(&self.client)
+                    .await
+                    .map_err(map_stripe_error)?
+            }
+            None => {
+                let mut item = stripe_billing::subscription::CreateSubscriptionItems::new();
+                item.price = Some(price_id.to_string());
+
+                stripe_billing::subscription::CreateSubscription::new()
+                    .customer(customer_id)
+                    .items(vec![item])
+                    // See comment on the update arm above (D-3/D-5).
+                    .collection_method(stripe_billing::SubscriptionCollectionMethod::SendInvoice)
+                    .days_until_due(30u32)
+                    .send(&self.client)
+                    .await
+                    .map_err(map_stripe_error)?
+            }
+        };
+
+        let (period_start, period_end) = subscription
+            .items
+            .data
+            .first()
+            .map(|item| (item.current_period_start, item.current_period_end))
+            .unwrap_or((0, 0));
+
+        Ok(StripeSubscriptionView {
+            stripe_subscription_id: subscription.id.to_string(),
+            stripe_price_id: price_id.to_string(),
+            current_period_start: DateTime::from_timestamp(period_start, 0).unwrap_or_default(),
+            current_period_end: DateTime::from_timestamp(period_end, 0).unwrap_or_default(),
+        })
     }
 
     /// Push one Stripe Usage Record for `subscription_item_id`. `idempotency_key`
@@ -220,12 +308,14 @@ impl StripeGateway {
 /// error response, e.g. 401 on an invalid key) becomes `ApiError`; anything
 /// else (connection failure, timeout, response deserialization, client
 /// misconfiguration) becomes `Unreachable`. Both map to the same
-/// `StatusCode::BAD_GATEWAY` at the handler boundary (AC-201-05), so this
-/// classification only affects the error message, not observable behavior.
+/// `StatusCode::BAD_GATEWAY` at the handler boundary (AC-201-05/AC-202-03),
+/// so this classification only affects the error message, not observable
+/// behavior. Shared by every Stripe call this adapter makes (customer
+/// provisioning, subscription create/update).
 fn map_stripe_error(err: stripe::StripeError) -> StripeError {
     match err {
         stripe::StripeError::Stripe(errors, status) => StripeError::ApiError(format!(
-            "customer create failed, status {status}: {errors:?}"
+            "stripe API call failed, status {status}: {errors:?}"
         )),
         other => StripeError::Unreachable(other.to_string()),
     }

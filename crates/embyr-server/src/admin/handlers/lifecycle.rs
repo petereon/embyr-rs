@@ -23,10 +23,17 @@ pub struct LifecycleDeps {
 /// Updates `status` and `updated_at` where the current status is in
 /// `('active', 'suspended')`. Returns `NOT_FOUND` when the project does not
 /// exist or has already been deleted; `INTERNAL_SERVER_ERROR` on DB failure.
+///
+/// Takes `system_db`/`credential_cache` directly (rather than a whole state
+/// struct) so both `OperatorState`-backed HTTP handlers (below) and
+/// `LifecycleDeps`-backed callers with no HTTP request in flight
+/// (`activate_account_projects`, the background `CapUsageRefresher`) can
+/// share this exact transition — D-12 literal reuse.
 async fn set_project_status(
     project_id: &str,
     new_status: &str,
-    state: &OperatorState,
+    system_db: &SystemDb,
+    credential_cache: &CredentialCache,
 ) -> StatusCode {
     let result = sqlx::query(
         "UPDATE projects SET status = $2, updated_at = now() \
@@ -34,12 +41,12 @@ async fn set_project_status(
     )
     .bind(project_id)
     .bind(new_status)
-    .execute(state.system_db.pool())
+    .execute(system_db.pool())
     .await;
 
     match result {
         Ok(r) if r.rows_affected() > 0 => {
-            state.credential_cache.evict_project(project_id).await;
+            credential_cache.evict_project(project_id).await;
             StatusCode::OK
         }
         Ok(_) => StatusCode::NOT_FOUND,
@@ -52,7 +59,13 @@ pub async fn suspend_project(
     State(state): State<OperatorState>,
 ) -> StatusCode {
     // Auth is enforced by operator_auth_middleware applied at the router layer.
-    set_project_status(&project_id, "suspended", &state).await
+    set_project_status(
+        &project_id,
+        "suspended",
+        &state.system_db,
+        &state.credential_cache,
+    )
+    .await
 }
 
 pub async fn activate_project(
@@ -60,7 +73,53 @@ pub async fn activate_project(
     State(state): State<OperatorState>,
 ) -> StatusCode {
     // Auth is enforced by operator_auth_middleware applied at the router layer.
-    set_project_status(&project_id, "active", &state).await
+    set_project_status(
+        &project_id,
+        "active",
+        &state.system_db,
+        &state.credential_cache,
+    )
+    .await
+}
+
+/// Reactivate every currently-suspended project under `account_id` — the
+/// SAME `set_project_status` transition the operator-initiated
+/// `activate_project` handler above uses (D-12 literal reuse). Used by the
+/// plan-change upgrade path when a subscription was `free_cap_exceeded`
+/// (AC-202-04, `billing_subscription::post_subscription`, step 01-02 — THIS
+/// is the first implementation) and — unchanged — by a future step's
+/// `invoice.payment_succeeded` webhook arm (US-204). Returns the count of
+/// projects transitioned.
+pub async fn activate_account_projects(
+    account_id: uuid::Uuid,
+    deps: &LifecycleDeps,
+) -> Result<u64, StatusCode> {
+    let project_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM projects WHERE account_id = $1 AND status = 'suspended'",
+    )
+    .bind(account_id)
+    .fetch_all(deps.system_db.pool())
+    .await
+    .map_err(|e| {
+        tracing::error!("activate_account_projects: failed to list suspended projects: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let mut activated_count = 0u64;
+    for project_id in &project_ids {
+        let status = set_project_status(
+            project_id,
+            "active",
+            &deps.system_db,
+            &deps.credential_cache,
+        )
+        .await;
+        if status == StatusCode::OK {
+            activated_count += 1;
+        }
+    }
+
+    Ok(activated_count)
 }
 
 pub async fn delete_project(

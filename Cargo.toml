@@ -87,7 +87,13 @@ async-stripe = { version = "1.0.0-rc.8", default-features = false, features = ["
 # defined) — "customer" and "balance" enable the two typed builders this
 # adapter uses (step 01-05: `CreateCustomer`, `RetrieveForMyAccountBalance`).
 async-stripe-core = { version = "1.0.0-rc.8", default-features = false, features = ["customer", "balance"] }
-async-stripe-billing = "1.0.0-rc.8"
+# `async-stripe-billing` gates each resource module behind an identically-named
+# opt-in feature too (no `default` feature defined) — "subscription" enables
+# the typed builders step 01-02 uses (`CreateSubscription`, `UpdateSubscription`,
+# `ListSubscription`); `CreateSubscriptionItems`/`UpdateSubscriptionItems` live
+# inside the same `subscription` module, no separate `subscription_item`
+# feature needed.
+async-stripe-billing = { version = "1.0.0-rc.8", features = ["subscription"] }
 async-stripe-webhook = "1.0.0-rc.8"
 
 # Testing (dev-only)
