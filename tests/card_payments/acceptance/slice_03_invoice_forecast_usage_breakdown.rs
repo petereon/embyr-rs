@@ -123,6 +123,99 @@ fn storage_overage_uses_flat_gb_rate_not_per_100k_unit() {
     );
 }
 
+// ── Mutation-killing: writes/deletes overage arithmetic + has_overage ──────
+//
+// The reads (worked example) and storage (flat-rate) dimensions already had
+// exact-value coverage above; writes/deletes shared the same /100k-unit
+// formula as reads but had no dimension-specific pinned value, and
+// `has_overage`'s per-dimension `> 0.0` / `||` chain was only exercised by
+// all-true and all-false cases, never an isolated single-dimension case.
+
+/// AC-103-02: writes and deletes overage use the identical /100,000-unit ×
+/// rate formula as reads — verified independently per dimension so a
+/// copy-paste bug in one dimension's divisor/rate does not hide behind
+/// reads' coverage alone.
+#[test]
+fn overage_estimate_uses_same_per_100k_formula_for_writes_and_deletes() {
+    let included = data::PRICING.pro_included;
+
+    // 300,000 overage writes / 100,000 × $0.05 = $0.15
+    let writes_usage = UsageTotals {
+        reads: included.reads,
+        writes: included.writes + 300_000,
+        deletes: included.deletes,
+        storage_gb: included.storage_gb,
+    };
+    let writes_estimate = data::next_invoice_estimate(&writes_usage);
+    assert!(
+        (writes_estimate.overage_writes - 0.15).abs() < 0.001,
+        "AC-103-02: writes overage must be $0.15, got {}",
+        writes_estimate.overage_writes
+    );
+
+    // 400,000 overage deletes / 100,000 × $0.05 = $0.20
+    let deletes_usage = UsageTotals {
+        reads: included.reads,
+        writes: included.writes,
+        deletes: included.deletes + 400_000,
+        storage_gb: included.storage_gb,
+    };
+    let deletes_estimate = data::next_invoice_estimate(&deletes_usage);
+    assert!(
+        (deletes_estimate.overage_deletes - 0.20).abs() < 0.001,
+        "AC-103-02: deletes overage must be $0.20, got {}",
+        deletes_estimate.overage_deletes
+    );
+}
+
+/// AC-103-04: `has_overage` is true when ANY single dimension exceeds its
+/// included allowance, even with the other three exactly at their included
+/// allowance — isolates each dimension's `> 0.0` comparison and its `||`
+/// link in the has_overage chain (an all-true/all-false case cannot tell
+/// `||` from `&&`, or `>` from `<`, apart).
+#[test]
+fn has_overage_true_when_any_single_dimension_exceeds_included_allowance() {
+    let included = data::PRICING.pro_included;
+    let cases = [
+        ("reads", UsageTotals { reads: included.reads + 1, writes: included.writes, deletes: included.deletes, storage_gb: included.storage_gb }),
+        ("writes", UsageTotals { reads: included.reads, writes: included.writes + 1, deletes: included.deletes, storage_gb: included.storage_gb }),
+        ("deletes", UsageTotals { reads: included.reads, writes: included.writes, deletes: included.deletes + 1, storage_gb: included.storage_gb }),
+        ("storage_gb", UsageTotals { reads: included.reads, writes: included.writes, deletes: included.deletes, storage_gb: included.storage_gb + 0.001 }),
+    ];
+
+    for (dimension, usage) in cases {
+        let estimate = data::next_invoice_estimate(&usage);
+        assert!(
+            estimate.has_overage,
+            "AC-103-04: has_overage must be true when only {dimension} exceeds its included allowance"
+        );
+    }
+}
+
+/// AC-103-03: total must reflect every overage line item independently —
+/// computed by hand here (NOT re-summed from `estimate`'s own returned
+/// fields, which would be circular and blind to a `+`→`-` mutation on any
+/// single term of the total's own summation).
+#[test]
+fn total_reflects_every_overage_line_item_independently_computed() {
+    let included = data::PRICING.pro_included;
+    let usage = UsageTotals {
+        reads: included.reads + 100_000,     // +$0.05
+        writes: included.writes + 200_000,   // +$0.10
+        deletes: included.deletes + 300_000, // +$0.15
+        storage_gb: included.storage_gb + 2.0, // +$0.20
+    };
+
+    let estimate = data::next_invoice_estimate(&usage);
+    let expected_total = 49.00 + 0.05 + 0.10 + 0.15 + 0.20;
+
+    assert!(
+        (estimate.total - expected_total).abs() < 0.001,
+        "AC-103-03: total must be ${}, got {}",
+        expected_total, estimate.total
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // US-104 / AC-104-01/03/04: per-database Usage tab.
 // ─────────────────────────────────────────────────────────────────────────────

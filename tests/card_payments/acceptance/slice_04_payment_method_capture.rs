@@ -44,6 +44,22 @@ fn brand_detected_as_mastercard_from_number_prefix() {
     assert_eq!(brand, CardBrand::Mastercard, "AC-105-02: '5...' prefix must detect Mastercard");
 }
 
+/// Mutation-killing: a number starting with "3" is detected as Amex —
+/// Visa/Mastercard/Unknown coverage above does not exercise this match arm.
+#[test]
+fn brand_detected_as_amex_from_number_prefix() {
+    let brand = data::detect_card_brand("340000000000009");
+    assert_eq!(brand, CardBrand::Amex, "AC-105-02: '3...' prefix must detect Amex");
+}
+
+/// Mutation-killing: a number starting with "6" is detected as Discover —
+/// Visa/Mastercard/Unknown coverage above does not exercise this match arm.
+#[test]
+fn brand_detected_as_discover_from_number_prefix() {
+    let brand = data::detect_card_brand("6011000000000004");
+    assert_eq!(brand, CardBrand::Discover, "AC-105-02: '6...' prefix must detect Discover");
+}
+
 /// AC-105-02, Error/Boundary: a prefix that matches no known brand detects
 /// as Unknown, not a false-positive brand.
 #[test]

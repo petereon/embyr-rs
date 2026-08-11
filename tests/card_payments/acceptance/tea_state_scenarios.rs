@@ -22,7 +22,7 @@
 use proptest::prelude::*;
 
 use embyr_admin_ui::data;
-use embyr_admin_ui::model::{AppModel, CardBrand, EffectiveStatus, Plan};
+use embyr_admin_ui::model::{AppModel, CardBrand, EffectiveStatus, InvoiceStatus, Plan};
 use embyr_admin_ui::msg::Msg;
 use embyr_admin_ui::update::update;
 
@@ -122,21 +122,27 @@ proptest! {
 // ── @property: cap_ratios is exactly usage_totals / FREE_CAPS ──────────────
 
 proptest! {
-    /// @property: for ANY usage, `cap_ratios().reads` equals
-    /// `usage_totals().reads as f64 / FREE_CAPS.reads as f64` — the single-
-    /// sourced formula AC-102-01 depends on, checked generatively rather
-    /// than pinned to one worked example.
+    /// @property: for ANY usage, EVERY `cap_ratios()` field equals its own
+    /// `usage_totals() / FREE_CAPS` dimension — the single-sourced formula
+    /// AC-102-01 depends on, checked generatively for all 4 dimensions
+    /// (not just reads) rather than pinned to one worked example.
     #[test]
-    fn cap_ratio_reads_matches_usage_totals_over_free_caps(model in arb_free_model_with_databases()) {
+    fn cap_ratio_matches_usage_totals_over_free_caps_for_all_dimensions(model in arb_free_model_with_databases()) {
         let ratios = model.cap_ratios();
         let totals = model.usage_totals();
-        let expected = totals.reads as f64 / data::FREE_CAPS.reads as f64;
 
-        prop_assert!(
-            (ratios.reads - expected).abs() < 1e-9,
-            "cap_ratios().reads ({}) must equal usage_totals().reads / FREE_CAPS.reads ({})",
-            ratios.reads, expected
-        );
+        for (dimension, actual, expected) in [
+            ("reads", ratios.reads, totals.reads as f64 / data::FREE_CAPS.reads as f64),
+            ("writes", ratios.writes, totals.writes as f64 / data::FREE_CAPS.writes as f64),
+            ("deletes", ratios.deletes, totals.deletes as f64 / data::FREE_CAPS.deletes as f64),
+            ("storage_gb", ratios.storage_gb, totals.storage_gb / data::FREE_CAPS.storage_gb),
+        ] {
+            prop_assert!(
+                (actual - expected).abs() < 1e-9,
+                "cap_ratios().{} ({}) must equal usage_totals().{} / FREE_CAPS.{} ({})",
+                dimension, actual, dimension, dimension, expected
+            );
+        }
     }
 }
 
@@ -217,4 +223,34 @@ fn pinned_example_single_dimension_at_cap_is_sufficient() {
     model.databases = vec![common::database_with_daily_usage("db-1", 0, 0, 3_334, 0.0)]; // ~100,020 monthly deletes
 
     assert!(model.cap_exceeded(), "AC-108-06 pinned example: one dimension at cap is sufficient");
+}
+
+// ── Mutation-killing: AppModel::from_mock() demo billing state ─────────────
+
+/// Kills `AppModel::from_mock -> Self with Default::default()` and the
+/// `mock::databases`/`mock::subscription`/`mock::invoices` empty/default
+/// mutants — no existing test previously called `from_mock()` directly
+/// (all other tests build via `model_on_plan`/struct-literal helpers per
+/// common/mod.rs's documented convention), so its billing-demo content
+/// (Pro plan, card on file, invoice history) was entirely uncovered.
+#[test]
+fn from_mock_populates_pro_plan_demo_billing_state() {
+    let model = AppModel::from_mock();
+
+    assert_eq!(model.databases.len(), 2, "from_mock must populate 2 demo databases");
+    let names: Vec<&str> = model.databases.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"production"), "from_mock must include the 'production' database");
+    assert!(names.contains(&"staging"), "from_mock must include the 'staging' database");
+
+    assert_eq!(model.subscription.plan, Plan::Pro, "from_mock demos a Pro-plan account");
+    assert_eq!(
+        model.subscription.stripe_customer_id, "cus_pro_example",
+        "from_mock's Pro subscription must carry the mock Pro stripe_customer_id"
+    );
+    assert!(model.subscription.card.is_some(), "from_mock demos an account with a card on file");
+    assert!(!model.subscription.payment_failure, "from_mock demos a healthy, non-failed payment state");
+
+    assert_eq!(model.invoices.len(), 3, "from_mock must populate 3 demo invoices (2 paid + 1 upcoming)");
+    let paid_count = model.invoices.iter().filter(|inv| inv.status == InvoiceStatus::Paid).count();
+    assert_eq!(paid_count, 2, "from_mock's invoice history must include exactly 2 paid invoices");
 }
