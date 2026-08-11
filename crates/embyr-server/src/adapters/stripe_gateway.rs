@@ -5,30 +5,32 @@
 //! precedent: Stripe has exactly one implementation, D-13 forbids a mocked
 //! port).
 //!
-//! Implementation note (step 01-01): the workspace's pinned `async-stripe`
-//! 1.0.0-rc.8 release only vendors the HTTP client scaffolding
-//! (`async-stripe-client-core`) and generated value types
-//! (`async-stripe-shared`) as transitive dependencies of the `async-stripe`
-//! facade crate — it does NOT re-export a `Customer::create`-style request
-//! builder (those live in separate, not-yet-added per-resource crates
-//! upstream, e.g. `async-stripe-core`). Rather than widen the dependency
-//! surface outside this step's `files_to_modify` boundary, `get_or_create_customer`
-//! and `probe` call the real Stripe test-mode REST API directly via
-//! `reqwest` (already a workspace runtime dependency) — still real,
-//! unmocked Stripe I/O per D-13. `upsert_subscription`/`push_usage_record`/
-//! `verify_webhook_signature` (out of this step's scope) are left as RED
-//! scaffolds; whichever step implements them should revisit this note.
+//! Implementation note (step 01-05, superseding step 01-01): step 01-01
+//! discovered the pinned `async-stripe` 1.0.0-rc.8 facade crate does not
+//! itself vend per-resource typed request builders — those live in separate
+//! companion crates (`async-stripe-core`, `async-stripe-billing`,
+//! `async-stripe-webhook`, now added to the workspace) — and used hand-rolled
+//! `reqwest` calls as a stopgap. Step 01-05 migrates `get_or_create_customer`
+//! and `probe` to the real typed builders: `stripe_core::customer::CreateCustomer`
+//! and `stripe_core::balance::RetrieveForMyAccountBalance`, sent through
+//! `stripe::Client` (the facade crate's hyper-backed client, re-exported as
+//! `Client` because this workspace enables `async-stripe`'s `__hyper`
+//! feature transitively via `rustls-tls-webpki-roots`). Still real, unmocked
+//! Stripe I/O per D-13 — only the request-construction mechanism changed.
+//! `upsert_subscription`/`push_usage_record`/`verify_webhook_signature` (out
+//! of this step's scope) are left as RED scaffolds; whichever step
+//! implements them should revisit this note.
 //!
 //! `new()` and `probe()`'s config-validation half are NOT scaffolded (no
 //! business logic to TDD — they only need to exist so this struct is
 //! constructible by the composition root and other test harnesses that don't
 //! exercise billing).
 
-use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use std::time::Duration;
 
-/// Stripe REST API base URL — real test-mode/live-mode endpoint (D-13: no
-/// mock server for this feature).
-const STRIPE_API_BASE: &str = "https://api.stripe.com/v1";
+use chrono::{DateTime, Utc};
+use stripe::StripeRequest;
 
 // ---------------------------------------------------------------------------
 // Value types (real — not scaffolded; plain data carriers)
@@ -85,26 +87,35 @@ pub struct WebhookEvent {
 // ---------------------------------------------------------------------------
 
 pub struct StripeGateway {
-    /// `sk_test_...` / `sk_live_...`. Never logged (mirrors the
-    /// `EMBYR_ADMIN_KEY` / `EMBYR_AGENT_DB_DSN` no-plaintext-in-logs
-    /// precedent, ADR-018 Enforcement section).
-    api_key: String,
-    /// Pooled HTTP client for real Stripe REST API calls (see module doc for
-    /// why this adapter calls the REST API directly rather than through
-    /// generated `async-stripe` request builders).
-    http: reqwest::Client,
+    /// Typed Stripe HTTP client (holds the `sk_test_...` / `sk_live_...`
+    /// secret internally as a redacted, sensitive header value — never
+    /// logged, mirrors the `EMBYR_ADMIN_KEY` / `EMBYR_AGENT_DB_DSN`
+    /// no-plaintext-in-logs precedent, ADR-018 Enforcement section).
+    client: stripe::Client,
 }
 
 impl StripeGateway {
     /// Construct a gateway holding the given API key. Performs no I/O —
     /// safe to call from composition-root wrapper functions that don't
     /// exercise billing (mirrors `AwsSecretFetcher`/`GcpSecretFetcher`'s
-    /// cheap, non-network constructors). `reqwest::Client::new()` only
-    /// allocates connection-pool configuration, no I/O.
+    /// cheap, non-network constructors). `stripe::Client::new()` only builds
+    /// connection-pool configuration (hyper client construction), no I/O.
+    ///
+    /// The workspace links both the `ring` and `aws-lc-rs` rustls crypto
+    /// backends transitively (`ring` via `sqlx`/`reqwest`/`tokio-rustls`,
+    /// `aws-lc-rs` via the AWS SDK's `hyper-rustls` default feature) —
+    /// `stripe::Client`'s hyper-rustls connector resolves its
+    /// `CryptoProvider` eagerly at construction via
+    /// `rustls::crypto::CryptoProvider::get_default()`, which panics when
+    /// both backends are linked and no default has been installed yet.
+    /// Installs `ring` as the process default the same way
+    /// `embyr-agent::main` and its acceptance-test harnesses already do
+    /// (`let _ = ...install_default()` — idempotent, ignores `Err` if
+    /// another call site already installed one first).
     pub fn new(api_key: impl Into<String>) -> Self {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Self {
-            api_key: api_key.into(),
-            http: reqwest::Client::new(),
+            client: stripe::Client::new(api_key),
         }
     }
 
@@ -117,33 +128,16 @@ impl StripeGateway {
         &self,
         account_id: uuid::Uuid,
     ) -> Result<String, StripeError> {
-        let resp = self
-            .http
-            .post(format!("{STRIPE_API_BASE}/customers"))
-            .bearer_auth(&self.api_key)
-            .form(&[("metadata[embyr_account_id]", account_id.to_string())])
-            .send()
-            .await
-            .map_err(|e| StripeError::Unreachable(e.to_string()))?;
+        let mut metadata = HashMap::with_capacity(1);
+        metadata.insert("embyr_account_id".to_string(), account_id.to_string());
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(StripeError::ApiError(format!(
-                "customer create failed, status {status}: {body}"
-            )));
-        }
-
-        let body: serde_json::Value = resp
-            .json()
+        let customer = stripe_core::customer::CreateCustomer::new()
+            .metadata(metadata)
+            .send(&self.client)
             .await
-            .map_err(|e| StripeError::ApiError(format!("invalid JSON response: {e}")))?;
-        body.get("id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                StripeError::ApiError(format!("response missing 'id' field: {body}"))
-            })
+            .map_err(map_stripe_error)?;
+
+        Ok(customer.id.to_string())
     }
 
     /// Create or update the Stripe Subscription for `customer_id` to `plan`'s
@@ -202,24 +196,37 @@ impl StripeGateway {
     /// Soft failure — callers WARN, never refuse to start (billing is not on
     /// the Firestore protocol-serving critical path, ADR-021).
     pub async fn probe(&self) -> Result<(), StripeProbeError> {
-        let result = self
-            .http
-            .get(format!("{STRIPE_API_BASE}/balance"))
-            .bearer_auth(&self.api_key)
-            .timeout(std::time::Duration::from_secs(3))
-            .send()
+        let result = stripe_core::balance::RetrieveForMyAccountBalance::new()
+            .customize()
+            .timeout(Duration::from_secs(3))
+            .send(&self.client)
             .await;
 
         match result {
-            Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                Err(StripeProbeError::Unauthorized)
+            Ok(_balance) => Ok(()),
+            Err(stripe::StripeError::Stripe(_, 401)) => Err(StripeProbeError::Unauthorized),
+            Err(stripe::StripeError::Stripe(errors, status)) => {
+                Err(StripeProbeError::AccountRestricted(format!(
+                    "unexpected status {status}: {errors:?}"
+                )))
             }
-            Ok(resp) => Err(StripeProbeError::AccountRestricted(format!(
-                "unexpected status: {}",
-                resp.status()
-            ))),
             Err(e) => Err(StripeProbeError::Unreachable(e.to_string())),
         }
+    }
+}
+
+/// Maps `stripe::StripeError` (the vendor SDK's transport/API error enum) to
+/// this adapter's own `StripeError` — `Stripe(_, status)` (a real Stripe API
+/// error response, e.g. 401 on an invalid key) becomes `ApiError`; anything
+/// else (connection failure, timeout, response deserialization, client
+/// misconfiguration) becomes `Unreachable`. Both map to the same
+/// `StatusCode::BAD_GATEWAY` at the handler boundary (AC-201-05), so this
+/// classification only affects the error message, not observable behavior.
+fn map_stripe_error(err: stripe::StripeError) -> StripeError {
+    match err {
+        stripe::StripeError::Stripe(errors, status) => StripeError::ApiError(format!(
+            "customer create failed, status {status}: {errors:?}"
+        )),
+        other => StripeError::Unreachable(other.to_string()),
     }
 }

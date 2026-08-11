@@ -59,6 +59,7 @@ use embyr_server::{
     adapters::{
         credential_cache::CredentialCache,
         email::NoopEmailSender,
+        stripe_gateway::StripeGateway,
         system_db::SystemDb,
     },
     admin::router::build_admin_router,
@@ -357,6 +358,9 @@ impl AdminTestContext {
         .expect("insert other account project");
 
         let prometheus_handle = embyr_server::observability::get_or_install_prometheus_handle();
+        // admin_api_v2 predates card-payments-backend and never exercises
+        // billing routes — placeholder StripeGateway (no I/O at construction).
+        let stripe_gateway = Arc::new(StripeGateway::new("stripe-secret-key-not-configured"));
         let router = build_admin_router(
             system_db,
             "test-admin-key-from-env".to_string(),
@@ -369,6 +373,8 @@ impl AdminTestContext {
             None,
             1000.0,
             prometheus_handle,
+            stripe_gateway,
+            String::new(),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

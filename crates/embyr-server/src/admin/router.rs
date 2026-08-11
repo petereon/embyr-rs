@@ -9,13 +9,16 @@ use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::adapters::{
     aws_secret_fetcher::AwsSecretFetcher,
+    cap_status_cache::CapStatusCache,
     credential_cache::CredentialCache,
     gcp_secret_fetcher::GcpSecretFetcher,
+    stripe_gateway::StripeGateway,
     system_db::SystemDb,
 };
 
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
 use super::handlers::billing::get_billing;
+use super::handlers::billing_subscription::{get_subscription, post_subscription};
 use super::handlers::oidc_providers::{
     create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
 };
@@ -60,6 +63,12 @@ pub fn build_admin_router(
     gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
     rate_limit_capacity: f64,
     prometheus_handle: PrometheusHandle,
+    stripe_gateway: Arc<StripeGateway>,
+    // card-payments-backend (US-203, not yet wired to a route by this step —
+    // webhook ingestion is a separate DELIVER step): accepted here so the
+    // composition root has a single call site once that step wires
+    // `stripe_signature_middleware`'s expected secret through.
+    _webhook_signing_secret: String,
 ) -> Router {
     let operator_state = OperatorState {
         system_db: system_db.clone(),
@@ -79,6 +88,8 @@ pub fn build_admin_router(
         credential_cache,
         admin_key_env: admin_key,
         admin_key_previous_env: admin_key_previous,
+        stripe_gateway,
+        cap_status_cache: Arc::new(CapStatusCache::new()),
     };
 
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by
@@ -170,6 +181,11 @@ pub fn build_admin_router(
         )
         // Billing route (step 06-03).
         .route("/admin/v1/billing", get(get_billing))
+        // Subscription routes (card-payments-backend, US-201/US-202).
+        .route(
+            "/admin/v1/billing/subscription",
+            get(get_subscription).post(post_subscription),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
             session_auth_middleware,
@@ -227,6 +243,10 @@ pub fn build_with_secret_fetchers(
 ) -> Router {
     use crate::adapters::email::NoopEmailSender;
     let prometheus_handle = crate::observability::get_or_install_prometheus_handle();
+    // These test-server wrappers (used by suites that predate card-payments-backend
+    // and never exercise billing routes) get a no-I/O placeholder StripeGateway —
+    // mirrors main.rs's own "billing unwired" placeholder-key fallback.
+    let stripe_gateway = Arc::new(StripeGateway::new("stripe-secret-key-not-configured"));
     build_admin_router(
         system_db,
         admin_key,
@@ -239,5 +259,7 @@ pub fn build_with_secret_fetchers(
         gcp_secret_fetcher,
         1000.0,
         prometheus_handle,
+        stripe_gateway,
+        String::new(),
     )
 }

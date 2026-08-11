@@ -199,6 +199,116 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stripe"
+version = "1.0.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab149862d2d33453ce54e9c73af81d48c47b52888a2925fe94751694e0fe07ef"
+dependencies = [
+ "async-stripe-client-core",
+ "async-stripe-shared",
+ "bytes",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-rustls 0.27.9",
+ "hyper-util",
+ "miniserde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "async-stripe-billing"
+version = "1.0.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aa35d8f69a65cbb916b7ed201a7200f05e2b9fb2b5ceb5cbe42f7301314ad1e"
+dependencies = [
+ "async-stripe-client-core",
+ "async-stripe-shared",
+ "async-stripe-types",
+ "miniserde",
+ "serde",
+ "smol_str",
+ "tracing",
+]
+
+[[package]]
+name = "async-stripe-client-core"
+version = "1.0.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "012387ff812fa51c118a2b324cdde3684d676c6e351f687abc933d47f429fad7"
+dependencies = [
+ "async-stripe-shared",
+ "async-stripe-types",
+ "bytes",
+ "futures-util",
+ "miniserde",
+ "serde",
+ "serde_json",
+ "serde_qs 1.1.3",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "async-stripe-core"
+version = "1.0.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d71c7d42ab20f94af44ec5fd49a7e17d5a07e0a89e50ede3a915d1a027b5cad"
+dependencies = [
+ "async-stripe-client-core",
+ "async-stripe-shared",
+ "async-stripe-types",
+ "miniserde",
+ "serde",
+ "smol_str",
+ "tracing",
+]
+
+[[package]]
+name = "async-stripe-shared"
+version = "1.0.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "315ef4797e2af87e5764e28ca513449ba3fa9e960b6ee081d406224536de3c37"
+dependencies = [
+ "async-stripe-types",
+ "miniserde",
+ "serde",
+ "smol_str",
+ "tracing",
+]
+
+[[package]]
+name = "async-stripe-types"
+version = "1.0.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6c44f1c110ccddbb5674b39e4b68345b245acf5b9c8ac1e6ca9f25011109263"
+dependencies = [
+ "miniserde",
+ "serde",
+ "smol_str",
+]
+
+[[package]]
+name = "async-stripe-webhook"
+version = "1.0.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a578d77acc0dadcc6a5b372b239784d80f0b94a4a9c7211c79a35625373d650e"
+dependencies = [
+ "async-stripe-shared",
+ "async-stripe-types",
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
+ "miniserde",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -892,6 +1002,16 @@ dependencies = [
  "serde",
  "serde_repr",
  "serde_with",
+]
+
+[[package]]
+name = "borsh"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a88b7ea17d208c4193f2c1e6de3c35fe71f98c96982d5ced308bdcc749ff6e1f"
+dependencies = [
+ "bytes",
+ "cfg_aliases",
 ]
 
 [[package]]
@@ -1738,6 +1858,10 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "async-stripe",
+ "async-stripe-billing",
+ "async-stripe-core",
+ "async-stripe-webhook",
  "async-trait",
  "aws-config",
  "aws-sdk-secretsmanager",
@@ -1752,6 +1876,7 @@ dependencies = [
  "embyr-proto",
  "hex",
  "hkdf",
+ "hmac 0.12.1",
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
@@ -1773,6 +1898,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha2 0.10.9",
  "sqlx",
  "subtle",
  "tempfile",
@@ -2895,7 +3021,7 @@ dependencies = [
  "send_wrapper",
  "serde",
  "serde_json",
- "serde_qs",
+ "serde_qs 0.15.0",
  "server_fn",
  "slotmap",
  "tachys",
@@ -3198,10 +3324,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "mini-internal"
+version = "0.1.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34dea53b00d87f21b1535cbef93765c75f159dbbfeef16152f0b6b3bf28f3bb6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+
+[[package]]
+name = "miniserde"
+version = "0.1.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8f82621301d3b99a1542736de96e5df69865b235987d6470b28c7aa670cfeb1"
+dependencies = [
+ "itoa",
+ "mini-internal",
+ "zmij",
+]
 
 [[package]]
 name = "mio"
@@ -4662,6 +4810,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_qs"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "475b9310e272827d34113bf8679b6dfb7fa0023ee049764ba003f8f984e8b5d1"
+dependencies = [
+ "itoa",
+ "percent-encoding",
+ "ryu",
+ "serde",
+]
+
+[[package]]
 name = "serde_repr"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4782,7 +4942,7 @@ dependencies = [
  "send_wrapper",
  "serde",
  "serde_json",
- "serde_qs",
+ "serde_qs 0.15.0",
  "server_fn_macro_default",
  "thiserror 2.0.18",
  "throw_error",
@@ -4926,6 +5086,16 @@ version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "smol_str"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
+dependencies = [
+ "borsh",
  "serde",
 ]
 
@@ -5234,6 +5404,17 @@ name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -8,6 +8,7 @@ pub mod middleware;
 pub mod observability;
 pub mod realtime;
 pub mod rest;
+pub mod sweepers;
 pub mod transactions;
 
 use std::sync::Arc;

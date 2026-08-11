@@ -1,5 +1,6 @@
 pub mod agent_backend;
 pub mod aws_secret_fetcher;
+pub mod cap_status_cache;
 pub mod credential_cache;
 pub mod email;
 pub mod encryption;
@@ -9,4 +10,5 @@ pub mod metrics_adapter;
 pub mod postgres_backend;
 pub mod postgres_notify_listener;
 pub mod query_log;
+pub mod stripe_gateway;
 pub mod system_db;

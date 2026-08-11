@@ -1,9 +1,22 @@
+use std::sync::Arc;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
 
+use crate::adapters::credential_cache::CredentialCache;
+use crate::adapters::system_db::SystemDb;
 use crate::admin::state::OperatorState;
+
+/// Dependencies for lifecycle-status transitions invoked outside the HTTP
+/// router — used by `CapUsageRefresher` (ADR-020) to call
+/// `set_project_status`-shaped suspension logic from the background cap-check
+/// task, which has no `OperatorState` (no HTTP request in flight).
+pub struct LifecycleDeps {
+    pub system_db: Arc<SystemDb>,
+    pub credential_cache: Arc<CredentialCache>,
+}
 
 /// Apply a lifecycle status transition to a project and evict the credential cache.
 ///

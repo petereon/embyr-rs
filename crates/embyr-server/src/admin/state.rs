@@ -12,8 +12,10 @@ use embyr_core::admin::email::IEmailSender;
 
 use crate::adapters::{
     aws_secret_fetcher::AwsSecretFetcher,
+    cap_status_cache::CapStatusCache,
     credential_cache::CredentialCache,
     gcp_secret_fetcher::GcpSecretFetcher,
+    stripe_gateway::StripeGateway,
     system_db::SystemDb,
 };
 
@@ -59,4 +61,12 @@ pub struct UserAdminState {
     /// `dual_auth_middleware`'s Bearer arm rotation-aware like its sibling
     /// `operator_auth_middleware` (ADR-018 §6, B-SM-07 consistency fix).
     pub admin_key_previous_env: Option<String>,
+    /// Sole Stripe-calling adapter (ADR-021, D-13) — used by
+    /// `billing_subscription::get_subscription`/`post_subscription` to
+    /// lazily provision/update the real Stripe Customer/Subscription.
+    pub stripe_gateway: Arc<StripeGateway>,
+    /// In-process cache of the latest `CapUsageRefresher`-computed
+    /// `CapStatus` per account (ADR-020) — read (fail-open on a miss,
+    /// AC-206-04) by `billing_subscription::get_subscription`.
+    pub cap_status_cache: Arc<CapStatusCache>,
 }

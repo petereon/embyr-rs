@@ -90,6 +90,25 @@ pub struct ServerConfig {
     pub admin_port: u16,
     /// `RUST_LOG` — tracing level filter; default "info".
     pub log_level: String,
+    /// `STRIPE_SECRET_KEY` — optional (card-payments-backend, ADR-021).
+    /// Plain `std::env::var(...).ok()`, not the full AWS/GCP secret-manager
+    /// resolver chain (simplified vs. DESIGN's exact ask — non-blocking,
+    /// see `docs/feature/card-payments-backend/distill/upstream-issues.md`
+    /// Finding 3: making this required would break every other
+    /// subprocess-spawning test suite that never sets a `STRIPE_*` var).
+    /// `None` means billing is unwired; the composition root uses a
+    /// placeholder key so `StripeGateway::new()` still constructs.
+    pub stripe_secret_key: Option<String>,
+    /// `STRIPE_WEBHOOK_SIGNING_SECRET` — optional (US-203); same resolution
+    /// simplification as `stripe_secret_key`.
+    pub stripe_webhook_signing_secret: Option<String>,
+    /// `STRIPE_PUBLISHABLE_KEY` — optional; same resolution simplification
+    /// as `stripe_secret_key`. Not yet consumed by any composition-root
+    /// wiring (reserved for a future client-side Stripe Elements step).
+    pub stripe_publishable_key: Option<String>,
+    /// `EMBYR_CAP_CHECK_INTERVAL_SECS` — cumulative cap-check background
+    /// task interval (ADR-020); default 30s.
+    pub cap_check_interval_secs: u64,
 }
 
 /// Configuration parse error.
@@ -225,6 +244,16 @@ impl ServerConfig {
         let admin_port = parse_port("ADMIN_PORT", 9090)?;
         let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
 
+        // card-payments-backend (ADR-021): optional, plain env-var resolution
+        // (Finding 3 — not the full secret-manager chain; see field docs).
+        let stripe_secret_key = std::env::var("STRIPE_SECRET_KEY").ok();
+        let stripe_webhook_signing_secret = std::env::var("STRIPE_WEBHOOK_SIGNING_SECRET").ok();
+        let stripe_publishable_key = std::env::var("STRIPE_PUBLISHABLE_KEY").ok();
+        let cap_check_interval_secs = std::env::var("EMBYR_CAP_CHECK_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(30);
+
         Ok(ServerConfig {
             db_url: db_url_opt.unwrap(),
             admin_key,
@@ -236,6 +265,10 @@ impl ServerConfig {
             rest_port,
             admin_port,
             log_level,
+            stripe_secret_key,
+            stripe_webhook_signing_secret,
+            stripe_publishable_key,
+            cap_check_interval_secs,
         })
     }
 }
