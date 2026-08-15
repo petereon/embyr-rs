@@ -57,6 +57,7 @@ use totp_rs::{Algorithm as TotpAlgorithm, TOTP};
 
 use embyr_server::{
     adapters::{
+        cap_status_cache::CapStatusCache,
         credential_cache::CredentialCache,
         email::NoopEmailSender,
         stripe_gateway::StripeGateway,
@@ -375,6 +376,10 @@ impl AdminTestContext {
             prometheus_handle,
             stripe_gateway,
             String::new(),
+            // admin_api_v2 never exercises billing/cap_status routes —
+            // fresh, unshared cache is sufficient (card-payments-backend
+            // ADR-020, step 03-01 signature addition).
+            Arc::new(CapStatusCache::new()),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

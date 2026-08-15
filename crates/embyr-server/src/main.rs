@@ -187,6 +187,15 @@ async fn main() {
         );
     }
 
+    // card-payments-backend (ADR-020, step 03-01): ONE shared cache instance
+    // between the router (reader, via `get_subscription`) and the
+    // `CapUsageRefresher` (writer) — a previous version built two
+    // independent `CapStatusCache`s here, which would have silently kept
+    // `cap_status` permanently absent regardless of `run_cycle` correctness.
+    let cap_status_cache = std::sync::Arc::new(
+        embyr_server::adapters::cap_status_cache::CapStatusCache::new(),
+    );
+
     let admin_app = build_admin_router(
         Arc::clone(&system_db),
         cfg.admin_key.clone(),
@@ -201,6 +210,7 @@ async fn main() {
         prom_handle,
         Arc::clone(&stripe_gateway),
         cfg.stripe_webhook_signing_secret.clone().unwrap_or_default(),
+        Arc::clone(&cap_status_cache),
     )
     .route("/healthz", axum::routing::get(healthz_handler));
 
@@ -208,11 +218,10 @@ async fn main() {
     // meaningful once STRIPE_SECRET_KEY is configured (Free-plan accounts
     // need a real `subscriptions` row to exist, seeded via US-201) — spawned
     // unconditionally regardless, mirroring the OBS-05 pool-gauge task's
-    // always-on shape; `run_cycle` is a no-op-safe RED scaffold until
-    // DELIVER implements it.
+    // always-on shape.
     let _cap_usage_refresher = embyr_server::sweepers::cap_usage_refresher::spawn(
         Arc::clone(&system_db),
-        std::sync::Arc::new(embyr_server::adapters::cap_status_cache::CapStatusCache::new()),
+        cap_status_cache,
         embyr_server::admin::handlers::lifecycle::LifecycleDeps {
             system_db: Arc::clone(&system_db),
             credential_cache: cache_for_cap_refresher,

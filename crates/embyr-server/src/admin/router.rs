@@ -72,6 +72,13 @@ pub fn build_admin_router(
     // secret, checked by `stripe_signature_middleware` — no session/operator
     // auth guards this sub-router.
     webhook_signing_secret: String,
+    // card-payments-backend (ADR-020, step 03-01): shared with the
+    // composition root's `CapUsageRefresher::spawn` call so the background
+    // task writes into the SAME cache instance `get_subscription` reads from
+    // (previously each call built its own disconnected `CapStatusCache`,
+    // silently defeating AC-206-01/02/05 regardless of `run_cycle`'s own
+    // correctness).
+    cap_status_cache: Arc<CapStatusCache>,
 ) -> Router {
     let operator_state = OperatorState {
         system_db: system_db.clone(),
@@ -99,7 +106,7 @@ pub fn build_admin_router(
         admin_key_env: admin_key,
         admin_key_previous_env: admin_key_previous,
         stripe_gateway,
-        cap_status_cache: Arc::new(CapStatusCache::new()),
+        cap_status_cache,
     };
 
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by
@@ -287,5 +294,6 @@ pub fn build_with_secret_fetchers(
         prometheus_handle,
         stripe_gateway,
         String::new(),
+        Arc::new(CapStatusCache::new()),
     )
 }
