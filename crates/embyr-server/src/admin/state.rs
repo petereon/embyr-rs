@@ -70,3 +70,16 @@ pub struct UserAdminState {
     /// AC-206-04) by `billing_subscription::get_subscription`.
     pub cap_status_cache: Arc<CapStatusCache>,
 }
+
+/// State for the Stripe webhook sub-router (US-203). No session/operator
+/// auth — `stripe_signature_middleware` is this sub-router's sole gate.
+#[derive(Clone)]
+pub struct WebhookState {
+    pub system_db: Arc<SystemDb>,
+    /// Sole Stripe-calling adapter — used here for
+    /// `verify_webhook_signature` (HMAC verification, no network call).
+    pub stripe_gateway: Arc<StripeGateway>,
+    /// `STRIPE_WEBHOOK_SIGNING_SECRET` this server instance was configured
+    /// with — passed to `StripeGateway::verify_webhook_signature`.
+    pub webhook_signing_secret: String,
+}

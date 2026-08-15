@@ -94,7 +94,7 @@ pub struct WebhookEvent {
 /// is provisioned the same way a real deployment would (Stripe
 /// Dashboard/CLI, once) and referenced here as static config — never
 /// created per-request. `lookup_key = "embyr_pro_monthly"`, $29.00/month USD.
-const PRO_PLAN_STRIPE_PRICE_ID: &str = "price_1U3IuADomd8yk6u5rAtzmWPt";
+pub(crate) const PRO_PLAN_STRIPE_PRICE_ID: &str = "price_1U3IuADomd8yk6u5rAtzmWPt";
 
 pub struct StripeGateway {
     /// Typed Stripe HTTP client (holds the `sk_test_...` / `sk_live_...`
@@ -265,19 +265,50 @@ impl StripeGateway {
     /// Verify a `Stripe-Signature` header against `payload` and
     /// `webhook_secret`. Deterministic HMAC-SHA256 timing-safe comparison
     /// with Stripe's documented replay-window tolerance — no network call
-    /// (ADR-021 § Enforcement; delegates to `async-stripe`'s
-    /// `Webhook::construct_event` once implemented).
+    /// (ADR-021 § Enforcement). Delegates to `async-stripe-webhook`'s
+    /// `stripe_webhook::Webhook::construct_event` for the actual HMAC
+    /// verification — never hand-rolled (ADR-021's specific rationale for
+    /// pulling in the vendor SDK).
     ///
-    /// # Panics (RED scaffold)
+    /// `construct_event` bundles two independent steps: (1) HMAC-SHA256
+    /// signature + replay-timestamp verification, then (2) full typed
+    /// per-resource object deserialization (`stripe_shared::Subscription`,
+    /// `Customer`, ...). Step (2) can fail (`WebhookError::BadParse`) on a
+    /// body that doesn't match the vendor SDK's exact typed shape (e.g. a
+    /// minimal/synthetic test fixture, or a real Stripe object shape newer
+    /// than this pinned SDK version) — but `parse_payload` (step 2) is only
+    /// ever reached in `do_construct_event` AFTER the HMAC comparison and
+    /// timestamp-tolerance check both already returned `Ok` (verified
+    /// against the vendored source at
+    /// `async-stripe-webhook-1.0.0-rc.8/src/webhook.rs:270-295`). So a
+    /// `BadParse` result means: this request IS authentically signed by
+    /// Stripe: falling back to a plain `serde_json` field read of `id`/
+    /// `type` off the already-HMAC-authenticated payload is not hand-rolled
+    /// signature verification, it's just cheap field extraction on data the
+    /// vendor SDK already vouched for. Any other `WebhookError` variant
+    /// (`BadKey`/`BadHeader`/`BadSignature`/`BadTimestamp`) is a genuine
+    /// authentication failure.
     pub fn verify_webhook_signature(
         &self,
-        _payload: &[u8],
-        _sig_header: &str,
-        _webhook_secret: &str,
+        payload: &[u8],
+        sig_header: &str,
+        webhook_secret: &str,
     ) -> Result<WebhookEvent, StripeError> {
-        panic!(
-            "SCAFFOLD: true -- StripeGateway::verify_webhook_signature not yet implemented -- RED scaffold (DISTILL, US-203)"
-        )
+        let payload_str = std::str::from_utf8(payload).map_err(|e| {
+            StripeError::InvalidSignature(format!("payload is not valid UTF-8: {e}"))
+        })?;
+
+        match stripe_webhook::Webhook::construct_event(payload_str, sig_header, webhook_secret) {
+            Ok(event) => Ok(WebhookEvent {
+                id: event.id.as_str().to_string(),
+                event_type: event.type_.to_string(),
+                payload: parse_raw_webhook_payload(payload_str)?,
+            }),
+            Err(stripe_webhook::WebhookError::BadParse(_)) => {
+                extract_webhook_event_from_authenticated_payload(payload_str)
+            }
+            Err(e) => Err(StripeError::InvalidSignature(e.to_string())),
+        }
     }
 
     /// Earned Trust probe (Principle 12): `GET /v1/balance`, 3s timeout.
@@ -312,6 +343,46 @@ impl StripeGateway {
 /// so this classification only affects the error message, not observable
 /// behavior. Shared by every Stripe call this adapter makes (customer
 /// provisioning, subscription create/update).
+fn parse_raw_webhook_payload(payload_str: &str) -> Result<serde_json::Value, StripeError> {
+    serde_json::from_str(payload_str)
+        .map_err(|e| StripeError::InvalidSignature(format!("payload is not valid JSON: {e}")))
+}
+
+/// Reads `id`/`type` directly off a payload whose signature has ALREADY been
+/// verified by `stripe_webhook::Webhook::construct_event` (see
+/// `verify_webhook_signature`'s doc comment for why this is safe — it only
+/// runs after the vendor SDK's own HMAC check succeeded).
+fn extract_webhook_event_from_authenticated_payload(
+    payload_str: &str,
+) -> Result<WebhookEvent, StripeError> {
+    let value = parse_raw_webhook_payload(payload_str)?;
+
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            StripeError::InvalidSignature(
+                "authenticated webhook payload missing string \"id\" field".to_string(),
+            )
+        })?
+        .to_string();
+    let event_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            StripeError::InvalidSignature(
+                "authenticated webhook payload missing string \"type\" field".to_string(),
+            )
+        })?
+        .to_string();
+
+    Ok(WebhookEvent {
+        id,
+        event_type,
+        payload: value,
+    })
+}
+
 fn map_stripe_error(err: stripe::StripeError) -> StripeError {
     match err {
         stripe::StripeError::Stripe(errors, status) => StripeError::ApiError(format!(

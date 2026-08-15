@@ -35,18 +35,21 @@ use super::handlers::query_logs::list_query_logs;
 use super::handlers::service_accounts::{
     create_service_account, delete_service_account, list_service_accounts,
 };
+use super::handlers::webhooks_stripe::stripe_webhook_handler;
 use super::middleware::dual_auth::dual_auth_middleware;
 use super::middleware::operator_auth::operator_auth_middleware;
 use super::middleware::session_auth::session_auth_middleware;
-use super::state::{OperatorState, UserAdminState};
+use super::middleware::stripe_signature::stripe_signature_middleware;
+use super::state::{OperatorState, UserAdminState, WebhookState};
 
-/// Build the admin router with all four sub-routers merged under /admin/v1.
+/// Build the admin router with all five sub-routers merged under /admin/v1.
 ///
 /// Sub-router breakdown (ADR-009, AA-01):
 ///   - `operator_router`:   Bearer EMBYR_ADMIN_KEY; operator routes + GET /metrics.
 ///   - `dual_auth_router`:  GET /projects/:id; session cookie OR operator Bearer (step 02-02).
 ///   - `public_router`:     No auth; signin/signout placeholders replaced in step 01-04.
 ///   - `session_router`:    Session cookie / admin_api_key Bearer; populated in steps 01-04 through 06-03.
+///   - `webhook_router`:    No session/operator auth; own `stripe_signature_middleware` gate instead (US-203, step 01-03).
 // Composition-root wiring function — each parameter is a distinct required
 // dependency for one of the four sub-routers; splitting into a config struct
 // wouldn't reduce the actual coupling, just relocate it.
@@ -64,11 +67,10 @@ pub fn build_admin_router(
     rate_limit_capacity: f64,
     prometheus_handle: PrometheusHandle,
     stripe_gateway: Arc<StripeGateway>,
-    // card-payments-backend (US-203, not yet wired to a route by this step —
-    // webhook ingestion is a separate DELIVER step): accepted here so the
-    // composition root has a single call site once that step wires
-    // `stripe_signature_middleware`'s expected secret through.
-    _webhook_signing_secret: String,
+    // card-payments-backend (US-203): the 5th sub-router's own signing
+    // secret, checked by `stripe_signature_middleware` — no session/operator
+    // auth guards this sub-router.
+    webhook_signing_secret: String,
 ) -> Router {
     let operator_state = OperatorState {
         system_db: system_db.clone(),
@@ -79,6 +81,11 @@ pub fn build_admin_router(
         gcp_secret_fetcher,
         rate_limit_capacity,
         prometheus_handle,
+    };
+    let webhook_state = WebhookState {
+        system_db: system_db.clone(),
+        stripe_gateway: stripe_gateway.clone(),
+        webhook_signing_secret,
     };
     let user_state = UserAdminState {
         system_db,
@@ -192,10 +199,21 @@ pub fn build_admin_router(
         ))
         .with_state(user_state);
 
+    // Webhook sub-router: no session/operator auth (AC-203-01) — gated by
+    // its own `stripe_signature_middleware` instead (US-203).
+    let webhook_router = Router::<WebhookState>::new()
+        .route("/admin/v1/webhooks/stripe", post(stripe_webhook_handler))
+        .route_layer(axum::middleware::from_fn_with_state(
+            webhook_state.clone(),
+            stripe_signature_middleware,
+        ))
+        .with_state(webhook_state);
+
     Router::new()
         .merge(operator_router)
         .merge(dual_auth_router)
         .merge(public_router)
+        .merge(webhook_router)
         .merge(session_router)
 }
 

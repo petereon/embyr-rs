@@ -3,3 +3,4 @@
 pub mod dual_auth;
 pub mod operator_auth;
 pub mod session_auth;
+pub mod stripe_signature;
