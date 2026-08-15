@@ -2690,3 +2690,376 @@ literal implementation of the D-6 hard-stop business rule.
 | CP-AD-06 | No Stripe.js/Elements JS interop shim in V1 — Rust-native form only | Accepted (inherited from D-3/D-5) | Explicit DISCUSS scope boundary; same-shape swap target for `card-payments-backend` |
 | CP-AD-07 | No new npm/JS dependency, no new Rust crate dependency | Accepted | Zero bundle-size risk beyond incremental application code; existing ≤4.5 MB CI gate applies unchanged |
 
+---
+
+## Application Architecture — card-payments-backend
+
+> Updated: 2026-08-11
+> Feature: card-payments-backend (JOB-14's "make it real" backend half — Stripe subscriptions,
+> webhooks, metering, real-time cap enforcement)
+> Mode: Propose (autonomous analysis)
+> ADRs: `docs/product/architecture/adr-020-cumulative-cap-check-architecture.md` (new),
+> `docs/product/architecture/adr-021-stripe-sdk-integration.md` (new); ADR-009/ADR-015/ADR-018
+> apply unchanged (sub-router pattern, distributed rate-limiting, secrets-management) — extended,
+> not re-litigated.
+
+---
+
+### Wave: DESIGN / [REF] Quality Attribute Priorities — card-payments-backend
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|-------------------|
+| 1 | **Correctness of suspension state (trust-critical)** | D-12's "one mechanism, two triggers" — a false suspension of a paying, healthy account is reputationally worse than a missed enforcement (feature-delta KPI #3 framing). Zero false-positive suspensions is a guardrail KPI, not aspirational. |
+| 2 | **Webhook idempotency and signature integrity** | Stripe redelivers events; a non-idempotent handler double-applies state transitions (double-suspend, double-reactivate). Invalid signatures must never reach a handler. |
+| 3 | **Zero added latency on the `:8080`/`:8081` Firestore hot path** | Protocol fidelity and real-time latency are the system's rank-1/rank-4 quality attributes (`brief.md` § System Quality Attributes). Billing concerns must not compete with them on the data plane. |
+| 4 | **Financial accuracy (no drift between local state and Stripe)** | KPI #1 (subscription-record reconciliation), KPI #4 (metering-to-invoice reconciliation) — local `subscriptions` rows are a read cache of Stripe, never the write-ahead source of truth. |
+| 5 | **Testability under D-13's no-mock constraint** | Every Stripe-calling component must be exercisable against real Stripe test-mode APIs; pure domain logic (`cap_status` derivation, webhook-outcome classification) must be testable without any network dependency. |
+
+---
+
+### Wave: DESIGN / [REF] D-9 Resolution Summary
+
+Full resolution and rationale: `docs/product/architecture/adr-020-cumulative-cap-check-architecture.md`.
+
+**Verdict: CREATE NEW mechanism — not a `RateLimiter`/`TokenBucket` extension.** The cumulative
+cap check is computed by a new background task (`CapUsageRefresher`, interval-based, mirrors the
+existing `QueryLogSweeper`/`SessionCleaner` advisory-lock sweeper pattern) that writes into an
+in-process `CapStatusCache` (mirrors the existing `CredentialCache` shape) and, on a cap-crossing
+transition, calls the *same* `set_project_status` function the dunning trigger (US-204) uses — via
+new `suspend_account_projects`/`activate_account_projects` fan-out wrappers in `lifecycle.rs`. The
+`:8080`/`:8081` hot path is **unmodified**: the existing `ProjectStatus` check in the auth
+interceptor is the enforcement point, driven by a new upstream writer, adding zero new per-request
+computation or Postgres query. Billing-cycle boundary for Free-plan accounts (which have no Stripe
+`Subscription` object) is the UTC calendar month — Stripe's `current_period_start`/`current_period_end`
+apply only to Pro-plan display, never to cap computation.
+
+---
+
+### Wave: DESIGN / [REF] Component Decomposition
+
+| File Path | Change | Responsibility |
+|-----------|--------|-----------------|
+| `crates/embyr-core/src/admin/billing.rs` | **NEW** | IO-free domain types: `SubscriptionPlan{Free,Pro}`, `SubscriptionStatus{Active,PastDue,FreeCapExceeded,Canceled}`, `Subscription` value type, `UsageDimension{Reads,Writes,Deletes,Storage}`, `DimensionCapEntry{used,cap,pct}`, `CapStatus`, `WebhookEventOutcome{Applied,Duplicate,Ignored}`. Pure functions: `compute_cap_status()`, `cap_exceeded()` (boundary-inclusive ≥100%). Zero IO imports. |
+| `crates/embyr-core/src/admin/mod.rs` | **EXTEND** | `pub mod billing;` + re-exports, mirrors existing module registration shape |
+| `crates/embyr-server/src/adapters/stripe_gateway.rs` | **NEW** | `StripeGateway` — sole `async-stripe` import site. Methods: get-or-create Customer, create/update Subscription, push Usage Record (idempotency-key `{project_id}:{dimension}:{date}`), verify webhook signature (`Webhook::construct_event`). Implements `probe()` (Earned Trust, see below). |
+| `crates/embyr-server/src/adapters/cap_status_cache.rs` | **NEW** | `CapStatusCache` — `Arc<RwLock<HashMap<AccountId, CapStatus>>>`, in-process per-instance, shape mirrors `CredentialCache`. Read by the subscription handler; written by `CapUsageRefresher`. |
+| `crates/embyr-server/src/admin/handlers/billing_subscription.rs` | **NEW** | `get_subscription` (US-201, extended with `cap_status` in US-206) and `post_subscription` (US-202, `check_rbac` Owner/Admin-gated) handlers. Separate file from existing `billing.rs` (usage-reporting, read-only, zero Stripe calls) — different responsibility, different external dependency. |
+| `crates/embyr-server/src/admin/handlers/webhooks_stripe.rs` | **NEW** | `stripe_webhook_handler` — dedupe via `processed_webhook_events`, dispatch by `event.type`: `customer.subscription.updated`/`.deleted` (sync local row), `invoice.payment_failed` (final-failure only → `suspend_account_projects`), `invoice.payment_succeeded` (→ `activate_account_projects`), all others → 200 no-op. |
+| `crates/embyr-server/src/admin/handlers/billing_metering.rs` | **NEW** | `run_metering` handler (US-205, operator-authed `POST /admin/v1/billing/run-metering`). Reads yesterday's `daily_project_metrics`, pushes one Stripe Usage Record per project per non-zero dimension, per-project failure isolation (one Stripe failure does not abort the run). **Not a Tokio-interval background task** — DISCUSS Slice 05 explicitly descopes scheduling to DEVOPS; this is a plain async function invoked via HTTP so an external scheduler (k8s CronJob or similar) can trigger it. |
+| `crates/embyr-server/src/admin/middleware/stripe_signature.rs` | **NEW** | `stripe_signature_middleware` — Tower middleware, verifies `Stripe-Signature` via `StripeGateway`'s wrapped `Webhook::construct_event`. Buffers the raw request body for HMAC verification, mirrors the shape (not the mechanism) of `operator_auth_middleware`. |
+| `crates/embyr-server/src/sweepers/cap_usage_refresher.rs` | **NEW** | `CapUsageRefresher` — Tokio-interval background task (`EMBYR_CAP_CHECK_INTERVAL_SECS`, default 30s), advisory-lock-guarded, mirrors `QueryLogSweeper`/`SessionCleaner` shape. See ADR-020. |
+| `crates/embyr-server/src/admin/handlers/lifecycle.rs` | **EXTEND** | `set_project_status` visibility widened to `pub(crate)`; signature narrowed from `&OperatorState` to a smaller `LifecycleDeps { system_db, credential_cache }` so non-operator callers (webhook handler, `CapUsageRefresher`) can invoke it. New `suspend_account_projects`/`activate_account_projects` fan-out wrappers, both delegating to the identical `set_project_status` (D-12 compliance, verified directly). |
+| `crates/embyr-server/src/admin/router.rs` | **EXTEND** | 5th sub-router (`webhook_router`), structural sibling of `public_router` — no session/operator auth `route_layer`, own `stripe_signature_middleware` instead. `build_admin_router` signature gains `stripe_gateway: Arc<StripeGateway>`, `stripe_webhook_signing_secret: String` (mirrors ADR-018's precedent of extending this function's parameter list directly, `#[allow(clippy::too_many_arguments)]`, rather than introducing a config struct). |
+| `crates/embyr-server/src/admin/state.rs` | **EXTEND** | New `WebhookState { system_db, stripe_gateway, webhook_signing_secret, credential_cache }` — separate from `OperatorState`/`UserAdminState`, mirrors the B-AD-07 precedent ("different dependency graphs; merging creates unnecessary coupling"). |
+| `crates/embyr-server/src/admin/handlers/mod.rs` | **EXTEND** | Register `billing_subscription`, `webhooks_stripe`, `billing_metering` modules |
+| `crates/embyr-server/src/admin/middleware/mod.rs` | **EXTEND** | Register `stripe_signature` module |
+| `crates/embyr-server/src/adapters/mod.rs` | **EXTEND** | Register `stripe_gateway`, `cap_status_cache` modules |
+| `crates/embyr-server/src/sweepers/mod.rs` | **EXTEND** | Register `cap_usage_refresher` module |
+| `crates/embyr-server/src/config.rs` | **EXTEND** | `ServerConfig` gains `stripe_secret_key: String`, `stripe_webhook_signing_secret: String`, `stripe_publishable_key: String`, `cap_check_interval_secs: u64` (default 30). Three new resolver functions reusing `resolve_secret_source`/`fetch_from_secret_manager` (ADR-018 pattern) — no `_previous`/rotation variant (not locked for this feature; see Open Questions). |
+| `crates/embyr-server/src/lib.rs` | **EXTEND** | `alloc_production_components` wires `StripeGateway` (probed), `CapStatusCache`, spawns `CapUsageRefresher`; `build_admin_router` call site gains the two new params. |
+| `crates/embyr-server/Cargo.toml`, root `Cargo.toml` | **EXTEND** | Add `async-stripe` to `[workspace.dependencies]` and `embyr-server`'s `[dependencies]` (see ADR-021). |
+| `migrations/0019_subscriptions.sql` | **NEW** | `accounts.stripe_customer_id` column (`TEXT UNIQUE`); `subscriptions` table, one row per account (`account_id UUID PRIMARY KEY REFERENCES accounts(id)`), `plan`/`status` CHECK-constrained, `stripe_subscription_id`, `current_period_start`/`current_period_end` (Pro-only, NULL for Free), `updated_at`. |
+| `migrations/0020_processed_webhook_events.sql` | **NEW** | `processed_webhook_events(event_id TEXT PRIMARY KEY, processed_at TIMESTAMPTZ)` — idempotency ledger, same INSERT-ON-CONFLICT shape as existing UNIQUE-constrained tables (`sdk_api_keys.key_hash`). |
+
+No changes to `embyr-proto`, `embyr-admin` (Leptos SPA — Decision 1 backend-only boundary honored,
+no frontend components touched), or `embyr-agent`.
+
+---
+
+### Wave: DESIGN / [REF] Driving Ports (Inbound) — card-payments-backend
+
+| Port | Location | Adapter(s) | What it does |
+|------|----------|------------|--------------|
+| `GET /admin/v1/billing/subscription` | `webhook_router` — no, session sub-router (`crates/embyr-server::admin::router`) | `billing_subscription::get_subscription` | Session-authed, any role. Returns real Stripe-backed subscription + `cap_status` (Free-plan only, from `CapStatusCache`). Lazy Stripe Customer provisioning on first call. |
+| `POST /admin/v1/billing/subscription` | session sub-router | `billing_subscription::post_subscription` | Session-authed, Owner/Admin (`check_rbac`). Real Stripe Subscription create/update; local row updates only after Stripe confirms (write-through, not write-behind). Clears `free_cap_exceeded` and reactivates on upgrade. |
+| `POST /admin/v1/webhooks/stripe` | **new 5th sub-router** (`webhook_router`) | `webhooks_stripe::stripe_webhook_handler` | No session/operator auth — own `stripe_signature_middleware` (D-11). Idempotent via `processed_webhook_events`. |
+| `POST /admin/v1/billing/run-metering` | operator sub-router | `billing_metering::run_metering` | Operator-authed only (Bearer `EMBYR_ADMIN_KEY`, mirrors existing operator routes). Manually triggerable; DEVOPS wires scheduled invocation. |
+
+No new customer-facing gRPC/REST surface on `:8080`/`:8081` (confirmed per DISCUSS Driving Ports —
+the cap check modifies existing internal enforcement behavior, adds no new port).
+
+---
+
+### Wave: DESIGN / [REF] Driven Ports + Adapters (Outbound) — card-payments-backend
+
+#### `StripeGateway` (`crates/embyr-server::adapters::stripe_gateway`)
+
+Not a `trait`-based port — mirrors ADR-015's "concrete struct, not a port interface" precedent for
+`RateLimiter`: Stripe has exactly one implementation (real Stripe test-mode/live API, D-13
+explicitly forbids a mocked port), so a trait would add indirection with no test-double benefit.
+
+Conceptual interface (concrete methods on a concrete struct, not a trait — no code beyond this
+signature list belongs in this document):
+
+```
+impl StripeGateway {
+    async fn get_or_create_customer(&self, account_id: AccountId) -> Result<CustomerId, StripeError>;
+    async fn upsert_subscription(&self, customer_id: &CustomerId, plan: SubscriptionPlan) -> Result<StripeSubscription, StripeError>;
+    async fn push_usage_record(&self, subscription_item_id: &str, quantity: u64, timestamp: DateTime<Utc>, idempotency_key: &str) -> Result<(), StripeError>;
+    fn verify_webhook_signature(&self, payload: &[u8], sig_header: &str) -> Result<stripe::Event, StripeError>;
+    async fn probe(&self) -> Result<(), AdapterProbeError>;
+}
+```
+
+**Earned Trust — `probe()` design (Principle 12):**
+
+| Aspect | Design |
+|--------|--------|
+| What it calls | `GET /v1/balance` — Stripe's standard zero-side-effect "is this API key valid and reachable" endpoint |
+| Timeout | 3 s (mirrors the existing `SecretFetcher.probe()` cloud-IAM-reachability pattern's soft-timeout shape) |
+| Failure action | **Soft failure — WARN, not refuse to start.** Logs `health.startup.warn: stripe_probe_failed`. Rationale: billing is not on the Firestore protocol-serving critical path (rank-1 quality attribute); a Stripe outage at deploy time should not block the data plane from starting, mirroring the existing `Cloud IAM reachability` probe's documented precedent ("Warn only — IAM may be region-scoped"). |
+| Fault-injection scenarios (CI, required) | (1) Invalid API key → 401 → `StripeProbeError::Unauthorized`. (2) Network unreachable/timeout → `StripeProbeError::Unreachable` within the 3 s bound (no infinite hang). (3) Valid key, restricted/disabled account → `StripeProbeError::AccountRestricted` (from response body inspection). |
+| Config validation (non-network) | `STRIPE_WEBHOOK_SIGNING_SECRET` format-checked at startup (`whsec_` prefix), mirroring `validate_encryption_key_hex`'s format-check-before-first-use pattern — not a network probe, a cheap local sanity check. |
+
+#### `LifecycleDeps` (`crates/embyr-server::admin::handlers::lifecycle`)
+
+Not a new adapter — a narrowed dependency struct extracted from `OperatorState` so
+`set_project_status`/`suspend_account_projects`/`activate_account_projects` are callable from
+`WebhookState` and `CapUsageRefresher` without depending on operator-only fields (admin key,
+AWS/GCP fetchers). No new IO surface; purely a signature refactor for reuse.
+
+---
+
+### Wave: DESIGN / [REF] Technology Choices — card-payments-backend
+
+| Layer | Choice | Version | License | Rationale |
+|-------|--------|---------|---------|-----------|
+| Stripe SDK | `async-stripe` | latest stable (pin exact series at implementation time) | MIT | See ADR-021 — API surface size (5 resource areas) and webhook-signature security-criticality favor a maintained typed SDK over hand-rolled `reqwest`, mirroring the `aws-sdk-secretsmanager` precedent rather than the single-endpoint `GcpSecretFetcher` precedent. |
+| Background task scheduling | `tokio::time::interval` (existing pattern) | — (already a workspace dep) | MIT | `CapUsageRefresher` reuses the exact `QueryLogSweeper`/`SessionCleaner` interval-loop + `pg_try_advisory_lock` shape. Zero new dependency. |
+| Idempotency (webhooks) | Postgres `UNIQUE` + `INSERT ... ON CONFLICT` | — (existing `sqlx`) | — | Mirrors `sdk_api_keys.key_hash UNIQUE` precedent. Zero new dependency. |
+| Idempotency (usage records) | `async-stripe`'s native idempotency-key parameter | — | — | Reuses Stripe's own server-side idempotency guarantee instead of a redundant local ledger table. |
+
+---
+
+### Wave: DESIGN / [REF] Reuse Analysis — card-payments-backend
+
+| Existing Component | File | Overlap | Decision | Justification |
+|-------------------|------|---------|----------|---------------|
+| `router.rs`'s 4-sub-router composition-root pattern | `crates/embyr-server/src/admin/router.rs` | New webhook sub-router | **EXTEND** | 5th sub-router merged into `build_admin_router`, structurally identical to `public_router` (no session/operator `route_layer`) plus its own `stripe_signature_middleware` (D-11 locked) |
+| `lifecycle.rs::set_project_status` | `crates/embyr-server/src/admin/handlers/lifecycle.rs` | Single-project suspend/activate | **EXTEND** | Visibility widened + dependency struct narrowed + two new account-fan-out wrappers; D-12 mandates literally the same function for both new triggers — zero duplicated suspend logic |
+| `config.rs`'s `resolve_secret_source`/`fetch_from_secret_manager` (ADR-018) | `crates/embyr-server/src/config.rs` | Env-var + AWS/GCP-secret-manager resolution | **EXTEND** | 3 new resolver calls (`STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SIGNING_SECRET`/`STRIPE_PUBLISHABLE_KEY`), zero new resolution logic |
+| `adapters/aws_secret_fetcher.rs` / `gcp_secret_fetcher.rs` adapter shape | `crates/embyr-server/src/adapters/` | One-file-per-external-integration, `probe()`-bearing adapter | **PATTERN REUSE** | `stripe_gateway.rs` follows the identical shape; no shared code (different external API entirely) |
+| `middleware::rate_limit::RateLimiter`/`TokenBucket` | `crates/embyr-server/src/middleware/rate_limit.rs` | Per-request quota enforcement | **CREATE NEW** (cap-check mechanism explicitly NOT built on top of this) | See ADR-020 — different key (account vs. project), different time semantics (cumulative-since-cycle vs. continuous refill), different reset boundary; AC-206-06 explicitly locks this as a MUST-NOT-literally-extend |
+| `daily_project_metrics` + `billing.rs`'s account-scoped aggregation query shape | `crates/embyr-server/src/admin/handlers/billing.rs` | Per-account usage aggregation, `LEFT JOIN`+`GROUP BY` pattern | **EXTEND** (query shape reused; new query text) | `CapUsageRefresher` and the metering batch job reuse the identical join/aggregation shape against a different date-range predicate (calendar-month vs. `billing.rs`'s 4 fixed ranges) — not literally callable as-is, but zero new aggregation *pattern* invented |
+| `adapters/credential_cache.rs` (`CredentialCache`) | `crates/embyr-server/src/adapters/credential_cache.rs` | In-process, per-instance keyed cache | **PATTERN REUSE** | `CapStatusCache` follows the identical `Arc<RwLock<HashMap<K,V>>>`-per-instance shape; different key/value types, so not the same struct |
+| `sweepers::query_log_sweeper`/`session_cleaner` advisory-lock background task shape | `crates/embyr-server/src/sweepers/` | Scheduled, advisory-lock-guarded interval task | **PATTERN REUSE** | `CapUsageRefresher` follows the identical `pg_try_advisory_lock` + interval-loop shape |
+| `admin_api_keys.key_hash`/`sdk_api_keys.key_hash` UNIQUE-constraint idempotency shape | migrations | Idempotent-write-via-UNIQUE-constraint pattern | **PATTERN REUSE** | `processed_webhook_events(event_id PRIMARY KEY)` follows the identical INSERT-ON-CONFLICT idempotency shape |
+| `admin/state.rs`'s `OperatorState`/`UserAdminState` split (B-AD-07) | `crates/embyr-server/src/admin/state.rs` | Per-sub-router state struct, separated by dependency graph | **PATTERN REUSE → CREATE NEW `WebhookState`** | B-AD-07's precedent ("different dependency graphs; merging creates unnecessary coupling") applies directly: webhook router needs `StripeGateway` + webhook secret, neither existing state struct needs those |
+| `embyr-core::rate_limit::RateLimitInfo` | `crates/embyr-core/src/rate_limit.rs` | Pure IO-free domain value type + derivation shape | **PATTERN REUSE** | `embyr-core::admin::billing` follows the identical "pure struct + pure derivation fn, zero IO" shape |
+| `daily_project_metrics` schema (`migrations/0002_metrics.sql`) | migrations | 4-dimension usage tracking | **GAP — flagged, not silently extended** | No `storage_bytes` column exists; `billing.rs` already hard-codes storage as a V1 placeholder (`0`). See ADR-020 § Storage Dimension Gap and Open Questions (OQ-CP-1) — reads/writes/deletes are fully real in this feature; storage is a documented, pre-existing gap this feature inherits rather than introduces |
+
+Zero unjustified CREATE NEW decisions. The one genuine CREATE NEW (cumulative cap-check mechanism)
+is extensively justified in ADR-020 with 3 rejected alternatives.
+
+---
+
+### Wave: DESIGN / [REF] Background Tasks — card-payments-backend
+
+| Task | Location | Schedule | Advisory Lock Key | Failure Mode |
+|------|----------|----------|-------------------|--------------|
+| `CapUsageRefresher` | `embyr-server::sweepers::cap_usage_refresher` | Every `EMBYR_CAP_CHECK_INTERVAL_SECS` (default 30s) | `pg_try_advisory_lock(fnv1a_hash("embyr_cap_check"))` | Lock held by another instance → skip cycle, retry next cycle (mirrors `QueryLogSweeper`/`SessionCleaner`) |
+
+`run_metering` (US-205) is **not** a background task — it is a plain async function invoked
+synchronously by `POST /admin/v1/billing/run-metering`. Scheduling (cron/k8s CronJob) is explicit
+DEVOPS-wave scope per Slice 05's own OUT Scope declaration — this asymmetry with `CapUsageRefresher`
+is a deliberate, DISCUSS-locked scope split, not an inconsistency.
+
+---
+
+### Wave: DESIGN / [REF] C4 System Context — Extended (card-payments-backend)
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (extended for card-payments-backend)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Uses Firebase SDK pointed at embyr")
+    Person(operator, "Service Operator (Sam)", "Provisions projects; triggers metering runs")
+    Person(userAdmin, "Account Admin (Chris)", "Views/changes subscription plan via web console")
+    Person(tenantAdmin, "Tenant Admin (Morgan)", "Manages cloud secrets for DB credentials")
+
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator + admin console API. Admin port now also ingests Stripe webhooks and enforces Free-plan caps.")
+
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK")
+    System_Ext(systemDB, "System Postgres", "Existing tables + new: subscriptions, processed_webhook_events. accounts gains stripe_customer_id.")
+    System_Ext(customerDB, "Customer Postgres")
+    System_Ext(adminUI, "embyr-admin-ui (Leptos SPA)", "Unchanged this feature — backend-only per Decision 1. Will consume this API in a future increment.")
+    System_Ext(stripe, "Stripe", "Payment processor. Customers, Subscriptions, Invoices, Usage Records. Sends webhook events for subscription/invoice state changes.")
+    System_Ext(awsSecrets, "AWS Secrets Manager")
+    System_Ext(gcpSecrets, "GCP Secret Manager")
+
+    Rel(sdkDev, firebaseSDK, "Calls")
+    Rel(firebaseSDK, embyr, "gRPC / gRPC-Web / BrowserChannel / REST", "TCP :8080 / :8081")
+    Rel(operator, embyr, "Admin API + POST run-metering", "HTTP :9090 Bearer admin_key")
+    Rel(userAdmin, adminUI, "Views billing (existing mock UI, unchanged)")
+    Rel(embyr, systemDB, "Project/account/subscription/webhook-event data", "Postgres")
+    Rel(embyr, customerDB, "Document CRUD, LISTEN/NOTIFY", "Postgres")
+    Rel(embyr, stripe, "Creates/updates Customers, Subscriptions, pushes Usage Records", "HTTPS, sk_test_/sk_live_ API key")
+    Rel(stripe, embyr, "Delivers webhook events (subscription/invoice changes)", "HTTPS POST /admin/v1/webhooks/stripe, HMAC-signed")
+    Rel(embyr, awsSecrets, "GetSecretValue (cache miss)", "AWS SDK")
+    Rel(embyr, gcpSecrets, "AccessSecretVersion (cache miss)", "GCP SDK")
+```
+
+---
+
+### Wave: DESIGN / [REF] C4 Container Diagram — Extended (card-payments-backend)
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (card-payments-backend extension)
+
+    Person(operator, "Service Operator")
+    Person(userAdmin, "Account Admin (session cookie)")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(lb, "Load Balancer")
+        Container(embyrA, "embyr-rs instance A", "Rust binary", "Admin port :9090 now serves a 5th sub-router (webhook_router) alongside operator/dual-auth/public/session. New in-process CapStatusCache. New CapUsageRefresher background task.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "New: subscriptions, processed_webhook_events. accounts gains stripe_customer_id.")
+    }
+
+    System_Boundary(customerInfra, "Customer Infrastructure") {
+        ContainerDb(custDB, "Customer Postgres")
+    }
+
+    System_Ext(stripe, "Stripe API + Webhooks")
+    System_Ext(awsSecrets, "AWS Secrets Manager")
+    System_Ext(gcpSecrets, "GCP Secret Manager")
+
+    Rel(operator, embyrA, "POST run-metering + existing operator routes", "HTTP :9090 Bearer admin_key")
+    Rel(userAdmin, embyrA, "GET/POST subscription (existing session-auth pattern)", "HTTP :9090 session cookie")
+    Rel(stripe, embyrA, "Delivers signed webhook events", "HTTP :9090 POST /admin/v1/webhooks/stripe")
+    Rel(embyrA, stripe, "StripeGateway: Customers, Subscriptions, Usage Records", "HTTPS")
+    Rel(embyrA, sysDB, "subscriptions, processed_webhook_events, daily_project_metrics (read)", "Postgres SQL")
+    Rel(lb, embyrA, "Firestore traffic (unmodified hot path)", "gRPC / HTTP")
+    Rel(embyrA, custDB, "Document CRUD, LISTEN/NOTIFY (unmodified)", "Postgres SQL")
+    Rel(embyrA, awsSecrets, "GetSecretValue")
+    Rel(embyrA, gcpSecrets, "AccessSecretVersion")
+```
+
+---
+
+### Wave: DESIGN / [REF] C4 Component Diagram — Billing Subsystem (card-payments-backend)
+
+Complex, multi-part subsystem (webhook ingestion + cumulative cap-check + batch metering +
+Stripe adapter) — L3 diagram per SKILL mandate.
+
+```mermaid
+C4Component
+    title Component Diagram — Billing Subsystem (card-payments-backend)
+
+    Container_Boundary(adminPort, "embyr-server Admin Port :9090") {
+        Component(webhookRouter, "Webhook Sub-Router", "embyr-server::admin (webhook routes)", "Route: POST /admin/v1/webhooks/stripe. Layer: stripe_signature_middleware. No session/operator auth.")
+        Component(stripeSigMw, "stripe_signature_middleware", "embyr-server::admin::middleware::stripe_signature", "Buffers raw body, verifies Stripe-Signature via StripeGateway. 401 on failure, zero DB writes.")
+        Component(webhookHandler, "stripe_webhook_handler", "embyr-server::admin::handlers::webhooks_stripe", "Dedupe via processed_webhook_events. Dispatches by event.type: subscription sync, dunning suspend/reactivate, unknown-type 200 no-op.")
+
+        Component(subscriptionHandlers, "billing_subscription handlers", "embyr-server::admin::handlers::billing_subscription", "get_subscription (session-authed, any role, reads CapStatusCache). post_subscription (Owner/Admin, write-through Stripe call then local update).")
+        Component(meteringHandler, "run_metering handler", "embyr-server::admin::handlers::billing_metering", "Operator-authed. Reads daily_project_metrics, pushes Stripe Usage Records per project per non-zero dimension, per-project failure isolation.")
+
+        Component(capRefresher, "CapUsageRefresher", "embyr-server::sweepers::cap_usage_refresher", "Interval background task (30s default), advisory-lock-guarded. Computes cumulative Free-plan usage, updates CapStatusCache, calls suspend_account_projects on cap-crossing.")
+        Component(capCache, "CapStatusCache", "embyr-server::adapters::cap_status_cache", "Arc<RwLock<HashMap<AccountId, CapStatus>>>, in-process per-instance.")
+
+        Component(stripeGateway, "StripeGateway", "embyr-server::adapters::stripe_gateway", "Sole async-stripe import site. Customer/Subscription/UsageRecord calls, webhook signature verification, probe().")
+
+        Component(lifecycleExt, "lifecycle.rs (extended)", "embyr-server::admin::handlers::lifecycle", "set_project_status (widened visibility) + new suspend_account_projects/activate_account_projects fan-out wrappers. Single suspend mechanism, all triggers (operator, dunning, cap-exceeded).")
+    }
+
+    Container_Boundary(core, "embyr-core (library crate)") {
+        Component(billingDomain, "billing domain", "embyr-core::admin::billing", "Subscription, CapStatus, compute_cap_status(), cap_exceeded() — pure, zero IO.")
+    }
+
+    System_Ext(systemDB, "System Postgres", "subscriptions, processed_webhook_events, daily_project_metrics, projects")
+    System_Ext(stripe, "Stripe API + Webhooks")
+    System_Ext(credCache, "CredentialCache", "Evicted on suspend, matching existing suspend_project behavior byte-for-byte")
+
+    Rel(webhookRouter, stripeSigMw, "layered with")
+    Rel(webhookRouter, webhookHandler, "routes to")
+    Rel(stripeSigMw, stripeGateway, "verifies signature via")
+    Rel(webhookHandler, systemDB, "dedupe check + subscriptions sync in")
+    Rel(webhookHandler, lifecycleExt, "dunning suspend/reactivate via")
+    Rel(webhookHandler, billingDomain, "classifies WebhookEventOutcome using")
+
+    Rel(subscriptionHandlers, stripeGateway, "Customer/Subscription calls via")
+    Rel(subscriptionHandlers, capCache, "reads cap_status from")
+    Rel(subscriptionHandlers, systemDB, "reads/writes subscriptions in")
+    Rel(subscriptionHandlers, lifecycleExt, "reactivate-on-upgrade via")
+
+    Rel(meteringHandler, systemDB, "reads daily_project_metrics from")
+    Rel(meteringHandler, stripeGateway, "pushes Usage Records via")
+
+    Rel(capRefresher, systemDB, "computes cumulative usage from")
+    Rel(capRefresher, billingDomain, "derives CapStatus using")
+    Rel(capRefresher, capCache, "writes")
+    Rel(capRefresher, lifecycleExt, "suspends on cap-crossing via")
+
+    Rel(lifecycleExt, systemDB, "UPDATE projects.status in")
+    Rel(lifecycleExt, credCache, "evicts on suspend")
+
+    Rel(stripeGateway, stripe, "HTTPS API calls")
+```
+
+---
+
+### Wave: DESIGN / [REF] Architecture Enforcement — card-payments-backend
+
+| Concern | Enforcement Mechanism |
+|---------|----------------------|
+| `embyr-core::admin::billing` must not import IO crates | `cargo-deny` `deny.toml` for `embyr-core`, unchanged (`async-stripe`, `sqlx`, `tokio`, `axum` in deny list) |
+| `StripeGateway` is the sole `async-stripe` import site | Code review convention (mirrors existing `AwsSecretFetcher`/`GcpSecretFetcher` sole-importer convention — not newly tool-enforced) |
+| One suspend mechanism, all triggers (D-12) | Integration test (DISTILL wave): asserts dunning (US-204) and cap-exceeded (US-207) triggers both call `lifecycle::set_project_status` via a shared test helper / code-path assertion, not merely behaviorally similar output |
+| Webhook idempotency | Integration test: redelivers an identical `event.id` and asserts the second delivery is a no-op (no double state transition) |
+| Zero hot-path latency added | Integration test: benchmarks `:8080`/`:8081` request latency before/after this feature lands, asserts no regression (the cap check adds no code to this path — see ADR-020) |
+| `async-stripe` license/CVE compliance | `cargo deny check` (unchanged `deny.toml`), covers the new dependency automatically |
+| Mutation testing | `cargo-mutants -p embyr-server --filter billing` targets `compute_cap_status`/`cap_exceeded` (embyr-core, pure), webhook dedupe logic, and the `suspend_account_projects`/`activate_account_projects` fan-out. Per-feature mutation gate per project `CLAUDE.md`. |
+
+---
+
+### Wave: DESIGN / [REF] Application-Level Decisions Table — card-payments-backend
+
+| ID | Decision | Verdict | Rationale |
+|----|----------|---------|-----------|
+| CPB-AD-01 | D-9's cap check is a new background-computed mechanism, not a `RateLimiter` extension | Accepted — see ADR-020 | Different key/time-semantics/reset-boundary; AC-206-06 locks this explicitly |
+| CPB-AD-02 | `async-stripe` over hand-rolled `reqwest` | Accepted — see ADR-021 | API surface size + webhook-signature security-criticality; mirrors the `aws-sdk-secretsmanager` precedent, not `GcpSecretFetcher`'s |
+| CPB-AD-03 | Enforcement happens in a background task; the `:8080`/`:8081` hot path is unmodified | Accepted | Eliminates the request-hot-path race condition Slice 07 explicitly flagged; adds zero latency to the rank-1/rank-4 quality-attribute-critical data plane |
+| CPB-AD-04 | Free-plan cap-check billing cycle = UTC calendar month; Stripe period fields are Pro-display-only | Accepted | AC-206-05 requires a real cycle boundary; Free accounts have no guaranteed Stripe `Subscription` object to source one from |
+| CPB-AD-05 | Storage dimension NOT metered/capped in V1 | Accepted, flagged as OQ-CP-1 | No `daily_project_metrics` column exists; computing it requires a new `BackendAdapter::table_size()` port method against each customer DB — real scope beyond this feature's locked boundary |
+| CPB-AD-06 | Webhook usage-record idempotency reuses Stripe's native idempotency-key mechanism, no local ledger table | Accepted | Avoids a redundant, potentially-drifting local audit table for a guarantee Stripe already provides server-side |
+| CPB-AD-07 | `lifecycle::set_project_status` narrowed to `LifecycleDeps`, not `OperatorState` | Accepted | Enables literal reuse (D-12) from non-operator callers (webhook handler, background task) without those callers depending on operator-only fields |
+| CPB-AD-08 | `billing_subscription.rs` is a new file, not an extension of existing `billing.rs` | Accepted | Existing `billing.rs` is a pure read-only reporting query with zero external-IO; mixing Stripe calls into it violates single-responsibility |
+| CPB-AD-09 | `run_metering` is HTTP-triggered, not a Tokio-interval sweeper (unlike `CapUsageRefresher`) | Accepted | DISCUSS Slice 05 explicitly descopes scheduling to DEVOPS-wave; deliberate asymmetry, not an inconsistency |
+| CPB-AD-10 | No `_previous`/rotation variant for `STRIPE_*` secrets in this feature | Accepted, flagged as OQ-CP-2 | Not locked by any D-decision; ADR-018's dual-key pattern is available to extend later if Stripe key rotation becomes an operational need |
+
+---
+
+### Wave: DESIGN / [REF] Open Questions — card-payments-backend
+
+| ID | Question | Blocking | Resolution Timing |
+|----|----------|---------|-------------------|
+| OQ-CP-1 | Storage-dimension metering/cap enforcement — requires a new `BackendAdapter::table_size()` port method against customer DBs | No (V1 ships reads/writes/deletes complete; storage remains the existing `billing.rs`-precedented placeholder) | Follow-up feature |
+| OQ-CP-2 | `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SIGNING_SECRET` rotation (dual-key window, ADR-018-shaped) | No (not locked by DISCUSS; extend later if needed) | Follow-up feature, if operationally needed |
+| OQ-CP-3 | `EMBYR_CAP_CHECK_INTERVAL_SECS` default (30s) — is this the right latency/load trade-off at production scale (many Free accounts)? | No (configurable; DEVOPS can tune post-launch against KPI #5 measurement) | DEVOPS-wave observation, post-launch |
+| OQ-CP-4 | `GET /admin/v1/billing/metering-log` audit trail (mentioned as illustrative in US-205's elevator pitch) | No — explicitly not built; KPI #4's reconciliation job is DEVOPS-wave scope per DISCUSS's own Out of Scope section | DEVOPS-wave, if pursued |
+| OQ-CP-5 | Peer review was skipped per-wave (background dispatch default) — but the D-9 resolution (ADR-020) is genuinely novel/contested enough that a dedicated review WOULD normally be warranted per the SKILL's trigger conditions | Flagged for orchestrator | Orchestrator's call — mandatory consolidated review still fires at end of DISTILL |
+
+---
+
+### Wave: DESIGN / [REF] External Integrations Requiring Contract Tests — card-payments-backend
+
+```
+External Integrations Requiring Contract Tests:
+- Stripe (REST API + Webhooks): embyr-server consumes Customer/Subscription/Invoice/UsageRecord
+  APIs and receives webhook events (customer.subscription.*, invoice.payment_*).
+  Recommended: consumer-driven contract tests (Pact) in CI's acceptance stage, covering both
+  directions — embyr-as-consumer of Stripe's REST API responses, and embyr-as-provider of the
+  webhook endpoint's expected request shape (Stripe's own webhook payload schema). This is the
+  highest-risk external boundary in this feature: a Stripe API contract change (new required
+  field, deprecated Usage Records API in favor of the newer Billing Meters API, webhook payload
+  schema evolution) would silently break subscription sync, metering, or dunning without contract
+  tests catching it pre-production. D-13's real-Stripe-test-mode testing strategy catches *some*
+  drift at test time, but only for the specific call shapes exercised by acceptance tests — Pact
+  contract tests against Stripe's published OpenAPI schema (Stripe publishes one) would catch
+  drift more systematically.
+```
+
+This is a forward-flag from the frontend `card-payments` feature's own DESIGN section (§ Driven
+Ports — Forward Contract), now realized as this feature's own highest-risk boundary.
+
+

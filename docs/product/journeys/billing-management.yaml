@@ -15,8 +15,13 @@ source: docs/feature/card-payments/feature-delta.md
 scope_note: >
   This journey covers the frontend billing UI slice only (card-payments, mock-data-first per
   ADR-007). Steps below render against deterministic mock data in V1. Real Stripe-backed data
-  (subscriptions table, webhook-driven state, live rate-limiter enforcement) is scope for the
-  recommended follow-up feature `card-payments-backend` — see feature-delta.md Scope Assessment.
+  (subscriptions table, webhook-driven state, live rate-limiter enforcement) is now scoped and
+  DISCUSS-complete under `card-payments-backend` (2026-08-11) — see
+  docs/feature/card-payments-backend/feature-delta.md. That feature is backend-only (no UI
+  changes to the steps below); it makes the `shared_artifacts` below real without changing this
+  journey's steps, outputs, or emotional arc. card-payments-backend also documents its own
+  lightweight system/operator flows (webhook delivery, dunning escalation, real-time cap
+  enforcement) separately, per its Decision 3 (no new end-user UX surface here).
 
 happy_path:
   - step: 1
@@ -99,6 +104,7 @@ slices:
     path: docs/feature/card-payments/slices/slice-07-suspension-banner.md
   - id: slice-08
     path: docs/feature/card-payments/slices/slice-08-test-mode-simulator.md
-  # Recommended follow-up feature (NOT executed by this DISCUSS wave — see feature-delta.md
-  # Scope Assessment): card-payments-backend — Stripe SDK, subscriptions/processed_webhook_events
-  # schema, 5th webhook sub-router, rate-limiter extension, daily batch job, dunning.
+  # Follow-up feature card-payments-backend (DISCUSS-complete 2026-08-11, see
+  # docs/feature/card-payments-backend/feature-delta.md): Stripe SDK, subscriptions/
+  # processed_webhook_events schema, 5th webhook sub-router, rate-limiter extension,
+  # daily batch job, dunning. Backend-only — no changes to the steps/slices above.

@@ -249,6 +249,14 @@ jobs:
         must not require sticky routing or per-node configuration
     opportunity_score: 11
     priority: high
+    # NOTE (card-payments-backend DISCUSS, 2026-08-11): D-9 (real-time
+    # Free-plan cap enforcement) physically extends crates/embyr-server/
+    # src/middleware/rate_limit.rs — the same file this job's distributed
+    # token bucket lives in — but is a DIFFERENT concern: JOB-11 is about
+    # per-second REQUEST-RATE fairness across tenants regardless of node
+    # count; D-9 is about MONTHLY-CUMULATIVE usage vs. a paid-plan cap,
+    # unrelated to horizontal scaling. Cross-referenced, not merged — see
+    # docs/feature/card-payments-backend/feature-delta.md § Open Question.
 
   - id: JOB-12
     name: observability
@@ -387,3 +395,12 @@ jobs:
         all familiar idioms; the design should not invent a new mental model
     opportunity_score: 17
     priority: critical
+    # NOTE (card-payments-backend DISCUSS, 2026-08-11): the functional
+    # dimension above was validated against mock data only (feature=
+    # card-payments). card-payments-backend makes it real: a Stripe
+    # Customer/Subscription, webhook-driven sync, daily usage metering,
+    # and real-time cap enforcement replacing the mock-derived
+    # SuspensionBanner/TestClockCard state. JOB-14 itself is unchanged —
+    # no new job was warranted, this is JOB-14's "make it real" backend
+    # half, exactly as admin-api-v2 was JOB-10's backend half of
+    # user-admin-ui. See docs/feature/card-payments-backend/feature-delta.md.

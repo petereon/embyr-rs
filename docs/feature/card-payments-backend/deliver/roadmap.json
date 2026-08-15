@@ -1,0 +1,259 @@
+{
+  "roadmap": {
+    "project_id": "card-payments-backend",
+    "created_at": "2026-08-11T00:00:00Z",
+    "total_steps": 8,
+    "notes": "OPERATING MODEL (per nw-distill red-classification.md, 36 #[ignore]/non-ignore acceptance scenarios across cpb01..cpb07 -- the 2 additional grep-visible unit tests advisory_lock_key_is_deterministic/advisory_lock_key_differs_for_different_input in cap_usage_refresher.rs are pre-existing, already-passing pure-function tests, NOT RED, and are explicitly excluded from this roadmap's 36-scenario coverage per red-classification.md's own note). For each step below, un-ignore the scenario(s) named in scenario_name ONE AT A TIME (the walking-skeleton scenario in 01-01 is already non-#[ignore] and already RED), implement just enough of the named production symbol(s) to make it pass, then run the full cpb01..cpb07 suite (not just the one test) before committing. Steps are ordered by DISCUSS's 3-Release-Group backbone (feature-delta.md Story Map Releases / Prioritization: Release 1 = Slices 01-04, Release 2 = Slice 05, Release 3 = Slices 06-07) -- phase id matches release-group number. FUNCTION-CALL DEPENDENCY TRACE (done before assignment, per this dispatch's explicit instruction to avoid the card-payments sibling's two backward-call-graph bugs): billing_subscription::post_subscription (step 01-02) internally calls lifecycle::activate_account_projects for AC-202-04 -- 01-02 is therefore the step that FIRST implements activate_account_projects, not a later one. webhooks_stripe::stripe_webhook_handler's invoice.payment_failed arm (step 01-04) internally calls lifecycle::suspend_account_projects -- 01-04 is therefore the step that FIRST implements suspend_account_projects; its invoice.payment_succeeded arm calls activate_account_projects, which by that point already exists from 01-02 (reused, not re-implemented -- no backward dependency). CapUsageRefresher::run_cycle (US-206/US-207) is one physical function DISTILL scaffolded with a single panic body, split across two roadmap steps by the two business rules it contains: 03-01 (cpb06, US-206) implements the compute-and-cache-write half only; 03-02 (cpb07, US-207) extends the SAME function with the cap_exceeded-check-and-suspend half, which calls lifecycle::suspend_account_projects -- already implemented in 01-04 (reused) -- and depends on post_subscription's free_cap_exceeded-clearing branch from 01-02 for AC-207-05's reactivation-on-upgrade assertion. No step calls a function scheduled for implementation in a LATER step; every callee is either pre-existing/real (set_project_status, CapStatusCache::get/set, SubscriptionPlan::parse, check_rbac) or implemented in the same step or an earlier one. DISTILL-vs-DESIGN divergence flags carried into implementation_notes where relevant: (1) upstream-issues.md Finding 1 -- CapUsageRefresher has no QueryLogSweeper/SessionCleaner precedent to literally reuse (that code never existed in this codebase); DELIVER builds run_cycle fresh, following ADR-020's described SHAPE (interval + pg_try_advisory_lock), not a citation that turned out to be false. (2) Finding 3 -- STRIPE_* secret resolution in config.rs already uses plain std::env::var (not the full ADR-018 AWS/GCP resolver chain DESIGN's brief.md described) and is already complete/non-scaffolded; no roadmap step touches config.rs. (3) Findings 2 and 4 (build_admin_router blast radius; async-stripe TLS/deny.toml wiring) are fully absorbed by DISTILL already (cargo check --workspace --tests is green) and require no DELIVER-wave production changes; no step lists Cargo.toml, deny.toml, router.rs's wrapper functions, main.rs's composition-root argument list, or tests/admin_api_v2/common/mod.rs as files_to_modify. Earned Trust addition beyond AC scope: step 01-01 also wires StripeGateway::probe() into main.rs's composition root (soft-failure/WARN, not startup refusal, per ADR-021/DESIGN Driven Ports table) -- main.rs currently constructs StripeGateway but never calls .probe() on it (confirmed by reading main.rs lines 171-181; the comment there explicitly says 'once implemented'), so wire\u2192probe\u2192use is presently incomplete for this adapter."
+  },
+  "phases": [
+    {
+      "id": "01",
+      "name": "Release 1: Subscription & Payment Lifecycle (Slices 01-04)",
+      "steps": [
+        {
+          "id": "01-01",
+          "name": "Slice 01 (US-201, Walking Skeleton) -- real Stripe Customer provisioning + GET /admin/v1/billing/subscription",
+          "criteria": [
+            "First billing call for an account with no stripe_customer_id creates a real Stripe test-mode Customer, persists accounts.stripe_customer_id, and seeds a subscriptions row (plan=free, status=active) (AC-201-02/04)",
+            "Repeated calls reuse the existing stripe_customer_id -- never create a second Customer (AC-201-03)",
+            "A Pro-plan account (subscriptions row seeded directly) returns its real plan and current_period_end (AC-201-06)",
+            "Stripe API failure during first-time provisioning returns 502 with zero partial accounts/subscriptions state written (AC-201-05)",
+            "Unauthenticated requests (no session cookie or admin Bearer key) return 401 (AC-201-01)",
+            "Response shape always includes plan, status, stripe_customer_id, current_period_end, card (AC-201-06)"
+          ],
+          "test_file": "tests/card_payments_backend/acceptance/cpb01_real_subscription_record.rs",
+          "scenario_name": "first_billing_call_auto_provisions_real_stripe_customer,repeated_calls_do_not_create_duplicate_stripe_customer,pro_plan_account_returns_its_real_period_end,stripe_unavailability_during_first_time_provisioning_leaves_no_partial_state,unauthenticated_request_is_rejected",
+          "acceptance_criteria": [
+            "AC-201-01",
+            "AC-201-02",
+            "AC-201-03",
+            "AC-201-04",
+            "AC-201-05",
+            "AC-201-06"
+          ],
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/stripe_gateway.rs",
+            "crates/embyr-server/src/admin/handlers/billing_subscription.rs",
+            "crates/embyr-server/src/main.rs"
+          ],
+          "implementation_notes": "Replace three RED panics. stripe_gateway.rs get_or_create_customer (panic: 'SCAFFOLD: true -- StripeGateway::get_or_create_customer not yet implemented -- RED scaffold (DISTILL, US-201)'): call async-stripe's Customer::create for a never-provisioned account, idempotent by construction because the caller (get_subscription) only invokes this when accounts.stripe_customer_id IS NULL. billing_subscription.rs get_subscription (panic: 'SCAFFOLD: true -- billing_subscription::get_subscription not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-201/US-206)'): read accounts.stripe_customer_id for session.account_id; if NULL, call stripe_gateway.get_or_create_customer BEFORE any DB write, and only on Ok write accounts.stripe_customer_id + INSERT the Free subscriptions row together (AC-201-05 -- a StripeError maps to 502 with neither row written); if already present, read the existing subscriptions row and return it. Read cap_status_cache.get(account_id) (already-real API, no scaffold) and include cap_status only when Some -- a miss (this slice's accounts are always fresh) naturally omits the field, which is what cpb01's tests expect since none of them assert on cap_status. 401 (AC-201-01) requires no new code -- the handler is already mounted on session_router behind session_auth_middleware (router.rs, unchanged). Also implement StripeGateway::probe() (panic: 'SCAFFOLD: true -- StripeGateway::probe not yet implemented -- RED scaffold (DISTILL)'): GET /v1/balance, 3s timeout, map failures to StripeProbeError variants; wire a call to it in main.rs immediately after the stripe_gateway Arc is constructed (currently absent -- main.rs lines ~171-181 construct StripeGateway but never call .probe() on it), logging tracing::warn! with a health.startup.refused-shaped event on failure, WITHOUT exiting the process (soft-failure per ADR-021/DESIGN Driven Ports table -- billing is not on the Firestore protocol-serving critical path). Do not implement upsert_subscription, push_usage_record, or verify_webhook_signature in this step.",
+          "dependencies": []
+        },
+        {
+          "id": "01-02",
+          "name": "Slice 02 (US-202) -- POST /admin/v1/billing/subscription plan change + FIRST implementation of activate_account_projects",
+          "criteria": [
+            "Upgrading Free to Pro calls Stripe's Subscription create/update API and persists the new plan + a real stripe_subscription_id only after Stripe confirms (AC-202-02/03)",
+            "A failed Stripe call leaves the local subscriptions.plan unchanged -- no optimistic update (AC-202-03)",
+            "Upgrading from free_cap_exceeded clears subscriptions.status to active and reactivates every suspended project under the account in the same request (AC-202-04)",
+            "Only Owner/Admin roles may change the plan; Viewer returns 403 (AC-202-01)",
+            "A plan value other than 'free'/'pro' returns 422 (AC-202-05, D-4)"
+          ],
+          "test_file": "tests/card_payments_backend/acceptance/cpb02_real_plan_change.rs",
+          "scenario_name": "upgrading_free_to_pro_updates_the_real_stripe_subscription,failed_stripe_call_does_not_update_local_plan,upgrading_from_cap_exceeded_clears_suspension_and_reactivates_projects,viewer_role_cannot_change_plan,unrecognized_plan_value_is_rejected",
+          "acceptance_criteria": [
+            "AC-202-01",
+            "AC-202-02",
+            "AC-202-03",
+            "AC-202-04",
+            "AC-202-05"
+          ],
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/stripe_gateway.rs",
+            "crates/embyr-server/src/admin/handlers/billing_subscription.rs",
+            "crates/embyr-server/src/admin/handlers/lifecycle.rs"
+          ],
+          "implementation_notes": "Replace three RED panics. stripe_gateway.rs upsert_subscription (panic: 'SCAFFOLD: true -- StripeGateway::upsert_subscription not yet implemented -- RED scaffold (DISTILL, US-202)'): create-or-update the Stripe Subscription for customer_id to plan's price via async-stripe, returning StripeSubscriptionView on success. billing_subscription.rs post_subscription (panic: 'SCAFFOLD: true -- billing_subscription::post_subscription not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-202)'): check_rbac Owner/Admin (AC-202-01, reuse the existing check_rbac pattern already used elsewhere in admin/handlers -- do not reimplement RBAC); SubscriptionPlan::parse(body.plan) -> 422 on None (AC-202-05, embyr_core::admin::billing::SubscriptionPlan::parse is already real, not scaffolded); call stripe_gateway.upsert_subscription BEFORE any local write (write-through -- on Err, return an error status leaving subscriptions.plan untouched, AC-202-03); on Ok, UPDATE subscriptions SET plan, stripe_subscription_id, and if the prior status was free_cap_exceeded also SET status='active' and call lifecycle::activate_account_projects(account_id, &deps) (AC-202-04). lifecycle.rs activate_account_projects (panic: 'SCAFFOLD: true -- activate_account_projects not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-202/US-204)') -- THIS STEP IS THE FIRST IMPLEMENTATION, later reused unchanged by step 01-04's invoice.payment_succeeded arm and read again (not reimplemented) by step 03-02's AC-207-05 assertion: select every project currently 'suspended' under account_id and call the SAME private set_project_status(&project_id, \"active\", deps) function already real in this file, once per project (D-12 literal-reuse, not a parallel bulk UPDATE) -- return the count transitioned. Do NOT implement suspend_account_projects in this step (it stays scaffolded/panicking until 01-04).",
+          "dependencies": [
+            "01-01"
+          ]
+        },
+        {
+          "id": "01-03",
+          "name": "Slice 03 (US-203) -- Stripe webhook signature verification + subscription-sync dispatch (customer.subscription.* only)",
+          "criteria": [
+            "A valid, correctly-signed customer.subscription.updated event updates the local subscriptions row's plan/status/current_period_end (AC-203-04)",
+            "A missing/invalid Stripe-Signature header is rejected 401 before any DB write (AC-203-02)",
+            "A redelivered event.id is recorded once and is a 200 no-op on the second delivery -- subscriptions row not modified twice (AC-203-03)",
+            "A customer.subscription.deleted event leaves the local row not falsely showing an active paid plan (AC-203-05)",
+            "An unrecognized-but-validly-signed event type returns 200, logged and ignored, not an error (AC-203-06)",
+            "POST /admin/v1/webhooks/stripe is the 5th sub-router with its own stripe_signature_middleware, no session/operator auth (AC-203-01 -- already structurally true per router.rs, verified not re-implemented)"
+          ],
+          "test_file": "tests/card_payments_backend/acceptance/cpb03_webhook_ingestion.rs",
+          "scenario_name": "valid_subscription_updated_event_syncs_local_record,invalid_signature_is_rejected_before_any_state_change,duplicate_event_delivery_is_a_no_op,subscription_deleted_event_does_not_leave_falsely_active_row,unrecognized_but_validly_signed_event_type_returns_200",
+          "acceptance_criteria": [
+            "AC-203-01",
+            "AC-203-02",
+            "AC-203-03",
+            "AC-203-04",
+            "AC-203-05",
+            "AC-203-06"
+          ],
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/stripe_gateway.rs",
+            "crates/embyr-server/src/admin/middleware/stripe_signature.rs",
+            "crates/embyr-server/src/admin/handlers/webhooks_stripe.rs"
+          ],
+          "implementation_notes": "Replace three RED panics. stripe_gateway.rs verify_webhook_signature (panic: 'SCAFFOLD: true -- StripeGateway::verify_webhook_signature not yet implemented -- RED scaffold (DISTILL, US-203)'): delegate to async-stripe's Webhook::construct_event(payload, sig_header, webhook_secret) per ADR-021, returning WebhookEvent{id, event_type, payload} on Ok or StripeError::InvalidSignature on Err. stripe_signature.rs stripe_signature_middleware (panic: 'SCAFFOLD: true -- stripe_signature_middleware not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-203)'): buffer the raw request body, call state.stripe_gateway.verify_webhook_signature; on Err return 401 with zero DB writes (AC-203-02); on Ok stash the WebhookEvent in request extensions and forward via next.run(req). webhooks_stripe.rs stripe_webhook_handler (panic: 'SCAFFOLD: true -- webhooks_stripe::stripe_webhook_handler not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-203/US-204)') -- THIS STEP'S SCOPE IS SUBSCRIPTION-SYNC DISPATCH ONLY, invoice.* arms are step 01-04's scope on this same function: read the WebhookEvent from extensions; SELECT 1 FROM processed_webhook_events WHERE event_id=$1 -- if present, 200 no-op (AC-203-03) before touching subscriptions; else INSERT INTO processed_webhook_events(event_id, processed_at) then dispatch event_type: 'customer.subscription.updated' -> UPDATE subscriptions SET plan/status/current_period_end matched by stripe_subscription_id (AC-203-04); 'customer.subscription.deleted' -> UPDATE subscriptions SET status to a non-active terminal value (embyr_core::admin::billing::SubscriptionStatus::Canceled, AC-203-05); any other type -> 200, tracing::info!, no state change (AC-203-06). Leave a clearly-marked TODO/match-arm gap for invoice.payment_failed/invoice.payment_succeeded -- 01-04 fills those in on the same function.",
+          "dependencies": [
+            "01-01"
+          ]
+        },
+        {
+          "id": "01-04",
+          "name": "Slice 04 (US-204) -- dunning suspend/recovery dispatch + FIRST implementation of suspend_account_projects",
+          "criteria": [
+            "A final-failure invoice.payment_failed event suspends every active project under the account (AC-204-01)",
+            "A non-final (intermediate retry) invoice.payment_failed does not suspend (AC-204-02)",
+            "invoice.payment_succeeded reactivates every suspended project under the account (AC-204-03)",
+            "The dunning trigger calls the identical set_project_status function as the cap-exceeded trigger -- no parallel implementation (AC-204-04)",
+            "Suspension via this path evicts the credential cache identically to today's operator-initiated suspend_project (AC-204-05)",
+            "A final-failure event for an unmatched stripe_subscription_id is a safe 200 no-op",
+            "A redelivered final-failure event.id does not double-process (relies on 01-03's processed_webhook_events dedupe, verified here specifically against the suspend path)"
+          ],
+          "test_file": "tests/card_payments_backend/acceptance/cpb04_dunning_suspension_recovery.rs",
+          "scenario_name": "exhausted_retries_suspend_every_project_under_the_account,intermediate_retry_failure_does_not_suspend,payment_recovery_reactivates_every_project_under_the_account,suspension_via_dunning_evicts_credential_cache_like_operator_suspend,payment_failed_for_unknown_subscription_id_is_a_safe_no_op,duplicate_final_failure_event_does_not_double_process",
+          "acceptance_criteria": [
+            "AC-204-01",
+            "AC-204-02",
+            "AC-204-03",
+            "AC-204-04",
+            "AC-204-05"
+          ],
+          "files_to_modify": [
+            "crates/embyr-server/src/admin/handlers/webhooks_stripe.rs",
+            "crates/embyr-server/src/admin/handlers/lifecycle.rs"
+          ],
+          "implementation_notes": "Extend the SAME stripe_webhook_handler dispatch built in 01-03 with two new event_type arms (no new panic to quote here beyond the one 01-03 already removed -- this step adds match arms to already-real code). 'invoice.payment_failed': act ONLY when data.object.next_payment_attempt is null/absent (final-failure signal, AC-204-01 vs AC-204-02); resolve account_id via subscriptions.stripe_subscription_id = data.object.subscription -- if no matching row, 200 no-op (the unknown-subscription edge scenario); else call lifecycle::suspend_account_projects(account_id, &deps) and UPDATE subscriptions SET status='past_due'. 'invoice.payment_succeeded': resolve account_id the same way, call lifecycle::activate_account_projects (already implemented in 01-02 -- reused unchanged, not reimplemented here) and UPDATE subscriptions SET status='active'. The duplicate-final-failure scenario needs no new idempotency code -- 01-03's processed_webhook_events check already short-circuits a redelivered event.id before this dispatch runs. lifecycle.rs suspend_account_projects (panic: 'SCAFFOLD: true -- suspend_account_projects not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-204/US-207)') -- THIS STEP IS THE FIRST IMPLEMENTATION, later reused unchanged by step 03-02's cap-exceeded enforcement (AC-207-04's 'identical function as US-204' requirement is satisfied by construction, verified directly by a shared-call-site assertion, not by convention): select every project currently 'active' under account_id and call the SAME private set_project_status(&project_id, \"suspended\", deps) function, once per project -- this is also what makes AC-204-05's credential-cache-eviction claim true for free, since set_project_status already evicts on every call.",
+          "dependencies": [
+            "01-03",
+            "01-02"
+          ]
+        },
+        {
+          "id": "01-05",
+          "name": "Fix-up: migrate StripeGateway to real async-stripe-core typed builders (ADR-021 compliance)",
+          "criteria": [
+            "StripeGateway::get_or_create_customer uses async-stripe-core::customer::CreateCustomer (or equivalent typed builder), not hand-rolled reqwest",
+            "StripeGateway::probe() uses a typed async-stripe request (e.g. Balance retrieve), not hand-rolled reqwest",
+            "All 5 cpb01 tests still pass unchanged"
+          ],
+          "test_file": "tests/card_payments_backend/acceptance/cpb01_real_subscription_record.rs",
+          "scenario_name": "first_billing_call_auto_provisions_real_stripe_customer,repeated_calls_do_not_create_duplicate_stripe_customer,pro_plan_account_returns_its_real_period_end,stripe_unavailability_during_first_time_provisioning_leaves_no_partial_state,unauthenticated_request_is_rejected",
+          "acceptance_criteria": [
+            "AC-201-02",
+            "AC-201-03",
+            "AC-201-05"
+          ],
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/stripe_gateway.rs"
+          ],
+          "implementation_notes": "Step 01-01 discovered that the pinned async-stripe 1.0.0-rc.8 facade crate does not itself expose per-resource typed request builders (Customer::create, etc.) -- those live in separate companion crates (async-stripe-core, async-stripe-billing, async-stripe-webhook), now added to Cargo.toml by the orchestrator and confirmed to compile. This step migrates the two functions 01-01 implemented via hand-rolled reqwest calls (as a stopgap, explicitly flagged as a deviation in its own commit) to use the real typed builders, restoring ADR-021 compliance for the Customer-provisioning and probe paths specifically -- ADR-021 chose async-stripe primarily for the webhook-signature-verification security-critical piece (step 01-03 must use async-stripe-webhook::Webhook::construct_event from the start, not repeat 01-01's stopgap), but Customer/probe should also be real per the locked decision, not left as a permanent reqwest hand-roll once the real builders are available. No test/AC changes -- purely an internal implementation swap, tests must stay green unchanged.",
+          "dependencies": [
+            "01-01"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "02",
+      "name": "Release 2: Usage Metering (Slice 05)",
+      "steps": [
+        {
+          "id": "02-01",
+          "name": "Slice 05 (US-205) -- nightly usage metering to Stripe, operator-triggered",
+          "criteria": [
+            "A day's non-zero-dimension usage is pushed as one Stripe usage record per project per dimension (AC-205-01)",
+            "Zero-usage project/dimension/day combinations are never pushed (AC-205-02)",
+            "Re-running an already-processed day pushes zero new records -- idempotent via Stripe's native idempotency-key parameter (AC-205-03)",
+            "A single project's Stripe API failure does not abort the rest of the run -- failed projects are reported, not silently dropped (AC-205-04)",
+            "POST /admin/v1/billing/run-metering is operator-authed only; a session-cookie caller is rejected (AC-205-05)"
+          ],
+          "test_file": "tests/card_payments_backend/acceptance/cpb05_usage_metering.rs",
+          "scenario_name": "a_days_usage_is_pushed_as_one_record_per_project_per_dimension,zero_usage_dimensions_are_not_pushed,rerunning_the_same_days_metering_does_not_double_count,a_single_projects_stripe_failure_does_not_abort_the_whole_run,manual_trigger_is_operator_only",
+          "acceptance_criteria": [
+            "AC-205-01",
+            "AC-205-02",
+            "AC-205-03",
+            "AC-205-04",
+            "AC-205-05"
+          ],
+          "files_to_modify": [
+            "crates/embyr-server/src/adapters/stripe_gateway.rs",
+            "crates/embyr-server/src/admin/handlers/billing_metering.rs"
+          ],
+          "implementation_notes": "Replace two RED panics. stripe_gateway.rs push_usage_record (panic: 'SCAFFOLD: true -- StripeGateway::push_usage_record not yet implemented -- RED scaffold (DISTILL, US-205)'): push one Stripe Usage Record via async-stripe, passing idempotency_key as the native idempotency-key request parameter (DDD-7/CPB-AD-06 -- no local ledger table). billing_metering.rs run_metering (panic: 'SCAFFOLD: true -- billing_metering::run_metering not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-205)'): operator-only auth requires no new code (AC-205-05 is already enforced by operator_auth_middleware at the router layer, router.rs's operator_router -- verify, do not reimplement). SELECT project_id, read_ops, write_ops, delete_ops FROM daily_project_metrics WHERE date = CURRENT_DATE - INTERVAL '1 day'; for each project's non-zero dimension only (AC-205-02 -- skip zero dimensions entirely, do not call push_usage_record for them), call stripe_gateway.push_usage_record with idempotency_key = '{project_id}:{dimension}:{date}' (AC-205-03). Wrap each project's pushes in independent Result handling so one project's StripeError increments projects_failed and the loop continues (AC-205-04) rather than aborting. Return MeteringRunSummary{projects_processed, usage_records_pushed, projects_failed}.",
+          "dependencies": [
+            "01-01"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "03",
+      "name": "Release 3: Real-Time Cap Enforcement (Slices 06-07)",
+      "steps": [
+        {
+          "id": "03-01",
+          "name": "Slice 06 (US-206) -- cumulative cap-status compute + CapStatusCache write (read side only, no enforcement)",
+          "criteria": [
+            "Cumulative usage sums writes across ALL of an account's projects, not just one, keyed by account_id (AC-206-01)",
+            "Usage exactly at the cap reports pct=100, boundary-inclusive -- never 99 or 101 (AC-206-02)",
+            "cap_status is only computed/returned for Free-plan accounts (AC-206-03)",
+            "A never-yet-refreshed account fails open -- cap_status is absent or never fabricates an over-cap reading (AC-206-04)",
+            "Usage from a prior UTC calendar month does not count toward the current cycle's total (AC-206-05)"
+          ],
+          "test_file": "tests/card_payments_backend/acceptance/cpb06_cumulative_cap_check.rs",
+          "scenario_name": "cumulative_usage_sums_across_all_of_an_accounts_projects,usage_at_exactly_the_cap_reports_100_percent,pro_plan_accounts_do_not_receive_cap_status,stale_or_unavailable_computation_fails_open,usage_from_a_prior_billing_cycle_does_not_count_toward_this_cycle",
+          "acceptance_criteria": [
+            "AC-206-01",
+            "AC-206-02",
+            "AC-206-03",
+            "AC-206-04",
+            "AC-206-05",
+            "AC-206-06"
+          ],
+          "files_to_modify": [
+            "crates/embyr-core/src/admin/billing.rs",
+            "crates/embyr-server/src/sweepers/cap_usage_refresher.rs"
+          ],
+          "implementation_notes": "Replace two RED panics. billing.rs compute_cap_status (panic: 'SCAFFOLD: true -- compute_cap_status not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-206)'): pure function -- for each (dimension, cap) in free_plan_caps() (Storage excluded, OQ-CP-1, AC-206-06), used = usage_this_cycle.get(dimension).unwrap_or(0), pct = (used * 100) / cap using integer arithmetic so used==cap yields exactly 100 (AC-206-02 boundary-inclusive). cap_usage_refresher.rs run_cycle (panic: 'SCAFFOLD: true -- CapUsageRefresher::run_cycle not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-206/US-207)') -- THIS STEP IMPLEMENTS THE COMPUTE-AND-CACHE-WRITE HALF ONLY, the cap_exceeded-and-suspend half is step 03-02's scope on this same function: for every account with subscriptions.plan='free' AND status IN ('active','free_cap_exceeded'), sum daily_project_metrics joined through projects.account_id, filtered to date >= DATE_TRUNC('month', CURRENT_DATE) (AC-206-05, UTC calendar month per ADR-020 -- Stripe's current_period_end is never consulted for Free accounts), call compute_cap_status, then cap_status_cache.set(account_id, status) (CapStatusCache::set/get are already real, not scaffolded, per adapters/cap_status_cache.rs). billing_subscription::get_subscription (implemented in 01-01) already reads cap_status_cache.get and omits cap_status on a cache miss -- AC-206-04's fail-open behavior falls out for free from a never-refreshed account simply having no cache entry yet; no change needed there. Do NOT add the cap_exceeded-check-and-suspend branch in this step.",
+          "dependencies": [
+            "01-01"
+          ]
+        },
+        {
+          "id": "03-02",
+          "name": "Slice 07 (US-207) -- cap-exceeded enforcement: extend run_cycle with cap_exceeded check + reused suspend_account_projects call",
+          "criteria": [
+            "Crossing >=100% of any Free-plan dimension cap suspends all of the account's projects and sets subscriptions.status=free_cap_exceeded within the enforcement window (AC-207-01)",
+            "Usage below 100% never triggers suspension via this path (AC-207-02)",
+            "Pro-plan accounts are never suspended by this mechanism (AC-207-03)",
+            "This trigger calls the identical set_project_status function as US-204's dunning trigger -- verified directly, no parallel implementation (AC-207-04)",
+            "Upgrading to Pro (US-202's post_subscription) reactivates projects suspended by this mechanism, verified from the enforcement side (AC-207-05)",
+            "Concurrent in-flight requests during a cap-crossing cycle do not double-suspend or lose the subscriptions.status update -- race eliminated by construction (ADR-020 Alternative 3, background task is single-writer-per-cycle)"
+          ],
+          "test_file": "tests/card_payments_backend/acceptance/cpb07_cap_exceeded_suspension.rs",
+          "scenario_name": "crossing_100_percent_of_a_free_plan_cap_suspends_the_accounts_projects,below_cap_usage_never_suspends,pro_plan_accounts_are_never_suspended_by_this_mechanism,upgrading_to_pro_reactivates_projects_suspended_by_cap_enforcement,concurrent_requests_during_cap_crossing_do_not_double_suspend",
+          "acceptance_criteria": [
+            "AC-207-01",
+            "AC-207-02",
+            "AC-207-03",
+            "AC-207-04",
+            "AC-207-05"
+          ],
+          "files_to_modify": [
+            "crates/embyr-core/src/admin/billing.rs",
+            "crates/embyr-server/src/sweepers/cap_usage_refresher.rs"
+          ],
+          "implementation_notes": "Replace one RED panic and extend one already-implemented function. billing.rs cap_exceeded (panic: 'SCAFFOLD: true -- cap_exceeded not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-207)'): pure function, status.entries.iter().any(|e| e.pct >= 100) -- reuses 03-01's already-boundary-correct pct (AC-207-01/02). cap_usage_refresher.rs run_cycle: extend the SAME function 03-01 built with an enforcement branch appended after the cache write -- if cap_exceeded(&status) is true AND the account's current subscriptions.status != 'free_cap_exceeded' (transition guard; a repeat call is harmless per set_project_status's idempotent WHERE clause but avoids redundant work every cycle), call lifecycle::suspend_account_projects(account_id, lifecycle_deps) -- ALREADY IMPLEMENTED in step 01-04, reused unchanged, which is what makes AC-207-04's 'identical function as US-204' requirement true by construction, not convention -- then UPDATE subscriptions SET status='free_cap_exceeded' WHERE account_id=$1. Pro-plan exclusion (AC-207-03) needs no new guard -- 03-01's account-selection query already filters to plan='free'. AC-207-05 (upgrade reactivates) needs no new code in this step -- it is fully satisfied by post_subscription's free_cap_exceeded-clearing branch already implemented in step 01-02, once subscriptions.status actually reaches free_cap_exceeded via this step's new enforcement logic. The concurrent-requests scenario needs no new synchronization code -- it is satisfied by ADR-020's existing design: the background task's pg_try_advisory_lock-guarded, single-threaded-per-cycle loop (already real, unchanged, from cap_usage_refresher.rs's spawn()) means concurrent GET requests only ever READ cap_status_cache/subscriptions; the only writer of subscriptions.status via this mechanism is one run_cycle invocation per lock-held cycle.",
+          "dependencies": [
+            "03-01",
+            "01-04",
+            "01-02"
+          ]
+        }
+      ]
+    }
+  ]
+}
