@@ -243,23 +243,102 @@ impl StripeGateway {
         })
     }
 
-    /// Push one Stripe Usage Record for `subscription_item_id`. `idempotency_key`
-    /// (shape `{project_id}:{dimension}:{date}`, AC-205-03) is passed as
-    /// `async-stripe`'s native idempotency-key request parameter — reuses
-    /// Stripe's own server-side idempotency guarantee (no local ledger for
-    /// this call, DDD-7/CPB-AD-06).
+    /// Push one usage record for `dimension` ("reads"/"writes"/"deletes"),
+    /// attached to `stripe_customer_id` (feature-delta.md: "usage records
+    /// attach to the Stripe customer", not a subscription item — every
+    /// US-205 test fixture stays on the Free plan, so no real Stripe
+    /// Subscription/subscription-item ever exists to attach to; the legacy
+    /// per-subscription-item Usage Records endpoint has no typed builder in
+    /// this crate anyway). Implemented via Stripe's Billing Meter Events API
+    /// (`CreateBillingMeterEvent`), the modern customer-keyed usage-recording
+    /// primitive, real Stripe I/O (D-13).
     ///
-    /// # Panics (RED scaffold)
+    /// `idempotency_key` (shape `{stripe_customer_id}:{project_id}:{dimension}:{date}`,
+    /// see `billing_metering::push_project_usage`, AC-205-03)
+    /// is passed as `async-stripe`'s NATIVE idempotency-key request parameter
+    /// (`RequestStrategy::Idempotent`, sent as the `Idempotency-Key` HTTP
+    /// header) — reuses Stripe's own server-side idempotency guarantee, no
+    /// local ledger for this call (DDD-7/CPB-AD-06).
+    ///
+    /// Returns `Ok(true)` when Stripe genuinely recorded a NEW event this
+    /// call, `Ok(false)` when Stripe's idempotency layer replayed an EARLIER
+    /// call's cached response instead of recording again (AC-205-03's
+    /// re-run-pushes-zero-new-records case). Stripe's documented idempotent-
+    /// replay behavior returns the ORIGINAL response verbatim — including the
+    /// original `created` timestamp — so comparing `created` against this
+    /// call's own start time distinguishes "genuinely new" from "replayed"
+    /// without any local state (the vendor SDK's hyper transport does not
+    /// expose the `Idempotent-Replayed` response header to callers, so this
+    /// is the only signal available).
     pub async fn push_usage_record(
         &self,
-        _subscription_item_id: &str,
-        _quantity: u64,
-        _timestamp: DateTime<Utc>,
-        _idempotency_key: &str,
-    ) -> Result<(), StripeError> {
-        panic!(
-            "SCAFFOLD: true -- StripeGateway::push_usage_record not yet implemented -- RED scaffold (DISTILL, US-205)"
+        stripe_customer_id: &str,
+        dimension: &str,
+        quantity: u64,
+        timestamp: DateTime<Utc>,
+        idempotency_key: &str,
+    ) -> Result<bool, StripeError> {
+        let event_name = format!("embyr_{dimension}");
+        self.ensure_meter_active(&event_name).await?;
+
+        let mut payload = HashMap::with_capacity(2);
+        payload.insert("stripe_customer_id".to_string(), stripe_customer_id.to_string());
+        payload.insert("value".to_string(), quantity.to_string());
+
+        let key = stripe::IdempotencyKey::new(idempotency_key).map_err(|e| {
+            StripeError::ApiError(format!("invalid idempotency key {idempotency_key:?}: {e}"))
+        })?;
+
+        let call_started_at = Utc::now().timestamp();
+
+        let event = stripe_billing::billing_meter_event::CreateBillingMeterEvent::new(
+            event_name, payload,
         )
+        .identifier(idempotency_key.to_string())
+        .timestamp(timestamp.timestamp())
+        .customize()
+        .request_strategy(stripe::RequestStrategy::Idempotent(key))
+        .send(&self.client)
+        .await
+        .map_err(map_stripe_error)?;
+
+        Ok(event.created >= call_started_at)
+    }
+
+    /// Ensure a Billing Meter named `event_name` exists and is active,
+    /// creating it once (List then Create-if-missing, mirrors
+    /// `upsert_subscription`'s list-then-create-or-update shape) — Stripe
+    /// requires an active Meter before it will accept meter events for a
+    /// given `event_name`. Real, idempotent-by-construction infra
+    /// provisioning (mirrors `PRO_PLAN_STRIPE_PRICE_ID`'s one-time real
+    /// Stripe object provisioning note above) — first real call against a
+    /// fresh Stripe test account creates it; every call after finds it via
+    /// `ListBillingMeter`. Uses Stripe's defaults for `customer_mapping`
+    /// (`stripe_customer_id`, by_id) and `value_settings` (`value`) — matches
+    /// the payload keys `push_usage_record` sends above.
+    async fn ensure_meter_active(&self, event_name: &str) -> Result<(), StripeError> {
+        let existing = stripe_billing::billing_meter::ListBillingMeter::new()
+            .limit(100)
+            .send(&self.client)
+            .await
+            .map_err(map_stripe_error)?;
+
+        if existing.data.iter().any(|meter| meter.event_name == event_name) {
+            return Ok(());
+        }
+
+        stripe_billing::billing_meter::CreateBillingMeter::new(
+            stripe_billing::billing_meter::CreateBillingMeterDefaultAggregation::new(
+                stripe_billing::billing_meter::CreateBillingMeterDefaultAggregationFormula::Sum,
+            ),
+            format!("Embyr usage — {event_name}"),
+            event_name,
+        )
+        .send(&self.client)
+        .await
+        .map_err(map_stripe_error)?;
+
+        Ok(())
     }
 
     /// Verify a `Stripe-Signature` header against `payload` and

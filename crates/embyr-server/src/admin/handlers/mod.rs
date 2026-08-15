@@ -1,6 +1,7 @@
 pub mod admin_keys;
 pub mod auth;
 pub mod billing;
+pub mod billing_metering;
 pub mod billing_subscription;
 pub mod get_project;
 pub mod lifecycle;

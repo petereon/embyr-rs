@@ -93,7 +93,16 @@ async-stripe-core = { version = "1.0.0-rc.8", default-features = false, features
 # `ListSubscription`); `CreateSubscriptionItems`/`UpdateSubscriptionItems` live
 # inside the same `subscription` module, no separate `subscription_item`
 # feature needed.
-async-stripe-billing = { version = "1.0.0-rc.8", features = ["subscription"] }
+# `billing_meter`/`billing_meter_event` added in step 02-01 (US-205): the
+# legacy per-subscription-item Usage Records endpoint has no typed builder in
+# this crate version (confirmed absent from both `-billing` and `-core`) and
+# is unreachable anyway — every US-205 test fixture stays on the Free plan
+# (Customer-only, no real Stripe Subscription/subscription-item ever
+# created), so Stripe's newer Billing Meter Events API (customer-keyed, no
+# subscription required) is the only typed mechanism that fits — also matches
+# feature-delta.md's own framing ("usage records attach to the Stripe
+# customer").
+async-stripe-billing = { version = "1.0.0-rc.8", features = ["subscription", "billing_meter", "billing_meter_event"] }
 async-stripe-webhook = "1.0.0-rc.8"
 
 # Testing (dev-only)

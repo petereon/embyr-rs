@@ -18,6 +18,7 @@ use crate::adapters::{
 
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
 use super::handlers::billing::get_billing;
+use super::handlers::billing_metering::run_metering;
 use super::handlers::billing_subscription::{get_subscription, post_subscription};
 use super::handlers::oidc_providers::{
     create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
@@ -81,6 +82,7 @@ pub fn build_admin_router(
         gcp_secret_fetcher,
         rate_limit_capacity,
         prometheus_handle,
+        stripe_gateway: stripe_gateway.clone(),
     };
     let webhook_state = WebhookState {
         system_db: system_db.clone(),
@@ -113,6 +115,11 @@ pub fn build_admin_router(
             "/admin/v1/projects/:project_id/activate",
             post(activate_project),
         )
+        // card-payments-backend (US-205, step 02-01): operator-triggered
+        // nightly usage metering. Mounted on operator_router so
+        // operator_auth_middleware enforces AC-205-05 (no in-handler auth
+        // check needed).
+        .route("/admin/v1/billing/run-metering", post(run_metering))
         .route("/metrics", get(get_prometheus_metrics))
         .route_layer(axum::middleware::from_fn_with_state(
             operator_state.clone(),

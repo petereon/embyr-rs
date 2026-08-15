@@ -39,6 +39,11 @@ pub struct OperatorState {
     /// Prometheus metrics handle for rendering the `/metrics` scrape response.
     /// Installed once per process via `observability::get_or_install_prometheus_handle()`.
     pub prometheus_handle: metrics_exporter_prometheus::PrometheusHandle,
+    /// Sole Stripe-calling adapter (ADR-021, D-13) — used by
+    /// `billing_metering::run_metering` (card-payments-backend US-205, step
+    /// 02-01) to push nightly usage records. Same shared instance as
+    /// `UserAdminState`/`WebhookState`.
+    pub stripe_gateway: Arc<StripeGateway>,
 }
 
 /// State for session-auth user-admin routes.
