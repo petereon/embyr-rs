@@ -166,6 +166,11 @@ pub fn stripe_trigger(event_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Operator Bearer key this test harness's admin routers are built with
+/// (`operator_auth_middleware` — guards `POST /admin/v1/projects/*`,
+/// `POST /admin/v1/billing/run-metering`, and `GET /metrics`).
+pub const ADMIN_KEY: &str = "test-admin-key-from-env";
+
 // ─── Test server ─────────────────────────────────────────────────────────────
 
 /// Ephemeral test context: Postgres container + seeded account + Axum admin
@@ -233,7 +238,7 @@ impl CpbTestContext {
 
         let router = build_admin_router(
             system_db.clone(),
-            "test-admin-key-from-env".to_string(),
+            ADMIN_KEY.to_string(),
             None,
             credential_cache.clone(),
             [0u8; 32],
@@ -325,7 +330,7 @@ impl CpbTestContext {
 
         let router = build_admin_router(
             system_db.clone(),
-            "test-admin-key-from-env".to_string(),
+            ADMIN_KEY.to_string(),
             None,
             credential_cache.clone(),
             [0u8; 32],
@@ -483,6 +488,40 @@ impl CpbTestContext {
             .bind(event_id)
             .fetch_one(&self.pool)
             .await
+            .unwrap_or(0)
+    }
+
+    /// Read the current value of the `embyr_stripe_webhook_dispatch_total`
+    /// Prometheus counter (labeled by `event_type`) via the real
+    /// `GET /metrics` operator route. Used by the CPB03 concurrent-redelivery
+    /// regression test: the idempotency ledger's PRIMARY KEY guarantees
+    /// `processed_webhook_events` stays at count 1 regardless of the TOCTOU
+    /// bug (Postgres enforces the constraint atomically either way), so
+    /// ledger count alone cannot prove business-logic dispatch ran exactly
+    /// once. This in-process counter can: it is incremented at the exact
+    /// call site dispatch begins (only reached once the INSERT race is won),
+    /// and — unlike `pg_stat_user_tables`, whose per-backend flush can sit
+    /// pending on an idle pooled connection well past any reasonable test
+    /// timeout — is immediately consistent, since `metrics_exporter_prometheus`
+    /// updates its atomic in the same process synchronously on `increment()`.
+    pub async fn stripe_webhook_dispatch_count(&self, event_type: &str) -> u64 {
+        let body = self
+            .client
+            .get(self.url("/metrics"))
+            .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+            .send()
+            .await
+            .expect("GET /metrics failed")
+            .text()
+            .await
+            .expect("GET /metrics body read failed");
+
+        let needle = format!("embyr_stripe_webhook_dispatch_total{{event_type=\"{event_type}\"}}");
+        body.lines()
+            .find(|line| line.starts_with(&needle))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .map(|value| value as u64)
             .unwrap_or(0)
     }
 

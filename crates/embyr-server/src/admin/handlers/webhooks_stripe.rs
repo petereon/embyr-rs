@@ -28,32 +28,23 @@ use embyr_core::admin::billing::SubscriptionStatus;
 ///   - any other validly-signed type — 200, logged, ignored (AC-203-06).
 ///
 /// Idempotent via `processed_webhook_events`: a redelivered `event.id` is a
-/// 200 no-op (AC-203-03) — checked BEFORE any state-mutating dispatch,
-/// including the dedupe-ledger insert itself.
+/// 200 no-op (AC-203-03) — enforced by the table's `event_id` PRIMARY KEY as
+/// the SOLE authoritative gate. This is INSERT-then-check-`rows_affected`,
+/// NOT SELECT-then-INSERT: a separate existence check followed by a
+/// conditional insert is a TOCTOU race under concurrent redelivery (which
+/// Stripe's real retry behavior produces) — two concurrent requests can both
+/// observe "not yet processed" before either commits its insert, and both
+/// then dispatch business logic. The PRIMARY KEY constraint makes the INSERT
+/// itself the atomic check: only the request whose INSERT actually adds a row
+/// (`rows_affected() > 0`) proceeds to dispatch; a redelivery — concurrent or
+/// sequential — always sees `rows_affected() == 0` and returns immediately.
 pub async fn stripe_webhook_handler(
     State(state): State<WebhookState>,
     Extension(event): Extension<WebhookEvent>,
 ) -> StatusCode {
     let pool = state.system_db.pool();
 
-    let already_processed: Option<i32> =
-        match sqlx::query_scalar("SELECT 1 FROM processed_webhook_events WHERE event_id = $1")
-            .bind(&event.id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::error!("stripe_webhook_handler: dedupe lookup failed: {e}");
-                return StatusCode::INTERNAL_SERVER_ERROR;
-            }
-        };
-
-    if already_processed.is_some() {
-        return StatusCode::OK;
-    }
-
-    if let Err(e) = sqlx::query(
+    let insert_result = match sqlx::query(
         "INSERT INTO processed_webhook_events (event_id, event_type) VALUES ($1, $2) \
          ON CONFLICT DO NOTHING",
     )
@@ -62,9 +53,31 @@ pub async fn stripe_webhook_handler(
     .execute(pool)
     .await
     {
-        tracing::error!("stripe_webhook_handler: failed to record processed event: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
+        Ok(result) => result,
+        Err(e) => {
+            tracing::error!("stripe_webhook_handler: failed to record processed event: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    if insert_result.rows_affected() == 0 {
+        // Redelivery (concurrent or sequential) — another request already
+        // claimed this event_id via the PRIMARY KEY constraint.
+        return StatusCode::OK;
     }
+
+    // Only the request that won the INSERT race reaches here — observability
+    // counter for dispatch volume by event type, and the deterministic signal
+    // the CPB03 concurrent-redelivery regression test reads back via
+    // `GET /metrics` to prove dispatch ran exactly once under a real
+    // concurrent race (in-process Prometheus counter — immediately
+    // consistent, unlike `pg_stat_user_tables`, which can sit unflushed on an
+    // idle pooled connection well past any reasonable test timeout).
+    metrics::counter!(
+        "embyr_stripe_webhook_dispatch_total",
+        "event_type" => event.event_type.clone()
+    )
+    .increment(1);
 
     match event.event_type.as_str() {
         "customer.subscription.updated" => sync_subscription_updated(pool, &event).await,

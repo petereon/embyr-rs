@@ -210,6 +210,123 @@ async fn duplicate_event_delivery_is_a_no_op() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AC-203-03 (concurrent variant, DELIVER Phase 4 adversarial review, D2
+// finding): a TRULY CONCURRENT redelivery of the same event.id must dispatch
+// business logic exactly once.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Journey:
+///   Given: an account has an existing subscriptions row (lazily provisioned)
+///   When:  the SAME correctly-signed customer.subscription.updated payload
+///          (same event.id) is delivered TWICE CONCURRENTLY — both requests
+///          fired before either is awaited, via `tokio::join!` — reproducing
+///          Stripe's real concurrent-redelivery behavior rather than
+///          sequential-but-fast delivery
+///   Then:  both responses are 200, the idempotency ledger records the event
+///          exactly once, AND the business-logic dispatch
+///          (`sync_subscription_updated`) actually ran exactly once — proven
+///          via the `embyr_stripe_webhook_dispatch_total` Prometheus counter
+///          (`GET /metrics`), since the ledger's PRIMARY KEY alone would stay
+///          at 1 even under the pre-fix TOCTOU race (Postgres enforces the
+///          constraint atomically regardless of the SELECT-then-INSERT bug)
+///          and so cannot by itself distinguish single- from double-dispatch
+///
+/// AC-203-03
+///
+/// @driving_port @real-io @US-203 @AC-203-03
+#[tokio::test]
+async fn concurrent_redelivery_of_same_event_dispatches_exactly_once() {
+    let ctx = CpbTestContext::with_webhook_secret(WEBHOOK_SECRET).await;
+    let cookie = ctx
+        .seed_session("morgan@concurrentcorp.example", "Owner")
+        .await;
+    let _ = ctx
+        .client
+        .get(ctx.url("/admin/v1/billing/subscription"))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .expect("provisioning GET failed");
+
+    let (_, _, stripe_subscription_id) = ctx
+        .subscription_row()
+        .await
+        .expect("subscriptions row must exist");
+    let stripe_subscription_id =
+        stripe_subscription_id.unwrap_or_else(|| "sub_placeholder".to_string());
+
+    let event_id = format!("evt_cpb03_concurrent_{}", uuid::Uuid::new_v4());
+    let payload = serde_json::json!({
+        "id": event_id,
+        "type": "customer.subscription.updated",
+        "data": {
+            "object": {
+                "id": stripe_subscription_id,
+                "status": "active",
+                "current_period_end": 1_799_999_999i64
+            }
+        }
+    })
+    .to_string();
+    let signature = sign_stripe_payload(&payload, WEBHOOK_SECRET);
+
+    let dispatches_before = ctx
+        .stripe_webhook_dispatch_count("customer.subscription.updated")
+        .await;
+
+    let request_a = ctx
+        .client
+        .post(ctx.url("/admin/v1/webhooks/stripe"))
+        .header("Stripe-Signature", signature.clone())
+        .header("Content-Type", "application/json")
+        .body(payload.clone())
+        .send();
+    let request_b = ctx
+        .client
+        .post(ctx.url("/admin/v1/webhooks/stripe"))
+        .header("Stripe-Signature", signature)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send();
+
+    // Fire both requests BEFORE awaiting either — genuine concurrency, not
+    // sequential-but-fast. This is the crux of exercising the actual race
+    // window: two connections can both reach the dedupe gate before either
+    // commits.
+    let (resp_a, resp_b) = tokio::join!(request_a, request_b);
+    let resp_a = resp_a.expect("webhook POST (A) failed");
+    let resp_b = resp_b.expect("webhook POST (B) failed");
+
+    assert_eq!(
+        resp_a.status().as_u16(),
+        200,
+        "concurrent delivery A must return 200"
+    );
+    assert_eq!(
+        resp_b.status().as_u16(),
+        200,
+        "concurrent delivery B must return 200"
+    );
+
+    assert_eq!(
+        ctx.processed_webhook_event_count(&event_id).await,
+        1,
+        "ledger must record the event exactly once under concurrent delivery"
+    );
+
+    let dispatches_after = ctx
+        .stripe_webhook_dispatch_count("customer.subscription.updated")
+        .await;
+    assert_eq!(
+        dispatches_after - dispatches_before,
+        1,
+        "business-logic dispatch (sync_subscription_updated) must run exactly once under \
+         concurrent redelivery of the same event.id -- a delta of 2 means the TOCTOU race let \
+         both concurrent requests through the dedupe gate and both reached dispatch"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AC-203-05: a subscription-deleted event marks the account appropriately
 // ─────────────────────────────────────────────────────────────────────────────
 
