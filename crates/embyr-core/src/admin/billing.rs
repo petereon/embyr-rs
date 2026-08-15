@@ -1,14 +1,9 @@
 //! Billing domain types — subscriptions, usage-vs-cap status (BC-1 Tenant Management).
 //!
-//! `SCAFFOLD: true` — created by DISTILL (card-payments-backend). Zero IO imports
-//! (enforced by workspace `deny.toml`). Business-logic functions below panic —
-//! DELIVER implements them via Outside-In TDD, unskipping the corresponding
-//! acceptance scenario one at a time (Mandate 7, nw-distill).
-//!
-//! Value types (`Subscription`, `CapStatus`, etc.) are NOT scaffolded — they are
-//! plain data carriers with no behavior to TDD; only `compute_cap_status` and
-//! `cap_exceeded` (the actual business rules, AC-206-01/02/05, AC-207-01/02) are
-//! RED.
+//! Zero IO imports (enforced by workspace `deny.toml`). `compute_cap_status`
+//! and `cap_exceeded` are the business rules driving AC-206-01/02/05 and
+//! AC-207-01/02 respectively — both implemented via Outside-In TDD (card-
+//! payments-backend, DELIVER).
 
 use std::collections::HashMap;
 
@@ -204,12 +199,10 @@ pub fn compute_cap_status(
 /// Returns `true` when ANY dimension in `status` has crossed `>= 100%` —
 /// the trigger condition US-207's enforcement action reads (AC-207-01/02).
 ///
-/// # Panics (RED scaffold)
-/// Always panics. DELIVER implements the real boundary-inclusive comparison.
-pub fn cap_exceeded(_status: &CapStatus) -> bool {
-    panic!(
-        "SCAFFOLD: true -- cap_exceeded not yet implemented -- RED scaffold (DISTILL, card-payments-backend US-207)"
-    )
+/// Boundary-inclusive (reuses `compute_cap_status`'s `pct` — `used == cap`
+/// yields `pct == 100`, which counts as exceeded here, AC-207-01/02).
+pub fn cap_exceeded(status: &CapStatus) -> bool {
+    status.entries.iter().any(|entry| entry.pct >= 100)
 }
 
 // ---------------------------------------------------------------------------

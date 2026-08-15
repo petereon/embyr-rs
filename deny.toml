@@ -109,6 +109,8 @@ deny = [
         "aws-smithy-runtime",
         "aws-smithy-runtime-api",
         "aws-smithy-types",
+        # Stripe SDK (ADR-021, card-payments-backend) — embyr-server only.
+        "async-stripe",
     ] },
 
     # gRPC framework — banned from embyr-core
@@ -148,5 +150,7 @@ deny = [
         "bollard",
         "metrics-exporter-prometheus",
         "aws-smithy-http-client",
+        # Stripe SDK (ADR-021, card-payments-backend) — embyr-server only.
+        "async-stripe",
     ] },
 ]

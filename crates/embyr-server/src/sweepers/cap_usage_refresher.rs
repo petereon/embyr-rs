@@ -18,11 +18,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use embyr_core::admin::{compute_cap_status, UsageDimension};
+use embyr_core::admin::{cap_exceeded, compute_cap_status, UsageDimension};
 
 use crate::adapters::cap_status_cache::CapStatusCache;
 use crate::adapters::system_db::SystemDb;
-use crate::admin::handlers::lifecycle::LifecycleDeps;
+use crate::admin::handlers::lifecycle::{self, LifecycleDeps};
 
 /// FNV-1a hash of the literal string `"embyr_cap_check"`, used as the
 /// `pg_try_advisory_lock` key (ADR-020). Computed once, at compile time
@@ -88,21 +88,23 @@ pub fn spawn(
 /// projects, `daily_project_metrics` joined through `projects.account_id`,
 /// filtered to the current UTC calendar month per ADR-020 § Billing Cycle
 /// Boundary), write the result into `cap_status_cache`, and — on a
-/// below-cap-to-cap-crossing transition — call
-/// `lifecycle::suspend_account_projects` and set
-/// `subscriptions.status = 'free_cap_exceeded'`.
+/// cap-crossing (`cap_exceeded`, AC-207-01/02) for an account not already
+/// `free_cap_exceeded` — call `lifecycle::suspend_account_projects` (the
+/// SAME function US-204's dunning trigger calls, AC-207-04 — D-12 literal
+/// reuse) and set `subscriptions.status = 'free_cap_exceeded'`.
 ///
-/// This step (03-01, US-206) implements the compute-and-cache-write half
-/// only. The cap_exceeded-check-and-suspend half (US-207) is a later step's
-/// scope on this same function — `_lifecycle_deps` stays unused here on
-/// purpose.
+/// Pro-plan accounts never reach this loop (the account-selection query
+/// below filters to `plan = 'free'`, AC-207-03). The transition guard
+/// (`status != 'free_cap_exceeded'`) is an optimization only — a repeat
+/// suspend call across cycles is harmless because `set_project_status`'s own
+/// `WHERE status IN ('active', 'suspended')` clause is idempotent.
 async fn run_cycle(
     system_db: &Arc<SystemDb>,
     cap_status_cache: &Arc<CapStatusCache>,
-    _lifecycle_deps: &LifecycleDeps,
+    lifecycle_deps: &LifecycleDeps,
 ) {
-    let account_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT account_id FROM subscriptions \
+    let accounts: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT account_id, status FROM subscriptions \
          WHERE plan = 'free' AND status IN ('active', 'free_cap_exceeded')",
     )
     .fetch_all(system_db.pool())
@@ -112,7 +114,7 @@ async fn run_cycle(
         Vec::new()
     });
 
-    for account_id in account_ids {
+    for (account_id, subscription_status) in accounts {
         // AC-206-01: summed across ALL of the account's projects, keyed by
         // account_id. AC-206-05: current UTC calendar month only (ADR-020 §
         // Billing Cycle Boundary — Stripe's current_period_end is never
@@ -148,7 +150,41 @@ async fn run_cycle(
         usage_this_cycle.insert(UsageDimension::Deletes, delete_ops.max(0) as u64);
 
         let status = compute_cap_status(account_id, &usage_this_cycle);
+        let crossed_cap = cap_exceeded(&status);
         cap_status_cache.set(account_id, status).await;
+
+        // AC-207-01/02: enforcement — suspend on cap-crossing, guarded so a
+        // repeat crossing on a later cycle doesn't redo work every tick
+        // (harmless if it did, per set_project_status's idempotent WHERE).
+        if crossed_cap && subscription_status != "free_cap_exceeded" {
+            // AC-207-04: identical function US-204's dunning trigger calls —
+            // reused unchanged, not reimplemented.
+            if let Err(e) =
+                lifecycle::suspend_account_projects(account_id, lifecycle_deps).await
+            {
+                tracing::error!(
+                    account_id = %account_id,
+                    status = ?e,
+                    "CapUsageRefresher: failed to suspend account projects on cap crossing"
+                );
+                continue;
+            }
+
+            if let Err(e) = sqlx::query(
+                "UPDATE subscriptions SET status = 'free_cap_exceeded', updated_at = now() \
+                 WHERE account_id = $1",
+            )
+            .bind(account_id)
+            .execute(system_db.pool())
+            .await
+            {
+                tracing::error!(
+                    account_id = %account_id,
+                    error = %e,
+                    "CapUsageRefresher: failed to persist free_cap_exceeded status"
+                );
+            }
+        }
     }
 }
 

@@ -59,6 +59,10 @@ aws-sdk-secretsmanager.workspace = true
 reqwest.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
+async-stripe.workspace = true
+async-stripe-core.workspace = true
+async-stripe-billing.workspace = true
+async-stripe-webhook.workspace = true
 
 [[test]]
 name = "us_13_browser_transport"
@@ -149,6 +153,39 @@ path = "../../tests/admin_api_v2/acceptance/b05_members.rs"
 name = "admin_api_v2_b06_oidc_billing"
 path = "../../tests/admin_api_v2/acceptance/b06_oidc_billing.rs"
 
+# card-payments-backend acceptance tests (one file per slice, mirroring
+# admin-api-v2's bNN registration convention). Release grouping:
+#   Release 1 (Subscription & Payment Lifecycle): cpb01-cpb04
+#   Release 2 (Usage Metering):                   cpb05
+#   Release 3 (Real-Time Cap Enforcement):         cpb06-cpb07
+[[test]]
+name = "card_payments_backend_cpb01_real_subscription_record"
+path = "../../tests/card_payments_backend/acceptance/cpb01_real_subscription_record.rs"
+
+[[test]]
+name = "card_payments_backend_cpb02_real_plan_change"
+path = "../../tests/card_payments_backend/acceptance/cpb02_real_plan_change.rs"
+
+[[test]]
+name = "card_payments_backend_cpb03_webhook_ingestion"
+path = "../../tests/card_payments_backend/acceptance/cpb03_webhook_ingestion.rs"
+
+[[test]]
+name = "card_payments_backend_cpb04_dunning_suspension_recovery"
+path = "../../tests/card_payments_backend/acceptance/cpb04_dunning_suspension_recovery.rs"
+
+[[test]]
+name = "card_payments_backend_cpb05_usage_metering"
+path = "../../tests/card_payments_backend/acceptance/cpb05_usage_metering.rs"
+
+[[test]]
+name = "card_payments_backend_cpb06_cumulative_cap_check"
+path = "../../tests/card_payments_backend/acceptance/cpb06_cumulative_cap_check.rs"
+
+[[test]]
+name = "card_payments_backend_cpb07_cap_exceeded_suspension"
+path = "../../tests/card_payments_backend/acceptance/cpb07_cap_exceeded_suspension.rs"
+
 # distributed-rate-limiting acceptance tests
 [[test]]
 name = "drl_b11_provision_initializes_bucket"
@@ -226,3 +263,6 @@ aes-gcm = { workspace = true }
 totp-rs = { workspace = true }
 jsonwebtoken = { workspace = true }
 rsa = { version = "0.9", features = ["sha2"] }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
