@@ -1,10 +1,6 @@
 //! `billing_subscription` handlers — `GET`/`POST /admin/v1/billing/subscription`
 //! (US-201, US-202, extended with `cap_status` by US-206).
 //!
-//! `SCAFFOLD: true` — created by DISTILL (card-payments-backend). Both
-//! handlers panic — DELIVER implements them via Outside-In TDD, unskipping
-//! one acceptance scenario at a time.
-//!
 //! Separate file from the existing `billing.rs` (usage-reporting, read-only,
 //! zero external calls) per CPB-AD-08 — this file's handlers make real Stripe
 //! network calls, a materially different responsibility/failure-mode profile.

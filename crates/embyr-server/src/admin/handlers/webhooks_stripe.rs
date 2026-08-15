@@ -1,8 +1,6 @@
 //! `stripe_webhook_handler` — `POST /admin/v1/webhooks/stripe` (US-203, US-204).
 //!
-//! `SCAFFOLD: true` — created by DISTILL (card-payments-backend). Dispatch
-//! logic panics — DELIVER implements it via Outside-In TDD. Signature
-//! verification itself happens in `stripe_signature_middleware`
+//! Signature verification happens in `stripe_signature_middleware`
 //! (`admin/middleware/stripe_signature.rs`), layered in front of this
 //! handler at the router level — by the time this handler runs, the request
 //! is already known-authentic (AC-203-01/02).

@@ -1,30 +1,23 @@
 //! `StripeGateway` — sole Stripe-calling adapter (ADR-021).
 //!
-//! `SCAFFOLD: true` — created by DISTILL (card-payments-backend). Concrete
-//! struct, not a `trait`-based port (mirrors ADR-015's `RateLimiter`
-//! precedent: Stripe has exactly one implementation, D-13 forbids a mocked
-//! port).
+//! Concrete struct, not a `trait`-based port (mirrors ADR-015's
+//! `RateLimiter` precedent: Stripe has exactly one implementation, D-13
+//! forbids a mocked port).
 //!
-//! Implementation note (step 01-05, superseding step 01-01): step 01-01
-//! discovered the pinned `async-stripe` 1.0.0-rc.8 facade crate does not
-//! itself vend per-resource typed request builders — those live in separate
-//! companion crates (`async-stripe-core`, `async-stripe-billing`,
-//! `async-stripe-webhook`, now added to the workspace) — and used hand-rolled
-//! `reqwest` calls as a stopgap. Step 01-05 migrates `get_or_create_customer`
-//! and `probe` to the real typed builders: `stripe_core::customer::CreateCustomer`
-//! and `stripe_core::balance::RetrieveForMyAccountBalance`, sent through
+//! The pinned `async-stripe` 1.0.0-rc.8 facade crate does not itself vend
+//! per-resource typed request builders — those live in separate companion
+//! crates (`async-stripe-core`, `async-stripe-billing`, `async-stripe-webhook`)
+//! — so every method below sends a typed builder (e.g.
+//! `stripe_core::customer::CreateCustomer`,
+//! `stripe_billing::subscription::CreateSubscription`) through
 //! `stripe::Client` (the facade crate's hyper-backed client, re-exported as
 //! `Client` because this workspace enables `async-stripe`'s `__hyper`
-//! feature transitively via `rustls-tls-webpki-roots`). Still real, unmocked
-//! Stripe I/O per D-13 — only the request-construction mechanism changed.
-//! `upsert_subscription`/`push_usage_record`/`verify_webhook_signature` (out
-//! of this step's scope) are left as RED scaffolds; whichever step
-//! implements them should revisit this note.
+//! feature transitively via `rustls-tls-webpki-roots`). All calls are real,
+//! unmocked Stripe I/O (D-13).
 //!
-//! `new()` and `probe()`'s config-validation half are NOT scaffolded (no
-//! business logic to TDD — they only need to exist so this struct is
-//! constructible by the composition root and other test harnesses that don't
-//! exercise billing).
+//! `new()` and `probe()`'s config-validation half need no business logic —
+//! they only need to exist so this struct is constructible by the
+//! composition root and other test harnesses that don't exercise billing.
 
 use std::collections::HashMap;
 use std::time::Duration;

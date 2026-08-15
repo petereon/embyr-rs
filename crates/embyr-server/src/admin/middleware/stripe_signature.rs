@@ -1,9 +1,6 @@
 //! `stripe_signature_middleware` — verifies `Stripe-Signature` on
 //! `POST /admin/v1/webhooks/stripe` (US-203, AC-203-02).
 //!
-//! `SCAFFOLD: true` — created by DISTILL (card-payments-backend). Panics —
-//! DELIVER implements it via Outside-In TDD.
-//!
 //! Buffers the raw request body for HMAC verification (Stripe's signature is
 //! computed over the exact raw bytes; any JSON re-serialization would break
 //! verification) — mirrors the SHAPE (not the auth mechanism) of

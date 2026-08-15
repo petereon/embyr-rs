@@ -154,7 +154,7 @@ pub struct CapStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Business logic — RED scaffold (DELIVER implements via TDD)
+// Business logic — cumulative cap-status computation (US-206/US-207)
 // ---------------------------------------------------------------------------
 
 /// Computes the per-dimension cumulative-usage-vs-cap entries for a Free-plan
