@@ -1,11 +1,6 @@
 //! `CapUsageRefresher` — background task computing cumulative Free-plan usage
 //! vs. cap and enforcing suspension on cap-crossing (ADR-020).
 //!
-//! `SCAFFOLD: true` — created by DISTILL (card-payments-backend). The
-//! per-cycle computation (`run_cycle`) is RED — DELIVER implements it via
-//! Outside-In TDD (US-206 read side, US-207 enforcement side). The interval
-//! loop / spawn wiring around it is real (mechanical, no business logic).
-//!
 //! Per ADR-020: runs every `EMBYR_CAP_CHECK_INTERVAL_SECS` (default 30s),
 //! guarded by a Postgres advisory lock so redundant computation is avoided
 //! across instances (not required for correctness — each instance computing
