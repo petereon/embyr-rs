@@ -122,6 +122,46 @@ pub async fn activate_account_projects(
     Ok(activated_count)
 }
 
+/// Suspend every currently-active project under `account_id` — the SAME
+/// `set_project_status` transition the operator-initiated `suspend_project`
+/// handler above uses (D-12 literal reuse). Used by the dunning
+/// final-failure webhook arm (`webhooks_stripe::stripe_webhook_handler`,
+/// AC-204-01, THIS is the first implementation) — the credential-cache
+/// eviction claim (AC-204-05) holds "for free" because `set_project_status`
+/// already evicts on every call, unchanged — and, unchanged, by a future
+/// step's cap-exceeded enforcement (US-207). Returns the count of projects
+/// transitioned.
+pub async fn suspend_account_projects(
+    account_id: uuid::Uuid,
+    deps: &LifecycleDeps,
+) -> Result<u64, StatusCode> {
+    let project_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM projects WHERE account_id = $1 AND status = 'active'")
+            .bind(account_id)
+            .fetch_all(deps.system_db.pool())
+            .await
+            .map_err(|e| {
+                tracing::error!("suspend_account_projects: failed to list active projects: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+    let mut suspended_count = 0u64;
+    for project_id in &project_ids {
+        let status = set_project_status(
+            project_id,
+            "suspended",
+            &deps.system_db,
+            &deps.credential_cache,
+        )
+        .await;
+        if status == StatusCode::OK {
+            suspended_count += 1;
+        }
+    }
+
+    Ok(suspended_count)
+}
+
 pub async fn delete_project(
     Path(project_id): Path<String>,
     State(state): State<OperatorState>,

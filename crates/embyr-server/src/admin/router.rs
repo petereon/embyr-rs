@@ -86,6 +86,7 @@ pub fn build_admin_router(
         system_db: system_db.clone(),
         stripe_gateway: stripe_gateway.clone(),
         webhook_signing_secret,
+        credential_cache: credential_cache.clone(),
     };
     let user_state = UserAdminState {
         system_db,

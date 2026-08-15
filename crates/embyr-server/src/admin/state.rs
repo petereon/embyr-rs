@@ -82,4 +82,10 @@ pub struct WebhookState {
     /// `STRIPE_WEBHOOK_SIGNING_SECRET` this server instance was configured
     /// with — passed to `StripeGateway::verify_webhook_signature`.
     pub webhook_signing_secret: String,
+    /// Same shared credential cache instance as `OperatorState`/`UserAdminState`
+    /// (card-payments-backend US-204) — required so the dunning
+    /// `invoice.payment_failed`/`.payment_succeeded` arms can build a
+    /// `lifecycle::LifecycleDeps` and evict the SAME cache
+    /// `suspend_project`/`activate_project` evict, not a throwaway instance.
+    pub credential_cache: Arc<CredentialCache>,
 }
