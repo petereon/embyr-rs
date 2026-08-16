@@ -233,6 +233,36 @@ path = "../../tests/observability/acceptance/obs04_rate_limit_metrics.rs"
 name = "obs05_postgres_pool_metrics"
 path = "../../tests/observability/acceptance/obs05_postgres_pool_metrics.rs"
 
+# customer-db-onboarding acceptance tests (US-02) — POST /admin/v1/projects
+# driving port, exercised via the embyr-server subprocess (CARGO_BIN_EXE_embyr-server).
+[[test]]
+name = "cdo12_provisioning_succeeds_when_database_ready"
+path = "../../tests/customer_db_onboarding/acceptance/cdo12_provisioning_succeeds_when_database_ready.rs"
+
+[[test]]
+name = "cdo13_provisioning_fails_when_not_prepped"
+path = "../../tests/customer_db_onboarding/acceptance/cdo13_provisioning_fails_when_not_prepped.rs"
+
+[[test]]
+name = "cdo14_provisioning_fails_when_schema_stale"
+path = "../../tests/customer_db_onboarding/acceptance/cdo14_provisioning_fails_when_schema_stale.rs"
+
+[[test]]
+name = "cdo15_not_ready_response_distinguishable_from_connectivity_failure"
+path = "../../tests/customer_db_onboarding/acceptance/cdo15_not_ready_response_distinguishable_from_connectivity_failure.rs"
+
+[[test]]
+name = "cdo16_dml_only_credential_succeeds_without_elevated_privilege"
+path = "../../tests/customer_db_onboarding/acceptance/cdo16_dml_only_credential_succeeds_without_elevated_privilege.rs"
+
+[[test]]
+name = "cdo17_regression_full_privilege_dsn_still_auto_migrates"
+path = "../../tests/customer_db_onboarding/acceptance/cdo17_regression_full_privilege_dsn_still_auto_migrates.rs"
+
+[[test]]
+name = "cdo18_forward_compatible_found_version_exceeds_expected"
+path = "../../tests/customer_db_onboarding/acceptance/cdo18_forward_compatible_found_version_exceeds_expected.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

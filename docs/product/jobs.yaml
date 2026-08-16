@@ -30,6 +30,14 @@ jobs:
       social: Be trusted by customers that data is isolated
     opportunity_score: 12
     priority: high
+    # NOTE (customer-db-onboarding DISCUSS, 2026-08-16): the automatic
+    # `sqlx::migrate!` this job's functional dimension describes assumes
+    # the submitted connection string carries DDL/schema-modification
+    # rights. JOB-15 (customer-db-preflight) is the mirror-image job for
+    # customers whose Postgres governance prohibits granting exactly that —
+    # it does not change JOB-02's own scope, but JOB-02's provisioning
+    # endpoint is the driving port JOB-15's verify-and-complain story
+    # extends. See docs/feature/customer-db-onboarding/feature-delta.md.
 
   - id: JOB-03
     name: live-sync
@@ -404,3 +412,68 @@ jobs:
     # no new job was warranted, this is JOB-14's "make it real" backend
     # half, exactly as admin-api-v2 was JOB-10's backend half of
     # user-admin-ui. See docs/feature/card-payments-backend/feature-delta.md.
+
+  - id: JOB-15
+    name: customer-db-preflight
+    persona: P6
+    persona_name: Elena Vasquez (Customer Database Administrator)
+    secondary_persona: P2
+    feature: customer-db-onboarding
+    job_story: >
+      When my company's Postgres governance policy prohibits granting DDL/schema-
+      modification privileges to any externally-controlled connection string, I want to
+      apply the exact schema embyr requires myself, once, under my own elevated DBA
+      credentials, so I can then hand embyr's operations team a lower-privilege,
+      DML-only connection string and complete onboarding without violating our
+      credential-privilege policy.
+    dimensions:
+      functional: >
+        Elena runs an embyr-provided database-preparation step against her Postgres
+        using her own elevated login; the step applies the exact migration set embyr-
+        server itself embeds and reports a clear success/failure signal with the
+        schema version applied. embyr's provisioning flow verifies the target database
+        matches the expected schema before completing onboarding, and returns a
+        specific, actionable complaint — not a generic or cryptic error — when it does
+        not match
+      emotional: >
+        Feel safe that she never has to grant a third-party SaaS elevated schema-
+        modification rights on production Postgres; feel confident handing over a
+        restricted-privilege connection string; feel in control of exactly what changed
+        on her database and when
+      social: >
+        Elena can show her own security/compliance reviewers that no third-party SaaS
+        was ever granted schema-modification rights on production — the same category
+        of evidence JOB-09's audit-proof pattern provides for credential egress
+    four_forces:
+      push: >
+        Enterprise Postgres governance policies commonly prohibit granting CREATE/
+        ALTER/DROP privileges to any externally-controlled connection string; the
+        existing `POST /admin/v1/projects` flow embeds an automatic `sqlx::migrate!`
+        call against the exact connection string it stores, which structurally
+        requires elevated privileges on that same credential — this blocks onboarding
+        for this customer segment today, and the failure mode they hit is an opaque
+        Postgres permission error surfaced as a generic `backend_unavailable` 400
+      pull: >
+        A standalone step Elena runs herself, once, under her own DBA login, removes
+        the privilege conflict entirely — she never hands over more than DML rights to
+        embyr's stored connection string, and provisioning completes the same day
+        instead of stalling on a security-review escalation
+      anxiety: >
+        "What if the tool I run applies a different schema version than what the
+        currently-deployed embyr expects?" — mitigated by requiring the standalone
+        tool to apply the identical migration set embyr-server embeds, and by the
+        server-side verification step failing loudly with a named, actionable message
+        rather than allowing a mismatched database through
+      habit: >
+        Elena is used to being handed a migration tool (Flyway, golang-migrate,
+        sqlx-cli) to run herself, under her own login, as a one-time pre-deployment
+        step — a familiar DBA pattern; she does not expect, and would resist, a
+        workflow that requires granting a SaaS vendor elevated schema rights
+    opportunity_score: 14
+    priority: high
+    # NOTE (customer-db-onboarding DISCUSS, 2026-08-16): scoped to
+    # backend_mode=direct_pg only in this feature's stories — aws_secret/
+    # gcp_secret provisioning branches share the identical underlying gap
+    # (they also call sqlx::migrate! against the fetched DSN) but are
+    # deferred as follow-up scope to keep this feature right-sized. See
+    # docs/feature/customer-db-onboarding/feature-delta.md § Out of Scope.

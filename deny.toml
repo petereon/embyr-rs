@@ -81,6 +81,9 @@ deny = [
         "embyr-admin",
         "embyr-admin-ui",
         "embyr-agent",
+        # embyr-db-prep (customer-db-onboarding, ADR-022) — customer-run
+        # standalone binary; IO-permissive scope, same as embyr-agent/embyr-server.
+        "embyr-db-prep",
         "embyr-pg-storage",
         "tokio-util",
         "tokio-stream",
@@ -133,6 +136,9 @@ deny = [
     { name = "sqlx", wrappers = [
         "embyr-server",
         "embyr-agent",
+        # embyr-db-prep (customer-db-onboarding, ADR-022) — applies
+        # migrations/customer/ via PostgresBackendAdapter::migrate().
+        "embyr-db-prep",
         "embyr-pg-storage",
     ] },
 

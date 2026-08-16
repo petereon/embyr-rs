@@ -3062,4 +3062,253 @@ External Integrations Requiring Contract Tests:
 This is a forward-flag from the frontend `card-payments` feature's own DESIGN section (§ Driven
 Ports — Forward Contract), now realized as this feature's own highest-risk boundary.
 
+---
+
+## Application Architecture — customer-db-onboarding
+
+> Updated: 2026-08-16
+> Feature: customer-db-onboarding (JOB-15 — privilege-separated Postgres onboarding for
+> DBA-gated/regulated customers, `backend_mode=direct_pg` only)
+> Mode: Propose (autonomous analysis per Decision 1)
+> ADRs: `docs/product/architecture/adr-022-customer-db-prep-crate-and-migration-consolidation.md`
+> (new), `docs/product/architecture/adr-023-schema-readiness-verification.md` (new)
+
+---
+
+### Wave: DESIGN / [REF] Contradiction Check — AD-A08 Correction
+
+DISCUSS's feature-delta (§ Out of Scope) states: "`agent` backend mode — not applicable;
+`embyr-agent` already self-migrates its own local customer DB at its own startup (AD-A08)."
+Codebase inspection during DESIGN (`crates/embyr-agent/src/main.rs`, `probe.rs`, `server.rs`)
+found this factually incorrect: `embyr-agent`'s production `run()` path connects a pool and starts
+the mTLS gRPC server directly — it never calls `PostgresBackendAdapter::migrate()` or
+`run_migrations()`. Those methods exist (in `embyr-pg-storage`) but, per their own doc comments,
+are used only by test harnesses today.
+
+This does not change agent mode's exclusion from this feature's scope — the exclusion is still
+correct on independent grounds (agent-mode credentials never leave the customer's VPC, so the
+cross-tenant privilege-separation-from-embyr's-SaaS problem this feature solves does not apply to
+agent mode regardless of how its schema gets applied). But the *stated reason* was inaccurate, and
+the actual gap (how does an agent-mode customer's local DB get its schema today?) is real and
+undocumented. Flagged as OQ-2 below — not fixed in this feature, per DISCUSS's explicit
+"do not expand scope" guardrail.
+
+---
+
+### Wave: DESIGN / [REF] Quality Attribute Priorities — customer-db-onboarding
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|---------------------|
+| 1 | **Privilege-separation integrity** | The entire reason the feature exists: provisioning must never require or attempt DDL against a database when it isn't necessary (AC-02-01, AC-02-05). This is the feature's own North Star KPI. |
+| 2 | **Migration-set single-sourcing** | DISCUSS's Handoff Package names this the single highest-consequence design risk. A drift between what the prep binary applies and what `embyr-server` expects is the anxiety-path failure mode JOB-15 names explicitly. |
+| 3 | **Error-message actionability** | KPI #2 (leading indicator): ≥90% of not-prepped/stale-version failures must be self-resolvable from the error message alone, no support ticket. |
+| 4 | **No regression to the existing default `direct_pg` flow** | KPI #3 (guardrail): 0% regression in existing provisioning success rate for non-DBA-gated customers. The single highest-consequence *defect* class this feature can produce. |
+| 5 | **Idempotent, resumable preparation** | AC-01-02/AC-01-03 — a DBA's interrupted run (VPN drop, network blip) must not require manual cleanup. |
+
+---
+
+### Wave: DESIGN / [REF] Reuse Analysis — customer-db-onboarding (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---------------------|------|---------|----------|----------------|
+| `PostgresBackendAdapter::migrate()` / `run_migrations()` | `crates/embyr-pg-storage/src/backend_adapter.rs` | Already applies `migrations/customer/` via `sqlx::migrate!` — exact capability the new prep binary needs, and exact capability `provision.rs` reimplements independently three times today | **EXTEND** | Route both the new prep binary and `provision.rs`'s three branches through this single existing method instead of independent inline macro calls. Collapses 2 pre-existing independent embeds (`provision.rs`, `backend_adapter.rs`) plus the new prep binary's would-be 3rd embed down to ONE canonical embed — directly resolves DISCUSS's #1 escalated risk. ~3 LOC diff per `provision.rs` branch vs. 0 new migration-application code anywhere. See ADR-022. |
+| `SystemDb::probe()` | `crates/embyr-server/src/adapters/system_db.rs` | Hard-gate schema-verification pattern: `SELECT 1` liveness + `information_schema.tables` existence check, refuse-to-proceed on mismatch | **EXTEND (pattern reuse, new sibling method)** | The new `verify_schema_readiness()` follows the identical shape but targets a different DB (customer, not system) at a different moment (provisioning-time, not server-startup). Cannot literally extend `SystemDb` itself — it is hard-wired to the system DB's own pool, connection lifecycle (`SystemDb::new()`), and the `projects` table name; retrofitting it to be DB/table-agnostic is more code than the ~15 LOC sibling method added to `PostgresBackendAdapter`, which already owns the customer DB pool. See ADR-023. |
+| `provision.rs`'s `direct_pg` branch + `probe_customer_db()` | `crates/embyr-server/src/admin/handlers/provision.rs` | The exact code path being extended: existing connectivity probe + automatic migrate call | **EXTEND** | Insert `verify_schema_readiness()` between the existing `probe_customer_db()` and the migrate call; branch on its result to skip migrate (`Ready`) or enrich the failure message (`NotPrepped`/`Stale`). No new HTTP endpoint; no new request/response shape beyond the error body. |
+| `embyr-agent` crate ([[bin]] target, `AgentConfig::from_env()` error-accumulation pattern, named startup errors) | `crates/embyr-agent/` | Precedent for a customer-run standalone binary with env-var config and distinct, actionable startup errors | **CREATE NEW crate (pattern-only reuse, not code reuse)** | `embyr-agent` is a long-running mTLS gRPC daemon (tonic, rustls server TLS, background sweeper, NOTIFY bridge) — a fundamentally different runtime shape from a one-shot CLI migration tool. Sharing its crate would pull tonic/rustls-server/mTLS dependencies into a tool needing none of them, working against the same supply-chain-minimization rationale SD-01/SD-09 already established for `embyr-agent` itself. The `[[bin]]`+`[lib]` shape and the config-error-accumulation *pattern* are reused directly; the crate and its dependency graph are new (`embyr-db-prep`: only `embyr-pg-storage`, `embyr-core`, `sqlx`, `tokio`). See ADR-022. |
+| `embyr-server` crate (as a home for a new `[[bin]]`) | `crates/embyr-server/` | Considered as an alternative home for the new binary | **REJECTED (not extended)** | `embyr-server`'s `Cargo.toml` carries axum, tonic, tonic-web, aws-sdk-secretsmanager, async-stripe, and a dozen SaaS-side dependencies irrelevant to a one-shot DB migration tool run in a customer environment. See ADR-022 Alternative 2. |
+| `CoreError` enum (`PermissionDenied`, `BackendUnavailable`, `InvalidArgument`) | `crates/embyr-core/src/error.rs` | Existing variants already cover "insufficient privilege" and "connection failure" semantics via free-text payload | **EXTEND (reuse existing variants, no new enum growth)** | Prep binary and `verify_schema_readiness()` reuse these existing variants; the String payload carries the specific role/database/table/version detail. Matches the project's established convention (nearly every `CoreError` variant already carries a free-text detail string). |
+
+**Verdict: 5 EXTEND, 1 CREATE NEW (new crate, extensively justified against 2 rejected in-place
+alternatives — see ADR-022), 0 unjustified CREATE NEW.**
+
+---
+
+### Wave: DESIGN / [REF] Component Decomposition — customer-db-onboarding
+
+| File Path | Change | Responsibility |
+|-----------|--------|-----------------|
+| `crates/embyr-db-prep/Cargo.toml` | **NEW** | New workspace crate. `[[bin]] name = "embyr-db-prep"`. Deps: `embyr-pg-storage`, `embyr-core`, `sqlx`, `tokio` only. |
+| `crates/embyr-db-prep/src/main.rs` | **NEW** | Entry point: `DbPrepConfig::from_env()` → connectivity probe (SELECT 1, timeout-bound) → `PostgresBackendAdapter::migrate()` → classify result → print named message → exit code. Mirrors `embyr-agent/src/main.rs`'s wire→probe→use shape. |
+| `crates/embyr-db-prep/src/config.rs` | **NEW** | `DbPrepConfig::from_env()` — `EMBYR_DB_PREP_DSN` (required, elevated) + `EMBYR_DB_PREP_DML_ROLE_DSN` (**optional**, revised per ADR-023 security-review resolution — the DML role's own connection string, used only to self-discover its role name). Mirrors `AgentConfig::from_env()`'s error-accumulation pattern. |
+| `crates/embyr-db-prep/src/error_report.rs` | **NEW** | Classifies the underlying `sqlx`/Postgres error (connect-phase vs. `SQLSTATE 42501` insufficient_privilege vs. other) into the 3 named message shapes UAT requires. Role/database named from the DSN's own components, not from server response content. |
+| `crates/embyr-pg-storage/src/backend_adapter.rs` | **EXTEND** | Add `verify_schema_readiness(&self) -> Result<SchemaReadiness, CoreError>`; add `discover_current_user(&self) -> Result<String, CoreError>` (runs `SELECT current_user`, used against a brief DML-role connection, ADR-023 revised); add `grant_schema_readiness_read(&self, role_name: &str) -> Result<(), CoreError>` (executes the role-scoped `GRANT`, executed against the elevated connection, using Postgres's own `format('%I', ...)` for identifier quoting — no hand-rolled Rust quoting). `provision.rs`'s 3 branches switch from inline `sqlx::migrate!` to calling the already-existing `migrate()` (ADR-022). |
+| `crates/embyr-core/src/domain/schema_readiness.rs` | **NEW** | Pure `SchemaReadiness` enum (`Ready`, `NotPrepped`, `Stale`). Zero IO imports — `deny.toml`-compliant. |
+| `crates/embyr-core/src/domain/mod.rs` | **EXTEND** | Register `schema_readiness` module. |
+| `crates/embyr-server/src/admin/handlers/provision.rs` | **EXTEND** | `direct_pg` branch: call `verify_schema_readiness()` after `probe_customer_db()`; skip migrate on `Ready`; on `NotPrepped`/`Stale`, attempt the existing (unchanged) migrate call and enrich only the failure message. Replace all 3 inline `sqlx::migrate!` calls with `PostgresBackendAdapter::migrate()`. No grant-related change — the grant step lives exclusively in `embyr-db-prep` (see revised ADR-023). |
+| ~~`migrations/customer/0003_grant_schema_readiness_read.sql`~~ | **REMOVED (design revision)** | Superseded — a role-parameterized grant cannot be expressed as static, unparameterized migration SQL (the target role name isn't known at migration-authoring time). The grant is now a runtime step in `embyr-db-prep` only (`discover_current_user()` + `grant_schema_readiness_read()`), never a tracked migration. `expected_version` for `Stale`/`Ready` comparison remains `2` (`0001`, `0002` only). |
+| Root `Cargo.toml` | **EXTEND** | Add `crates/embyr-db-prep` to `[workspace] members`. |
+| `deny.toml` | **EXTEND** | Register `embyr-db-prep` with the same IO-permissive scope as `embyr-agent`/`embyr-server` (only `embyr-core` is IO-prohibited). |
+
+No changes to `embyr-proto`, `embyr-admin`, `embyr-admin-ui`, or `embyr-agent`.
+
+**Revision note (post-DESIGN-wave security review):** the original Component Decomposition proposed
+a static migration `0003_grant_schema_readiness_read.sql` granting `SELECT` on `_sqlx_migrations` to
+`PUBLIC`. A targeted security review of ADR-023 approved the design overall but flagged this as an
+avoidably broad grant for a feature whose entire framing is least-privilege separation. Revised to a
+role-parameterized runtime grant (above); full mechanism and rationale: ADR-023 (revised) and
+§ Driven Ports + Adapters below.
+
+---
+
+### Wave: DESIGN / [REF] Driving Ports — customer-db-onboarding
+
+| Port | Auth/Trigger | Handler |
+|------|--------------|---------|
+| `embyr-db-prep` CLI process (**new**) | Run by Elena under her own elevated, database-scoped Postgres role. Config: `EMBYR_DB_PREP_DSN` env var (required) + `EMBYR_DB_PREP_DML_ROLE_DSN` env var (optional, revised per ADR-023 — enables the role-scoped read grant). Not network-facing — a system-context-level driving port, per DISCUSS's own framing. | `crates/embyr-db-prep/src/main.rs` |
+| `POST /admin/v1/projects` (existing, `backend_mode=direct_pg` branch extended) | Operator Bearer (`operator_auth_middleware`, unchanged) | `provision.rs::provision` |
+
+No new customer-facing gRPC/REST surface on `:8080`/`:8081` — confirmed unchanged from DISCUSS's
+own Driving Ports section.
+
+---
+
+### Wave: DESIGN / [REF] Driven Ports + Adapters — customer-db-onboarding
+
+Conceptual interface (method signatures only — no implementation belongs in this document):
+
+```
+impl PostgresBackendAdapter {
+    async fn migrate(&self) -> Result<(), CoreError>;
+    // existing method, now the sole embed point for migrations/customer/ (ADR-022)
+
+    async fn verify_schema_readiness(&self) -> Result<SchemaReadiness, CoreError>;
+    // new (ADR-023)
+
+    async fn discover_current_user(&self) -> Result<String, CoreError>;
+    // new (ADR-023, revised) — runs `SELECT current_user`. Called against a brief, short-lived
+    // connection opened with EMBYR_DB_PREP_DML_ROLE_DSN; the DSN is never logged, never reused
+    // beyond this one query (mirrors StartupProbe's DSN-handling convention).
+
+    async fn grant_schema_readiness_read(&self, role_name: &str) -> Result<(), CoreError>;
+    // new (ADR-023, revised) — executed against the ELEVATED connection (only the owner of
+    // _sqlx_migrations can grant on it). Role-name interpolation is delegated to Postgres's own
+    // format('%I', ...) (a plain, bind-parameterized SELECT), never hand-rolled Rust-side quoting —
+    // closes the SQL-injection-shaped risk a naive string interpolation would open.
+}
+
+enum SchemaReadiness {
+    Ready { schema_version: i64 },
+    NotPrepped { missing_tables: Vec<String> },
+    Stale { expected_version: i64, found_version: i64 },
+}
+```
+
+**Revised per ADR-023's security-review resolution:** `_sqlx_migrations` is made readable to the DML
+role via a runtime, role-scoped `GRANT` — not `GRANT ... TO PUBLIC`, and not a static migration file
+(a role-parameterized grant cannot be expressed as unparameterized migration SQL). `embyr-db-prep`
+performs the grant only when `EMBYR_DB_PREP_DML_ROLE_DSN` is supplied (optional); if absent, the tool
+still reports migration success normally and prints an informational note that read-verification
+access was not established. Full mechanism, the two-round-trip identifier-quoting technique, and the
+rejected `PUBLIC`-grant alternative: ADR-023 § Mechanism, § Alternatives Considered (Alternative 4).
+
+**Earned Trust — probe design (Principle 12):**
+
+| Aspect | Design |
+|--------|--------|
+| What `embyr-db-prep` probes before use | Connectivity: `PgPoolOptions::connect(dsn)` + `SELECT 1`, timeout-bound — mirrors `probe_customer_db()`/`embyr-agent`'s `StartupProbe::probe_postgres` shape. Runs **before** `migrate()` is ever attempted (wire → probe → use). |
+| Failure action on probe failure | Hard failure — distinct "connection failed" message, exit 1, `migrate()` never attempted. |
+| Fault-injection scenarios | (1) host unreachable → connect timeout/error → "connection failed" (AC-01-05). (2) valid connection, insufficient privilege on the first pending DDL statement → `SQLSTATE 42501` → "insufficient privilege: role `{role}` lacks CREATE on database `{database}`" (role/database parsed from the DSN itself, not server response content — AC-01-04). (3) interrupted mid-migration (network drop between migrations) → Postgres transactional DDL rolls back the uncommitted migration; `_sqlx_migrations` retains only prior, fully-committed versions; re-run resumes cleanly with no duplicate-object error — this relies on Postgres's transactional DDL + sqlx's per-migration transaction wrapping (validated existing behavior, no new resume logic required — AC-01-03). (4) `EMBYR_DB_PREP_DML_ROLE_DSN` connection fails (revised, ADR-023) → the grant step is skipped with a distinct, non-fatal warning; migration success/failure reporting is unaffected — a broken DML-role credential must not make an otherwise-successful schema migration look like a failure. |
+| `verify_schema_readiness()` as `embyr-server`'s own probe | Mirrors `SystemDb::probe()`'s hard-gate shape: a read-only check of substrate claims (schema state) performed before provisioning proceeds against that substrate. Runs on every `direct_pg` provisioning request — the provisioning-time analogue of a startup probe, not a one-time check. |
+| The specific substrate lie this defends against | A submitted DML-only connection string "looks" like an ordinary Postgres connection (connects fine, `SELECT 1` succeeds) but silently cannot perform the DDL provisioning has always assumed it could until the migration attempt fails. This is exactly the kind of substrate assumption Earned Trust requires probing/diagnosing explicitly rather than surfacing as a raw downstream error. |
+
+External integrations requiring contract tests: **none.** This feature adds no new external
+SaaS/API integration — the "external" system touched (the customer's own Postgres) is already a
+first-class integration point in the existing architecture (`direct_pg` mode), not a new
+dependency class.
+
+---
+
+### Wave: DESIGN / [REF] C4 System Context (Mermaid) — customer-db-onboarding
+
+```mermaid
+C4Context
+    title System Context — Customer DB Onboarding (customer-db-onboarding)
+
+    Person(elena, "Elena Vasquez (Customer DBA, P6)", "Runs embyr-db-prep against her own Postgres using an elevated, database-scoped role")
+    Person(sam, "Sam Chen (Service Operator, P2)", "Submits provisioning with the DML-only connection string Elena hands over")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        System(embyrServer, "embyr-rs (embyr-server)", "Admin port :9090. direct_pg provisioning branch extended with a schema-readiness verification step around the existing automatic migration attempt.")
+    }
+
+    System_Ext(embyrDbPrep, "embyr-db-prep", "New standalone binary. Customer-run, outside any embyr-hosted process. Applies migrations/customer/ under Elena's own elevated credential.")
+    System_Ext(customerDB, "Customer Postgres", "Customer-managed, direct_pg mode. Elena preps it; Sam later hands embyr-server a DML-only credential to the same database.")
+
+    Rel(elena, embyrDbPrep, "Runs against her target database")
+    Rel(embyrDbPrep, customerDB, "Applies migrations/customer/ (CREATE TABLE); then GRANT SELECT on _sqlx_migrations to the DML role only, discovered via a brief secondary connection (revised, ADR-023)", "Postgres — elevated DDL credential (migrate + grant) / DML-role credential (role-name discovery only)")
+    Rel(sam, embyrServer, "POST /admin/v1/projects with DML-only connection string", "HTTP :9090 (internal)")
+    Rel(embyrServer, customerDB, "Verifies schema readiness (SELECT only); if not ready, attempts the existing automatic migration (unchanged path)", "Postgres — DML-only credential (verify) / customer-submitted credential (migrate attempt)")
+```
+
+---
+
+### Wave: DESIGN / [REF] C4 Container Diagram (Mermaid) — customer-db-onboarding
+
+```mermaid
+C4Container
+    title Container Diagram — Customer DB Onboarding
+
+    Person(elena, "Elena Vasquez (Customer DBA)")
+    Person(sam, "Sam Chen (Service Operator)")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(provisionHandler, "provision.rs (direct_pg branch)", "Rust / axum handler", "Extended: calls verify_schema_readiness() before the existing migrate() attempt; returns customer_db_not_prepped / customer_db_schema_stale on migrate failure instead of generic backend_unavailable.")
+        Container(pgStorage, "embyr-pg-storage (PostgresBackendAdapter)", "Rust library", "Sole embed point for migrations/customer/ (migrate()) and new verify_schema_readiness(). Shared by embyr-server and embyr-db-prep.")
+    }
+
+    System_Boundary(customerInfra, "Customer Infrastructure (direct_pg)") {
+        Container(dbPrep, "embyr-db-prep", "Rust binary, new crate", "One-shot CLI. Depends only on embyr-pg-storage + embyr-core + sqlx + tokio. Calls PostgresBackendAdapter::migrate(), then (if EMBYR_DB_PREP_DML_ROLE_DSN supplied) discover_current_user() + grant_schema_readiness_read() — revised, ADR-023.")
+        ContainerDb(custDB, "Customer Postgres", "PostgreSQL", "documents, transactions, _sqlx_migrations tables. _sqlx_migrations is SELECT-granted at runtime to exactly the DML role onboarded (role-scoped, not PUBLIC — revised per ADR-023 security review).")
+    }
+
+    Rel(elena, dbPrep, "Runs with EMBYR_DB_PREP_DSN=<elevated DSN> [+ EMBYR_DB_PREP_DML_ROLE_DSN=<DML role DSN>, optional]")
+    Rel(dbPrep, pgStorage, "Calls PostgresBackendAdapter::migrate(), then discover_current_user()/grant_schema_readiness_read()")
+    Rel(sam, provisionHandler, "POST /admin/v1/projects", "HTTP :9090")
+    Rel(provisionHandler, pgStorage, "Calls verify_schema_readiness(), then migrate() only if not Ready")
+    Rel(pgStorage, custDB, "SELECT (verify) / CREATE TABLE (migrate) / SELECT current_user + GRANT (embyr-db-prep's grant step only)", "Postgres SQL")
+```
+
+---
+
+### Wave: DESIGN / [REF] Architecture Enforcement — customer-db-onboarding
+
+| Concern | Enforcement Mechanism |
+|---------|------------------------|
+| Single embed point for `migrations/customer/` (ADR-022) | Code-review convention + DISTILL-wave regression test asserting the macro invocation appears exactly once in the workspace source tree (`crates/embyr-pg-storage/src/backend_adapter.rs`) — mirrors the project's existing "sole importer" conventions (e.g., `StripeGateway`, ADR-021). |
+| `embyr-core` stays IO-free (`SchemaReadiness` enum) | Existing `deny.toml` IO-prohibition for `embyr-core`, unchanged scope. |
+| `embyr-db-prep` dependency minimality (no tonic/rustls-server/aws-sdk) | `deny.toml` extended to register `embyr-db-prep`; `Cargo.lock` diff review in CI — no new transitive dependencies beyond `sqlx`/`tokio`/`embyr-pg-storage`/`embyr-core` already present in the workspace. |
+| `verify_schema_readiness()` never attempts DDL | Integration test (DISTILL, testcontainers, mirrors `SystemDb::probe()`'s test pattern): connect as a role granted only DML+SELECT on the application tables, assert `verify_schema_readiness()` succeeds/reports correctly without itself triggering a permission-denied error. |
+| Role-scoped grant is actually role-scoped, not broad (**added per security review, ADR-023 revision**) | Integration test: after `embyr-db-prep` runs with `EMBYR_DB_PREP_DML_ROLE_DSN` set to role `embyr_app`, assert `embyr_app` CAN `SELECT * FROM _sqlx_migrations` AND a second, distinct role granted no privileges by the test fixture CANNOT (`permission denied`). This is the test that would have caught a `PUBLIC`-grant regression. |
+| Grant-discovery mechanism applied consistently and idempotently | Integration test: run `embyr-db-prep`'s full flow (migrate + discover + grant) twice against the same database/role, assert the second run is a no-op — `migrate()`'s existing idempotency plus `grant_schema_readiness_read()`'s idempotency (re-granting is a Postgres no-op). |
+| Grant step is optional and non-fatal when `EMBYR_DB_PREP_DML_ROLE_DSN` is absent/unreachable | Integration test: run `embyr-db-prep` without the DML-role DSN, assert migration success is still reported via the unchanged success message and an informational (not error) note is printed; a subsequent `verify_schema_readiness()` against a DML-only role with no grant reports `NotPrepped`, not an unhandled error. |
+| Identifier interpolation into the dynamic `GRANT` is injection-safe | Unit/integration test: role name containing an embedded double-quote or reserved word round-trips correctly through `discover_current_user()` → `format('%I', ...)` → `grant_schema_readiness_read()` without producing a malformed or injectable statement. |
+| Mutation testing | `cargo-mutants -p embyr-core --filter schema_readiness` (pure comparison logic). Per-feature mutation gate per project `CLAUDE.md`. |
+
+---
+
+### Wave: DESIGN / [REF] Application-Level Decisions Table — customer-db-onboarding
+
+| ID | Decision | Verdict | Rationale |
+|----|----------|---------|-----------|
+| CDO-AD-01 | Single embed point for `migrations/customer/` via `PostgresBackendAdapter::migrate()` | Accepted — ADR-022 | Eliminates the pre-existing 2-way embed duplication and prevents a 3rd; directly resolves DISCUSS's #1 flagged risk |
+| CDO-AD-02 | New crate `embyr-db-prep`, not a new `[[bin]]` inside `embyr-agent` or `embyr-server` | Accepted — ADR-022 | Supply-chain minimization; mirrors SD-09's rationale for `embyr-agent` itself |
+| CDO-AD-03 | Verification via sqlx's own `_sqlx_migrations` table, not a bespoke marker table | Accepted — ADR-023 | Avoids a second, parallel bookkeeping mechanism; reuses existing sqlx tracking |
+| CDO-AD-04 | `verify_schema_readiness()` enriches the existing migrate-attempt failure path; does not replace or gate it | Accepted — ADR-023 | Required to preserve AC-02-06 (no regression to today's full-privilege-DSN default path) |
+| CDO-AD-05 | `found_version >= expected_version` (not strict equality) counts as `Ready` | Accepted, flagged OQ-1 | Forward-compatible during rolling deploys; could mask a hypothetical future non-additive migration — documented, deferred |
+| CDO-AD-06 | `SchemaReadiness` lives in `embyr-core` (pure domain type); `verify_schema_readiness()` lives in `embyr-pg-storage` (adapter) | Accepted | Matches existing layering (`ProjectId` in `embyr-core`, adapter-side structs like `ProjectAuthRow` in infra) |
+| CDO-AD-07 | No new `CoreError` variants; reuse `PermissionDenied`/`BackendUnavailable` for prep-binary and verify messaging | Accepted | Matches the existing string-payload `CoreError` convention; avoids enum growth for a single feature |
+| CDO-AD-08 | **Revised** — `_sqlx_migrations` read access is a role-scoped `GRANT` (target role discovered at runtime via a brief secondary connection + `SELECT current_user`), executed by `embyr-db-prep` only, not a static `migrations/customer/0003` migration granting `PUBLIC` | Accepted — ADR-023 (revised), supersedes the original PUBLIC-grant proposal | Security review flagged the `PUBLIC` grant as avoidably broad for a privilege-separation feature; role-scoped grant achieves the same zero-manual-role-typing property via self-discovery, at the cost of one new optional prep-tool input (`EMBYR_DB_PREP_DML_ROLE_DSN`) |
+
+---
+
+### Wave: DESIGN / [REF] Open Questions — customer-db-onboarding
+
+| ID | Question | Blocking | Resolution Timing |
+|----|----------|---------|---------------------|
+| OQ-1 | `found_version >= expected_version` could mask a genuinely breaking future migration (e.g., a column removal) that the current additive-only, one-table-per-migration schema history doesn't yet need to worry about | No | Follow-up, if/when a non-additive migration is ever introduced to `migrations/customer/` |
+| OQ-2 | **AD-A08 factual correction** (see § Contradiction Check above): `embyr-agent`'s production `server::run()` does not call `migrate()`/`run_migrations()` at startup. Agent mode's exclusion from this feature is still correct on other grounds (credentials never leave the customer VPC), but how an agent-mode customer's local DB actually gets its schema today is unaddressed and undocumented | No (does not block this feature; `direct_pg` is unaffected) | Recommend a follow-up: either wire `embyr-agent`'s startup path to call `PostgresBackendAdapter::migrate()` (now single-sourced per ADR-022, trivial to add), or document the current manual process, whichever reflects actual customer practice |
+| OQ-3 | `aws_secret`/`gcp_secret` generalization (deferred per DISCUSS) | No | `provision.rs`'s `aws_secret`/`gcp_secret` branches can adopt the identical `verify_schema_readiness()` call with zero new adapter code when scoped — design confirmed to generalize cleanly |
+| OQ-4 | **Resolved by targeted security review.** The original `GRANT SELECT ... TO PUBLIC` (ADR-023) was flagged as a genuine, if narrow, privilege-model change during a targeted security review of the ADR. The review approved ADR-023 overall and recommended a role-scoped grant instead — adopted (CDO-AD-08, ADR-023 revision). No further review action needed on this specific point. | Resolved | Closed this wave |
+| OQ-5 | The revised role-scoped grant introduces an ordering dependency: if Elena runs `embyr-db-prep` without `EMBYR_DB_PREP_DML_ROLE_DSN` (e.g., before the `embyr_app` role exists), `verify_schema_readiness()` will report `NotPrepped` at provisioning time even though the schema itself is fully applied, until the tool is re-run (idempotently) with the DML-role DSN supplied | No (documented, not a defect — re-running the idempotent prep tool is cheap) | DISTILL should write an explicit UAT scenario for this sequencing case so it is tested, not just documented |
+
 

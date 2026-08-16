@@ -1,0 +1,167 @@
+{
+  "schema_version": "3.0",
+  "feature_id": "customer-db-onboarding",
+  "events": [
+    {
+      "sid": "01-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T14:46:24Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "FAIL: cdo01 exit 101 (from_env panic) vs expected 0; cdo02 same precondition fail; cdo03 assert_state_delta migrations.applied_count expected 2 got 1 -- all fail for business-logic reason, no collection/import errors",
+      "t": "2026-08-16T14:47:15Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: no pure-function logic introduced this step, see 03-01 for this feature's PBT-appropriate surface",
+      "t": "2026-08-16T14:47:20Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PARTIAL_PASS: cdo01 (fresh apply) + cdo02 (idempotent no-op) GREEN via real DbPrepConfig::from_env() + main.rs wire-probe-migrate-report flow. cdo03 (interrupted resume) BLOCKED -- re-ignored -- root cause isolated and confirmed by direct reproduction (real Postgres 15-alpine container + real embyr-db-prep binary): fixture applies migration 0001 via the testcontainer superuser DSN (db_url) rather than elena_dsn, making role 'postgres' the owner of _sqlx_migrations; elena_dba (created via create_ddl_role, granted only ALL ON DATABASE + CREATE ON SCHEMA public, no table-level grants) then gets permission denied for table _sqlx_migrations when PostgresBackendAdapter::migrate() runs under her DSN -- confirmed via psql (SELECT as elena_dba fails) and via the actual compiled binary (migrate() Err: permission denied for table _sqlx_migrations). Contradicts ADR-023's stated assumption that _sqlx_migrations is owned by Elena's elevated role by virtue of having created it. Fix requires editing tests/customer_db_onboarding/acceptance/cdo03_interrupted_run_resumes.rs Given-block (use elena_dsn not db_url) -- outside files_to_modify scope for step 01-01 (config.rs, main.rs only). Full workspace build clean; full embyr-db-prep test suite green (cdo01/cdo02 pass, cdo03-cdo18 correctly ignored, 0 failures).",
+      "t": "2026-08-16T15:03:14Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PARTIAL: commit 6c91eef -- cdo01+cdo02 GREEN and committed; cdo03 re-ignored and NOT satisfied this step, blocked by out-of-scope fixture defect (see GREEN phase data + BLOCKED comment in cdo03_interrupted_run_resumes.rs). Step 01-01 not fully closed -- escalation raised to fix the fixture (cdo03 Given-block must apply migration 0001 via elena_dsn, not the superuser db_url) before re-attempting cdo03.",
+      "t": "2026-08-16T15:03:32Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "FAIL",
+      "t": "2026-08-16T15:05:05Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:05:10Z"
+    },
+    {
+      "sid": "01-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:05:11Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:14:46Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:17:15Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: 3-arm match, not proportionate for PBT machinery at this scope per DISTILL scenario list; revisit if classify() grows a 4th+ arm",
+      "t": "2026-08-16T15:17:17Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:18:33Z"
+    },
+    {
+      "sid": "01-02",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:19:09Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:21:32Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:21:45Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: structural/architecture-enforcement scenario, no runtime logic to PBT",
+      "t": "2026-08-16T15:21:50Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:26:40Z"
+    },
+    {
+      "sid": "02-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:26:54Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:29:11Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:30:09Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "RED_UNIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:31:07Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:38:51Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-16T15:40:02Z"
+    }
+  ]
+}

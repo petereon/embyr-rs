@@ -1,0 +1,9 @@
+version: "1.0"
+feature: customer-db-onboarding
+persona: P6
+persona_name: Elena Vasquez (Customer Database Administrator)
+secondary_persona: P2 (Sam Chen, Service Operator — receives the verify-and-complain signal)
+jobs:
+  - JOB-15  # customer-db-preflight
+updated: "2026-08-16"
+source: docs/feature/customer-db-onboarding/feature-delta.md
