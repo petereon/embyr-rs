@@ -27,12 +27,15 @@
 //!      informational (non-fatal) note; migration success reporting is
 //!      unaffected.
 //!
-//! Step 01-01 (walking skeleton) implements the happy-reachable path: config
+//! Step 01-01 (walking skeleton) implemented the happy-reachable path: config
 //! parsing, a timeout-bound connect, migrate(), a before/after
 //! `_sqlx_migrations` count comparison to distinguish "freshly applied" from
 //! "already up to date", and the DML-role-absent informational note.
-//! Connection-failure classification (`error_report::classify()`) and the
-//! grant step are filled in by later steps (01-02, 05-01) — see
+//! Step 01-02 added the connect-phase liveness probe and
+//! `error_report::classify()` wiring (AC-01-04, AC-01-05): connect-phase
+//! failures (pool open or probe) short-circuit to a hardcoded message and
+//! never reach `classify()`; only a `migrate()`-phase failure does. The
+//! grant step is filled in by a later step (05-01) — see
 //! `tests/customer_db_onboarding/acceptance/cdo0{1..11}_*.rs`.
 
 mod config;
@@ -40,6 +43,7 @@ mod error_report;
 
 use std::time::Duration;
 
+use embyr_core::storage::backend_adapter::BackendAdapter;
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
 
 #[tokio::main]
@@ -52,6 +56,13 @@ async fn main() {
         }
     };
 
+    // Connect phase: pool open + a liveness probe (SELECT 1), both
+    // timeout-bound. Any failure here (unreachable host, refused
+    // connection, probe timeout) short-circuits to a hardcoded,
+    // structurally distinct "connection failed" message -- migrate() and
+    // error_report::classify() are NEVER reached from this branch, which is
+    // what makes AC-01-05's negative assertion (no "privilege"/"permission
+    // denied" wording) structurally guaranteed rather than incidental.
     let pool = match tokio::time::timeout(
         Duration::from_secs(10),
         sqlx::postgres::PgPoolOptions::new()
@@ -61,27 +72,23 @@ async fn main() {
     .await
     {
         Ok(Ok(pool)) => pool,
-        Ok(Err(_)) => {
-            // Connection-failure classification (distinct message shapes)
-            // is 01-02's scope. This step only needs the happy-reachable
-            // path to succeed without hanging.
-            eprintln!("embyr-db-prep: failed to connect to the database");
-            std::process::exit(1);
-        }
-        Err(_) => {
-            eprintln!("embyr-db-prep: connection attempt timed out");
-            std::process::exit(1);
-        }
+        _ => connection_failed_and_exit(&cfg.dsn),
     };
 
     let adapter = PostgresBackendAdapter::new_from_pool(pool);
 
+    match tokio::time::timeout(Duration::from_secs(10), adapter.probe()).await {
+        Ok(Ok(())) => {}
+        _ => connection_failed_and_exit(&cfg.dsn),
+    }
+
     let applied_before = applied_migration_count(&adapter).await;
 
+    // Migrate phase: the pool is open and the probe succeeded, so any
+    // failure from here on is classified via error_report::classify() --
+    // this is the only path that reaches it.
     if let Err(e) = adapter.migrate().await {
-        // Full presentable classification is 01-02's scope
-        // (error_report::classify()) — not needed for this step's ATs.
-        eprintln!("embyr-db-prep: migration failed: {e}");
+        eprintln!("embyr-db-prep: {}", error_report::classify(&e, &cfg.dsn));
         std::process::exit(1);
     }
 
@@ -107,6 +114,27 @@ async fn main() {
     }
 
     std::process::exit(0);
+}
+
+/// Print the hardcoded, structurally-distinct connect-phase failure message
+/// and exit non-zero. Used for both a failed/timed-out pool open and a
+/// failed/timed-out liveness probe -- neither ever calls
+/// `error_report::classify()`, which is what makes AC-01-05's message
+/// structurally incapable of containing privilege/permission wording.
+fn connection_failed_and_exit(dsn: &str) -> ! {
+    eprintln!("embyr-db-prep: connection failed: {} unreachable", host_from_dsn(dsn));
+    std::process::exit(1);
+}
+
+/// Extract the `host[:port]` component from a `postgres://user:pass@host:port/db`
+/// connection string, for use in the connect-phase failure message. Falls
+/// back to the raw DSN if the shape is unexpected -- never panics.
+fn host_from_dsn(dsn: &str) -> &str {
+    let after_scheme = dsn.split_once("://").map_or(dsn, |(_, rest)| rest);
+    let host_and_path = after_scheme
+        .split_once('@')
+        .map_or(after_scheme, |(_, rest)| rest);
+    host_and_path.split('/').next().unwrap_or(host_and_path)
 }
 
 /// Count successfully-applied rows in sqlx's own `_sqlx_migrations`

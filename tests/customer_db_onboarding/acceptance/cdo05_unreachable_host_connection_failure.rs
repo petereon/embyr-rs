@@ -21,7 +21,6 @@ mod common;
 use common::run_db_prep;
 
 #[tokio::test]
-#[ignore]
 async fn unreachable_host_reports_a_connection_failure_distinct_from_privilege_failure() {
     // Given: an unreachable host (unroutable TEST-NET-1 address, RFC 5737,
     // guaranteed not to accept connections; port bound to nothing).

@@ -16,7 +16,6 @@ mod common;
 use common::{create_postgres_role, role_connection_url, run_db_prep, start_postgres_container};
 
 #[tokio::test]
-#[ignore]
 async fn insufficient_privilege_is_reported_with_actionable_detail() {
     let (_pg, db_url) = start_postgres_container().await;
 
