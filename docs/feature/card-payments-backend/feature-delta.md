@@ -1437,11 +1437,11 @@ clause. Gate: **PASS**.
 | Roadmap review (Phase 1) | ✅ APPROVED, 0 blockers — the call-graph dependency trace (the exact bug class that slipped through on the sibling frontend feature) was independently verified clean |
 | Per-step TDD (Phase 2) | ✅ 8/8 steps COMMIT/PASS, `des-verify-integrity` exit 0 |
 | Post-merge integration + demo evidence (Phase 3.5) | ✅ see above |
-| Refactor L1-L6 (Phase 3) | pending |
-| Adversarial review (Phase 4) | pending |
-| Mutation testing (Phase 5) | pending — `per-feature` strategy per CLAUDE.md |
+| Refactor L1-L6 (Phase 3) | ✅ done — dropped stale DISTILL/SCAFFOLD provenance comments (`0ed04f7`) |
+| Adversarial review (Phase 4) | ✅ 1 BLOCKER found and fixed — TOCTOU race in webhook idempotency (SELECT-then-INSERT → atomic INSERT-then-`rows_affected()`), verified with a new genuinely-concurrent regression test (`ebcf0b5`) |
+| Mutation testing (Phase 5) | ✅ `per-feature` strategy per CLAUDE.md — 129 mutants (diff-scoped vs `63a53d2`), kill rate 91/95 = 95.8% (excl. 34 structurally-unviable), well past the 80% gate. Closed a real domain-logic gap in `embyr-core::billing` (`SubscriptionStatus::parse` arm deletions, `cap_exceeded`) with direct unit tests (`57640dc`) — those functions had zero unit coverage, relying only on slow integration tests. 2 accepted survivor clusters: `subscription_item_price_id` (webhook plan-derivation path never exercised by a payload with `items.price.id` populated — real but narrow acceptance-test gap, same category as AC-205-04, deferred to a future DISTILL pass) and `build_admin_router` (TIMEOUT not MISSED — an empty router would 404 every request, so this is very likely caught-but-slow rather than a real gap) |
 | Deliver integrity verification (Phase 6) | ✅ exit 0, 8/8 steps traced |
-| Finalize (Phase 7) | pending |
+| Finalize (Phase 7) | in progress |
 
 ## Wave: DELIVER / [REF] Pre-requisites
 
