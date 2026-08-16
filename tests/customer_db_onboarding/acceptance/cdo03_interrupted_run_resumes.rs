@@ -28,30 +28,13 @@ use common::{
 use sqlx::migrate::Migrate;
 use std::collections::HashMap;
 
-// BLOCKED (step 01-01, 2026-08-16): fixture defect, not a production-code
-// gap. This scenario's Given-block applies the "interrupted" migration 0001
-// via `db_url` (the testcontainer's `postgres` bootstrap superuser
-// connection), making `postgres` the OWNER of `_sqlx_migrations`. Elena's
-// own `elena_dba` role (created by `create_ddl_role`, granted `ALL ON
-// DATABASE` + `CREATE ON SCHEMA public` -- no table-level grants) then has
-// zero Postgres privilege on that pre-existing table, so
-// `PostgresBackendAdapter::migrate()` genuinely fails with `permission
-// denied for table _sqlx_migrations` when re-run as elena -- confirmed by
-// direct reproduction against a real Postgres 15-alpine container with the
-// exact same CREATE ROLE/GRANT statements `create_ddl_role` issues, and by
-// running the actual compiled `embyr-db-prep` binary against that state.
-// ADR-023 explicitly assumes "_sqlx_migrations is owned by Elena's elevated
-// role by virtue of having created it" -- an assumption this fixture
-// violates by using the superuser connection instead of `elena_dsn` to
-// create the interrupted-run precondition. No change to config.rs/main.rs
-// (this step's only editable production files) can bridge a Postgres ACL
-// gap between two distinct, unrelated roles. Fix: this Given-block should
-// apply migration 0001 via `elena_dsn`, not `db_url`, so elena owns the
-// table from the same first run a real interrupted DBA session would have.
-// Re-ignored pending that fixture correction (escalated, not authored by
-// this crafter -- outside `files_to_modify` scope for step 01-01).
+// Fixture note (fixed 2026-08-16, orchestrator pass after step 01-01):
+// the "interrupted" precondition must be created under `elena_dba`'s own
+// connection, not the testcontainer superuser, so `_sqlx_migrations` is
+// owned by the same role that resumes the run -- matching ADR-023's
+// assumption that Elena's elevated role owns the tracking table by virtue
+// of having created it.
 #[tokio::test]
-#[ignore]
 async fn rerunning_preparation_after_an_interrupted_partial_run_resumes_safely() {
     let (_pg, db_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&db_url).await.unwrap();
@@ -61,9 +44,9 @@ async fn rerunning_preparation_after_an_interrupted_partial_run_resumes_safely()
 
     // Given: only migration 0001 applied (interrupted before 0002 started).
     let migrator = sqlx::migrate!("../../migrations/customer");
-    let mut conn = sqlx::PgConnection::connect(&db_url)
+    let mut conn = sqlx::PgConnection::connect(&elena_dsn)
         .await
-        .expect("connect superuser for fixture setup");
+        .expect("connect as elena_dba for fixture setup");
     use sqlx::Connection;
     conn.ensure_migrations_table()
         .await
