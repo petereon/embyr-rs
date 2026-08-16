@@ -20,22 +20,15 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
-    assert_state_delta, create_ddl_role, provision, role_connection_url, set_to,
-    start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY,
+    assert_state_delta, create_customer_database, create_ddl_role, provision,
+    role_connection_url, set_to, start_healthy_server, start_postgres_container, TEST_ADMIN_KEY,
 };
 use std::collections::HashMap;
-use std::time::Duration;
 
 #[tokio::test]
 async fn full_privilege_dsn_against_an_unprepped_database_still_auto_migrates() {
     let (_pg, base_url) = start_postgres_container().await;
-    let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();
-    sqlx::query("CREATE DATABASE cdo17_customer")
-        .execute(&sys_pool)
-        .await
-        .expect("create customer database");
-    let last_slash = base_url.rfind('/').unwrap();
-    let customer_db_url = format!("{}/cdo17_customer", &base_url[..last_slash]);
+    let customer_db_url = create_customer_database(&base_url, "cdo17_customer").await;
 
     // Given: full-privilege (DDL-capable) role, database not yet prepped —
     // exactly today's default, non-DBA-gated flow. create_ddl_role's pool
@@ -46,21 +39,14 @@ async fn full_privilege_dsn_against_an_unprepped_database_still_auto_migrates() 
     create_ddl_role(&customer_pool, "full_priv_role", "cdo17_customer").await;
     let full_priv_dsn = role_connection_url(&customer_db_url, "full_priv_role");
 
-    let server = ServerProcess::start(
-        &base_url,
-        &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
-            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
-        ],
-    );
-    assert!(server.wait_for_healthy(Duration::from_secs(30)).await);
+    let server = start_healthy_server(&base_url).await;
 
     let before: HashMap<&str, String> = HashMap::new();
 
     // When: an operator submits provisioning.
     let (status, body) = provision(
         &server,
-        "testkey",
+        TEST_ADMIN_KEY,
         serde_json::json!({
             "project_id": "cdo17-proj",
             "dsn": full_priv_dsn,

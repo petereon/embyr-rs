@@ -379,10 +379,7 @@ pub async fn provision(
             .verify_schema_readiness()
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-        let is_ready = matches!(
-            readiness,
-            embyr_core::domain::schema_readiness::SchemaReadiness::Ready { .. }
-        );
+        let is_ready = matches!(readiness, SchemaReadiness::Ready { .. });
 
         // ECIES encrypt DSN using api_key bytes as the seed
         let pubkey = ecies::derive_public_key(api_key.as_bytes());

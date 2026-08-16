@@ -21,22 +21,15 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
-    assert_state_delta, create_postgres_role, provision, role_connection_url, set_to,
-    start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY,
+    assert_state_delta, create_customer_database, create_postgres_role, provision,
+    role_connection_url, set_to, start_healthy_server, start_postgres_container, TEST_ADMIN_KEY,
 };
 use std::collections::HashMap;
-use std::time::Duration;
 
 #[tokio::test]
 async fn provisioning_fails_with_a_specific_complaint_when_database_not_prepped_at_all() {
     let (_pg, base_url) = start_postgres_container().await;
-    let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();
-    sqlx::query("CREATE DATABASE cdo13_customer")
-        .execute(&sys_pool)
-        .await
-        .expect("create customer database");
-    let last_slash = base_url.rfind('/').unwrap();
-    let customer_db_url = format!("{}/cdo13_customer", &base_url[..last_slash]);
+    let customer_db_url = create_customer_database(&base_url, "cdo13_customer").await;
 
     // Given: fresh, completely empty database — no prep step ever run — and
     // a DML-only role (cannot itself apply the pending migrations).
@@ -44,21 +37,14 @@ async fn provisioning_fails_with_a_specific_complaint_when_database_not_prepped_
     create_postgres_role(&customer_sys_pool, "embyr_app", &[]).await;
     let embyr_app_dsn = role_connection_url(&customer_db_url, "embyr_app");
 
-    let server = ServerProcess::start(
-        &base_url,
-        &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
-            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
-        ],
-    );
-    assert!(server.wait_for_healthy(Duration::from_secs(30)).await);
+    let server = start_healthy_server(&base_url).await;
 
     let before: HashMap<&str, String> = HashMap::new();
 
     // When: Sam submits provisioning.
     let (status, body) = provision(
         &server,
-        "testkey",
+        TEST_ADMIN_KEY,
         serde_json::json!({
             "project_id": "cdo13-proj",
             "dsn": embyr_app_dsn,

@@ -25,22 +25,15 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
-    create_postgres_role, grant_migrations_table_read, provision, role_connection_url,
-    start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY,
+    create_customer_database, create_postgres_role, grant_migrations_table_read, provision,
+    role_connection_url, start_healthy_server, start_postgres_container, TEST_ADMIN_KEY,
 };
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
-use std::time::Duration;
 
 #[tokio::test]
 async fn a_found_version_higher_than_expected_is_treated_as_ready() {
     let (_pg, base_url) = start_postgres_container().await;
-    let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();
-    sqlx::query("CREATE DATABASE cdo18_customer")
-        .execute(&sys_pool)
-        .await
-        .expect("create customer database");
-    let last_slash = base_url.rfind('/').unwrap();
-    let customer_db_url = format!("{}/cdo18_customer", &base_url[..last_slash]);
+    let customer_db_url = create_customer_database(&base_url, "cdo18_customer").await;
 
     let seed_adapter = PostgresBackendAdapter::new(&customer_db_url)
         .await
@@ -70,19 +63,12 @@ async fn a_found_version_higher_than_expected_is_treated_as_ready() {
     grant_migrations_table_read(&customer_sys_pool, "embyr_app").await;
     let embyr_app_dsn = role_connection_url(&customer_db_url, "embyr_app");
 
-    let server = ServerProcess::start(
-        &base_url,
-        &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
-            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
-        ],
-    );
-    assert!(server.wait_for_healthy(Duration::from_secs(30)).await);
+    let server = start_healthy_server(&base_url).await;
 
     // When: provisioning submitted with the DML-only credential.
     let (status, body) = provision(
         &server,
-        "testkey",
+        TEST_ADMIN_KEY,
         serde_json::json!({
             "project_id": "cdo18-proj",
             "dsn": embyr_app_dsn,

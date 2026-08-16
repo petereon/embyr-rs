@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! Common test infrastructure — customer-db-onboarding acceptance tests.
 //!
 //! Infrastructure policy (docs/architecture/atdd-infrastructure-policy.md):
@@ -149,6 +148,25 @@ pub async fn grant_migrations_table_read(pool: &PgPool, role_name: &str) {
     .unwrap_or_else(|e| panic!("failed to grant _sqlx_migrations read to {role_name}: {e}"));
 }
 
+/// Create a fresh customer-scoped Postgres database on the cluster
+/// `base_url` connects to, and return the connection URL for that database.
+///
+/// `base_url` must be of the `postgres://user:pass@host:port/db` shape
+/// produced by `start_postgres_container`. Used by the US-02 provisioning
+/// scenarios (cdo12-cdo18), each of which needs its own isolated customer
+/// database within the shared cluster container.
+pub async fn create_customer_database(base_url: &str, db_name: &str) -> String {
+    let sys_pool = sqlx::PgPool::connect(base_url)
+        .await
+        .expect("connect to cluster to create customer database");
+    sqlx::query(&format!("CREATE DATABASE {db_name}"))
+        .execute(&sys_pool)
+        .await
+        .expect("create customer database");
+    let last_slash = base_url.rfind('/').expect("db_url has a path separator");
+    format!("{}/{db_name}", &base_url[..last_slash])
+}
+
 /// Build a connection URL substituting the role's own login for the given
 /// base URL's host/port/database (assumes `postgres:postgres@host:port/db`
 /// shape from `start_postgres_container`).
@@ -271,6 +289,11 @@ pub fn find_free_port() -> u16 {
 pub const TEST_ENCRYPTION_KEY: &str =
     "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
 
+/// Admin bearer key the US-02 provisioning scenarios spawn `embyr-server`
+/// with, and authenticate `provision()` calls against — arbitrary, not a
+/// real secret.
+pub const TEST_ADMIN_KEY: &str = "testkey";
+
 /// Wraps a spawned `embyr-server` subprocess. Mirrors
 /// `tests/production_readiness/common/mod.rs::ServerProcess` (trimmed to
 /// what US-02's provisioning scenarios need). Killed on `Drop`.
@@ -335,6 +358,26 @@ impl ServerProcess {
     pub fn admin_base(&self) -> String {
         format!("http://127.0.0.1:{}", self.admin_port)
     }
+}
+
+/// Spawn `embyr-server` against `db_url` with the standard test admin key +
+/// encryption key env vars, and assert it becomes healthy within 30s.
+///
+/// Shared by the US-02 provisioning scenarios (cdo12-cdo18), which otherwise
+/// each repeated this identical spawn-and-wait sequence.
+pub async fn start_healthy_server(db_url: &str) -> ServerProcess {
+    let server = ServerProcess::start(
+        db_url,
+        &[
+            ("EMBYR_ADMIN_KEY", TEST_ADMIN_KEY),
+            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
+        ],
+    );
+    assert!(
+        server.wait_for_healthy(Duration::from_secs(30)).await,
+        "embyr-server must be healthy before provisioning"
+    );
+    server
 }
 
 impl Drop for ServerProcess {

@@ -18,24 +18,17 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
-    assert_state_delta, create_postgres_role, grant_migrations_table_read, provision,
-    role_connection_url, set_to, start_postgres_container, unchanged, ServerProcess,
-    TEST_ENCRYPTION_KEY,
+    assert_state_delta, create_customer_database, create_postgres_role,
+    grant_migrations_table_read, provision, role_connection_url, set_to, start_healthy_server,
+    start_postgres_container, unchanged, TEST_ADMIN_KEY,
 };
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
 use std::collections::HashMap;
-use std::time::Duration;
 
 #[tokio::test]
 async fn dml_only_credential_succeeds_and_never_attempts_ddl() {
     let (_pg, base_url) = start_postgres_container().await;
-    let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();
-    sqlx::query("CREATE DATABASE cdo16_customer")
-        .execute(&sys_pool)
-        .await
-        .expect("create customer database");
-    let last_slash = base_url.rfind('/').unwrap();
-    let customer_db_url = format!("{}/cdo16_customer", &base_url[..last_slash]);
+    let customer_db_url = create_customer_database(&base_url, "cdo16_customer").await;
 
     let seed_adapter = PostgresBackendAdapter::new(&customer_db_url)
         .await
@@ -73,19 +66,12 @@ async fn dml_only_credential_succeeds_and_never_attempts_ddl() {
     let mut before: HashMap<&str, String> = HashMap::new();
     before.insert("migrations.applied_count", applied_before.to_string());
 
-    let server = ServerProcess::start(
-        &base_url,
-        &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
-            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
-        ],
-    );
-    assert!(server.wait_for_healthy(Duration::from_secs(30)).await);
+    let server = start_healthy_server(&base_url).await;
 
     // When: Sam submits provisioning with the DML-only credential.
     let (status, body) = provision(
         &server,
-        "testkey",
+        TEST_ADMIN_KEY,
         serde_json::json!({
             "project_id": "cdo16-proj",
             "dsn": embyr_app_dsn,

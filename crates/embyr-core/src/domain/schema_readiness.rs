@@ -7,10 +7,8 @@
 //! (embyr-core IO-prohibition).
 //!
 //! Constructed by `embyr_pg_storage::backend_adapter::PostgresBackendAdapter::
-//! verify_schema_readiness()`. This type carries no behavior of its own in
-//! this DISTILL scaffold — comparison/construction logic lives in the
-//! adapter method (`embyr-pg-storage`), which is itself a RED scaffold
-//! DELIVER implements via Outside-In TDD, one acceptance scenario at a time.
+//! verify_schema_readiness()`, which fetches `found_version` from
+//! `_sqlx_migrations` and delegates the pure classification below.
 
 /// The customer database's schema-readiness state, as determined by reading
 /// sqlx's own `_sqlx_migrations` bookkeeping table (ADR-023 § Mechanism).

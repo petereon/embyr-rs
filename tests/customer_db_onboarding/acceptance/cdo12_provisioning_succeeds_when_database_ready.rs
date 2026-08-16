@@ -25,23 +25,16 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
-    create_postgres_role, grant_migrations_table_read, provision, role_connection_url,
-    start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY,
+    create_customer_database, create_postgres_role, grant_migrations_table_read, provision,
+    role_connection_url, start_healthy_server, start_postgres_container, TEST_ADMIN_KEY,
 };
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
-use std::time::Duration;
 
 #[tokio::test]
 async fn provisioning_succeeds_when_database_is_fully_prepped() {
     let (_pg, base_url) = start_postgres_container().await;
 
-    let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();
-    sqlx::query("CREATE DATABASE cdo12_customer")
-        .execute(&sys_pool)
-        .await
-        .expect("create customer database");
-    let last_slash = base_url.rfind('/').expect("db_url has a path separator");
-    let customer_db_url = format!("{}/cdo12_customer", &base_url[..last_slash]);
+    let customer_db_url = create_customer_database(&base_url, "cdo12_customer").await;
 
     // Given: database already fully prepared (real migrate(), production
     // code that already works — not a mock) + DML role already granted
@@ -56,8 +49,8 @@ async fn provisioning_succeeds_when_database_is_fully_prepped() {
 
     // Role creation is cluster-wide (any connection may run CREATE ROLE),
     // but table-level GRANTs are database-scoped — they must run against a
-    // connection to cdo12_customer itself, not the "postgres" system db
-    // sys_pool is connected to.
+    // connection to cdo12_customer itself, not the "postgres" system db.
+    let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();
     create_postgres_role(&sys_pool, "embyr_app", &[]).await;
     let customer_pool = sqlx::PgPool::connect(&customer_db_url).await.unwrap();
     sqlx::query("GRANT SELECT, INSERT, UPDATE, DELETE ON documents, transactions TO embyr_app")
@@ -68,19 +61,11 @@ async fn provisioning_succeeds_when_database_is_fully_prepped() {
     let embyr_app_customer_dsn = role_connection_url(&customer_db_url, "embyr_app");
 
     // When: Sam submits provisioning with the DML-only credential.
-    let server = ServerProcess::start(
-        &base_url,
-        &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
-            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
-        ],
-    );
-    let healthy = server.wait_for_healthy(Duration::from_secs(30)).await;
-    assert!(healthy, "embyr-server must be healthy before provisioning");
+    let server = start_healthy_server(&base_url).await;
 
     let (status, body) = provision(
         &server,
-        "testkey",
+        TEST_ADMIN_KEY,
         serde_json::json!({
             "project_id": "cdo12-proj",
             "dsn": embyr_app_customer_dsn,
