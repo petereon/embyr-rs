@@ -31,7 +31,6 @@ use common::{create_ddl_role, create_postgres_role, role_connection_url, run_db_
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
 
 #[tokio::test]
-#[ignore]
 async fn grant_step_is_optional_and_a_followup_run_closes_the_sequencing_gap() {
     let (_pg, db_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&db_url).await.unwrap();

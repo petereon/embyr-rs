@@ -24,7 +24,6 @@ use common::{
 use std::collections::HashMap;
 
 #[tokio::test]
-#[ignore]
 async fn full_flow_run_twice_against_the_same_database_and_role_is_idempotent() {
     let (_pg, db_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&db_url).await.unwrap();

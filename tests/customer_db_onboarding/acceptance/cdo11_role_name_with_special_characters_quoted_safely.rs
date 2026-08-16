@@ -23,7 +23,6 @@ mod common;
 use common::{create_ddl_role, role_connection_url, run_db_prep, start_postgres_container};
 
 #[tokio::test]
-#[ignore]
 async fn reserved_word_role_name_is_quoted_safely_through_the_grant() {
     let (_pg, db_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&db_url).await.unwrap();

@@ -20,7 +20,6 @@ mod common;
 use common::{create_ddl_role, create_postgres_role, role_connection_url, run_db_prep, start_postgres_container};
 
 #[tokio::test]
-#[ignore]
 async fn a_different_non_granted_role_cannot_read_the_migrations_table() {
     let (_pg, db_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&db_url).await.unwrap();

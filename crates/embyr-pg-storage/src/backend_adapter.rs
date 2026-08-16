@@ -89,8 +89,10 @@ impl PostgresBackendAdapter {
 
     // ─── customer-db-onboarding (ADR-023) ──────────────────────────────────
     //
-    // `verify_schema_readiness()` implemented step 03-01. The two methods
-    // below remain RED scaffolds — step 05-01's scope.
+    // `verify_schema_readiness()` implemented step 03-01 (with step 05-01's
+    // insufficient_privilege→NotPrepped extension for the OQ-5 sequencing
+    // gap). `discover_current_user()` and `grant_schema_readiness_read()`
+    // implemented step 05-01.
 
     /// Verify the customer database's schema-readiness state.
     ///
@@ -124,9 +126,13 @@ impl PostgresBackendAdapter {
         let rows = match rows {
             Ok(rows) => rows,
             Err(sqlx::Error::Database(db_err))
-                if db_err.code().as_deref() == Some("42P01") =>
+                if matches!(db_err.code().as_deref(), Some("42P01") | Some("42501")) =>
             {
-                // relation "_sqlx_migrations" does not exist — never prepped.
+                // 42P01: relation "_sqlx_migrations" does not exist — never prepped.
+                // 42501: insufficient_privilege — a DML role that exists but was
+                // never granted read access (ADR-023 OQ-5 sequencing gap) sees
+                // this as indistinguishable from "not prepped" until a follow-up
+                // embyr-db-prep run supplies its DSN and closes the gap.
                 return Ok(embyr_core::domain::schema_readiness::classify(
                     0,
                     expected_version,
@@ -163,13 +169,11 @@ impl PostgresBackendAdapter {
     /// read once, used once, never logged (mirrors `StartupProbe`'s
     /// DSN-handling convention, `crates/embyr-agent/src/probe.rs`). Only the
     /// resulting role *name* is carried forward, never the DSN itself.
-    ///
-    /// SCAFFOLD: true — RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023 revised).
     pub async fn discover_current_user(&self) -> Result<String, CoreError> {
-        panic!(
-            "PostgresBackendAdapter::discover_current_user: not yet implemented \
-             -- RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023 revised)"
-        )
+        sqlx::query_scalar("SELECT current_user")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
     }
 
     /// Grant `SELECT` on `_sqlx_migrations` to exactly the named role.
@@ -182,14 +186,21 @@ impl PostgresBackendAdapter {
     /// string interpolation would open (ADR-023 § Mechanism, step 4).
     /// Naturally idempotent — re-granting an already-granted privilege is a
     /// Postgres no-op, not an error.
-    ///
-    /// SCAFFOLD: true — RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023 revised).
     pub async fn grant_schema_readiness_read(&self, role_name: &str) -> Result<(), CoreError> {
-        let _ = role_name;
-        panic!(
-            "PostgresBackendAdapter::grant_schema_readiness_read: not yet implemented \
-             -- RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023 revised)"
-        )
+        let quoted_role: String = sqlx::query_scalar("SELECT format('%I', $1::text)")
+            .bind(role_name)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        sqlx::query(&format!(
+            "GRANT SELECT ON _sqlx_migrations TO {quoted_role}"
+        ))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        Ok(())
     }
 }
 

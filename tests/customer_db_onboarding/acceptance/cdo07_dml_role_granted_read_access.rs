@@ -21,7 +21,6 @@ mod common;
 use common::{create_ddl_role, create_postgres_role, role_connection_url, run_db_prep, start_postgres_container};
 
 #[tokio::test]
-#[ignore]
 async fn dml_role_can_read_migrations_table_after_prep_run_supplies_its_dsn() {
     let (_pg, db_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&db_url).await.unwrap();

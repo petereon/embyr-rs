@@ -34,8 +34,9 @@
 //! Step 01-02 added the connect-phase liveness probe and
 //! `error_report::classify()` wiring (AC-01-04, AC-01-05): connect-phase
 //! failures (pool open or probe) short-circuit to a hardcoded message and
-//! never reach `classify()`; only a `migrate()`-phase failure does. The
-//! grant step is filled in by a later step (05-01) — see
+//! never reach `classify()`; only a `migrate()`-phase failure does. Step
+//! 05-01 wired the grant step: `discover_current_user()` +
+//! `grant_schema_readiness_read()` — see
 //! `tests/customer_db_onboarding/acceptance/cdo0{1..11}_*.rs`.
 
 mod config;
@@ -102,18 +103,58 @@ async fn main() {
         );
     }
 
-    match cfg.dml_role_dsn {
+    match &cfg.dml_role_dsn {
         None => {
             println!(
                 "note: EMBYR_DB_PREP_DML_ROLE_DSN not set -- read-verification access was not established"
             );
         }
-        Some(_) => {
-            // TODO(05-01): discover_current_user() + grant_schema_readiness_read().
+        Some(dml_dsn) => {
+            grant_dml_role_read_access(&adapter, dml_dsn).await;
         }
     }
 
     std::process::exit(0);
+}
+
+/// Discover the DML role's own name (via a brief connection using its own
+/// DSN) and grant it `SELECT` on `_sqlx_migrations` from the elevated
+/// connection (ADR-023 revised § Mechanism, step 4).
+///
+/// Best-effort: a connect failure against `dml_dsn` is treated identically
+/// to the DSN-absent case (informational skip note, not a hard failure) --
+/// the migration itself already succeeded by the time this runs, so a
+/// transient DML-role connectivity problem must not fail the whole run.
+async fn grant_dml_role_read_access(elevated_adapter: &PostgresBackendAdapter, dml_dsn: &str) {
+    let dml_adapter = match tokio::time::timeout(
+        Duration::from_secs(10),
+        PostgresBackendAdapter::new(dml_dsn),
+    )
+    .await
+    {
+        Ok(Ok(adapter)) => adapter,
+        _ => {
+            println!(
+                "note: could not connect using EMBYR_DB_PREP_DML_ROLE_DSN -- \
+                 read-verification access was not established"
+            );
+            return;
+        }
+    };
+
+    let role_name = match dml_adapter.discover_current_user().await {
+        Ok(name) => name,
+        Err(e) => {
+            eprintln!("embyr-db-prep: failed to discover DML role name: {e}");
+            return;
+        }
+    };
+    drop(dml_adapter);
+
+    match elevated_adapter.grant_schema_readiness_read(&role_name).await {
+        Ok(()) => println!("read-verification access granted to role {role_name}"),
+        Err(e) => eprintln!("embyr-db-prep: failed to grant read-verification access: {e}"),
+    }
 }
 
 /// Print the hardcoded, structurally-distinct connect-phase failure message
