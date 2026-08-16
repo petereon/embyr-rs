@@ -67,3 +67,54 @@ fn role_and_database_from_dsn(dsn: &str) -> (String, String) {
 
     (role, database)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_and_database_from_dsn_extracts_both_components() {
+        let dsn = "postgres://elena_dba:secret@pg-prod.example.internal:5432/meridian_embyr";
+        assert_eq!(
+            role_and_database_from_dsn(dsn),
+            ("elena_dba".to_string(), "meridian_embyr".to_string())
+        );
+    }
+
+    #[test]
+    fn role_and_database_from_dsn_strips_query_string() {
+        let dsn = "postgres://embyr_app:pw@host/meridian_embyr?sslmode=require";
+        let (_, database) = role_and_database_from_dsn(dsn);
+        assert_eq!(database, "meridian_embyr");
+    }
+
+    #[test]
+    fn is_insufficient_privilege_true_for_permission_denied() {
+        assert!(is_insufficient_privilege(
+            "permission denied for table _sqlx_migrations"
+        ));
+    }
+
+    #[test]
+    fn is_insufficient_privilege_false_for_other_errors() {
+        assert!(!is_insufficient_privilege("connection refused"));
+    }
+
+    #[test]
+    fn classify_backend_unavailable_with_permission_text_names_role_and_database() {
+        let dsn = "postgres://elena_dba:pw@host/meridian_embyr";
+        let err = CoreError::BackendUnavailable("permission denied for schema public".to_string());
+        let msg = classify(&err, dsn);
+        assert!(msg.contains("elena_dba"), "got: {msg}");
+        assert!(msg.contains("meridian_embyr"), "got: {msg}");
+    }
+
+    #[test]
+    fn classify_generic_backend_unavailable_is_the_fallback_message() {
+        let dsn = "postgres://elena_dba:pw@host/meridian_embyr";
+        let err = CoreError::BackendUnavailable("connection reset by peer".to_string());
+        let msg = classify(&err, dsn);
+        assert!(msg.contains("database preparation failed"), "got: {msg}");
+        assert!(!msg.contains("insufficient privilege"), "got: {msg}");
+    }
+}

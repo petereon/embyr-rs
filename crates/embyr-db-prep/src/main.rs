@@ -191,3 +191,21 @@ async fn applied_migration_count(adapter: &PostgresBackendAdapter) -> i64 {
         Err(e) => panic!("embyr-db-prep: failed to query _sqlx_migrations: {e}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_from_dsn_extracts_host_and_port() {
+        assert_eq!(
+            host_from_dsn("postgres://elena_dba:secret@pg-prod.example.internal:5432/meridian_embyr"),
+            "pg-prod.example.internal:5432"
+        );
+    }
+
+    #[test]
+    fn host_from_dsn_falls_back_to_raw_dsn_when_shape_is_unexpected() {
+        assert_eq!(host_from_dsn("not-a-dsn"), "not-a-dsn");
+    }
+}
