@@ -1,0 +1,78 @@
+[package]
+name = "embyr-db-prep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "embyr-db-prep"
+path = "src/main.rs"
+
+[dependencies]
+embyr-pg-storage.workspace = true
+embyr-core.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+# customer-db-onboarding acceptance tests (US-01) — subprocess driving port.
+# CARGO_BIN_EXE_embyr-db-prep is only set by Cargo for [[test]] targets that
+# belong to THIS package (the package owning the [[bin]]), so these test
+# entries live here rather than in embyr-server's Cargo.toml.
+
+[[test]]
+name = "cdo01_first_time_preparation"
+path = "../../tests/customer_db_onboarding/acceptance/cdo01_first_time_preparation.rs"
+
+[[test]]
+name = "cdo02_idempotent_rerun_already_current"
+path = "../../tests/customer_db_onboarding/acceptance/cdo02_idempotent_rerun_already_current.rs"
+
+[[test]]
+name = "cdo03_interrupted_run_resumes"
+path = "../../tests/customer_db_onboarding/acceptance/cdo03_interrupted_run_resumes.rs"
+
+[[test]]
+name = "cdo04_insufficient_privilege_reported"
+path = "../../tests/customer_db_onboarding/acceptance/cdo04_insufficient_privilege_reported.rs"
+
+[[test]]
+name = "cdo05_unreachable_host_connection_failure"
+path = "../../tests/customer_db_onboarding/acceptance/cdo05_unreachable_host_connection_failure.rs"
+
+[[test]]
+name = "cdo06_single_migration_embed_point"
+path = "../../tests/customer_db_onboarding/acceptance/cdo06_single_migration_embed_point.rs"
+
+[[test]]
+name = "cdo07_dml_role_granted_read_access"
+path = "../../tests/customer_db_onboarding/acceptance/cdo07_dml_role_granted_read_access.rs"
+
+[[test]]
+name = "cdo08_non_granted_role_cannot_read_migrations_table"
+path = "../../tests/customer_db_onboarding/acceptance/cdo08_non_granted_role_cannot_read_migrations_table.rs"
+
+[[test]]
+name = "cdo09_grant_skipped_when_dml_dsn_absent"
+path = "../../tests/customer_db_onboarding/acceptance/cdo09_grant_skipped_when_dml_dsn_absent.rs"
+
+[[test]]
+name = "cdo10_full_flow_idempotent_on_rerun"
+path = "../../tests/customer_db_onboarding/acceptance/cdo10_full_flow_idempotent_on_rerun.rs"
+
+[[test]]
+name = "cdo11_role_name_with_special_characters_quoted_safely"
+path = "../../tests/customer_db_onboarding/acceptance/cdo11_role_name_with_special_characters_quoted_safely.rs"
+
+[dev-dependencies]
+embyr-pg-storage.workspace = true
+embyr-core.workspace = true
+sqlx.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "time"] }
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+# reqwest + serde_json are needed only because tests/customer_db_onboarding/
+# common/mod.rs is #[path]-shared with embyr-server's [[test]] targets
+# (ServerProcess/provision() helpers, unused by this crate's own cdo0{1..11}
+# tests but required for the shared file to compile under this package too).
+reqwest.workspace = true
+serde_json.workspace = true
