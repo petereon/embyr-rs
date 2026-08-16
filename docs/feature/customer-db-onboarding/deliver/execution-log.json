@@ -232,6 +232,41 @@
       "s": "EXECUTED",
       "d": "PASS",
       "t": "2026-08-16T16:02:44Z"
+    },
+    {
+      "sid": "phase3-refactor",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS: not a roadmap step -- DELIVER-wave Phase 3 (Complete Refactoring, RPP L1-L2) pass across cdo12-cdo18 acceptance tests + common/mod.rs, dispatched after all 6 roadmap steps (01-01..05-01) and all 18 cdo scenarios were already implemented and green; pure mechanical dedup, no observable-behavior change permitted.",
+      "t": "2026-08-16T16:23:59Z"
+    },
+    {
+      "sid": "phase3-refactor",
+      "p": "RED_ACCEPTANCE",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: no new/changed acceptance criteria -- behavior-preserving refactor, not a TDD cycle; all 18 cdo ATs were already green before this pass and required to remain green throughout, not gated by a RED step.",
+      "t": "2026-08-16T16:24:06Z"
+    },
+    {
+      "sid": "phase3-refactor",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: no new unit test authored -- pure setup-boilerplate extraction (create_customer_database(), start_healthy_server() helpers into common/mod.rs; stale-doc-comment/fully-qualified-path cleanup in schema_readiness.rs/provision.rs), zero new logic to unit-test.",
+      "t": "2026-08-16T16:24:12Z"
+    },
+    {
+      "sid": "phase3-refactor",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS: cargo check --workspace clean; cargo build --tests -p embyr-server -p embyr-db-prep clean; Docker available -- full cargo test executed (not just compiled) against real Postgres 15-alpine testcontainers: all 18 cdo acceptance scenarios (cdo01-cdo18) pass; embyr-core --lib (55 tests) and embyr-server --lib (25 tests) pass; zero regressions; no lingering testcontainers left running.",
+      "t": "2026-08-16T16:24:18Z"
+    },
+    {
+      "sid": "phase3-refactor",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS: commit d11adba -- refactor(customer-db-onboarding): dedupe cdo12-cdo18 setup boilerplate into common helpers.",
+      "t": "2026-08-16T16:24:24Z"
     }
   ]
 }
