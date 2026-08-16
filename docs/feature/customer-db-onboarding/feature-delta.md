@@ -1048,4 +1048,17 @@ Assertion verified: `detail.contains("documents") || detail.contains("transactio
 Gate recorded: post-merge-integration PASS, environments_tested: [real-testcontainers-postgres]
 (no DEVOPS environment matrix exists for this feature — default applied), stories_demoed: [US-01, US-02].
 
+## Wave: DELIVER / [REF] Quality Gates
+
+| Gate | Status |
+|---|---|
+| Roadmap review (Phase 1) | ✅ APPROVED, 0 blockers — all 18 DISTILL scenarios mapped to exactly one of 6 steps, dependency DAG verified acyclic |
+| Per-step TDD (Phase 2) | ✅ 6/6 steps COMMIT/PASS. 2 fixture defects found and fixed along the way (cdo03's Given-block used the wrong Postgres role by the orchestrator at step 01-01; a missing `grant_migrations_table_read()` call in cdo14 by the step 04-01 crafter) — both documented in their fix commits |
+| Post-merge integration + demo evidence (Phase 3.5) | ✅ see above — 18/18 scenarios green, 0 ignored |
+| Refactor L1-L6 (Phase 3) | ✅ done — deduped byte-identical setup boilerplate across cdo12-cdo18 into shared `common/mod.rs` helpers; stale RED-scaffold doc comments removed; most files (backend_adapter.rs, main.rs, config.rs, error_report.rs) confirmed already clean, no forced changes |
+| Adversarial review (Phase 4) | ✅ APPROVED, 0 blockers/defects — independently spot-checked the role-scoped GRANT mechanism and AC-02-06 regression path against actual source before accepting the verdict |
+| Mutation testing (Phase 5) | ✅ `per-feature` strategy per CLAUDE.md — 72 mutants (diff-scoped vs `079d563`, split across 4 packages), kill rate 47/49 = 95.9% (excl. 23 structurally-unviable mutants against non-`Default` return types), comfortably past the 80% gate. Closed a real gap in `embyr-db-prep`'s pure helpers (`host_from_dsn`, `is_insufficient_privilege`, `role_and_database_from_dsn`, `classify()`) with 8 direct unit tests — those functions had zero unit coverage, relying only on loose integration-test message-content checks (`contains("ready")` rather than exact values). 2 accepted survivors remain: `verify_schema_readiness()`'s SQLSTATE match guard (`42P01`\|`42501`) — requires real Postgres error-code injection to test meaningfully beyond what the 18 acceptance scenarios already exercise end-to-end; not cheaply unit-testable since it's embedded in an async I/O function, and the observable behavior (NotPrepped classification) is already covered by cdo01-03/cdo09's real-Postgres scenarios |
+| Deliver integrity verification (Phase 6) | pending |
+| Finalize (Phase 7) | pending |
+
 ---
