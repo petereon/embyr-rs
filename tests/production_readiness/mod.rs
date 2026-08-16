@@ -18,7 +18,7 @@
 //!   4. pr04 — US-PR-01: graceful shutdown on SIGTERM (D-PR-5)
 //!
 //! Pre-requisites before running any test:
-//!   - `cargo build --bin embyr-server` (produces `target/debug/embyr-server`)
+//!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
 //!   - Docker daemon available for PR-02 tests
 //!   - `CARGO_MANIFEST_DIR` set by cargo (automatic for `[[test]]` entries)
 

@@ -68,34 +68,14 @@ pub fn find_free_port() -> u16 {
 
 /// Resolve the path to the pre-built `embyr-server` binary.
 ///
-/// Prefers the release binary, falls back to debug.
-/// Returns the path regardless of whether the binary exists — `spawn()` will
-/// report the error at runtime, causing the test to fail (RED, not BROKEN).
-///
-/// `CARGO_MANIFEST_DIR` is `crates/embyr-server/` for this integration test;
-/// two `parent()` calls reach the workspace root.
+/// `CARGO_BIN_EXE_embyr-server` is set by Cargo at compile time to the exact
+/// path of the `[[bin]]` it just built for this test run — correct
+/// regardless of `CARGO_TARGET_DIR`/profile, unlike a hand-assembled
+/// `target/{debug,release}/embyr-server` guess relative to the workspace
+/// root (which breaks the moment builds are redirected to a shared target
+/// directory, e.g. via `~/.cargo/config.toml`'s `[build] target-dir`).
 pub fn embyr_server_binary() -> PathBuf {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = std::path::Path::new(manifest_dir)
-        .parent() // crates/
-        .expect("crates dir")
-        .parent() // workspace root
-        .expect("workspace root");
-
-    // `cargo test` always rebuilds every target of the package under test
-    // (lib + [[bin]] + the integration-test binary) as part of its own build
-    // graph, so target/debug/embyr-server is guaranteed fresh on every run.
-    // target/release/embyr-server is NOT — it's only produced by a separate,
-    // explicit `cargo build --release` that `cargo test` never triggers, so
-    // it can silently go stale in a shared target/ directory across
-    // unrelated source/migration changes. Prefer debug; fall back to
-    // release only when debug doesn't exist.
-    let debug = workspace_root.join("target/debug/embyr-server");
-    if debug.exists() {
-        debug
-    } else {
-        workspace_root.join("target/release/embyr-server")
-    }
+    PathBuf::from(env!("CARGO_BIN_EXE_embyr-server"))
 }
 
 // ─── Postgres container helper ────────────────────────────────────────────────

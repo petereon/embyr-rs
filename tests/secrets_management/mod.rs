@@ -22,7 +22,7 @@
 //!   4. sm04 — US-SM-04: EMBYR_ADMIN_KEY dual-token rotation window
 //!
 //! Pre-requisites before running any test:
-//!   - `cargo build --bin embyr-server` (produces `target/debug/embyr-server`)
+//!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
 //!   - Docker daemon available (Postgres + LocalStack testcontainers)
 //!   - `CARGO_MANIFEST_DIR` set by cargo (automatic for `[[test]]` entries)
 //!
