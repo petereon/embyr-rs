@@ -19,15 +19,14 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
-    assert_state_delta, create_postgres_role, provision, role_connection_url, set_to,
-    start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY,
+    assert_state_delta, create_postgres_role, grant_migrations_table_read, provision,
+    role_connection_url, set_to, start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY,
 };
 use sqlx::migrate::Migrate;
 use std::collections::HashMap;
 use std::time::Duration;
 
 #[tokio::test]
-#[ignore]
 async fn provisioning_fails_with_a_specific_complaint_when_schema_is_stale() {
     let (_pg, base_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();
@@ -60,6 +59,7 @@ async fn provisioning_fails_with_a_specific_complaint_when_schema_is_stale() {
         &["GRANT SELECT, INSERT, UPDATE, DELETE ON documents TO embyr_app"],
     )
     .await;
+    grant_migrations_table_read(&customer_sys_pool, "embyr_app").await;
     let embyr_app_dsn = role_connection_url(&customer_db_url, "embyr_app");
 
     let server = ServerProcess::start(

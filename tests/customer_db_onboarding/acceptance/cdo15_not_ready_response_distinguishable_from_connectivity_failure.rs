@@ -22,7 +22,6 @@ use common::{
 use std::time::Duration;
 
 #[tokio::test]
-#[ignore]
 async fn not_ready_response_is_distinguishable_from_a_connectivity_failure() {
     let (_pg, base_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();

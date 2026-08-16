@@ -4,7 +4,10 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use embyr_core::{auth::{argon2, ecies}, domain::project::ProjectId};
+use embyr_core::{
+    auth::{argon2, ecies},
+    domain::{project::ProjectId, schema_readiness::SchemaReadiness},
+};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -59,6 +62,53 @@ type ApiResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
 
 fn err(code: StatusCode, error: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": error })))
+}
+
+fn err_with_detail(
+    code: StatusCode,
+    error: &str,
+    detail: String,
+) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        code,
+        Json(serde_json::json!({ "error": error, "detail": detail })),
+    )
+}
+
+/// Build the enriched `customer_db_not_prepped` / `customer_db_schema_stale`
+/// response when the existing (unchanged) `migrate()` attempt itself fails —
+/// distinguishing "reachable but not ready" from the pre-existing generic
+/// `backend_unavailable` connectivity-failure classification (AC-02-02,
+/// AC-02-03, AC-02-04).
+fn not_ready_migrate_failure(
+    readiness: &SchemaReadiness,
+    migrate_err: &str,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match readiness {
+        SchemaReadiness::NotPrepped { missing_tables } => err_with_detail(
+            StatusCode::BAD_REQUEST,
+            "customer_db_not_prepped",
+            format!(
+                "table '{}' not found -- run the embyr database-preparation step first",
+                missing_tables
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("unknown")
+            ),
+        ),
+        SchemaReadiness::Stale {
+            expected_version,
+            found_version,
+        } => err_with_detail(
+            StatusCode::BAD_REQUEST,
+            "customer_db_schema_stale",
+            format!(
+                "expected schema version {expected_version}, found {found_version} \
+                 -- re-run the embyr database-preparation step"
+            ),
+        ),
+        SchemaReadiness::Ready { .. } => err(StatusCode::INTERNAL_SERVER_ERROR, migrate_err),
+    }
 }
 
 /// Connect to a customer Postgres DSN and verify it is reachable.
@@ -369,7 +419,7 @@ pub async fn provision(
             customer_adapter
                 .migrate()
                 .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+                .map_err(|e| not_ready_migrate_failure(&readiness, &e.to_string()))?;
         }
     }
 

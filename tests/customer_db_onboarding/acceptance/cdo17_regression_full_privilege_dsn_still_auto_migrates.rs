@@ -27,7 +27,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[tokio::test]
-#[ignore]
 async fn full_privilege_dsn_against_an_unprepped_database_still_auto_migrates() {
     let (_pg, base_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();

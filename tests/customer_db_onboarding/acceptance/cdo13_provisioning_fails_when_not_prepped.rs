@@ -28,7 +28,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[tokio::test]
-#[ignore]
 async fn provisioning_fails_with_a_specific_complaint_when_database_not_prepped_at_all() {
     let (_pg, base_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();
