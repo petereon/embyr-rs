@@ -222,3 +222,77 @@ pub enum WebhookEventOutcome {
     /// change (AC-203-06, forward-compatible).
     Ignored,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_status_round_trips_through_as_str_and_parse() {
+        for status in [
+            SubscriptionStatus::Active,
+            SubscriptionStatus::PastDue,
+            SubscriptionStatus::FreeCapExceeded,
+            SubscriptionStatus::Canceled,
+        ] {
+            assert_eq!(SubscriptionStatus::parse(status.as_str()), Some(status));
+        }
+    }
+
+    #[test]
+    fn subscription_status_parse_rejects_unknown_value() {
+        assert_eq!(SubscriptionStatus::parse("bogus"), None);
+    }
+
+    fn cap_status_with_pct(pct: u64) -> CapStatus {
+        CapStatus {
+            account_id: uuid::Uuid::nil(),
+            entries: vec![DimensionCapEntry {
+                dimension: UsageDimension::Reads,
+                used: pct,
+                cap: 100,
+                pct,
+            }],
+        }
+    }
+
+    #[test]
+    fn cap_exceeded_is_false_below_100_percent() {
+        assert!(!cap_exceeded(&cap_status_with_pct(99)));
+    }
+
+    #[test]
+    fn cap_exceeded_is_true_at_exactly_100_percent() {
+        assert!(cap_exceeded(&cap_status_with_pct(100)));
+    }
+
+    #[test]
+    fn cap_exceeded_is_true_above_100_percent() {
+        assert!(cap_exceeded(&cap_status_with_pct(150)));
+    }
+
+    #[test]
+    fn compute_cap_status_reports_100_pct_when_used_equals_cap() {
+        let account_id = uuid::Uuid::nil();
+        let mut usage = HashMap::new();
+        usage.insert(UsageDimension::Reads, 2_000_000);
+
+        let status = compute_cap_status(account_id, &usage);
+
+        let reads_entry = status
+            .entries
+            .iter()
+            .find(|e| e.dimension == UsageDimension::Reads)
+            .expect("Reads entry present");
+        assert_eq!(reads_entry.pct, 100);
+    }
+
+    #[test]
+    fn compute_cap_status_never_includes_storage_dimension() {
+        let status = compute_cap_status(uuid::Uuid::nil(), &HashMap::new());
+        assert!(!status
+            .entries
+            .iter()
+            .any(|e| e.dimension == UsageDimension::Storage));
+    }
+}
