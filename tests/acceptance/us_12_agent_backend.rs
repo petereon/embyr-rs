@@ -142,17 +142,55 @@ fn wait_for_log_combined(
     false
 }
 
-/// Find the embyr-agent binary path relative to the test manifest directory.
-/// CARGO_MANIFEST_DIR for embyr-server is crates/embyr-server; walk up to workspace root.
-fn agent_binary_path() -> std::path::PathBuf {
+/// Build `embyr-agent` and return the exact path cargo placed the binary at.
+///
+/// Parses `cargo build`'s own `--message-format=json` output for the
+/// compiler-artifact's `executable` field rather than guessing
+/// `<workspace_root>/target/debug/embyr-agent` -- that guess breaks the
+/// moment builds are redirected to a shared target directory (this
+/// machine's `~/.cargo/config.toml` sets `[build] target-dir` to dedupe
+/// build artifacts across projects), the same class of bug fixed in
+/// `tests/secrets_management/common/mod.rs` and
+/// `tests/production_readiness/common/mod.rs` via `CARGO_BIN_EXE_*` --
+/// that mechanism isn't available here since this is a cross-crate binary
+/// (embyr-server's test target building embyr-agent's `[[bin]]`), so we
+/// resolve the artifact path from cargo's own build output instead.
+fn build_agent_binary() -> std::path::PathBuf {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // crates/embyr-server -> workspace root
     let workspace_root = manifest_dir
         .parent()
         .expect("crates dir")
         .parent()
         .expect("workspace root");
-    workspace_root.join("target").join("debug").join("embyr-agent")
+
+    let output = Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "embyr-agent",
+            "--bin",
+            "embyr-agent",
+            "--message-format=json-render-diagnostics",
+        ])
+        .current_dir(workspace_root)
+        .output()
+        .expect("cargo build -p embyr-agent");
+    assert!(output.status.success(), "cargo build -p embyr-agent failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|msg| msg.get("reason").and_then(|r| r.as_str()) == Some("compiler-artifact"))
+        .find_map(|msg| {
+            let target_name = msg.get("target")?.get("name")?.as_str()?;
+            if target_name != "embyr-agent" {
+                return None;
+            }
+            let executable = msg.get("executable")?.as_str()?;
+            Some(std::path::PathBuf::from(executable))
+        })
+        .expect("cargo build -p embyr-agent produced no embyr-agent executable artifact")
 }
 
 // ---------------------------------------------------------------------------
@@ -464,22 +502,7 @@ async fn setup_test_env() -> TestEnv {
 /// Tags: @real_io @adapter_integration
 #[tokio::test]
 async fn agent_starts_with_required_env_vars_and_logs_readiness() {
-    // Build embyr-agent before running
-    let workspace_root = {
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir
-            .parent()
-            .expect("crates dir")
-            .parent()
-            .expect("workspace root")
-            .to_path_buf()
-    };
-    let build_status = Command::new("cargo")
-        .args(["build", "-p", "embyr-agent"])
-        .current_dir(&workspace_root)
-        .status()
-        .expect("cargo build -p embyr-agent");
-    assert!(build_status.success(), "cargo build -p embyr-agent failed");
+    let binary = build_agent_binary();
 
     // Start Postgres via testcontainers
     use testcontainers_modules::testcontainers::ContainerAsync;
@@ -493,8 +516,6 @@ async fn agent_starts_with_required_env_vars_and_logs_readiness() {
     // Pick a free port for the agent
     let agent_port = free_port();
     let agent_addr = format!("127.0.0.1:{}", agent_port);
-
-    let binary = agent_binary_path();
     let mut child = Command::new(&binary)
         .env("EMBYR_AGENT_DB_DSN", &dsn)
         .env("EMBYR_AGENT_PROJECT_ID", "test-project")
@@ -578,22 +599,7 @@ async fn agent_starts_with_required_env_vars_and_logs_readiness() {
 async fn connection_without_client_cert_fails_tls_handshake() {
     install_ring_provider();
 
-    // Build embyr-agent before running
-    let workspace_root = {
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir
-            .parent()
-            .expect("crates dir")
-            .parent()
-            .expect("workspace root")
-            .to_path_buf()
-    };
-    let build_status = Command::new("cargo")
-        .args(["build", "-p", "embyr-agent"])
-        .current_dir(&workspace_root)
-        .status()
-        .expect("cargo build -p embyr-agent");
-    assert!(build_status.success(), "cargo build -p embyr-agent failed");
+    let binary = build_agent_binary();
 
     // Start Postgres
     use testcontainers_modules::testcontainers::ContainerAsync;
@@ -608,7 +614,6 @@ async fn connection_without_client_cert_fails_tls_handshake() {
     let agent_port = free_port();
     let agent_addr = format!("127.0.0.1:{}", agent_port);
 
-    let binary = agent_binary_path();
     let mut child = Command::new(&binary)
         .env("EMBYR_AGENT_DB_DSN", &dsn)
         .env("EMBYR_AGENT_PROJECT_ID", "test-project")
@@ -738,27 +743,10 @@ async fn connection_without_client_cert_fails_tls_handshake() {
 /// And:    the stderr output indicates the missing env var
 #[tokio::test]
 async fn agent_exits_nonzero_when_db_dsn_missing() {
-    // Build embyr-agent before running
-    let workspace_root = {
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir
-            .parent()
-            .expect("crates dir")
-            .parent()
-            .expect("workspace root")
-            .to_path_buf()
-    };
-    let build_status = Command::new("cargo")
-        .args(["build", "-p", "embyr-agent"])
-        .current_dir(&workspace_root)
-        .status()
-        .expect("cargo build -p embyr-agent");
-    assert!(build_status.success(), "cargo build -p embyr-agent failed");
+    let binary = build_agent_binary();
 
     // Generate mTLS certs
     let (_tmp, ca_path, cert_path, key_path) = generate_mtls_certs();
-
-    let binary = agent_binary_path();
 
     // Spawn without EMBYR_AGENT_DB_DSN
     // Use env::vars() to get a clean environment but keep PATH for the binary to execute
