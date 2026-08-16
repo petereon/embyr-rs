@@ -12,6 +12,7 @@ use sqlx::postgres::PgPoolOptions;
 use crate::adapters::{
     aws_secret_fetcher::AwsSecretError,
     gcp_secret_fetcher::GcpSecretError,
+    postgres_backend::PostgresBackendAdapter,
 };
 use crate::admin::state::OperatorState;
 
@@ -165,8 +166,8 @@ pub async fn provision(
 
         let customer_pool = probe_customer_db(&dsn).await?;
 
-        sqlx::migrate!("../../migrations/customer")
-            .run(&customer_pool)
+        PostgresBackendAdapter::new_from_pool(customer_pool.clone())
+            .migrate()
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -217,8 +218,8 @@ pub async fn provision(
 
         let customer_pool = probe_customer_db(&dsn).await?;
 
-        sqlx::migrate!("../../migrations/customer")
-            .run(&customer_pool)
+        PostgresBackendAdapter::new_from_pool(customer_pool.clone())
+            .migrate()
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -348,8 +349,8 @@ pub async fn provision(
             err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
         })?;
 
-        sqlx::migrate!("../../migrations/customer")
-            .run(&customer_pool)
+        PostgresBackendAdapter::new_from_pool(customer_pool.clone())
+            .migrate()
             .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     }

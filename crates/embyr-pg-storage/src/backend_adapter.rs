@@ -12,6 +12,7 @@ use embyr_core::{
         field_value::FieldValue,
         project::ProjectId,
         query::StructuredQuery,
+        schema_readiness::SchemaReadiness,
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
@@ -26,6 +27,13 @@ use uuid;
 pub struct PostgresBackendAdapter {
     pool: PgPool,
 }
+
+/// The single compiled-in embed point for `migrations/customer/` (ADR-022).
+///
+/// `migrate()` and (from step 03-01) `verify_schema_readiness()` both read
+/// this identical `Migrator` instance — never invoke `sqlx::migrate!` a
+/// second time anywhere in the workspace.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/customer");
 
 impl PostgresBackendAdapter {
     /// Connect to the customer database. Does NOT run migrations.
@@ -45,7 +53,7 @@ impl PostgresBackendAdapter {
 
     /// Apply customer schema migrations from `migrations/customer/`.
     pub async fn migrate(&self) -> Result<(), CoreError> {
-        sqlx::migrate!("../../migrations/customer")
+        MIGRATOR
             .run(&self.pool)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
@@ -54,12 +62,10 @@ impl PostgresBackendAdapter {
     /// Run customer schema migrations against the given pool.
     ///
     /// Convenience for test harnesses that need to migrate before constructing
-    /// the adapter.
+    /// the adapter. Delegates to `migrate()` — never invokes the migration
+    /// embed macro independently (ADR-022).
     pub async fn run_migrations(pool: &PgPool) -> Result<(), CoreError> {
-        sqlx::migrate!("../../migrations/customer")
-            .run(pool)
-            .await
-            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
+        Self::new_from_pool(pool.clone()).migrate().await
     }
 
     /// Send a Postgres NOTIFY on the project's channel after a write.
@@ -79,6 +85,72 @@ impl PostgresBackendAdapter {
     /// Expose the internal pool for use by `PostgresNotifyListener`.
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    // ─── customer-db-onboarding (ADR-023) — RED scaffolds ─────────────────
+    //
+    // SCAFFOLD: true
+    //
+    // Three new methods below are added by feature `customer-db-onboarding`
+    // (DISTILL wave, 2026-08-16). Each panics unconditionally until DELIVER
+    // implements it via Outside-In TDD, one acceptance scenario at a time —
+    // see tests/customer_db_onboarding/acceptance/.
+
+    /// Verify the customer database's schema-readiness state.
+    ///
+    /// Reads sqlx's own `_sqlx_migrations` bookkeeping table (no new table
+    /// type introduced) and compares the highest successfully-applied
+    /// version against the compiled-in `Migrator`'s own highest embedded
+    /// version (the single-sourced embed established by ADR-022). Read-only
+    /// — `SELECT`-only against `_sqlx_migrations`, never attempts DDL.
+    ///
+    /// This method *is* `embyr-server`'s provisioning-time probe of the
+    /// customer DB's claimed schema state (Earned Trust — mirrors
+    /// `SystemDb::probe()`'s hard-gate shape). See ADR-023 § Mechanism.
+    ///
+    /// SCAFFOLD: true — RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023).
+    pub async fn verify_schema_readiness(&self) -> Result<SchemaReadiness, CoreError> {
+        panic!(
+            "PostgresBackendAdapter::verify_schema_readiness: not yet implemented \
+             -- RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023)"
+        )
+    }
+
+    /// Discover the role name of the connection this adapter instance was
+    /// constructed with, via `SELECT current_user`.
+    ///
+    /// Callers construct a second `PostgresBackendAdapter` from
+    /// `EMBYR_DB_PREP_DML_ROLE_DSN` and call this method on it — the DSN is
+    /// read once, used once, never logged (mirrors `StartupProbe`'s
+    /// DSN-handling convention, `crates/embyr-agent/src/probe.rs`). Only the
+    /// resulting role *name* is carried forward, never the DSN itself.
+    ///
+    /// SCAFFOLD: true — RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023 revised).
+    pub async fn discover_current_user(&self) -> Result<String, CoreError> {
+        panic!(
+            "PostgresBackendAdapter::discover_current_user: not yet implemented \
+             -- RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023 revised)"
+        )
+    }
+
+    /// Grant `SELECT` on `_sqlx_migrations` to exactly the named role.
+    ///
+    /// Executed against the ELEVATED connection (the owner of
+    /// `_sqlx_migrations`, and therefore the only connection that
+    /// structurally holds grant authority). Role-name interpolation is
+    /// delegated to Postgres's own `format('%I', ...)` — never hand-rolled
+    /// Rust-side quoting — closing the SQL-injection-shaped risk a naive
+    /// string interpolation would open (ADR-023 § Mechanism, step 4).
+    /// Naturally idempotent — re-granting an already-granted privilege is a
+    /// Postgres no-op, not an error.
+    ///
+    /// SCAFFOLD: true — RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023 revised).
+    pub async fn grant_schema_readiness_read(&self, role_name: &str) -> Result<(), CoreError> {
+        let _ = role_name;
+        panic!(
+            "PostgresBackendAdapter::grant_schema_readiness_read: not yet implemented \
+             -- RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023 revised)"
+        )
     }
 }
 

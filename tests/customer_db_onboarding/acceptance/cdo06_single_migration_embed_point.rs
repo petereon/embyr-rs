@@ -38,7 +38,6 @@ use std::path::Path;
 const EMBED_NEEDLE: &str = r#"sqlx::migrate!("../../migrations/customer")"#;
 
 #[test]
-#[ignore]
 fn migrations_customer_has_exactly_one_embed_point_workspace_wide() {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
