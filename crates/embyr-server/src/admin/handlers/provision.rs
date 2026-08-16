@@ -318,6 +318,22 @@ pub async fn provision(
 
         let customer_pool = probe_customer_db(dsn).await?;
 
+        // Ready-skip-migrate (step 03-01, AC-02-05): verify_schema_readiness()
+        // is SELECT-only against _sqlx_migrations. On Ready, migrate() is
+        // never invoked at all below — the submitted connection string need
+        // not hold elevated (DDL) privilege. On NotPrepped/Stale, fall
+        // through to today's migrate() behavior unchanged (04-01 enriches
+        // that path with response bodies).
+        let customer_adapter = PostgresBackendAdapter::new_from_pool(customer_pool.clone());
+        let readiness = customer_adapter
+            .verify_schema_readiness()
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        let is_ready = matches!(
+            readiness,
+            embyr_core::domain::schema_readiness::SchemaReadiness::Ready { .. }
+        );
+
         // ECIES encrypt DSN using api_key bytes as the seed
         let pubkey = ecies::derive_public_key(api_key.as_bytes());
         let encrypted_dsn = ecies::encrypt(&pubkey, dsn.as_bytes())
@@ -349,10 +365,12 @@ pub async fn provision(
             err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
         })?;
 
-        PostgresBackendAdapter::new_from_pool(customer_pool.clone())
-            .migrate()
-            .await
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        if !is_ready {
+            customer_adapter
+                .migrate()
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        }
     }
 
     Ok((

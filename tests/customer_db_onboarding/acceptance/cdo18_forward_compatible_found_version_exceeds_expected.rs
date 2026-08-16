@@ -32,7 +32,6 @@ use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
 use std::time::Duration;
 
 #[tokio::test]
-#[ignore]
 async fn a_found_version_higher_than_expected_is_treated_as_ready() {
     let (_pg, base_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();

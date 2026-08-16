@@ -27,7 +27,6 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[tokio::test]
-#[ignore]
 async fn dml_only_credential_succeeds_and_never_attempts_ddl() {
     let (_pg, base_url) = start_postgres_container().await;
     let sys_pool = sqlx::PgPool::connect(&base_url).await.unwrap();

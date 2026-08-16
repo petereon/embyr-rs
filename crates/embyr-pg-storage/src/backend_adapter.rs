@@ -87,14 +87,10 @@ impl PostgresBackendAdapter {
         &self.pool
     }
 
-    // ─── customer-db-onboarding (ADR-023) — RED scaffolds ─────────────────
+    // ─── customer-db-onboarding (ADR-023) ──────────────────────────────────
     //
-    // SCAFFOLD: true
-    //
-    // Three new methods below are added by feature `customer-db-onboarding`
-    // (DISTILL wave, 2026-08-16). Each panics unconditionally until DELIVER
-    // implements it via Outside-In TDD, one acceptance scenario at a time —
-    // see tests/customer_db_onboarding/acceptance/.
+    // `verify_schema_readiness()` implemented step 03-01. The two methods
+    // below remain RED scaffolds — step 05-01's scope.
 
     /// Verify the customer database's schema-readiness state.
     ///
@@ -102,18 +98,61 @@ impl PostgresBackendAdapter {
     /// type introduced) and compares the highest successfully-applied
     /// version against the compiled-in `Migrator`'s own highest embedded
     /// version (the single-sourced embed established by ADR-022). Read-only
-    /// — `SELECT`-only against `_sqlx_migrations`, never attempts DDL.
+    /// — `SELECT`-only against `_sqlx_migrations`, never attempts DDL
+    /// (AC-02-05).
     ///
     /// This method *is* `embyr-server`'s provisioning-time probe of the
     /// customer DB's claimed schema state (Earned Trust — mirrors
     /// `SystemDb::probe()`'s hard-gate shape). See ADR-023 § Mechanism.
     ///
-    /// SCAFFOLD: true — RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023).
+    /// On a relation-does-not-exist error (or zero successfully-applied
+    /// rows), `found_version = 0` is passed to `classify()` — the pure
+    /// comparison lives in `embyr_core::domain::schema_readiness::classify()`.
     pub async fn verify_schema_readiness(&self) -> Result<SchemaReadiness, CoreError> {
-        panic!(
-            "PostgresBackendAdapter::verify_schema_readiness: not yet implemented \
-             -- RED scaffold (DISTILL wave, feature customer-db-onboarding, ADR-023)"
-        )
+        use sqlx::Row;
+
+        let expected_version: i64 = MIGRATOR
+            .migrations
+            .last()
+            .map(|m| m.version)
+            .unwrap_or(0);
+
+        let rows = sqlx::query("SELECT version, success FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&self.pool)
+            .await;
+
+        let rows = match rows {
+            Ok(rows) => rows,
+            Err(sqlx::Error::Database(db_err))
+                if db_err.code().as_deref() == Some("42P01") =>
+            {
+                // relation "_sqlx_migrations" does not exist — never prepped.
+                return Ok(embyr_core::domain::schema_readiness::classify(
+                    0,
+                    expected_version,
+                    vec!["documents".to_string(), "transactions".to_string()],
+                ));
+            }
+            Err(e) => return Err(CoreError::BackendUnavailable(e.to_string())),
+        };
+
+        let found_version: i64 = rows
+            .iter()
+            .filter_map(|row| {
+                let success: bool = row.try_get("success").ok()?;
+                if !success {
+                    return None;
+                }
+                row.try_get::<i64, _>("version").ok()
+            })
+            .max()
+            .unwrap_or(0);
+
+        Ok(embyr_core::domain::schema_readiness::classify(
+            found_version,
+            expected_version,
+            vec!["documents".to_string(), "transactions".to_string()],
+        ))
     }
 
     /// Discover the role name of the connection this adapter instance was

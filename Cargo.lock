@@ -1830,12 +1830,27 @@ dependencies = [
  "blake3",
  "chrono",
  "hkdf",
+ "proptest",
  "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "uuid",
  "x25519-dalek",
+]
+
+[[package]]
+name = "embyr-db-prep"
+version = "0.1.0"
+dependencies = [
+ "embyr-core",
+ "embyr-pg-storage",
+ "reqwest",
+ "serde_json",
+ "sqlx",
+ "testcontainers 0.23.1",
+ "testcontainers-modules",
+ "tokio",
 ]
 
 [[package]]
