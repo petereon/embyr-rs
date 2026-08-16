@@ -65,8 +65,12 @@ chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 
 # AWS SDK
+# default-features disabled to drop the "rustls" legacy-compat alias, which
+# pulls a duplicate old hyper-rustls 0.24/rustls 0.21 TLS stack alongside the
+# modern one already pulled in by default-https-client (CVE: rustls-webpki
+# 0.101.7 DoS + name-constraint bugs, GHSA advisories on this repo's Cargo.lock).
 aws-config = "1"
-aws-sdk-secretsmanager = "1"
+aws-sdk-secretsmanager = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 
 # Stripe SDK (ADR-021) — embyr-server only; embyr-core never depends on it (IO-prohibition, deny.toml).
 # Pinned to the latest published release at implementation time (no non-RC 1.0
