@@ -976,3 +976,76 @@ verified fixture helpers with no novel technique.
   `*_cannot_read_*`) — no PBT-generated sad paths, consistent with layer 3's example-only mode.
 
 ---
+
+## Wave: DELIVER / [REF] Implementation Summary
+
+All 6 roadmap steps (01-01, 01-02, 02-01, 03-01, 04-01, 05-01) landed via the 3-phase TDD canon.
+US-01 (`embyr-db-prep`, a new customer-run CLI crate) applies `migrations/customer/` under a
+customer DBA's own elevated credentials and reports readiness or a named, actionable failure.
+US-02 (`provision.rs`'s `direct_pg` branch) verifies schema readiness via a read-only
+`_sqlx_migrations` check before attempting any migration, skips the migrate attempt entirely when
+already `Ready` (closing AC-02-05's no-elevated-privilege guarantee), and enriches the existing
+migrate-failure path with named `customer_db_not_prepped`/`customer_db_schema_stale` error bodies
+when not. The migration set is now single-sourced through one `PostgresBackendAdapter::migrate()`
+embed point (ADR-022), collapsing what were 5 independent `sqlx::migrate!` invocations to 1. The
+`_sqlx_migrations` read-access grant (needed so a DML-only role can be checked) is role-scoped,
+discovered at runtime via `SELECT current_user`, and quoted via Postgres's own `format('%I', ...)`
+— never `GRANT ... TO PUBLIC` — per a targeted security review during DESIGN.
+
+## Wave: DELIVER / [REF] Files Modified
+
+**Production:**
+- `crates/embyr-db-prep/` (new crate) — `main.rs`, `config.rs`, `error_report.rs`
+- `crates/embyr-core/src/domain/schema_readiness.rs` (new) — pure `SchemaReadiness` enum + `classify()`
+- `crates/embyr-pg-storage/src/backend_adapter.rs` — `verify_schema_readiness()`, `discover_current_user()`, `grant_schema_readiness_read()`; `migrate()`/`run_migrations()` refactored to a single module-level `static MIGRATOR`
+- `crates/embyr-server/src/admin/handlers/provision.rs` — `direct_pg` branch extended with verify-then-conditionally-migrate + enriched error bodies; all 3 branches now call the adapter's `migrate()` instead of the macro inline
+- `deny.toml`, root `Cargo.toml`, `crates/embyr-server/Cargo.toml` — new crate registration, `[[test]]` entries
+
+**Tests:** 18 new acceptance test files at `tests/customer_db_onboarding/acceptance/` (cdo01-cdo18) + `tests/customer_db_onboarding/common/mod.rs`; 1 proptest suite in `crates/embyr-core` for `schema_readiness::classify()`
+
+**Docs:** `docs/product/architecture/adr-022-*.md`, `adr-023-*.md`, `docs/product/jobs.yaml` (JOB-15), `docs/product/journeys/customer-dba.yaml`, `docs/architecture/atdd-infrastructure-policy.md`
+
+## Wave: DELIVER / [REF] Scenarios Green Count
+
+**18 of 18** (2026-08-16) — cdo01 through cdo18, zero `#[ignore]` markers remaining in this feature's test files, independently verified by the orchestrator (not just the implementing crafters) via a full `cargo test` run across both `embyr-db-prep` and `embyr-server` `[[test]]` targets.
+
+## Wave: DELIVER / [REF] Demo Evidence — 2026-08-16
+
+Per this repo's established convention (see `card-payments-backend`'s own DELIVER section), demo
+evidence is the real acceptance-test run itself — these tests already execute the Elevator Pitch's
+exact "After" command (real `embyr-db-prep` subprocess / real HTTP against a real `embyr-server`
+subprocess) against real testcontainers Postgres, not a mock.
+
+**US-01** — "run the database-preparation step → sees `database ready for embyr onboarding (schema
+version N of N applied)`":
+```
+$ cargo test -p embyr-db-prep --test cdo01_first_time_preparation
+test elena_preps_a_fresh_database_and_sees_the_applied_schema_version ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.92s
+```
+Assertion verified: `run.stdout.to_lowercase().contains("ready") && run.stdout.contains('2')`
+(`tests/customer_db_onboarding/acceptance/cdo01_first_time_preparation.rs:49`).
+
+**US-02 (success path)** — "call `POST /admin/v1/projects` with a DML-only connection string →
+sees the standard `{project_id, api_key}` response":
+```
+$ cargo test -p embyr-server --test cdo12_provisioning_succeeds_when_database_ready
+test provisioning_succeeds_when_database_is_fully_prepped ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.11s
+```
+Assertion verified: `status == 201` (`cdo12_provisioning_succeeds_when_database_ready.rs:94`).
+
+**US-02 (complain path)** — "call `POST /admin/v1/projects` against a not-prepped database → sees
+a 400 naming the specific missing schema element":
+```
+$ cargo test -p embyr-server --test cdo13_provisioning_fails_when_not_prepped
+test provisioning_fails_with_a_specific_complaint_when_database_not_prepped_at_all ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.03s
+```
+Assertion verified: `detail.contains("documents") || detail.contains("transactions")`
+(`cdo13_provisioning_fails_when_not_prepped.rs:93`).
+
+Gate recorded: post-merge-integration PASS, environments_tested: [real-testcontainers-postgres]
+(no DEVOPS environment matrix exists for this feature — default applied), stories_demoed: [US-01, US-02].
+
+---
