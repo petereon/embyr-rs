@@ -285,6 +285,28 @@ path = "../../tests/client_auth/acceptance/ca04_standalone_verify_debug_check.rs
 name = "client_auth_ca05_algorithm_confusion_defense"
 path = "../../tests/client_auth/acceptance/ca05_algorithm_confusion_defense.rs"
 
+# security-rules acceptance tests (Slices 01-05, mirroring the srNN
+# registration convention client-auth's own caNN entries established).
+[[test]]
+name = "security_rules_sr01_define_and_redefine_rule"
+path = "../../tests/security_rules/acceptance/sr01_define_and_redefine_rule.rs"
+
+[[test]]
+name = "security_rules_sr02_signed_in_read_gated_by_rule"
+path = "../../tests/security_rules/acceptance/sr02_signed_in_read_gated_by_rule.rs"
+
+[[test]]
+name = "security_rules_sr03_anonymous_session_evaluated_as_null_auth"
+path = "../../tests/security_rules/acceptance/sr03_anonymous_session_evaluated_as_null_auth.rs"
+
+[[test]]
+name = "security_rules_sr04_untouched_collections_and_regression_suite_unaffected"
+path = "../../tests/security_rules/acceptance/sr04_untouched_collections_and_regression_suite_unaffected.rs"
+
+[[test]]
+name = "security_rules_sr05_simulate_rule_before_publish"
+path = "../../tests/security_rules/acceptance/sr05_simulate_rule_before_publish.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

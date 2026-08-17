@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3a13876e0ec814faaae9b8de422d64cd421babcca510410e877ce9a11bde7ef5 # shrinks to uid = "a", field_name = "a"
+cc d0eca58ca6024022b5238e2909a2bf1b27cbf7b7bd2c6a6a53f3290652330cdf # shrinks to auth_uid = "a-", owner_uid = "a0", unrelated_value = ""

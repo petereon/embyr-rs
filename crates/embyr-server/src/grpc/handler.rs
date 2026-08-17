@@ -527,7 +527,13 @@ impl FirestoreService {
         // this call never rejects `getDoc` (AC-16-08b). Everything above
         // this line is the pre-existing, UNCHANGED authenticate() path
         // (AC-16-08a — regression guardrail).
-        let _verified_identity = self
+        //
+        // security-rules (ADR-029 § Identity reuse): renamed from
+        // `_verified_identity` to `verified_identity` — this feature adds a
+        // CONSUMER of the existing return value below, not a new code path
+        // into `attach_client_identity_if_present` itself, which is
+        // untouched by this feature.
+        let verified_identity = self
             .attach_client_identity_if_present(&request, &project_id)
             .await;
 
@@ -535,17 +541,76 @@ impl FirestoreService {
         self.metrics_adapter.record_read(&project_id, 1).await;
 
         let path = Self::parse_document_path(&name)?;
+
+        // security-rules (ADR-029 § Structural no-rule-defined guardrail,
+        // AC-17-14/15/16): a single indexed lookup on the composite primary
+        // key `(project_id, collection_path)`, called BEFORE the document
+        // fetch. `None` -> the match arm below is EXACTLY today's
+        // pre-`security-rules` code, unmodified —
+        // `embyr_core::access_control::evaluate()` is never called. This is
+        // the same short-circuit shape as `attach_client_identity_if_present`'s
+        // own AC-16-08(c) guarantee.
+        let rule_row = self
+            .system_db
+            .get_access_rule(&project_id, &path.collection_path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
         let doc_opt = adapter
             .get_document(&path)
             .await
             .map_err(core_error_to_status)?;
 
-        match doc_opt {
-            None => Err(Status::not_found(format!("{name} not found"))),
-            Some(doc) => {
-                let mut response = Response::new(document_to_proto(doc));
-                Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
-                Ok(response)
+        match rule_row {
+            // No rule defined for this collection — UNCHANGED, unmodified
+            // pre-`security-rules` code path (AC-17-14/15/16, structural
+            // regression guardrail).
+            None => match doc_opt {
+                None => Err(Status::not_found(format!("{name} not found"))),
+                Some(doc) => {
+                    let mut response = Response::new(document_to_proto(doc));
+                    Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+                    Ok(response)
+                }
+            },
+            // A rule is defined — evaluate it (US-02/03/04, AC-17-06..13).
+            Some(rule_row) => {
+                let condition = embyr_core::access_control::parse_condition(&rule_row.condition_source)
+                    .map_err(|e| {
+                        Status::internal(format!("stored access rule failed to re-parse: {e:?}"))
+                    })?;
+                let auth_ctx = verified_identity
+                    .as_ref()
+                    .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+                // AC-17-10 (existence non-leakage): a non-existent document
+                // evaluates against an EMPTY field map — the same
+                // fail-closed mechanism AC-17-09 already uses for a single
+                // missing field, applied uniformly. `evaluate()` is called
+                // UNCONDITIONALLY, whether or not the document exists.
+                let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                    std::collections::BTreeMap::new();
+                let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+
+                match embyr_core::access_control::evaluate(&condition, auth_ctx.as_ref(), resource_fields) {
+                    // AC-17-10: `Deny` ALWAYS produces the identical
+                    // `PermissionDenied` response — never distinguishes
+                    // "wrong owner" from "document does not exist" for a
+                    // rule that references `resource.data` (scoped per
+                    // OQ-SR-06, see feature-delta.md § DISTILL).
+                    embyr_core::access_control::EvaluationOutcome::Deny => {
+                        Err(Status::permission_denied("access denied by rule"))
+                    }
+                    // `Allow` only then branches on document existence —
+                    // unchanged from today's `NotFound`/success shape.
+                    embyr_core::access_control::EvaluationOutcome::Allow => match doc_opt {
+                        None => Err(Status::not_found(format!("{name} not found"))),
+                        Some(doc) => {
+                            let mut response = Response::new(document_to_proto(doc));
+                            Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+                            Ok(response)
+                        }
+                    },
+                }
             }
         }
     }

@@ -29,6 +29,8 @@ use super::handlers::client_identity::{
     register_client_identity_credential, rotate_client_identity_credential,
     verify_client_identity_credential,
 };
+// security-rules (US-01/US-05, ADR-029): access-rule define/redefine + simulate.
+use super::handlers::access_rules::{define_access_rule, simulate_access_rule};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
@@ -184,6 +186,18 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/client_identity_credential/verify",
             post(verify_client_identity_credential),
+        )
+        // security-rules (US-01/US-05, ADR-029): define/redefine an access
+        // rule (Owner/Admin, gated in-handler) + simulate a candidate rule
+        // (any role, read-only, gated in-handler) — mirrors
+        // client_identity_credential's identical in-handler-gate shape.
+        .route(
+            "/admin/v1/projects/:project_id/access_rules",
+            post(define_access_rule),
+        )
+        .route(
+            "/admin/v1/projects/:project_id/access_rules/simulate",
+            post(simulate_access_rule),
         )
         .route(
             "/admin/v1/projects/:project_id/metrics",

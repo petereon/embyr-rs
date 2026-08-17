@@ -25,6 +25,18 @@ pub struct ClientIdentityCredentialRotationRow {
     pub rotated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// security-rules (ADR-028): a project's per-collection access-control rule
+/// row, as stored in `access_rules`. `condition_source` is the raw,
+/// validated grammar text — NOT a serialized AST (ADR-028 § Store Source,
+/// Not AST) — re-parsed via `embyr_core::access_control::parse_condition`
+/// on every gated `GetDocument` call.
+#[derive(Debug, Clone)]
+pub struct AccessRuleRow {
+    pub condition_source: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Project row returned for credential verification.
 #[derive(Debug)]
 pub struct ProjectAuthRow {
@@ -278,6 +290,50 @@ impl SystemDb {
                 .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("rotated_at")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
+    }
+
+    // -----------------------------------------------------------------------
+    // security-rules (ADR-028) — RED scaffold (Mandate 7, DISTILL wave).
+    // -----------------------------------------------------------------------
+
+    /// Define OR redefine (Resolution 3: idempotent upsert, the SAME action
+    /// either way — ADR-028 § Decision, `INSERT ... ON CONFLICT (project_id,
+    /// collection_path) DO UPDATE`) the access rule for `(project_id,
+    /// collection_path)`. There is no separate `insert_*`/`redefine_*`
+    /// pair, unlike `insert_client_identity_credential`/
+    /// `rotate_client_identity_credential` above — see ADR-028 § Decision,
+    /// "Adapter methods" for why that asymmetry is intentional.
+    // SCAFFOLD: true
+    pub async fn upsert_access_rule(
+        &self,
+        project_id: &str,
+        collection_path: &str,
+        condition_source: &str,
+    ) -> Result<(), CoreError> {
+        let _ = (project_id, collection_path, condition_source);
+        panic!(
+            "SystemDb::upsert_access_rule — RED scaffold (DISTILL wave, \
+             feature security-rules, ADR-028): not yet implemented"
+        );
+    }
+
+    /// Look up the access rule for `(project_id, collection_path)`.
+    /// `Ok(None)` is the mechanism behind the structural no-rule-defined
+    /// guardrail (ADR-029 § Structural no-rule-defined guardrail,
+    /// AC-17-14/15/16): when `None`, `grpc::handler::handle_get_document`
+    /// takes the EXACT unmodified pre-`security-rules` code path —
+    /// `embyr_core::access_control::evaluate()` is never called.
+    // SCAFFOLD: true
+    pub async fn get_access_rule(
+        &self,
+        project_id: &str,
+        collection_path: &str,
+    ) -> Result<Option<AccessRuleRow>, CoreError> {
+        let _ = (project_id, collection_path);
+        panic!(
+            "SystemDb::get_access_rule — RED scaffold (DISTILL wave, \
+             feature security-rules, ADR-028): not yet implemented"
+        );
     }
 }
 

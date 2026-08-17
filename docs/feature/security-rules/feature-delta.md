@@ -1084,3 +1084,218 @@ covering all 4 waves in parallel, per standard process.
 
 ### Upstream Changes
 - `docs/product/architecture/adr-002-bounded-contexts.md` amended (§ Changed Assumptions, appended) — a new 4th bounded context, BC-4 Access Control, is established. This is the one architecture-driven reversal this wave makes to a prior-wave (DESIGN-owned, cross-feature) artifact; it does not change any DISCUSS-locked observable behavior or user story.
+
+---
+
+## Wave: DISTILL / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Wave**: DISTILL | **Agent**: Quinn (nw-acceptance-designer) | **Date**: 2026-08-17
+
++ `docs/feature/security-rules/feature-delta.md` (this file, DISCUSS + DESIGN sections, read in full — including Handoff Package, OQ-SR-04, OQ-SR-06, and all 19 UAT scenarios across US-01 through US-05)
++ `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md` (read in full — grammar EBNF, `Condition`/`Operand`/`ConditionParseError` shapes, fail-closed semantics, the OQ-SR-04 grammar gap flagged for this wave)
++ `docs/product/architecture/adr-028-access-rule-storage-and-lifecycle.md` (read in full — `access_rules` schema, `upsert_access_rule`/`get_access_rule` adapter method shapes, "store source not AST")
++ `docs/product/architecture/adr-029-access-control-composition-and-bounded-context.md` (read in full — the exact composition ordering in `handle_get_document`, identity-reuse mechanism, structural no-rule-defined guardrail, existence-non-leakage mechanism and the OQ-SR-06 scoped clarification flagged for this wave, simulation's shared-evaluation-routine requirement, BC-4 placement)
++ `docs/product/architecture/adr-002-bounded-contexts.md` § Changed Assumptions (read — confirms the BC-4 amendment, Option D's original text quoted verbatim, not re-litigated here)
++ `docs/feature/client-auth/feature-delta.md` (full, all four waves — the direct structural template for this DISTILL pass, per this wave's own explicit dispatch instructions: DISCUSS's Framing Resolution methodology, DESIGN's Component Decomposition, and DISTILL's Scenario List / Adapter Coverage Table / Scaffolds / Test Placement section shapes are all reproduced here in the identical Tier-1 structure)
++ `docs/feature/client-auth/distill/red-classification.md` (read in full — the gate-evidence file FORMAT this wave's own `docs/feature/security-rules/distill/red-classification.md` reproduces; NOTE its "0 regression" claim for the 72-scenario suite does NOT carry over unchanged to this feature — see § Pre-DELIVER Fail-For-The-Right-Reason Gate below for why)
++ `tests/client_auth/acceptance/ca01_register_verification_credential.rs` through `ca05_algorithm_confusion_defense.rs` (all 5, read in full — direct template for scenario-function naming, doc-comment tagging, and the one-scenario-at-a-time `#[ignore]` discipline)
++ `tests/client_auth/common/mod.rs` (read in full — `ClientAuthAdminContext`/`ClientAuthFullContext` shape, `mint_client_identity_token`/`now_unix`/`public_key_b64` helpers, REUSED via a `#[path]` import into `tests/security_rules/common/mod.rs` rather than duplicated, per this wave's own dispatch instructions)
++ `crates/embyr-server/Cargo.toml` (full `[[test]]` section grepped — confirms `client_auth_ca0N_*` is this project's most recent per-feature naming convention; `security_rules_sr0N_*` chosen as the analogous prefix, consistent with `card_payments_backend_cpbNN_*`/`drl_bNN_*`/`cdoNN_*`'s own established per-feature-prefix pattern)
++ `crates/embyr-server/src/grpc/handler.rs` (full, 1369 lines pre-edit — `authenticate()`, `attach_client_identity_if_present()`, `handle_get_document()` read in full; the exact `_verified_identity` discard point and existing `doc_opt` match arm this feature extends, confirmed by direct read, not assumed)
++ `crates/embyr-core/src/client_identity/mod.rs`, `crates/embyr-server/src/admin/handlers/client_identity.rs`, `crates/embyr-server/src/adapters/system_db.rs` (`ClientIdentityCredentialRow` + `insert_/get_/rotate_client_identity_credential`), `crates/embyr-server/src/admin/handlers/shared.rs`, `crates/embyr-server/src/admin/router.rs` — all read in full as the direct per-file scaffold/handler/adapter/router-registration shape templates this wave's own new files mirror
++ `docs/architecture/atdd-infrastructure-policy.md` — read in full; confirmed reusable rows already present for the admin port `:9090`, gRPC data port `:8080`, and System Postgres driven-internal port (inherited from `client-auth`'s own bootstrap) — zero new policy rows needed, this feature introduces no new port CLASS (DESIGN § Driven Ports + Adapters — security-rules: "No new driven port")
+- `docs/feature/security-rules/discuss/wave-decisions.md`, `docs/feature/security-rules/design/wave-decisions.md`, `docs/feature/security-rules/devops/wave-decisions.md` (not found — same single-narrative-file convention as `client-auth`; DISCUSS/DESIGN decisions live embedded in this file's own § System Constraints, § Decisions Table, and DESIGN's numbered "8 Explicit Flags" sections, consulted directly below for reconciliation)
+- `docs/product/kpi-contracts.yaml` (not found — soft gate, warned, proceeded; this file's own § Outcome KPIs above already carries 4 KPIs with measurement plans, owned by a DEVOPS wave that has not yet run for this feature, same as `client-auth`)
+- `docs/feature/security-rules/devops/` (directory does not exist — DEVOPS wave has not run; graceful degradation applied per the skill's Graceful Degradation Matrix: WARN, default environment matrix used — `clean` | `with-pre-commit` | `with-stale-config` — no environment-specific precondition materially affects these scenarios, this feature introduces no new deployment topology)
+
+Migration Gate: `docs/product/` exists and is the established SSOT root for this project. Greenfield/migration gate: N/A, not triggered.
+
+---
+
+## Wave: DISTILL / [REF] Wave-Decision Reconciliation — HARD GATE
+
+Executed BEFORE any scenario was written, per the skill's mandatory pre-scenario gate.
+
+**Method**: identical to `client-auth`'s own precedent — since `security-rules` has no separate `discuss/design/devops` `wave-decisions.md` files, reconciliation was performed directly against the embedded decision sections: DISCUSS's `§ System Constraints`, `§ Out of Scope`, `§ Job Discovery Framing Resolution` (all three Resolutions), and `§ Handoff Package`'s 8 numbered flags, checked against DESIGN's `§ Architecture Design` (the identically-numbered 8-point resolution), `§ Bounded-Context Placement`, and all three ADRs' `Decision` sections.
+
+| DISCUSS decision | DESIGN treatment | Contradiction? |
+|---|---|---|
+| Resolution 1 (Option C): constrained boolean grammar, no cross-document reads/functions/wildcards | ADR-027's EBNF has no production for `get()`/`exists()`/functions/wildcards — explicitly recognized and rejected (`UnsupportedConstruct`), not silently accepted or silently absent | NO — consistent, and DESIGN's mechanism (a NAMED rejection class) is stricter than DISCUSS's own bare "reject it" requirement |
+| Resolution 2: no-rule-defined collections stay unrestricted (unchanged from pre-feature) | ADR-029 § Structural no-rule-defined guardrail: `get_access_rule` returning `None` short-circuits BEFORE any evaluation logic runs — the exact unmodified pre-feature branch | NO — consistent, and DESIGN's mechanism is *stronger* than DISCUSS required (structural, not just behavioral — mirrors `client-auth`'s own ADR-026 precedent exactly) |
+| Resolution 3: idempotent upsert, no register-then-rotate | ADR-028: single `upsert_access_rule` method, `INSERT ... ON CONFLICT ... DO UPDATE` — no `insert_*`/`redefine_*` pair, unlike `client_identity_credentials`'s deliberate split | NO — consistent, and DESIGN's mechanism makes the lock structural (one SQL statement, no code branch) not just observable |
+| § System Constraints: rule evaluation MUST consume `attach_client_identity_if_present()`'s existing result, never re-derive identity | ADR-029 § Identity reuse: `_verified_identity` renamed to `verified_identity` (dropping the underscore), threaded unchanged into the new evaluation step; `attach_client_identity_if_present()` itself is not modified in any way | NO — consistent |
+| § System Constraints: existence non-leakage is a locked, testable behavior | ADR-029 § Existence non-leakage: `Deny` always produces the identical `PermissionDenied` response regardless of `doc_opt`; scoped clarification for content-blind rules flagged as OQ-SR-06, not silently narrowed or silently over-claimed | NO — consistent, DESIGN correctly did NOT silently resolve the content-blind-rule edge itself, deferring the scoping confirmation to this wave (§ Open Question Resolutions below) |
+| § System Constraints: v1 enforcement surface is `GetDocument` only | DESIGN § Architecture Design point 6 confirms, by direct enumeration against the full `grpc/handler.rs` read, that `handle_create_document`/`handle_update_document`/`handle_delete_document`/`handle_run_query`/`handle_listen`/etc. are untouched | NO — consistent |
+| § Handoff Package flag 7: bounded-context placement flagged, not locked | DESIGN resolved it: BC-4 Access Control, evaluated against ADR-002's own 5 decision drivers, not defaulted by inertia | NO — not a contradiction; this is DISCUSS's own explicit deferral being exercised, exactly as DISCUSS asked |
+| § Handoff Package flag 8: simulation must share the exact evaluation routine as real enforcement | ADR-029 § Simulation shares the exact evaluation routine: two call sites (`handle_get_document`, `simulate_access_rule`), one `evaluate()` function; `parse_condition` likewise shared across three call sites | NO — consistent |
+| Grammar/endpoint/persistence-shape/BC-placement are all explicitly DESIGN's call (DISCUSS locks observable behavior only) | ADR-027/028/029 exercise exactly the delegated authority DISCUSS granted | NO — this is DISCUSS's own explicit deferral being honored, not a contradiction |
+
+**OQ-SR-04 and OQ-SR-06 notes**: both are explicitly-flagged OPEN QUESTIONS for THIS wave to resolve (DESIGN § Handoff Package flags 2/3), not DISCUSS/DESIGN contradictions — see § Open Question Resolutions below for both.
+
+**Reconciliation passed — 0 contradictions.** Proceeded to scenario design.
+
+---
+
+## Wave: DISTILL / [REF] Open Question Resolutions
+
+### OQ-SR-04 — literal-operand grammar (booleans-only in v1)
+
+**Resolution: confirmed sufficient. No scenario in this feature's full scope (all 19 UAT scenarios across US-01 through US-05) requires a string/number literal comparand.**
+
+Every Domain Example and UAT Scenario across all 5 user stories was read in full during this wave (see § Prior Wave Consultation). The complete set of conditions any domain example or UAT scenario actually exercises is:
+- `request.auth.uid == resource.data.owner_id` (US-01/02 — ownership equality; both operands are non-literal: an auth-uid reference and a resource-field reference)
+- `request.auth != null` (US-01/03 — the null-auth idiom; `null` is already a first-class grammar production, not a string/number literal)
+- `true` (US-01/03 — the bare boolean-literal "public read" idiom; already the ONE literal shape the locked grammar admits)
+- `get(/databases/(default)/documents/users/$(request.auth.uid))` (US-01 — explicitly OUT of v1 scope, rejected as `UnsupportedConstruct`, not a literal-operand question at all)
+- Unbalanced-parentheses / unrecognized-operator strings (US-01 — plain syntax-error boundary cases, not valid conditions)
+- Simulation's synthetic `resource` payloads (US-05) carry field VALUES (e.g. `{"owner_id": "test-user-001"}`) — but these are simulated DOCUMENT DATA, evaluated against `resource.data.<field>` operand references already in the locked grammar, not new literal syntax inside a CONDITION STRING itself. `json_value_to_field_value` (the simulation request's JSON-to-`FieldValue` translator) has no bearing on the CONDITION grammar's literal-operand set — it is a separate, non-grammar concern.
+
+No scenario anywhere in DISCUSS's 19 UAT scenarios compares `resource.data.<field>` against a string or number literal (e.g. `resource.data.status == "published"`, the exact hypothetical ADR-027's own § Grammar Gap Flagged for DISTILL section raises). **Confirmed: the boolean-only literal grammar (ADR-027 § Decision) is sufficient for this feature's full scope as specified.** This is recorded here, not silently assumed — a future epic that DOES need a string/number literal comparand (e.g. gating on a `status` field's exact value) would need its own DISCUSS pass to re-open Resolution 1, per ADR-027's own § Grammar Gap Flagged for DISTILL closing note.
+
+### OQ-SR-06 — existence non-leakage is scoped to content-referencing rules only
+
+**Resolution: confirmed scoped correctly. AC-17-10's scenario (`sr02_signed_in_read_gated_by_rule.rs::a_denied_read_never_reveals_whether_the_target_document_exists`) is written ONLY against the content-referencing ownership rule (`request.auth.uid == resource.data.owner_id`) — exactly as DISCUSS's own UAT scenario specifies — and NOT against a content-blind rule (e.g. `allow read: if true` or `request.auth != null`).**
+
+No scenario in `sr01`-`sr05` asserts a non-leakage guarantee for a content-blind rule. This scoping is stated explicitly in the scenario's own doc comment (`sr02...rs`, AC-17-10) so DELIVER does not accidentally treat the guardrail as unscoped when implementing or when later extending test coverage — a content-blind rule's `Allow` verdict against a non-existent document legitimately still resolves to `NotFound` (ADR-029 § Existence non-leakage's own closing paragraph), which is a DIFFERENT, narrower guarantee than AC-17-10's content-referencing-rule claim, and this feature does not claim the broader one.
+
+---
+
+## Wave: DISTILL / [REF] Two-Tier Acceptance Composition Decision (Mandate 10)
+
+**Tier A only. Tier B (state-machine PBT) is explicitly NOT added.**
+
+Journey shape check against Mandate 10's trigger:
+- Chained scenarios (Pillar 2 active)? Partially — within each file, scenario N's Given reuses scenario 1's rule/identity-seeding shape (e.g. `sr02`'s scenarios 2-5 all reuse scenario 1's `journal_entries` ownership-rule Given), but each file's own journey is 1-2 conceptual steps (define, or evaluate), not a single ≥3-chained-scenario journey through one state machine — same conclusion `client-auth`'s own DISTILL reached for its own file shape.
+- Domain-rich input space (emails, dates, payloads, free-text, IDs from a large set)? **NO** — per Resolution 1 (Option C), the entire condition-grammar input space is a small, closed, deliberately-capped set: two boolean combinators, one comparison operator pair, and four operand shapes (`request.auth.uid`, `request.auth`, `resource.data.<field>`, `true`/`false`/`null`). This is closer to Mandate 10's explicit "skip" case ("the feature is config/taxonomy-shaped") than to a domain-rich journey.
+
+**Where the generative/PBT value already lives instead**: the one place this feature genuinely has a quantifiable input space (arbitrary uid strings, arbitrary field names, arbitrary non-matching owner/auth pairs, all under a FIXED grammar) is captured at **layer 1** — `crates/embyr-core/src/access_control/mod.rs`'s `proptest!` block (2 properties, 64 cases each: any ownership condition against an empty resource map always denies; mismatched-owner denial holds regardless of unrelated resource fields) — exactly where Mandate 9 says PBT-full belongs, and far cheaper per-case than a Tier B `RuleBasedStateMachine` over an in-memory-doubled server would be. Adding Tier B on top would explore the same small, closed grammar a second time at 10-100x the per-case cost for no additional contract-gap discovery — the identical reasoning `client-auth`'s own DISTILL wave applied to its own bounded four-member rejection taxonomy.
+
+---
+
+## Wave: DISTILL / [REF] Scenario List
+
+19 acceptance scenarios (Tier A, example-only per the decision above) + 1
+structural marker (AC-17-16, not a RED/GREEN-classified scenario) + 12
+layer-1 unit/property tests (embyr-core, RED). **13/19 acceptance scenarios
+are error/edge (68%)** — well over the 40% mandate.
+
+| # | File | Scenario | Tags |
+|---|---|---|---|
+| 1 | sr01 | `first_time_rule_definition_succeeds_and_is_immediately_active` | `@walking_skeleton @driving_port @real-io @US-01 @AC-17-01` |
+| 2 | sr01 | `redefining_an_existing_rule_fully_replaces_it_with_no_overlap_window` | `@error @driving_port @real-io @US-01 @AC-17-02` |
+| 3 | sr01 | `a_condition_using_an_out_of_v1_scope_construct_is_rejected_naming_whats_unsupported` | `@error @driving_port @real-io @US-01 @AC-17-03` |
+| 4 | sr01 | `a_condition_with_invalid_syntax_is_rejected_with_a_specific_reason` | `@error @driving_port @real-io @US-01 @AC-17-04` |
+| 5 | sr01 | `rule_definition_without_valid_admin_credentials_is_rejected` | `@error @driving_port @real-io @US-01 @AC-17-05` |
+| 6 | sr02 | `a_signed_in_end_user_reading_their_own_document_succeeds_unchanged` | `@walking_skeleton @driving_port @real-io @US-02 @AC-17-06` |
+| 7 | sr02 | `a_different_signed_in_end_users_read_of_the_same_document_is_denied` | `@error @driving_port @real-io @US-02 @AC-17-07` |
+| 8 | sr02 | `a_rule_not_based_on_ownership_allows_any_signed_in_caller` | `@driving_port @real-io @US-02 @AC-17-08` |
+| 9 | sr02 | `a_condition_referencing_a_missing_field_fails_closed_not_with_an_error` | `@error @driving_port @real-io @US-02 @AC-17-09` |
+| 10 | sr02 | `a_denied_read_never_reveals_whether_the_target_document_exists` | `@error @driving_port @real-io @US-02 @AC-17-10 @security-regression` |
+| 11 | sr03 | `a_never_signed_in_session_is_denied_by_a_rule_requiring_identity` | `@walking_skeleton @driving_port @real-io @US-03 @AC-17-11` |
+| 12 | sr03 | `a_never_signed_in_session_succeeds_against_a_rule_allowing_public_read` | `@driving_port @real-io @US-03 @AC-17-12` |
+| 13 | sr03 | `an_invalid_client_identity_header_is_evaluated_identically_to_no_header_at_all` | `@error @driving_port @real-io @US-03 @AC-17-13` |
+| 14 | sr04 | `a_collection_that_has_never_had_a_rule_defined_is_unaffected_by_this_feature` | `@walking_skeleton @driving_port @real-io @US-04 @AC-17-14` |
+| 15 | sr04 | `a_rule_on_one_collection_does_not_affect_a_sibling_collection_without_its_own_rule` | `@error @driving_port @real-io @US-04 @AC-17-15` |
+| — | sr04 | `full_113_scenario_regression_suite_passes_unmodified` (structural marker, `#[ignore]`d unconditionally — not RED/GREEN-classified) | `@driving_port @real-io @US-04 @AC-17-16 @regression-proof-obligation` |
+| 16 | sr05 | `simulating_a_valid_candidate_rule_against_a_matching_pair_returns_the_correct_outcome` | `@driving_port @real-io @US-05 @AC-17-17` |
+| 17 | sr05 | `simulation_surfaces_an_over_permissive_rule_bug_before_publishing` | `@error @driving_port @real-io @US-05 @AC-17-17` |
+| 18 | sr05 | `simulation_has_zero_effect_on_live_traffic` | `@error @driving_port @real-io @US-05 @AC-17-18` |
+| 19 | sr05 | `simulation_supports_the_anonymous_case_identically_to_real_evaluation` | `@error @driving_port @real-io @US-05 @AC-17-19` |
+| — | embyr-core `access_control::tests` | 12 layer-1 unit/property tests (grammar acceptance, distinguishable rejection reasons, the 4-way evaluation truth table, fail-closed missing-field semantics, 2 `proptest!` properties) | `@property` (proptest block) / example (pinned cases) |
+
+Story traceability: US-01 → scenarios 1-5; US-02 → 6-10; US-03 → 11-13; US-04 → 14-15 + the AC-17-16 marker; US-05 → 16-19. No UAT scenario from DISCUSS's own 5+5+3+3+4=19 count was dropped or invented.
+
+---
+
+## Wave: DISTILL / [REF] WS Strategy
+
+**Architecture of Reference applied (per-project defaults, not a per-feature A/B/C/D choice)**: Driving ports (admin `:9090`, gRPC `:8080`) use real adapters via the production composition root (`build_admin_router` directly for `sr01`/parts of `sr05`; `embyr_server::start_test_server` for `sr02`/`sr03`/`sr04`/parts of `sr05` needing the full gRPC+admin stack) — Pillar 3 compliance confirmed: zero hand-rolled routers, zero mocked driving ports anywhere in this feature's tests. Driven-internal (System Postgres, including the new `access_rules` table) uses real `testcontainers-rs` Postgres per the existing project policy row — reused unchanged, no new row needed. Zero driven-external ports (DESIGN § Driven Ports + Adapters — security-rules: "No new driven port... no new external dependency").
+
+Per DISCUSS's own WS Strategy (Strategy B, thin end-to-end slice, extended to Slices 01-04 since DISCUSS explicitly scoped all of Release 1 as the walking skeleton — feature-delta.md § WS Strategy DISCUSS section): four walking-skeleton scenarios, one per WS-tagged Slice — scenario 1 (`sr01`, Activity A — define), scenario 6 (`sr02`, Activity B — signed-in own-doc read), scenario 11 (`sr03`, Activity B — anonymous denied, DISCUSS's own "Happy Path (expected deny)" domain example), scenario 14 (`sr04`, Activity B proof — untouched collection). All four tagged `@walking_skeleton @driving_port`, all real-I/O, all confirmed RED for the correct `MISSING_FUNCTIONALITY` reason (see § Pre-DELIVER Fail-For-The-Right-Reason Gate).
+
+---
+
+## Wave: DISTILL / [REF] Adapter Coverage Table (Mandate 6)
+
+| Adapter / Port | `@real-io` scenario | Covered by |
+|---|---|---|
+| Admin HTTP `:9090` (driving, extended) | YES | `sr01` (all 5 define/redefine scenarios), `sr05` (simulate scenarios 1/2/4 via `SecurityRulesAdminContext`, scenario 3 via `SecurityRulesFullContext`'s `admin_url`) — all via real `build_admin_router`/`start_test_server` |
+| gRPC `:8080` `GetDocument` (driving, extended — the single call site ADR-029 touches) | YES | `sr02` (all 5 scenarios), `sr03` (all 3 scenarios), `sr04` (2 of 3 scenarios), `sr05` scenario 3 (real `getDoc` before/after the simulation call) |
+| `SystemDb` / System Postgres — `access_rules` table (driven-internal, new table) | YES | `sr01`'s `seed_access_rule`/`access_rule_condition_source` helpers exercise real INSERT/SELECT against real Postgres directly; `sr01` scenario 1's walking skeleton additionally exercises the real endpoint-driven INSERT path once `upsert_access_rule` is implemented; `sr02`/`sr03`/`sr04`/`sr05`'s `seed_access_rule` helpers exercise the same real table from the `SecurityRulesFullContext` side |
+| `client_identity_credentials` table (read-only reuse, no new adapter — `client-auth`'s already-existing output, per the dispatch instructions) | YES (inherited) | `sr02`/`sr03`/`sr05` seed real rows via `seed_client_identity_credential` and mint real tokens via the reused `mint_client_identity_token` helper — exercises the exact same `attach_client_identity_if_present()` real code path `client-auth`'s own `ca02` already proved |
+| `embyr_core::access_control::{parse_condition, evaluate}` (pure, no adapter — layer 1) | N/A (pure function; direct unit + property coverage, not an I/O adapter) | `crates/embyr-core/src/access_control/mod.rs` — 12 unit/property tests |
+
+Zero "NO — MISSING" rows. This feature introduces no new driven-external port (DESIGN confirms zero new outbound network dependency), so the driven-external column of the Architecture-of-Reference table is not applicable here — identical conclusion to `client-auth`'s own Adapter Coverage Table.
+
+---
+
+## Wave: DISTILL / [REF] Scaffolds (RED-ready, Mandate 7)
+
+All scaffold bodies `panic!` (Rust convention — RED, not `NotImplementedError`-equivalent BROKEN) and are marked `// SCAFFOLD: true`.
+
+| File | What's scaffolded | Confirmed RED (not BROKEN) |
+|---|---|---|
+| `crates/embyr-core/src/access_control/mod.rs` (new) | `parse_condition()`, `evaluate()`. Types (`Condition`, `Operand`, `CompareOp`, `AuthContext`, `EvaluationOutcome`, `ConditionParseError`, `UnsupportedConstruct`) are fully defined — real, not scaffolded (the grammar's SHAPE is locked by ADR-027; only the parsing/evaluation ALGORITHM is missing, mirroring `client_identity::mod`'s own historical shape during `client-auth`'s DISTILL wave) | YES — 12/12 unit/property tests panic inside the scaffold (`cargo test -p embyr-core --lib access_control`: 12 failed, 0 passed) |
+| `crates/embyr-server/src/adapters/system_db.rs` (extended) | `upsert_access_rule`, `get_access_rule` (+ `AccessRuleRow`, real, non-scaffold struct) | YES — reached and panics via both the admin handler AND `handle_get_document` (every real-I/O scenario in `sr01`-`sr05` confirmed) |
+| `crates/embyr-server/src/admin/handlers/access_rules.rs` (new) | `define_access_rule`, `simulate_access_rule` (session-auth / role-gate / project-ownership checks ahead of the panic are real, reused code, not scaffolds — see the file's own doc comment distinguishing this from Mandate 7's "missing functionality") | YES — `sr01`/`sr05` confirmed |
+| `crates/embyr-server/src/grpc/handler.rs` (extended) | The single new call site inside `handle_get_document` — `get_access_rule` lookup + the `Some(rule_row)` evaluation branch. The pre-existing `authenticate()`/`attach_client_identity_if_present()`/`None`-branch code is UNCHANGED, real, non-scaffold (per ADR-029's own structural argument) | YES — `sr02`/`sr03`/`sr04`/`sr05` confirmed; ALSO reached (as an expected, documented side effect, not a bug) by every pre-existing `GetDocument`-touching scenario in the 113-scenario suite — see § Pre-DELIVER Fail-For-The-Right-Reason Gate's Regression-Suite Finding |
+| `migrations/0022_access_rules.sql` (new) | `access_rules` table (real DDL, not a scaffold — schema is not "business logic") | N/A — applied cleanly by every test context's `system_db.migrate()` (confirmed via every `SecurityRulesAdminContext`/`SecurityRulesFullContext::new()` call across all 5 test files, which would fail at construction, not later, if the migration itself were broken) |
+
+Also wired (composition-root plumbing, real code, not scaffolds): `crates/embyr-core/src/lib.rs` (`pub mod access_control`), `crates/embyr-server/src/admin/handlers/mod.rs` (`pub mod access_rules`), `crates/embyr-server/src/admin/router.rs` (2 new `session_router` routes: define + simulate). No new `Cargo.toml` dependency anywhere (ADR-027 Consequences: "Zero new workspace dependency" — confirmed via `cargo deny check bans`: `bans ok`).
+
+**No DISTILL-scope limitation analogous to `client-auth`'s own** (that feature wired its new call site into exactly one of 9 RPC handlers, deferring the other 8 explicitly): `security-rules`' v1 enforcement surface IS `GetDocument`-only by DESIGN (§ System Constraints, § Handoff Package flag 6) — there is no "the other N call sites" follow-through to flag, since extending to `RunQuery`/writes/`Listen` is out of THIS feature's scope entirely (named, deferred follow-up epics 2b/2c/2d), not an artifact of DISTILL's own scoping choices.
+
+---
+
+## Wave: DISTILL / [REF] Test Placement
+
+`tests/security_rules/acceptance/*.rs` + `tests/security_rules/common/mod.rs`, registered as `[[test]]` entries in `crates/embyr-server/Cargo.toml` with the `security_rules_sr0N_*` binary-name prefix.
+
+**Precedent verified before choosing this path**: exact structural match to `tests/client_auth/` (`caNN_*.rs` + `common/mod.rs`, `[[test]]` names prefixed `client_auth_ca0N_*`) — the direct, most-recent, per-feature-prefix precedent, per the DISTILL dispatch instructions' own request to confirm the naming convention before choosing one. `crates/embyr-server/Cargo.toml`'s full `[[test]]` section was grepped in full during § Prior Wave Consultation, confirming OTHER features use DIFFERENT prefix shapes (`card_payments_backend_cpbNN_*`, `drl_bNN_*`, `cdoNN_*` unprefixed, `admin_api_v2_bNN_*`) — each feature's own prefix, not a single global convention — so `security_rules_sr0N_*` (full feature name + `sr` abbreviation + zero-padded number) was chosen to mirror `client_auth_ca0N_*`'s EXACT shape (full feature name prefix, not the shorter `drl`/`cdo`-style abbreviation-only prefixes some older features use), since `client-auth` is this project's immediately-prior feature and the direct template this DISTILL pass was dispatched to mirror. `sr` is `security-rules`'s own natural abbreviation, already used throughout ADR-027/028/029's own decision-ID conventions is NOT the case here (those ADRs use `OQ-SR-*` for open questions, confirming `SR`/`sr` as this feature's established short form).
+
+`tests/security_rules/common/mod.rs` REUSES (not duplicates) `tests/client_auth/common/mod.rs`'s token-minting helpers (`mint_client_identity_token`, `now_unix`, `public_key_b64`) via a `#[path = "../../client_auth/common/mod.rs"] pub mod client_auth_common;` import, per the DISTILL dispatch instructions' explicit request to evaluate direct reuse vs. a thin wrapper — direct reuse was the right call here since `sr02`/`sr03`/`sr05`'s scenarios need real signed-in Maria/Dana sessions using the EXACT SAME token shape (ADR-024, unchanged by this feature) `client-auth`'s own `ca02` already established, with zero divergence in requirements.
+
+---
+
+## Wave: DISTILL / [REF] Driving Adapter Coverage
+
+Per the skill's Driving Adapter Verification mandate — every CLI/endpoint/hook DESIGN specifies, mapped to at least one subprocess/HTTP/hook scenario (not just a service-level call):
+
+| Driving adapter (DESIGN § Driving Ports) | Protocol | WS/subprocess-equivalent scenario |
+|---|---|---|
+| `AccessRuleAdminPort` (define/redefine) | HTTP `:9090` | `sr01` scenario 1 (define, real `reqwest::Client` against real `build_admin_router`/`start_test_server`) |
+| `AccessRuleSimulationPort` (simulate) | HTTP `:9090` | `sr05` scenario 1 (real `reqwest::Client` against real `build_admin_router`) |
+| `FirestoreGrpcPort`/`RestPort` `GetDocument` extension (single call site, `handle_get_document`) | gRPC `:8080` | `sr02` scenario 1 (walking skeleton, real `FirestoreClient` gRPC calls with real `x-embyr-client-identity` metadata), `sr03` scenario 1 (walking skeleton, real gRPC calls with NO client-identity metadata — the anonymous case), `sr04` scenario 1 (walking skeleton, real gRPC calls against a zero-rules project) |
+
+Zero uncovered entry points — both new driving ports DESIGN specifies (`AccessRuleAdminPort`, `AccessRuleSimulationPort`) plus the one extended existing port (`GetDocument`) all have at least one real-protocol scenario exercising exit status (HTTP status code / gRPC `Status`), response body shape, and argument handling.
+
+---
+
+## Wave: DISTILL / [REF] Pre-requisites
+
+- DESIGN driving ports: `AccessRuleAdminPort`, `AccessRuleSimulationPort`, extended `FirestoreGrpcPort`/`RestPort` (all confirmed present and routable — see § Driving Adapter Coverage above).
+- DEVOPS environment matrix: not yet produced for this feature (DEVOPS wave has not run) — default matrix applied (`clean` | `with-pre-commit` | `with-stale-config`); no environment-specific precondition materially affects these scenarios, since the feature adds no new deployment topology, no new external service, and no new configuration surface.
+- `docs/architecture/atdd-infrastructure-policy.md`: read, applied unchanged (`--policy=inherit`, default) — zero new rows appended, confirmed no genuinely new port class was introduced.
+- `tests/common/state_delta.rs`: present (bootstrapped 2026-05-24, feature `embyr-rs`) — inherited (via TWO paths: directly, and re-exported through `tests/client_auth/common/mod.rs`'s own re-export), applied in `sr01`'s walking-skeleton scenario (`ACCESS_RULE_CONDITION_SOURCE` universe entry, `set_to(Some(condition))` predicate). `[port-mode] inherit`.
+- `[lang-mode] rust` (per this repo's own `CLAUDE.md` — Rust workspace, `functional-where-practical` paradigm) — confirmed via `Cargo.toml` at the workspace root; no `--lang` override needed.
+
+---
+
+## Wave: DISTILL / [REF] Pre-DELIVER Fail-For-The-Right-Reason Gate
+
+Full results: `docs/feature/security-rules/distill/red-classification.md`.
+
+**Summary**: all 19 UAT-derived scenarios across `sr01`-`sr05`, plus all 12 embyr-core layer-1 unit/property tests, fail with `MISSING_FUNCTIONALITY` classification (panics inside the target RED scaffold, surfacing as connection resets on the admin HTTP path or gRPC stream cancellation on the data-plane path — this codebase has no `catch_panic` middleware, so a scaffold panic aborts the in-flight request rather than producing a clean 5xx). One legitimate GREEN-by-construction exception is documented (`sr01`'s AC-17-05, rejected by `SessionContext`'s own extractor before the handler body is reached — mirrors `client-auth` ca03's identical precedent). **One vacuous-pass finding was caught and fixed during this DISTILL session** (`sr03`'s AC-17-13 scenario originally compared two scaffold-panic outcomes to each other with no independent anchor, making it pass trivially without any real implementation — an anchor assertion was added; re-run confirmed it now fails for the correct reason). **Zero scenarios remain classified as test-bug/wrong-shape.** Gate **PASSED WITH A DOCUMENTED CAVEAT** (see below).
+
+**Regression-suite caveat (differs from `client-auth`'s own "0 regression, 69/72 passed" DISTILL-time claim)**: `client-auth`'s scaffold was entered CONDITIONALLY (only when the new, optional header was present), so its own 72-scenario suite ran genuinely unaffected during RED. `security-rules`' `get_access_rule` lookup runs UNCONDITIONALLY on every `GetDocument` call, per ADR-029's own structural design (the guardrail's whole point is that the `None` branch contains NO NEW LOGIC once implemented — but during the scaffold period, the LOOKUP ITSELF panics regardless of branch). Verified empirically this session: `cargo test -p embyr-server --test us_03_read_document` (an existing, UNMODIFIED file) — 3 of 4 scenarios now fail with the identical `get_access_rule` scaffold panic. **The full 113-scenario suite is therefore NOT run to a pass/fail verdict during this DISTILL session** — see `red-classification.md` § Regression-Suite Finding for the full reasoning and the explicit handoff note to DELIVER (implement `get_access_rule`'s `Ok(None)`-for-missing-rows path first, specifically to unblock the regression suite before building out the rest of the upsert/lookup machinery).
+
+`cargo deny check bans`: **`bans ok`** — confirms zero new workspace dependencies (ADR-027 Consequences), nothing analogous to `client-auth`'s own `jsonwebtoken`-in-`embyr-core` flag to resolve here.
+
+---
+
+## Wave: DISTILL / [REF] Mandate Compliance Evidence
+
+- **CM-A** (Mandate 1, hexagonal boundary): every scenario invokes through a driving port — `reqwest::Client` against real HTTP admin `:9090` routes, or a real `FirestoreClient` gRPC stub — zero test imports an internal handler/adapter function directly. Import listing: `use embyr_proto::firestore::firestore_client::FirestoreClient` (`sr02`/`sr03`/`sr04`, inside `SecurityRulesFullContext::get_document`), `reqwest::Client` (all 5 files) — zero `use embyr_server::admin::handlers::*` or `use embyr_server::adapters::*` in any acceptance test file (confirmed by direct read of all 5 files' import blocks).
+- **CM-B** (Mandate 2, business language): scenario/function names use domain terms (`first_time_rule_definition_succeeds_and_is_immediately_active`, `a_signed_in_end_user_reading_their_own_document_succeeds_unchanged`, `a_never_signed_in_session_is_denied_by_a_rule_requiring_identity`) — zero occurrences of "database", "endpoint", "schema" in scenario NAMES; technical detail (HTTP status codes, gRPC status codes, JSON field names) lives inside step bodies only, consistent with this codebase's established `#[tokio::test]` convention (substituting for Gherkin, per the dispatch instructions).
+- **CM-C** (Mandate 3, journey completeness): all 4 walking skeletons carry a real user trigger (Alex defining a rule; Maria/an anonymous session/an untouched-collection caller reading a document), real business logic (rule evaluation via the real composition root), and an observable, business-meaningful outcome (rule stored and active; read succeeds or is denied exactly as the rule's condition logically implies) — not an isolated technical operation.
+- **CM-D** (Mandate 4, pure function extraction): `embyr_core::access_control::{parse_condition, evaluate}` is the pure function pair ALL impure adapters (the admin handler, the `handle_get_document` extension) delegate to — zero business logic (grammar parsing, comparison semantics, fail-closed missing-field handling) lives in any `embyr-server` adapter or handler; handlers/adapters only do I/O (HTTP/DB/gRPC) plus thin translation to/from the pure types (`AuthContext` construction from `VerifiedEndUserIdentity`, `json_value_to_field_value`'s JSON translation).

@@ -1,3 +1,4 @@
+pub mod access_rules;
 pub mod admin_keys;
 pub mod auth;
 pub mod billing;

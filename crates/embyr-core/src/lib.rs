@@ -4,6 +4,10 @@
 // NO IO crates (tokio, sqlx, tonic, axum) — enforced by deny.toml.
 
 pub mod admin;
+// security-rules (BC-4 Access Control, ADR-027/ADR-029): Condition,
+// Operand, AuthContext, EvaluationOutcome, ConditionParseError, pure
+// parse_condition()/evaluate(). Zero IO.
+pub mod access_control;
 pub mod auth;
 // client-auth (BC-1 extension, ADR-024): ClientIdentityCredential,
 // VerifiedEndUserIdentity, ClientIdentityVerifyError, pure
