@@ -134,6 +134,41 @@
       "s": "EXECUTED",
       "d": "PASS",
       "t": "2026-08-17T02:41:29Z"
+    },
+    {
+      "sid": "03-01",
+      "p": "COMMIT",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-17T02:42:35Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "PREPARE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-17T02:48:22Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "RED_ACCEPTANCE",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-17T02:49:28Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "RED_UNIT",
+      "s": "SKIPPED",
+      "d": "NOT_APPLICABLE: reuses already-tested 01-01 verify_client_identity_token verbatim, one function two call sites by design, no new pure logic",
+      "t": "2026-08-17T02:49:34Z"
+    },
+    {
+      "sid": "04-01",
+      "p": "GREEN",
+      "s": "EXECUTED",
+      "d": "PASS",
+      "t": "2026-08-17T03:00:12Z"
     }
   ]
 }

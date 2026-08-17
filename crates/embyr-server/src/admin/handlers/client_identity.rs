@@ -20,7 +20,7 @@
 //!   AC-16-14). Calls the IDENTICAL `embyr_core::client_identity::
 //!   verify_client_identity_token()` used by real sign-in (ADR-025 §
 //!   Debug/verify check) — never creates a live session.
-//!   SCAFFOLD — implemented in step 04-01.
+//!   Implemented (step 04-01).
 
 use axum::{
     extract::{Path, State},
@@ -35,7 +35,10 @@ use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::handlers::shared::verify_project_ownership;
 use crate::admin::state::UserAdminState;
 use embyr_core::admin::account::Role;
-use embyr_core::client_identity::credential_fingerprint;
+use embyr_core::client_identity::{
+    credential_fingerprint, verify_client_identity_token, ClientIdentityCredential,
+    ClientIdentityVerifyError,
+};
 use embyr_core::error::CoreError;
 
 // ---------------------------------------------------------------------------
@@ -91,13 +94,12 @@ pub struct VerifyClientIdentityFailureResponse {
     pub reason: &'static str,
 }
 
-fn rejection_reason(err: embyr_core::client_identity::ClientIdentityVerifyError) -> &'static str {
-    use embyr_core::client_identity::ClientIdentityVerifyError as E;
+fn rejection_reason(err: ClientIdentityVerifyError) -> &'static str {
     match err {
-        E::MissingToken => "MISSING_TOKEN",
-        E::Malformed => "MALFORMED_TOKEN",
-        E::Expired => "TOKEN_EXPIRED",
-        E::ProjectMismatch => "PROJECT_MISMATCH",
+        ClientIdentityVerifyError::MissingToken => "MISSING_TOKEN",
+        ClientIdentityVerifyError::Malformed => "MALFORMED_TOKEN",
+        ClientIdentityVerifyError::Expired => "TOKEN_EXPIRED",
+        ClientIdentityVerifyError::ProjectMismatch => "PROJECT_MISMATCH",
     }
 }
 
@@ -263,22 +265,72 @@ pub async fn verify_client_identity_credential(
     State(state): State<UserAdminState>,
     session: SessionContext,
     Json(body): Json<VerifyClientIdentityTokenBody>,
-) -> Result<
-    (
-        StatusCode,
-        Json<serde_json::Value>,
-    ),
-    StatusCode,
-> {
+) -> Result<Response, StatusCode> {
     let pool = state.system_db.pool();
     verify_project_ownership(pool, &project_id, session.account_id).await?;
 
-    let _ = (body, rejection_reason as fn(_) -> _);
-    panic!(
-        "verify_client_identity_credential: RED scaffold (DISTILL, client-auth) — \
-         not yet implemented. See ADR-025 § Debug/verify check (SystemDb::get_client_identity_credential \
-         + embyr_core::client_identity::verify_client_identity_token — the IDENTICAL routine real \
-         sign-in uses, AC-16-15; success -> {{end_user_id, expires_at}}, no live session; failure -> \
-         {{reason}} matching AC-16-07's taxonomy exactly)."
-    )
+    // AC-16-14: read-only by construction — this handler loads the
+    // credential (read) and calls the pure verify function; it never writes
+    // to `sessions` or `client_identity_credentials`.
+    let credential_row = state
+        .system_db
+        .get_client_identity_credential(&project_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("verify_client_identity_credential read error: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // No credential registered for this project at all: clean 4xx, never a
+    // 5xx crash. 404 mirrors rotate's "no credential registered" precedent
+    // (verify_project_ownership already confirmed the project itself exists).
+    let Some(credential_row) = credential_row else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no verification credential is registered for this project",
+            })),
+        )
+            .into_response());
+    };
+
+    let public_key_current: [u8; 32] = credential_row
+        .public_key_current
+        .as_slice()
+        .try_into()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let public_key_previous: Option<[u8; 32]> = match credential_row.public_key_previous {
+        Some(bytes) => Some(
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        ),
+        None => None,
+    };
+    let credential = ClientIdentityCredential {
+        public_key_current,
+        public_key_previous,
+    };
+
+    // Same function real sign-in (02-01's rest/sign_in.rs) calls — one
+    // function, two call sites, is what makes AC-16-15's "identical
+    // taxonomy" guarantee true by construction.
+    match verify_client_identity_token(Some(&body.token), &project_id, &credential) {
+        Ok(identity) => Ok((
+            StatusCode::OK,
+            Json(VerifyClientIdentitySuccessResponse {
+                end_user_id: identity.end_user_id,
+                expires_at: identity.expires_at_unix,
+            }),
+        )
+            .into_response()),
+        Err(err) => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(VerifyClientIdentityFailureResponse {
+                reason: rejection_reason(err),
+            }),
+        )
+            .into_response()),
+    }
 }

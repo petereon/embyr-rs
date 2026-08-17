@@ -41,7 +41,6 @@ use rand_core::OsRng;
 ///
 /// @driving_port @real-io @US-04 @AC-16-14
 #[tokio::test]
-#[ignore = "RED — this feature's own Walking Skeleton lives in ca01/ca02; enable ca04 after those are GREEN"]
 async fn verifying_a_valid_token_returns_resolved_identity_and_creates_no_live_session() {
     let ctx = ClientAuthAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -92,7 +91,6 @@ async fn verifying_a_valid_token_returns_resolved_identity_and_creates_no_live_s
 ///
 /// @error @driving_port @real-io @US-04 @AC-16-15
 #[tokio::test]
-#[ignore = "RED — enable after ca01/ca02's walking skeletons are GREEN"]
 async fn verifying_a_token_with_a_project_mismatch_surfaces_the_same_reason_as_real_signin() {
     let ctx = ClientAuthAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -125,7 +123,6 @@ async fn verifying_a_token_with_a_project_mismatch_surfaces_the_same_reason_as_r
 ///
 /// @error @driving_port @real-io @US-04 @AC-16-15
 #[tokio::test]
-#[ignore = "RED — enable after ca01/ca02's walking skeletons are GREEN"]
 async fn verifying_an_expired_token_surfaces_the_expiry_reason_distinguishable_from_others() {
     let ctx = ClientAuthAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -155,7 +152,6 @@ async fn verifying_an_expired_token_surfaces_the_expiry_reason_distinguishable_f
 ///
 /// @error @driving_port @real-io @US-04
 #[tokio::test]
-#[ignore = "RED — enable after ca01/ca02's walking skeletons are GREEN"]
 async fn verifying_with_no_credential_registered_for_the_project_is_rejected_not_a_crash() {
     let ctx = ClientAuthAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
