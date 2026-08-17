@@ -244,7 +244,6 @@ async fn token_minted_for_a_different_project_is_rejected_with_project_mismatch_
 ///
 /// @driving_port @real-io @US-02 @AC-16-08
 #[tokio::test]
-#[ignore = "RED — enable after the walking skeleton (AC-16-06) is GREEN"]
 async fn an_expired_client_identity_header_does_not_break_an_ordinary_getdoc_call() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-guardrail-b").await;
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -295,7 +294,6 @@ async fn an_expired_client_identity_header_does_not_break_an_ordinary_getdoc_cal
 ///
 /// @driving_port @real-io @US-02 @AC-16-08
 #[tokio::test]
-#[ignore = "RED — enable after the walking skeleton (AC-16-06) is GREEN"]
 async fn a_session_that_never_presents_the_client_identity_header_never_reaches_the_new_verification_branch() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-guardrail-c").await;
     // Deliberately: no client_identity_credentials row seeded at all — if
