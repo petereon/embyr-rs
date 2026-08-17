@@ -15,6 +15,16 @@ pub struct ClientIdentityCredentialRow {
     pub rotated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Result row of a rotation `UPDATE ... RETURNING` (ADR-025 § Rotation).
+/// Deliberately excludes public key material — the rotate response, like
+/// registration's, never echoes raw key bytes back (mirrors AC-16-01).
+#[derive(Debug, Clone)]
+pub struct ClientIdentityCredentialRotationRow {
+    pub algorithm: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Project row returned for credential verification.
 #[derive(Debug)]
 pub struct ProjectAuthRow {
@@ -150,8 +160,9 @@ impl SystemDb {
     // -----------------------------------------------------------------------
     // client-auth (ADR-025) — client_identity_credentials CRUD.
     // insert_client_identity_credential: implemented (step 01-01).
-    // get_client_identity_credential / rotate_client_identity_credential:
-    // SCAFFOLD — still RED, implemented in steps 04-01 / 03-01 respectively.
+    // rotate_client_identity_credential: implemented (step 03-01).
+    // get_client_identity_credential: SCAFFOLD — still RED, implemented in
+    // step 04-01.
     // -----------------------------------------------------------------------
 
     /// Read a project's registered client-identity credential, if any.
@@ -230,17 +241,44 @@ impl SystemDb {
     /// current -> previous, sets the new current key, stamps `rotated_at`.
     /// One rotation generation retained (ADR-025 — not an unbounded
     /// history), identical shape to ADR-018's `admin_key`/`admin_key_previous`.
+    ///
+    /// `Ok(None)` means no credential was registered for this project (the
+    /// `UPDATE` matched zero rows) — the caller maps this to 404, mirroring
+    /// `insert_client_identity_credential`'s error-mapping convention.
     pub async fn rotate_client_identity_credential(
         &self,
         project_id: &str,
         new_public_key: &[u8; 32],
-    ) -> Result<(), CoreError> {
-        let _ = (project_id, new_public_key);
-        panic!(
-            "SystemDb::rotate_client_identity_credential: RED scaffold (DISTILL, client-auth) — \
-             not yet implemented. See ADR-025 § Rotation (UPDATE public_key_previous = \
-             public_key_current, public_key_current = $2, rotated_at = now() WHERE project_id = $1)."
+    ) -> Result<Option<ClientIdentityCredentialRotationRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "UPDATE client_identity_credentials \
+             SET public_key_previous = public_key_current, public_key_current = $2, rotated_at = now() \
+             WHERE project_id = $1 \
+             RETURNING algorithm, created_at, rotated_at",
         )
+        .bind(project_id)
+        .bind(&new_public_key[..])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("rotate_client_identity_credential failed: {e}"))
+        })?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(ClientIdentityCredentialRotationRow {
+            algorithm: r
+                .try_get("algorithm")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            rotated_at: r
+                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("rotated_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
     }
 }
 

@@ -12,7 +12,8 @@
 //! rotate_client_identity_credential (POST .../client_identity_credential/rotate):
 //!   Session auth, Owner/Admin only (US-03). Shifts current -> previous,
 //!   activates the new current key (ADR-025 dual-generation window).
-//!   SCAFFOLD — implemented in step 03-01.
+//!   200 { project_id, algorithm, created_at, rotated_at } on success. 404
+//!   if no credential is registered yet. Implemented (step 03-01).
 //!
 //! verify_client_identity_credential (POST .../client_identity_credential/verify):
 //!   Session auth, any role (US-04, debug-only, read-only by construction —
@@ -187,7 +188,7 @@ pub async fn rotate_client_identity_credential(
     State(state): State<UserAdminState>,
     session: SessionContext,
     Json(body): Json<RegisterClientIdentityCredentialBody>,
-) -> Result<Json<RotateClientIdentityCredentialResponse>, StatusCode> {
+) -> Result<Response, StatusCode> {
     if session.role < Role::Admin {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -195,20 +196,60 @@ pub async fn rotate_client_identity_credential(
     let pool = state.system_db.pool();
     verify_project_ownership(pool, &project_id, session.account_id).await?;
 
+    // AC-16-02 (same shape as registration's validation): malformed
+    // verification material named specifically (byte count found vs. the
+    // required 32), not a raw parse error.
     let raw = URL_SAFE_NO_PAD
         .decode(body.public_key.as_bytes())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if raw.len() != 32 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "public_key must be exactly 32 bytes, found {} byte(s)",
+                    raw.len()
+                )
+            })),
+        )
+            .into_response());
+    }
     let public_key: [u8; 32] = raw
         .try_into()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .expect("length already verified to be exactly 32");
 
-    let _ = public_key;
-    panic!(
-        "rotate_client_identity_credential: RED scaffold (DISTILL, client-auth) — \
-         not yet implemented. See ADR-025 § Rotation (SystemDb::rotate_client_identity_credential; \
-         AC-16-10/AC-16-11: new credential active for new tokens, immediately-previous key still \
-         verifies during the window)."
-    )
+    match state
+        .system_db
+        .rotate_client_identity_credential(&project_id, &public_key)
+        .await
+    {
+        Ok(Some(row)) => Ok((
+            StatusCode::OK,
+            Json(RotateClientIdentityCredentialResponse {
+                project_id,
+                algorithm: row.algorithm,
+                created_at: row.created_at,
+                rotated_at: row.rotated_at,
+            }),
+        )
+            .into_response()),
+        // No credential registered for this project yet — nothing to
+        // rotate (verify_project_ownership already confirmed the project
+        // itself exists, so this is specifically "no credential", not "no
+        // project").
+        Ok(None) => Ok((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no verification credential is registered for this project",
+                "action": "use the register action first",
+            })),
+        )
+            .into_response()),
+        Err(e) => {
+            tracing::error!("rotate_client_identity_credential update error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 /// POST /admin/v1/projects/:project_id/client_identity_credential/verify

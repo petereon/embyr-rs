@@ -53,7 +53,6 @@ async fn sign_in(ctx: &ClientAuthFullContext, token: &str) -> (u16, serde_json::
 ///
 /// @driving_port @real-io @US-03 @AC-16-10
 #[tokio::test]
-#[ignore = "RED — this feature's own Walking Skeleton lives in ca01/ca02; enable ca03 after those are GREEN"]
 async fn a_valid_rotation_activates_the_new_credential_for_new_tokens() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-basic").await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -86,7 +85,6 @@ async fn a_valid_rotation_activates_the_new_credential_for_new_tokens() {
 ///
 /// @driving_port @real-io @US-03 @AC-16-11
 #[tokio::test]
-#[ignore = "RED — enable after ca01/ca02's walking skeletons are GREEN"]
 async fn a_token_minted_under_the_immediately_previous_credential_still_verifies_during_the_window() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-prev").await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -130,7 +128,6 @@ async fn a_token_minted_under_the_immediately_previous_credential_still_verifies
 ///
 /// @error @driving_port @real-io @US-03 @AC-16-12
 #[tokio::test]
-#[ignore = "RED — enable after ca01/ca02's walking skeletons are GREEN"]
 async fn a_token_signed_under_a_credential_two_rotations_ago_is_rejected_as_no_longer_valid() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-stale").await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -181,7 +178,6 @@ async fn a_token_signed_under_a_credential_two_rotations_ago_is_rejected_as_no_l
 ///
 /// @error @driving_port @real-io @US-03 @AC-16-13
 #[tokio::test]
-#[ignore = "RED — enable after ca01/ca02's walking skeletons are GREEN"]
 async fn rotation_without_a_valid_session_is_rejected() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-unauth").await;
     let original_key = SigningKey::generate(&mut OsRng);
