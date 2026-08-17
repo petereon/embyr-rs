@@ -167,7 +167,6 @@ async fn sign_in(ctx: &ClientAuthFullContext, token: Option<&str>) -> (u16, serd
 ///
 /// @error @driving_port @real-io @US-02 @AC-16-07
 #[tokio::test]
-#[ignore = "RED — enable after the walking skeleton (AC-16-06) is GREEN"]
 async fn signing_in_with_no_token_is_rejected_with_missing_token_reason() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-missing").await;
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -183,7 +182,6 @@ async fn signing_in_with_no_token_is_rejected_with_missing_token_reason() {
 ///
 /// @error @driving_port @real-io @US-02 @AC-16-07
 #[tokio::test]
-#[ignore = "RED — enable after the walking skeleton (AC-16-06) is GREEN"]
 async fn signing_in_with_a_corrupted_token_is_rejected_with_malformed_reason() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-malformed").await;
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -200,7 +198,6 @@ async fn signing_in_with_a_corrupted_token_is_rejected_with_malformed_reason() {
 ///
 /// @error @driving_port @real-io @US-02 @AC-16-07
 #[tokio::test]
-#[ignore = "RED — enable after the walking skeleton (AC-16-06) is GREEN"]
 async fn danas_expired_token_is_rejected_with_expiry_reason() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-expired").await;
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -218,7 +215,6 @@ async fn danas_expired_token_is_rejected_with_expiry_reason() {
 ///
 /// @error @driving_port @real-io @US-02 @AC-16-07
 #[tokio::test]
-#[ignore = "RED — enable after the walking skeleton (AC-16-06) is GREEN"]
 async fn token_minted_for_a_different_project_is_rejected_with_project_mismatch_reason() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-mismatch").await;
     let signing_key = SigningKey::generate(&mut OsRng);

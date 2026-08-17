@@ -27,7 +27,6 @@ use rand_core::OsRng;
 
 /// @error @driving_port @real-io @security-regression @ADR-024
 #[tokio::test]
-#[ignore = "RED — enable after ca01/ca02's walking skeletons are GREEN"]
 async fn an_hs256_token_forged_from_the_registered_public_key_bytes_is_rejected_as_malformed() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca05-alg-confusion").await;
     let signing_key = SigningKey::generate(&mut OsRng);

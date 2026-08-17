@@ -388,7 +388,7 @@ impl ClientAuthFullContext {
         )
         .bind(project_id)
         .bind(format!("{project_id}-doc-1"))
-        .bind(serde_json::json!({"title": {"stringValue": "hello"}}))
+        .bind(serde_json::json!({"title": {"t": "S", "v": "hello"}}))
         .execute(&cust_pool)
         .await
         .expect("insert seed document");

@@ -129,9 +129,7 @@ impl SystemDb {
         sqlx::query("SELECT 1")
             .execute(&self.pool)
             .await
-            .map_err(|e| {
-                CoreError::BackendUnavailable(format!("system DB unreachable: {e}"))
-            })?;
+            .map_err(|e| CoreError::BackendUnavailable(format!("system DB unreachable: {e}")))?;
 
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM information_schema.tables \
@@ -162,13 +160,36 @@ impl SystemDb {
         &self,
         project_id: &str,
     ) -> Result<Option<ClientIdentityCredentialRow>, CoreError> {
-        let _ = project_id;
-        panic!(
-            "SystemDb::get_client_identity_credential: RED scaffold (DISTILL, client-auth) — \
-             not yet implemented. See ADR-025 § Debug/verify check and § Verification order \
-             (SELECT public_key_current, public_key_previous, algorithm, created_at, rotated_at \
-             FROM client_identity_credentials WHERE project_id = $1)."
+        let row_opt = sqlx::query(
+            "SELECT public_key_current, public_key_previous, algorithm, created_at, rotated_at \
+             FROM client_identity_credentials WHERE project_id = $1",
         )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(ClientIdentityCredentialRow {
+            public_key_current: r
+                .try_get("public_key_current")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            public_key_previous: r
+                .try_get::<Option<Vec<u8>>, _>("public_key_previous")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            algorithm: r
+                .try_get("algorithm")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            rotated_at: r
+                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("rotated_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
     }
 
     /// Register a project's first client-identity verification credential
@@ -200,9 +221,7 @@ impl SystemDb {
                     ));
                 }
             }
-            CoreError::BackendUnavailable(format!(
-                "insert_client_identity_credential failed: {e}"
-            ))
+            CoreError::BackendUnavailable(format!("insert_client_identity_credential failed: {e}"))
         })?;
         Ok(())
     }
