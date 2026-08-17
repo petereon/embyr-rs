@@ -293,7 +293,7 @@ impl SystemDb {
     }
 
     // -----------------------------------------------------------------------
-    // security-rules (ADR-028) — RED scaffold (Mandate 7, DISTILL wave).
+    // security-rules (ADR-028) — access_rules CRUD.
     // -----------------------------------------------------------------------
 
     /// Define OR redefine (Resolution 3: idempotent upsert, the SAME action
@@ -303,18 +303,25 @@ impl SystemDb {
     /// pair, unlike `insert_client_identity_credential`/
     /// `rotate_client_identity_credential` above — see ADR-028 § Decision,
     /// "Adapter methods" for why that asymmetry is intentional.
-    // SCAFFOLD: true
     pub async fn upsert_access_rule(
         &self,
         project_id: &str,
         collection_path: &str,
         condition_source: &str,
     ) -> Result<(), CoreError> {
-        let _ = (project_id, collection_path, condition_source);
-        panic!(
-            "SystemDb::upsert_access_rule — RED scaffold (DISTILL wave, \
-             feature security-rules, ADR-028): not yet implemented"
-        );
+        sqlx::query(
+            "INSERT INTO access_rules (project_id, collection_path, condition_source) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (project_id, collection_path) \
+             DO UPDATE SET condition_source = EXCLUDED.condition_source, updated_at = now()",
+        )
+        .bind(project_id)
+        .bind(collection_path)
+        .bind(condition_source)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(format!("upsert_access_rule failed: {e}")))?;
+        Ok(())
     }
 
     /// Look up the access rule for `(project_id, collection_path)`.
@@ -323,17 +330,36 @@ impl SystemDb {
     /// AC-17-14/15/16): when `None`, `grpc::handler::handle_get_document`
     /// takes the EXACT unmodified pre-`security-rules` code path —
     /// `embyr_core::access_control::evaluate()` is never called.
-    // SCAFFOLD: true
     pub async fn get_access_rule(
         &self,
         project_id: &str,
         collection_path: &str,
     ) -> Result<Option<AccessRuleRow>, CoreError> {
-        let _ = (project_id, collection_path);
-        panic!(
-            "SystemDb::get_access_rule — RED scaffold (DISTILL wave, \
-             feature security-rules, ADR-028): not yet implemented"
-        );
+        let row_opt = sqlx::query(
+            "SELECT condition_source, created_at, updated_at \
+             FROM access_rules WHERE project_id = $1 AND collection_path = $2",
+        )
+        .bind(project_id)
+        .bind(collection_path)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(format!("get_access_rule failed: {e}")))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(AccessRuleRow {
+            condition_source: r
+                .try_get("condition_source")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            updated_at: r
+                .try_get("updated_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
     }
 }
 

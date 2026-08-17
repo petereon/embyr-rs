@@ -1,4 +1,3 @@
-// SCAFFOLD: true
 //! Access-rule condition grammar and evaluation — BC-4 Access Control
 //! (feature `security-rules`, ADR-027/ADR-029).
 //!
@@ -25,23 +24,19 @@
 //! Resolutions).
 //!
 //! `evaluate()` is infallible and total by construction (no `Result`, no
-//! panic in its OWN logic once implemented) — AC-17-09's "never crashes on
-//! a missing field" claim is a type-level guarantee, not a tested
-//! convention (see § Fail-Closed Semantics below). The two functions in
-//! this module are the SOLE evaluation routine shared by real enforcement
+//! panic) — AC-17-09's "never crashes on a missing field" claim is a
+//! type-level guarantee, not a tested convention (see § Fail-Closed
+//! Semantics below). The two functions in this module are the SOLE
+//! evaluation routine shared by real enforcement
 //! (`grpc/handler.rs::handle_get_document`, US-02/03/04) and simulation
 //! (`admin::handlers::access_rules::simulate_access_rule`, US-05) — ADR-029
 //! § Decision — Composition, "Simulation shares the exact evaluation
 //! routine".
 //!
-//! RED scaffold (Mandate 7, DISTILL wave `security-rules`): types are fully
-//! defined (they are not "business logic" — the grammar's SHAPE is locked
-//! by ADR-027, only the parsing/evaluation ALGORITHM is missing); the two
-//! functions panic. This is deliberately parallel to
-//! `crates/embyr-core/src/client_identity/mod.rs`'s own historical shape
-//! during `client-auth`'s DISTILL wave (types real, `verify_client_identity_token`
-//! scaffolded) — see that module's doc comment for the precedent this
-//! mirrors.
+//! Hand-rolled recursive-descent parser (ADR-027 Option C) — no `pest`/
+//! `nom`, deliberately, so the grammar cannot silently widen via a
+//! grammar-file edit; widening requires a new AST variant, parser branch,
+//! and evaluator arm.
 
 use std::collections::BTreeMap;
 
@@ -133,11 +128,246 @@ pub enum ConditionParseError {
 /// caller-supplied candidate condition
 /// (`admin::handlers::access_rules::simulate_access_rule`).
 pub fn parse_condition(source: &str) -> Result<Condition, ConditionParseError> {
-    let _ = source;
-    panic!(
-        "embyr_core::access_control::parse_condition — RED scaffold \
-         (DISTILL wave, feature security-rules, ADR-027): not yet implemented"
-    );
+    if let Some(err) = detect_unsupported_construct(source) {
+        return Err(err);
+    }
+    let tokens = tokenize(source)?;
+    let mut parser = Parser { tokens: &tokens, pos: 0 };
+    let condition = parser.parse_or()?;
+    if parser.pos != tokens.len() {
+        return Err(syntax_error("unexpected trailing input after condition"));
+    }
+    Ok(condition)
+}
+
+// ---------------------------------------------------------------------------
+// parse_condition internals (ADR-027 Option C — hand-rolled, closed grammar)
+// ---------------------------------------------------------------------------
+
+fn syntax_error(detail: impl Into<String>) -> ConditionParseError {
+    ConditionParseError::SyntaxError { detail: detail.into() }
+}
+
+/// Recognizes named out-of-v1-grammar shapes BEFORE tokenizing, since their
+/// arguments (e.g. `get()`'s Firestore document path) are not expressible
+/// in the locked grammar's token set at all and would otherwise surface as
+/// an undifferentiated `SyntaxError` (violating AC-17-03's distinguishability
+/// requirement).
+fn detect_unsupported_construct(source: &str) -> Option<ConditionParseError> {
+    if source.contains("**") || source.contains('{') {
+        return Some(ConditionParseError::UnsupportedConstruct {
+            construct: UnsupportedConstruct::WildcardPath,
+            detail: "wildcard/recursive path matching is not supported in v1".to_string(),
+        });
+    }
+
+    // Call-shaped syntax: an identifier immediately followed by '('. Never
+    // reachable from valid grammar (the grammar's own '(' is only used for
+    // grouping, never directly preceded by an identifier character).
+    let chars: Vec<char> = source.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let ident: String = chars[start..i].iter().collect();
+            if i < chars.len() && chars[i] == '(' {
+                return Some(if ident == "get" || ident == "exists" {
+                    ConditionParseError::UnsupportedConstruct {
+                        construct: UnsupportedConstruct::CrossDocumentRead,
+                        detail: "cross-document reads (get()/exists()) are not supported in v1"
+                            .to_string(),
+                    }
+                } else {
+                    ConditionParseError::UnsupportedConstruct {
+                        construct: UnsupportedConstruct::CustomFunction,
+                        detail: format!(
+                            "custom function calls ('{ident}(...)') are not supported in v1"
+                        ),
+                    }
+                });
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    LParen,
+    RParen,
+    And,
+    Or,
+    Not,
+    Eq,
+    Ne,
+    Word(String),
+}
+
+fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        match c {
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            '&' if chars.get(i + 1) == Some(&'&') => {
+                tokens.push(Token::And);
+                i += 2;
+            }
+            '|' if chars.get(i + 1) == Some(&'|') => {
+                tokens.push(Token::Or);
+                i += 2;
+            }
+            '=' if chars.get(i + 1) == Some(&'=') => {
+                tokens.push(Token::Eq);
+                i += 2;
+            }
+            '!' if chars.get(i + 1) == Some(&'=') => {
+                tokens.push(Token::Ne);
+                i += 2;
+            }
+            '!' => {
+                tokens.push(Token::Not);
+                i += 1;
+            }
+            c if c.is_ascii_alphabetic() || c == '_' => {
+                let start = i;
+                while i < chars.len()
+                    && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+                {
+                    i += 1;
+                }
+                tokens.push(Token::Word(chars[start..i].iter().collect()));
+            }
+            other => {
+                return Err(syntax_error(format!(
+                    "unexpected character '{other}' at position {i}"
+                )));
+            }
+        }
+    }
+    Ok(tokens)
+}
+
+fn word_to_operand(word: &str) -> Result<Operand, ConditionParseError> {
+    match word {
+        "request.auth.uid" => Ok(Operand::AuthUid),
+        "request.auth" => Ok(Operand::AuthNullSentinel),
+        "null" => Ok(Operand::NullLiteral),
+        w if w.starts_with("resource.data.") => {
+            let field = &w["resource.data.".len()..];
+            if field.is_empty() {
+                return Err(syntax_error("'resource.data.' requires a field name"));
+            }
+            Ok(Operand::ResourceField(field.to_string()))
+        }
+        other => Err(syntax_error(format!("unrecognized operand '{other}'"))),
+    }
+}
+
+struct Parser<'a> {
+    tokens: &'a [Token],
+    pos: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.pos)
+    }
+
+    fn advance(&mut self) -> Option<&Token> {
+        let token = self.tokens.get(self.pos);
+        if token.is_some() {
+            self.pos += 1;
+        }
+        token
+    }
+
+    fn parse_or(&mut self) -> Result<Condition, ConditionParseError> {
+        let mut left = self.parse_and()?;
+        while matches!(self.peek(), Some(Token::Or)) {
+            self.advance();
+            let right = self.parse_and()?;
+            left = Condition::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_and(&mut self) -> Result<Condition, ConditionParseError> {
+        let mut left = self.parse_unary()?;
+        while matches!(self.peek(), Some(Token::And)) {
+            self.advance();
+            let right = self.parse_unary()?;
+            left = Condition::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_unary(&mut self) -> Result<Condition, ConditionParseError> {
+        if matches!(self.peek(), Some(Token::Not)) {
+            self.advance();
+            let inner = self.parse_unary()?;
+            return Ok(Condition::Not(Box::new(inner)));
+        }
+        self.parse_primary()
+    }
+
+    fn parse_primary(&mut self) -> Result<Condition, ConditionParseError> {
+        match self.peek() {
+            Some(Token::LParen) => {
+                self.advance();
+                let inner = self.parse_or()?;
+                match self.advance() {
+                    Some(Token::RParen) => Ok(inner),
+                    _ => Err(syntax_error("expected closing ')'")),
+                }
+            }
+            Some(Token::Word(w)) if w == "true" => {
+                self.advance();
+                Ok(Condition::Literal(true))
+            }
+            Some(Token::Word(w)) if w == "false" => {
+                self.advance();
+                Ok(Condition::Literal(false))
+            }
+            Some(Token::Word(_)) => self.parse_comparison(),
+            _ => Err(syntax_error("expected a condition (operand, 'true'/'false', or '(')")),
+        }
+    }
+
+    fn parse_comparison(&mut self) -> Result<Condition, ConditionParseError> {
+        let left = match self.advance() {
+            Some(Token::Word(w)) => word_to_operand(w)?,
+            _ => return Err(syntax_error("expected an operand")),
+        };
+        let op = match self.advance() {
+            Some(Token::Eq) => CompareOp::Eq,
+            Some(Token::Ne) => CompareOp::Ne,
+            _ => return Err(syntax_error("expected '==' or '!='")),
+        };
+        let right = match self.advance() {
+            Some(Token::Word(w)) => word_to_operand(w)?,
+            _ => return Err(syntax_error("expected an operand")),
+        };
+        Ok(Condition::Compare(left, op, right))
+    }
 }
 
 /// Evaluate a parsed `Condition` against an `(auth, resource)` pair.
@@ -156,11 +386,91 @@ pub fn evaluate(
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
 ) -> EvaluationOutcome {
-    let _ = (condition, auth, resource_fields);
-    panic!(
-        "embyr_core::access_control::evaluate — RED scaffold \
-         (DISTILL wave, feature security-rules, ADR-027): not yet implemented"
-    );
+    match eval_bool(condition, auth, resource_fields) {
+        Ok(true) => EvaluationOutcome::Allow,
+        Ok(false) | Err(FieldMissing) => EvaluationOutcome::Deny,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// evaluate() internals (ADR-027 § Fail-Closed Semantics on Missing Field)
+// ---------------------------------------------------------------------------
+
+/// Module-local field-lookup error, distinct from `ConditionParseError`
+/// (parse-time only). The FIRST `FieldMissing` encountered anywhere in the
+/// condition tree short-circuits (via `?`) the whole evaluation to `Deny` —
+/// no per-operator null-propagation semantics beyond plain `&&`/`||`
+/// short-circuit evaluation (ADR-027).
+struct FieldMissing;
+
+fn eval_bool(
+    condition: &Condition,
+    auth: Option<&AuthContext>,
+    resource_fields: &BTreeMap<String, FieldValue>,
+) -> Result<bool, FieldMissing> {
+    match condition {
+        Condition::Literal(value) => Ok(*value),
+        Condition::Not(inner) => Ok(!eval_bool(inner, auth, resource_fields)?),
+        Condition::And(left, right) => {
+            Ok(eval_bool(left, auth, resource_fields)? && eval_bool(right, auth, resource_fields)?)
+        }
+        Condition::Or(left, right) => {
+            Ok(eval_bool(left, auth, resource_fields)? || eval_bool(right, auth, resource_fields)?)
+        }
+        Condition::Compare(left, op, right) => {
+            let equal = compare_operands(left, right, auth, resource_fields)?;
+            Ok(match op {
+                CompareOp::Eq => equal,
+                CompareOp::Ne => !equal,
+            })
+        }
+    }
+}
+
+/// Comparison semantics (ADR-027 § Comparison Semantics). Named pairings
+/// (`AuthUid`/`ResourceField`, `{AuthUid,AuthNullSentinel}`/`NullLiteral`)
+/// use identity-specific rules; every other grammar-legal pairing falls
+/// through to ordinary `FieldValue::PartialEq`.
+fn compare_operands(
+    left: &Operand,
+    right: &Operand,
+    auth: Option<&AuthContext>,
+    resource_fields: &BTreeMap<String, FieldValue>,
+) -> Result<bool, FieldMissing> {
+    match (left, right) {
+        (Operand::AuthUid, Operand::ResourceField(name))
+        | (Operand::ResourceField(name), Operand::AuthUid) => {
+            let auth = auth.ok_or(FieldMissing)?;
+            let field = resource_fields.get(name).ok_or(FieldMissing)?;
+            Ok(matches!(field, FieldValue::String(v) if v == &auth.uid))
+        }
+        // The `request.auth == null` / `!= null` idiom (AC-17-11/12): auth
+        // presence, NOT a literal string comparison against "null".
+        (Operand::AuthNullSentinel, Operand::NullLiteral)
+        | (Operand::NullLiteral, Operand::AuthNullSentinel)
+        | (Operand::AuthUid, Operand::NullLiteral)
+        | (Operand::NullLiteral, Operand::AuthUid) => Ok(auth.is_none()),
+        _ => {
+            let left_value = resolve_field_value(left, auth, resource_fields)?;
+            let right_value = resolve_field_value(right, auth, resource_fields)?;
+            Ok(left_value == right_value)
+        }
+    }
+}
+
+fn resolve_field_value(
+    operand: &Operand,
+    auth: Option<&AuthContext>,
+    resource_fields: &BTreeMap<String, FieldValue>,
+) -> Result<FieldValue, FieldMissing> {
+    match operand {
+        Operand::ResourceField(name) => resource_fields.get(name).cloned().ok_or(FieldMissing),
+        Operand::BoolLiteral(value) => Ok(FieldValue::Boolean(*value)),
+        Operand::NullLiteral => Ok(FieldValue::Null),
+        Operand::AuthUid | Operand::AuthNullSentinel => {
+            auth.map(|a| FieldValue::String(a.uid.clone())).ok_or(FieldMissing)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -172,12 +482,6 @@ mod tests {
     //! contracts. Mirrors `client_identity::mod::tests`'s own shape
     //! (pinned examples + `proptest!` block) — the DIRECT structural
     //! precedent for a layer-1 test module in this codebase.
-    //!
-    //! RED by design (Mandate 7): every test below calls into the scaffold
-    //! functions above and is expected to panic (not `#[ignore]`d — these
-    //! are layer-1 inner-loop tests, run under plain `cargo test`, same
-    //! one-scenario-at-a-time discipline exemption `client_identity::tests`
-    //! documents for itself).
 
     use super::*;
     use proptest::prelude::*;
