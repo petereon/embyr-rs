@@ -95,7 +95,6 @@ async fn simulating_a_valid_candidate_rule_against_a_matching_pair_returns_the_c
 ///
 /// @error @driving_port @real-io @US-05 @AC-17-17
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn simulation_surfaces_an_over_permissive_rule_bug_before_publishing() {
     let ctx = SecurityRulesAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -136,7 +135,6 @@ async fn simulation_surfaces_an_over_permissive_rule_bug_before_publishing() {
 ///
 /// @error @driving_port @real-io @US-05 @AC-17-18
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn simulation_has_zero_effect_on_live_traffic() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-sr05-liveunaffected").await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -199,7 +197,6 @@ async fn simulation_has_zero_effect_on_live_traffic() {
 ///
 /// @error @driving_port @real-io @US-05 @AC-17-19
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn simulation_supports_the_anonymous_case_identically_to_real_evaluation() {
     let ctx = SecurityRulesAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
