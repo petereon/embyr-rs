@@ -545,3 +545,91 @@ jobs:
     # extends BC-1 Tenant Management's existing auth middleware (ADR-002) —
     # it does not introduce a fourth bounded context. See
     # docs/feature/client-auth/feature-delta.md.
+
+  - id: JOB-17
+    name: document-access-control
+    persona: P1
+    feature: security-rules
+    job_story: >
+      When my app's end users each need to read and write only their own
+      Firestore documents — not each other's — I want to define
+      access-control rules per collection and have embyr enforce them on
+      every request, so I can build the same real per-user data protection
+      I would get from Firebase Security Rules, without hand-rolling
+      authorization checks in my own backend for every collection.
+    dimensions:
+      functional: >
+        Alex defines an access-control rule for a collection via the admin
+        API, expressed as a boolean condition over request.auth (the
+        caller's verified end-user identity from JOB-16, if any) and
+        resource.data (the target document's fields); embyr evaluates the
+        applicable rule and denies with a specific, distinguishable reason
+        when it fails. A collection with no rule defined continues to behave
+        exactly as it does today — unrestricted by identity. NOTE: this
+        job's full ambition spans read/write/query/listen: v1 (this
+        feature, security-rules) implements read-path (GetDocument)
+        enforcement only — write-path, query-path, and real-time-listen
+        enforcement are named, deferred follow-up epics; see
+        docs/feature/security-rules/feature-delta.md § Scope Assessment.
+      emotional: >
+        Feel confident that a rule he writes does what he intended before it
+        reaches a real end user — not find out from a support ticket or a
+        security incident; feel that migrating off Firebase didn't force him
+        to either over-expose or over-restrict his own users' data
+      social: >
+        Be able to tell his own team and his own users "embyr enforces the
+        same per-user protection Firebase did," instead of quietly running
+        an app where every signed-in end user's data is technically readable
+        by every other end user
+    four_forces:
+      push: >
+        Today, any two of Alex's end users who are both signed in with a
+        verified identity (JOB-16/client-auth) still have identical data
+        access on every Firestore call — client-auth gives embyr a caller
+        identity, but nothing yet uses it to gate anything. Maria Santos and
+        Dana Kim can each read the other's private trip-journal entries with
+        no error at all
+      pull: >
+        A rule Alex can test against concrete before-I-ship examples, then
+        trust to gate real reads correctly, closes the exact gap JOB-16's
+        own "pull" four-force named as its prerequisite condition — the
+        identity JOB-16 establishes finally has something that consumes it
+      anxiety: >
+        "What if I get the condition backwards and either leak every user's
+        data or lock every user out of their own?" — mitigated by a
+        dedicated test/simulate action Alex can run against concrete
+        examples before a rule goes live, mirroring JOB-16's own
+        debug-verify precedent (US-04)
+      habit: >
+        Alex already has real Firestore rules (a firestore.rules file) from
+        his existing Firebase app, expressed as boolean conditions over
+        request.auth/resource.data — he expects to express rules the same
+        way, not learn an unrelated new authorization model
+    opportunity_score: 17
+    priority: critical
+    # NOTE (security-rules DISCUSS, 2026-08-17): new job, not a JOB-16
+    # amendment — authoring/evaluating access-control rules is a
+    # functionally, emotionally, and socially distinct job from establishing
+    # identity was (same persona, P1 Alex, different goal), mirroring this
+    # project's own precedent for "same persona, different goal ⇒ new job"
+    # (JOB-11 vs JOB-06, JOB-14 vs JOB-10). v1 scope (this feature) is
+    # narrowed to read-path (GetDocument) rule enforcement only; write-path,
+    # query-path, and real-time-listen enforcement, plus full Firestore
+    # Rules Language parity (cross-document get()/exists() reads, custom
+    # functions, recursive wildcard paths), are explicitly named, deferred
+    # follow-up epics — see docs/feature/security-rules/feature-delta.md
+    # § Job Discovery Framing Resolution and § Scope Assessment. Reverses no
+    # founding decision of its own (JOB-16 already reversed the relevant
+    # embyr-rs founding exclusion) but is the job that finally gives the
+    # optional identity JOB-16 established real teeth. Architecturally
+    # extends BC-2 Document Storage's read path (ADR-002) and introduces a
+    # new rule-definition/storage subsystem whose bounded-context placement
+    # is flagged, not locked, for DESIGN — see § System Constraints.
+    # NOTE (security-rules DISCUSS, 2026-08-17): this job's "pull" four-force
+    # text ("the prerequisite a follow-up Security Rules epic will build
+    # on") is now taken up by JOB-17 (document-access-control), a distinct
+    # new job for the same persona (P1 Alex) — not an amendment to this job.
+    # JOB-17's v1 scope is itself narrowed to read-path rule enforcement
+    # only (write/query/listen-path enforcement are named, deferred
+    # follow-up epics) — see docs/feature/security-rules/feature-delta.md
+    # § Scope Assessment for the Elephant Carpaccio split rationale.
