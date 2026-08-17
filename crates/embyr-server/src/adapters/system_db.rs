@@ -161,8 +161,7 @@ impl SystemDb {
     // client-auth (ADR-025) — client_identity_credentials CRUD.
     // insert_client_identity_credential: implemented (step 01-01).
     // rotate_client_identity_credential: implemented (step 03-01).
-    // get_client_identity_credential: SCAFFOLD — still RED, implemented in
-    // step 04-01.
+    // get_client_identity_credential: implemented (step 04-01).
     // -----------------------------------------------------------------------
 
     /// Read a project's registered client-identity credential, if any.

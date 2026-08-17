@@ -22,12 +22,13 @@
 //!             (c) header absent -> zero calls into embyr_core::client_identity
 //!             (structural unreachability, not just unobserved effect) —
 //!             proved two ways: the pure-function half in
-//!             grpc/handler.rs::client_identity_extension_tests, and the
-//!             black-box half here (a getDoc call with NO client-identity
-//!             header succeeds — if the new branch were reachable without
-//!             the header, it would call the RED scaffold, which panics,
-//!             which would make this test fail; a pass is therefore
-//!             affirmative proof the branch was never entered).
+//!             grpc/handler.rs::client_identity_extension_tests (asserting
+//!             `extract_client_identity_token` returns `None` for an absent
+//!             header, short-circuiting via `?` before any
+//!             `embyr_core::client_identity` call), and the black-box half
+//!             here (a getDoc call with NO client-identity header succeeds
+//!             exactly as the pre-existing 72-scenario suite expects —
+//!             behavioral corroboration of the mechanism proved at unit level).
 //!   AC-16-09: verified identity available to embyr's own request handling
 //!             for the signed-in session's duration — bounded, per feature
 //!             scope, to "the subsequent call still succeeds" (nothing
@@ -58,7 +59,8 @@
 //! Error ratio: 5 error/edge (missing/malformed/expired/wrong-project +
 //! AC-16-08b) out of 8 = 62.5%.
 //!
-//! All scenarios `#[ignore]` except the walking skeleton.
+//! All scenarios enabled — unignored one at a time across DELIVER's steps,
+//! now GREEN.
 
 #![allow(unused_imports)]
 
@@ -284,21 +286,23 @@ async fn an_expired_client_identity_header_does_not_break_an_ordinary_getdoc_cal
 // AC-16-08(c): header absent -> the new branch is structurally unreachable
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Black-box half of the structural-unreachability proof (pure-function half
-/// lives in grpc/handler.rs::client_identity_extension_tests). A session
-/// that never presents the header exercises the SAME code path the 72
-/// existing scenarios exercise. If step 4 were reachable without the
-/// header, it would call the RED scaffold (which panics unconditionally
-/// today) — so a PASS here is affirmative proof the branch was never
-/// entered, not merely an absence of an observed side effect.
+/// Black-box half of the structural-unreachability proof. The pure-function
+/// half in grpc/handler.rs::client_identity_extension_tests proves the actual
+/// mechanism: `extract_client_identity_token` returns `None` for an absent
+/// header, short-circuiting `attach_client_identity_if_present` via `?`
+/// before any `embyr_core::client_identity` call is made. A session that
+/// never presents the header exercises the SAME code path the 72 existing
+/// scenarios exercise; this getDoc call succeeding is the black-box
+/// corroboration that the ordinary path is unaffected.
 ///
 /// @driving_port @real-io @US-02 @AC-16-08
 #[tokio::test]
 async fn a_session_that_never_presents_the_client_identity_header_never_reaches_the_new_verification_branch() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-guardrail-c").await;
-    // Deliberately: no client_identity_credentials row seeded at all — if
-    // the new branch were reachable, it would panic looking up a
-    // nonexistent credential too, reinforcing the unreachability proof.
+    // Deliberately: no client_identity_credentials row seeded at all — the
+    // unit-level proof (grpc/handler.rs::client_identity_extension_tests)
+    // establishes the branch is never entered when the header is absent;
+    // this scenario corroborates that the ordinary getDoc path is unaffected.
 
     let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
         .expect("valid endpoint")

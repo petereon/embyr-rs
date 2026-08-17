@@ -340,10 +340,9 @@ impl FirestoreService {
     ///   absent  -> `None`, and — load-bearing for AC-16-08(c) — ZERO calls
     ///              into `embyr_core::client_identity`. The routing check
     ///              below (`extract_client_identity_token` returning `None`)
-    ///              is real, already-correct control flow, not "missing
-    ///              functionality" — only the verification computation
-    ///              itself is a RED scaffold (see
-    ///              `embyr_core::client_identity::verify_client_identity_token`).
+    ///              short-circuits via `?` before
+    ///              `embyr_core::client_identity::verify_client_identity_token`
+    ///              (fully implemented — GREEN) is ever reached.
     ///   present -> verified or not, but NEVER rejects the caller's request
     ///              either way (ADR-026: "failure -> attach nothing; DOES
     ///              NOT reject the request"). Callers that want to surface a
@@ -1321,17 +1320,19 @@ fn core_error_to_status(e: CoreError) -> Status {
 #[cfg(test)]
 mod client_identity_extension_tests {
     //! client-auth (ADR-026 step 4) — pure, IO-free unit coverage for the
-    //! new metadata-extraction routing logic. This is real, already-correct
-    //! code (not a RED scaffold — see `FirestoreService::extract_client_identity_token`'s
-    //! own doc comment): only the verification COMPUTATION downstream
-    //! (`embyr_core::client_identity::verify_client_identity_token`) is a
-    //! RED scaffold, tested at layer 1 in `embyr-core`.
+    //! metadata-extraction routing logic. Both this extractor and the
+    //! verification computation downstream
+    //! (`embyr_core::client_identity::verify_client_identity_token`, tested
+    //! at layer 1 in `embyr-core`) are fully implemented (GREEN).
     //!
     //! AC-16-08(c)'s structural-unreachability claim starts here: proving
     //! the extraction function itself correctly distinguishes "header
     //! absent" from "header present" is the pure-function half of that
-    //! proof; the acceptance-level half (a real getDoc call succeeding
-    //! without ever reaching the scaffold panic) lives in
+    //! proof — an absent header short-circuits via `?` in
+    //! `attach_client_identity_if_present` before
+    //! `embyr_core::client_identity` is ever called; the acceptance-level
+    //! half (a real getDoc call succeeding with no client-identity header)
+    //! lives in
     //! tests/client_auth/acceptance/ca02_signin_and_reject_invalid_tokens.rs.
     use super::FirestoreService;
     use tonic::Request;

@@ -190,14 +190,12 @@ mod tests {
     //! specific AC-16-07 rejection reasons and the algorithm-confusion
     //! regression (ADR-024 Enforcement).
     //!
-    //! All tests currently RED (`verify_client_identity_token`/
-    //! `credential_fingerprint` panic unconditionally) — no `#[ignore]`
-    //! needed here (unlike the acceptance scenarios in
-    //! `tests/client_auth/acceptance/`): these are layer-1 inner-loop unit
-    //! tests, meant to run and fail visibly under plain `cargo test` to
-    //! drive DELIVER's TDD cycle, per Mandate 7 (panic = correct RED, not
-    //! BROKEN). The one-scenario-at-a-time discipline applies to the outer
-    //! (acceptance) loop, not this inner loop.
+    //! `verify_client_identity_token`/`credential_fingerprint` are fully
+    //! implemented (GREEN) — no `#[ignore]` needed here (unlike the
+    //! acceptance scenarios in `tests/client_auth/acceptance/`): these are
+    //! layer-1 inner-loop unit tests, run under plain `cargo test` as part
+    //! of the normal suite. The one-scenario-at-a-time discipline applies to
+    //! the outer (acceptance) loop, not this inner loop.
 
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};

@@ -17,8 +17,8 @@
 //! Error ratio: 4 error/edge (AC-16-02/03/04/05) out of 6 scenarios = 67% —
 //! comfortably over the 40% mandate.
 //!
-//! All scenarios `#[ignore]` except the walking-skeleton scenario — RED,
-//! enable one at a time in DELIVER (per DISTILL's one-at-a-time discipline).
+//! All scenarios enabled — unignored one at a time across DELIVER's steps
+//! (per DISTILL's one-at-a-time discipline), now GREEN.
 
 #![allow(unused_imports)]
 
