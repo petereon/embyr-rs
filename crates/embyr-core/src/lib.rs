@@ -5,6 +5,10 @@
 
 pub mod admin;
 pub mod auth;
+// client-auth (BC-1 extension, ADR-024): ClientIdentityCredential,
+// VerifiedEndUserIdentity, ClientIdentityVerifyError, pure
+// verify_client_identity_token(). Zero IO.
+pub mod client_identity;
 pub mod domain;
 pub mod error;
 pub mod rate_limit;

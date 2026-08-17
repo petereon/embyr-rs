@@ -16,6 +16,14 @@ jobs:
       social: Be seen as infrastructure-independent; avoid "locked into Google" reputation
     opportunity_score: 18
     priority: critical
+    # NOTE (client-auth DISCUSS, 2026-08-16): this job's functional dimension
+    # ("all SDK calls succeed unchanged") is scoped to the Firestore data-plane
+    # SDK surface (setDoc/getDoc/onSnapshot/etc, per the shipped embyr-rs
+    # feature) — it does not extend to the Firebase Auth SDK surface. JOB-16
+    # (client-identity-verification) is a distinct, new job for per-end-user
+    # identity, not an extension of this job's scope. See
+    # docs/feature/client-auth/feature-delta.md § Job Discovery Framing
+    # Resolution for why this is a new job rather than a JOB-01 amendment.
 
   - id: JOB-02
     name: tenant-provision
@@ -477,3 +485,63 @@ jobs:
     # (they also call sqlx::migrate! against the fetched DSN) but are
     # deferred as follow-up scope to keep this feature right-sized. See
     # docs/feature/customer-db-onboarding/feature-delta.md § Out of Scope.
+
+  - id: JOB-16
+    name: client-identity-verification
+    persona: P1
+    feature: client-auth
+    job_story: >
+      When my app's end users need to read and write their own Firestore documents
+      through embyr, I want each signed-in session to carry a verifiable identity for
+      the specific end user making it — not just my project's api_key — so I can build
+      real per-user data access the way I would with Firebase Auth, and so a follow-up
+      Security Rules epic has a caller identity to evaluate against.
+    dimensions:
+      functional: >
+        Alex's own backend mints a per-end-user token; the SDK's existing
+        signInWithCustomToken() call, now backed by embyr, resolves it into a verified
+        end-user identity attached to that session's subsequent Firestore calls;
+        embyr never sees or stores an end-user password
+      emotional: >
+        Feel confident that migrating off Firebase doesn't force him to also become
+        his own end-user-identity operator overnight; feel that per-user identity
+        survives the migration the same way per-document data already does
+      social: >
+        Be able to tell his own team "migrating to embyr didn't downgrade our
+        security model" instead of "we had to rip out real user-level access control"
+    four_forces:
+      push: >
+        embyr only recognizes one identity per project today — the project-level
+        api_key. Any two of Alex's own end users look identical to embyr; nothing
+        distinguishes one end user's request from another's
+      pull: >
+        A verifiable per-end-user identity on every signed-in session gives Alex the
+        same foundation Firebase gives him today — the prerequisite a follow-up
+        Security Rules epic will build on
+      anxiety: >
+        "If embyr becomes my end users' identity provider, embyr now custodies my
+        users' passwords — a liability I didn't sign up for by choosing a
+        Firestore-compatible backend" — mitigated by locking v1 to custom-token
+        verification only; embyr trusts a token Alex's own backend mints and never
+        sees or stores an end-user password (see feature-delta.md § Job Discovery
+        Framing Resolution)
+      habit: >
+        Alex is used to Firebase's signInWithCustomToken() pattern — many production
+        Firebase apps already mint custom tokens to bridge an existing backend user
+        database into Firebase Auth; this is a familiar migration bridge, not a new
+        concept
+    opportunity_score: 15
+    priority: critical
+    # NOTE (client-auth DISCUSS, 2026-08-16): reverses a deliberate founding
+    # Out-of-Scope decision from embyr-rs's own original DISCUSS — see
+    # docs/feature/embyr-rs/discuss/feature-delta.md § Out of Scope ("Firebase
+    # Authentication integration ... no Firebase Auth service dependency").
+    # Scoped narrowly to custom-token verification only (embyr never stores
+    # end-user credentials); embyr-hosted email/password identity provision
+    # is explicitly deferred as a candidate follow-up epic, not built here —
+    # see the Framing Resolution's confidence/escalation note. Security
+    # Rules (authorization on top of the identity this feature establishes)
+    # is a separate, dependent follow-up epic. Architecturally, this job
+    # extends BC-1 Tenant Management's existing auth middleware (ADR-002) —
+    # it does not introduce a fourth bounded context. See
+    # docs/feature/client-auth/feature-delta.md.

@@ -263,6 +263,28 @@ path = "../../tests/customer_db_onboarding/acceptance/cdo17_regression_full_priv
 name = "cdo18_forward_compatible_found_version_exceeds_expected"
 path = "../../tests/customer_db_onboarding/acceptance/cdo18_forward_compatible_found_version_exceeds_expected.rs"
 
+# client-auth acceptance tests (Slices 01-04 + dedicated algorithm-confusion
+# regression, mirroring the caNN registration convention).
+[[test]]
+name = "client_auth_ca01_register_verification_credential"
+path = "../../tests/client_auth/acceptance/ca01_register_verification_credential.rs"
+
+[[test]]
+name = "client_auth_ca02_signin_and_reject_invalid_tokens"
+path = "../../tests/client_auth/acceptance/ca02_signin_and_reject_invalid_tokens.rs"
+
+[[test]]
+name = "client_auth_ca03_rotate_verification_credential"
+path = "../../tests/client_auth/acceptance/ca03_rotate_verification_credential.rs"
+
+[[test]]
+name = "client_auth_ca04_standalone_verify_debug_check"
+path = "../../tests/client_auth/acceptance/ca04_standalone_verify_debug_check.rs"
+
+[[test]]
+name = "client_auth_ca05_algorithm_confusion_defense"
+path = "../../tests/client_auth/acceptance/ca05_algorithm_confusion_defense.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
@@ -296,3 +318,6 @@ rsa = { version = "0.9", features = ["sha2"] }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+# client-auth (DISTILL): mints real Ed25519-signed test tokens simulating a
+# customer's own backend (Trailmark) — see tests/client_auth/common/mod.rs.
+ed25519-dalek = { workspace = true }

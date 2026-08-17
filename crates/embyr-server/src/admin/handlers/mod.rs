@@ -3,6 +3,8 @@ pub mod auth;
 pub mod billing;
 pub mod billing_metering;
 pub mod billing_subscription;
+// client-auth (US-01/US-03/US-04, ADR-025): credential register/rotate/verify.
+pub mod client_identity;
 pub mod get_project;
 pub mod lifecycle;
 pub mod members;
@@ -14,4 +16,5 @@ pub mod provision;
 pub mod query_logs;
 pub mod sdk_keys;
 pub mod service_accounts;
+pub(crate) mod shared;
 pub mod webhooks_stripe;

@@ -5,5 +5,13 @@ persona_name: Alex (SDK Developer)
 jobs:
   - JOB-01  # sdk-compat
   - JOB-03  # live-sync
-updated: "2026-05-23"
+  - JOB-16  # client-identity-verification (added by client-auth DISCUSS, 2026-08-16)
+updated: "2026-08-16"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (client-auth DISCUSS, 2026-08-16): JOB-16 is a new, distinct job for
+# per-end-user identity verification (P1 Alex is still the persona who
+# "hires" the capability, but the goal differs from JOB-01/JOB-03's Firestore
+# data-plane focus). No separate visual/YAML journey artifact was produced
+# for JOB-16 — Decision 3 (UX Research Depth) = Lightweight for this feature;
+# journey detail lives inline in docs/feature/client-auth/feature-delta.md
+# per the current single-narrative-file convention.

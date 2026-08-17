@@ -6,3 +6,5 @@
 
 pub mod browser_channel;
 pub mod grpc_web;
+// client-auth (US-02, ADR-026): signInWithCustomToken() bridge endpoint.
+pub mod sign_in;

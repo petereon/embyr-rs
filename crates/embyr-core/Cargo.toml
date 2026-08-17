@@ -19,6 +19,18 @@ aes-gcm = { workspace = true, features = ["aes"] }
 rand_core.workspace = true
 sha2.workspace = true
 uuid.workspace = true
+# client-auth (DDD-CA-8, ADR-024): embyr-core's first-time jsonwebtoken
+# consumer. Verified pure-computation (aws_lc_rs EdDSA backend) — no IO,
+# deny.toml's IO-prohibition bans list is unaffected (see brief.md §
+# Architecture Enforcement — client-auth).
+jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 proptest.workspace = true
+# client-auth (DISTILL, ADR-024 Enforcement): mint real Ed25519-signed test
+# tokens to exercise verify_client_identity_token — simulates Trailmark's
+# own backend (an external actor), not a mock of any embyr-owned port.
+ed25519-dalek = { workspace = true }
+base64.workspace = true
+serde_json.workspace = true
+hmac.workspace = true

@@ -187,6 +187,23 @@ pub fn spawn_all_servers(
         )
         .with_state(bc_state);
 
+    // client-auth (US-02, ADR-026): signInWithCustomToken() REST bridge —
+    // no auth header of its own (the token IN the body IS the credential),
+    // so it gets its own minimal state/router merged in here rather than
+    // reusing UserAdminState (which this route does not need any other
+    // field of). Cloned from `service` BEFORE `service` moves into
+    // `FirestoreServer::new(service)` below.
+    let sign_in_state = rest::sign_in::SignInState {
+        system_db: std::sync::Arc::clone(&service.system_db),
+    };
+    let sign_in_app = axum::Router::new()
+        .route(
+            "/v1/projects/:project_id/accounts:signInWithCustomToken",
+            axum::routing::post(rest::sign_in::sign_in_with_custom_token),
+        )
+        .with_state(sign_in_state);
+    let axum_app = axum_app.merge(sign_in_app);
+
     let rest_task = rest::grpc_web::spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
 
     tokio::spawn(async move {

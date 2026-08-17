@@ -24,6 +24,11 @@ use super::handlers::oidc_providers::{
     create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
 };
 use super::handlers::auth::{oidc_callback, signin, signout};
+// client-auth (US-01/US-03/US-04, ADR-025): credential register/rotate/verify.
+use super::handlers::client_identity::{
+    register_client_identity_credential, rotate_client_identity_credential,
+    verify_client_identity_credential,
+};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
@@ -163,6 +168,22 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/sdk_keys/:key_id",
             delete(revoke_sdk_key),
+        )
+        // client-auth (US-01/US-03/US-04, ADR-025): credential lifecycle.
+        // Owner/Admin gate for register/rotate enforced inside the handlers
+        // (mirrors sdk_keys.rs's own in-handler role check); verify (debug
+        // check) is any role, also gated in-handler.
+        .route(
+            "/admin/v1/projects/:project_id/client_identity_credential",
+            post(register_client_identity_credential),
+        )
+        .route(
+            "/admin/v1/projects/:project_id/client_identity_credential/rotate",
+            post(rotate_client_identity_credential),
+        )
+        .route(
+            "/admin/v1/projects/:project_id/client_identity_credential/verify",
+            post(verify_client_identity_credential),
         )
         .route(
             "/admin/v1/projects/:project_id/metrics",

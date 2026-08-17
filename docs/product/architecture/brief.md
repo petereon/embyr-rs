@@ -3311,4 +3311,168 @@ C4Container
 | OQ-4 | **Resolved by targeted security review.** The original `GRANT SELECT ... TO PUBLIC` (ADR-023) was flagged as a genuine, if narrow, privilege-model change during a targeted security review of the ADR. The review approved ADR-023 overall and recommended a role-scoped grant instead — adopted (CDO-AD-08, ADR-023 revision). No further review action needed on this specific point. | Resolved | Closed this wave |
 | OQ-5 | The revised role-scoped grant introduces an ordering dependency: if Elena runs `embyr-db-prep` without `EMBYR_DB_PREP_DML_ROLE_DSN` (e.g., before the `embyr_app` role exists), `verify_schema_readiness()` will report `NotPrepped` at provisioning time even though the schema itself is fully applied, until the tool is re-run (idempotently) with the DML-role DSN supplied | No (documented, not a defect — re-running the idempotent prep tool is cheap) | DISTILL should write an explicit UAT scenario for this sequencing case so it is tested, not just documented |
 
+---
+
+## Application Architecture — client-auth
+
+> Updated: 2026-08-16
+> Feature: client-auth (JOB-16 — per-end-user identity verification via customer-minted
+> custom tokens, `signInWithCustomToken()` bridge pattern)
+> Mode: Propose (autonomous analysis per Decision 1)
+> ADRs: `docs/product/architecture/adr-024-client-identity-verification-mechanism.md`
+> (new), `adr-025-client-identity-credential-storage-rotation.md` (new),
+> `adr-026-client-identity-composition-with-api-key-auth.md` (new)
+
+---
+
+### Wave: DESIGN / [REF] Quality Attribute Priorities — client-auth
+
+See `docs/feature/client-auth/feature-delta.md` § Quality Attribute Priorities
+(client-auth) for the ranked table — reproduced here for SSOT completeness:
+
+1. No regression to existing `api_key`-only traffic (KPI #3 guardrail, structurally
+   enforced — ADR-026).
+2. Non-impersonation (embyr must never hold anything that lets it mint a valid
+   Trailmark-authentic token — ADR-024).
+3. Distinguishable rejection-reason fidelity (four reasons, never collapsed — ADR-024).
+4. Shared-artifact integrity — one verification routine, two call sites (ADR-025).
+5. Operational simplicity for V1 — no new session-issuance machinery (ADR-026, reuses
+   AD-03's already-established rationale).
+
+---
+
+### Wave: DESIGN / [REF] Reuse Analysis — client-auth (hard gate)
+
+See `docs/feature/client-auth/feature-delta.md` § Reuse Analysis for the full table
+(6 EXTEND, 2 justified CREATE NEW, 0 unjustified CREATE NEW). Summary: this feature
+extends the existing `authenticate()` interceptor additively (never restructures it),
+reuses the ADR-009/010 session-auth sub-router and `SessionContext` extractor verbatim
+for its three new admin routes, reuses ADR-018's dual-current/previous rotation *shape*
+(not its code, since the underlying primitive differs — public key vs. hash vs.
+symmetric key), and reuses the already-workspace-present `jsonwebtoken` crate rather
+than adding a new one. The two CREATE NEW items are a new 1:1 credential table
+(mirroring the existing `sdk_api_keys`-as-own-table precedent) and a new verification
+call site (the existing `oidc_callback` JWT code is architecturally incompatible —
+browser-session-shaped, not stateless-per-request — confirmed by direct read, not
+assumed).
+
+---
+
+### Wave: DESIGN / [REF] Architectural Pattern — client-auth
+
+**No change to the project's Hexagonal (ports-and-adapters) pattern or its Cargo
+-workspace enforcement mechanism.** `embyr-core::client_identity` is a new domain module
+following the identical shape as `embyr-core::auth` (pure functions, zero IO, `Result`
+-typed errors) — not a new pattern, an instance of the existing one. No new driving or
+driven port *category* is introduced; the two new driving ports (admin credential
+lifecycle, REST sign-in) are new *instances* of the existing `AdminHttpPort`/`RestPort`
+categories already documented in § Driving Ports (Inbound) above.
+
+---
+
+### Wave: DESIGN / [REF] Component Decomposition — client-auth
+
+| Component | Crate/Module Path | Responsibility | Bounded Context |
+|-----------|--------------------|------------------|------------------|
+| `embyr-core::client_identity` | `crates/embyr-core/src/client_identity/mod.rs` (new) | `ClientIdentityCredential`, `VerifiedEndUserIdentity` value types; `ClientIdentityVerifyError` enum (`MissingToken`/`Malformed`/`Expired`/`ProjectMismatch`); pure `verify_client_identity_token()`. No IO — extends `embyr-core`'s zero-IO invariant with a first-time `jsonwebtoken` dependency (verified pure-computation). | BC-1 |
+| `embyr-server::admin::handlers::client_identity` | `crates/embyr-server/src/admin/handlers/client_identity.rs` (new) | Session-auth Axum handlers: register (US-01), rotate (US-03), debug-verify (US-04). Mirrors `sdk_keys.rs`'s shape (Owner/Admin gate for mutating actions, `verify_project_ownership`, no-raw-material-in-response convention). | BC-1 (driving adapter) |
+| `embyr-server::admin::handlers::shared` | `crates/embyr-server/src/admin/handlers/shared.rs` (new — extraction) | Promoted `verify_project_ownership` helper, now shared by `sdk_keys.rs` and `client_identity.rs`. | BC-1 |
+| `embyr-server::rest::sign_in` | `crates/embyr-server/src/rest/sign_in.rs` (new) | `POST /v1/projects/{project_id}/accounts:signInWithCustomToken` (US-02). Calls the shared verify function; returns the AC-16-07 rejection taxonomy. Transport shape flagged OQ-CA-01. | BC-1 → BC-2/BC-3 (driving adapter) |
+| `embyr-server::grpc::handler::authenticate` (existing, extended) | `crates/embyr-server/src/grpc/handler.rs` | Adds an additive step 4: optional `x-embyr-client-identity` header check, gated entirely on the header's presence (ADR-026). Zero change to the existing three-role `api_key` check. | BC-1 |
+| `client_identity_credentials` (System DB table) | `crates/embyr-server/migrations/0021_client_identity_credentials.sql` (new) | 1:1 FK to `projects.id`. `public_key_current`/`public_key_previous` (BYTEA, unhashed — see ADR-025), `algorithm`, `created_at`, `rotated_at`. | BC-1 |
+
+---
+
+### Wave: DESIGN / [REF] Driving Ports (Inbound) — client-auth additions
+
+| Port | Location | Adapter(s) | What it does |
+|------|----------|------------|---------------|
+| `ClientIdentityCredentialAdminPort` | `embyr-server::admin::handlers::client_identity` | Axum, session sub-router (`:9090`) | `POST .../client_identity_credential` (register, 201/400/401/404/409), `POST .../client_identity_credential/rotate` (US-03), `POST .../client_identity_credential/verify` (debug-verify, US-04, read-only, any role). Owner/Admin gate on register/rotate, matching `sdk_keys.rs`'s `Role::Admin` check. |
+| `ClientIdentitySignInPort` | `embyr-server::rest::sign_in` | Axum (`:8081`) | `POST /v1/projects/{project_id}/accounts:signInWithCustomToken`. No auth header of its own — the token presented in the body *is* the credential being verified. Returns 200 with `{localId, expiresIn}` or 400 with a `reason` enum matching AC-16-07's four rejection classes. |
+| `FirestoreGrpcPort` / `RestPort` (existing, extended additively) | `embyr-server::grpc`, `embyr-server::rest` | `authenticate()` (extended) | New optional step: `x-embyr-client-identity` / `X-Embyr-Client-Identity` header, checked only if present, never rejects the underlying call on failure (ADR-026). |
+
+---
+
+### Wave: DESIGN / [REF] Driven Ports + Adapters — client-auth additions
+
+No new driven port. `verify_client_identity_token()` is pure computation (CPU-bound
+Ed25519 signature check, no IO) over an already-fetched request header and an
+already-loaded `client_identity_credentials` row — the existing `SystemDb` driven port
+is reused unchanged. Per Principle 12, the explicit reasoning for why no new `probe()`
+is warranted here (no new substrate dependency; a cryptographic signature either
+verifies or it does not, with no partial-trust/substrate-lie scenario analogous to
+`decrypt_with_rotation`'s AEAD-tag guarantee in ADR-018) is documented in
+`docs/feature/client-auth/feature-delta.md` § Driven Ports + Adapters.
+
+---
+
+### Wave: DESIGN / [REF] Technology Choices — client-auth additions
+
+| Layer | Choice | Version | License | Rationale |
+|-------|--------|---------|---------|-----------|
+| Token format/verification | `jsonwebtoken` (workspace dep, reused) | 10.x, `aws_lc_rs` backend | MIT | New consumer (`embyr-core`) of an already-present dependency. See ADR-024. |
+| Signature algorithm | EdDSA (Ed25519) | RFC 8032/8037 | N/A | Asymmetric-only, satisfies non-impersonation constraint; algorithm-pinned to defend against JWT algorithm-confusion attacks. See ADR-024. |
+| Fingerprint (admin response) | `blake3` (workspace dep, reused) | 1.x | CC0/Apache 2.0 | Non-secret credential fingerprint for the registration response, matching the existing `CredentialFingerprint` convention. See ADR-025. |
+
+No new workspace dependency is added.
+
+---
+
+### Wave: DESIGN / [REF] Application-Level Decisions Table — client-auth
+
+| ID | Decision | Verdict | Rationale |
+|----|----------|---------|-----------|
+| CA-AD-01 | Ed25519/EdDSA, directly-registered public key (not HMAC shared secret, not JWKS discovery) | Accepted — ADR-024 | Only option satisfying the non-impersonation constraint without adding a hot-path network dependency |
+| CA-AD-02 | New `client_identity_credentials` table, unhashed/unencrypted public key, current/previous rotation columns | Accepted — ADR-025 | Public data needs neither hashing nor encryption; rotation-window *shape* mirrors ADR-018, not its data representation |
+| CA-AD-03 | Stateless per-request re-verification; no embyr-issued session JWT | Accepted — ADR-026 | Directly extends AD-03's already-accepted "no session-token layer" rationale to a cheaper primitive (Ed25519 vs. Argon2id) |
+| CA-AD-04 | New `x-embyr-client-identity` header/metadata key, additive to the unchanged `authorization` slot | Accepted, provisional pending OQ-CA-01 spike — ADR-026 | Structurally guarantees the regression invariant (new branch unreachable when header absent); exact SDK wire fidelity requires empirical confirmation, mirroring OQ-02/OQ-03 |
+| CA-AD-05 | `jsonwebtoken` becomes an `embyr-core` dependency for the first time | Accepted | Verified pure-computation; `deny.toml`'s IO-prohibition list is unaffected |
+
+---
+
+### Wave: DESIGN / [REF] C4 Diagrams — client-auth
+
+See `docs/feature/client-auth/feature-delta.md` §§ C4 System Context (Mermaid, client
+-auth delta), C4 Container Diagram (Mermaid, client-auth delta) for the full diagrams.
+No new external system is introduced; Trailmark's own token-minting backend is never
+called by embyr (offline signature verification only), so it does not appear as a
+`System_Ext` relationship target — only as context in the System Context diagram's
+narrative.
+
+---
+
+### Wave: DESIGN / [REF] Architecture Enforcement — client-auth
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern.
+Language: Rust.
+Tool: `cargo-deny` (existing `deny.toml`) + the existing three-layer probe-enforcement
+combination (AD-06) — no new enforcement tooling required, since this feature adds no
+new adapter requiring a `probe()` (see Driven Ports above).
+
+Rules enforced (existing, applying unchanged to the new module):
+- `embyr-core::client_identity` has zero IO imports (`cargo-deny`, `deny.toml`).
+- `embyr-core` defines the trait/value-type surface; `embyr-server` consumes it —
+  dependency direction inward, matching AD-02's existing rule for `BackendAdapter`.
+
+---
+
+### Wave: DESIGN / [REF] Open Questions — client-auth
+
+See `docs/feature/client-auth/feature-delta.md` § Open Questions for OQ-CA-01 (sign-in
+wire-fidelity spike, mirrors OQ-02/OQ-03), OQ-CA-02 (verification-result caching,
+non-blocking performance follow-up), OQ-CA-03 (embyr-hosted-auth scope ceiling,
+non-blocking, owned by Product Discovery).
+
+---
+
+### Wave: DESIGN / [REF] External Integrations — client-auth
+
+**None requiring contract tests.** This feature introduces no new outbound network
+dependency: `verify_client_identity_token()` is pure computation against
+already-registered material; Trailmark's own token-minting backend is never called by
+embyr (the token arrives already-signed, over a channel embyr does not control — the
+SDK/app's own network path to embyr, not a new embyr-to-Trailmark integration). This is
+a deliberate consequence of ADR-024's Option C selection over Option B (JWKS discovery),
+which would have introduced exactly such an integration.
+
 

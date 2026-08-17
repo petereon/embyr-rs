@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::admin::extractors::session_context::SessionContext;
+use crate::admin::handlers::shared::verify_project_ownership;
 use crate::admin::state::UserAdminState;
 use embyr_core::admin::account::Role;
 
@@ -254,41 +255,4 @@ pub async fn revoke_sdk_key(
     state.credential_cache.evict_project(&project_id).await;
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-// ---------------------------------------------------------------------------
-// Internal helper
-// ---------------------------------------------------------------------------
-
-/// Verify that `project_id` exists and is owned by `account_id`.
-///
-/// Returns `Ok(())` on success.
-/// Returns `Err(NOT_FOUND)` if the project does not exist or has been deleted.
-/// Returns `Err(FORBIDDEN)` if the project belongs to a different account.
-async fn verify_project_ownership(
-    pool: &sqlx::PgPool,
-    project_id: &str,
-    account_id: Uuid,
-) -> Result<(), StatusCode> {
-    let row = sqlx::query(
-        "SELECT account_id FROM projects WHERE id = $1 AND status != 'deleted'",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("verify_project_ownership DB error: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?
-    .ok_or(StatusCode::NOT_FOUND)?;
-
-    let project_account: Uuid = row
-        .try_get("account_id")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if project_account != account_id {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    Ok(())
 }

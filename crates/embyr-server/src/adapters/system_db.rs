@@ -1,6 +1,20 @@
 use embyr_core::error::CoreError;
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 
+/// client-auth (ADR-025): a project's registered client-identity verification
+/// credential row, as stored in `client_identity_credentials`. Raw key bytes
+/// — never hashed, never encrypted (public key material has no
+/// confidentiality property to protect).
+#[derive(Debug, Clone)]
+pub struct ClientIdentityCredentialRow {
+    pub public_key_current: Vec<u8>,
+    /// `None` when no rotation window is open.
+    pub public_key_previous: Option<Vec<u8>>,
+    pub algorithm: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Project row returned for credential verification.
 #[derive(Debug)]
 pub struct ProjectAuthRow {
@@ -133,6 +147,81 @@ impl SystemDb {
             ));
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // client-auth (ADR-025) — client_identity_credentials CRUD.
+    // insert_client_identity_credential: implemented (step 01-01).
+    // get_client_identity_credential / rotate_client_identity_credential:
+    // SCAFFOLD — still RED, implemented in steps 04-01 / 03-01 respectively.
+    // -----------------------------------------------------------------------
+
+    /// Read a project's registered client-identity credential, if any.
+    /// `Ok(None)` means no credential has been registered for this project.
+    pub async fn get_client_identity_credential(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ClientIdentityCredentialRow>, CoreError> {
+        let _ = project_id;
+        panic!(
+            "SystemDb::get_client_identity_credential: RED scaffold (DISTILL, client-auth) — \
+             not yet implemented. See ADR-025 § Debug/verify check and § Verification order \
+             (SELECT public_key_current, public_key_previous, algorithm, created_at, rotated_at \
+             FROM client_identity_credentials WHERE project_id = $1)."
+        )
+    }
+
+    /// Register a project's first client-identity verification credential
+    /// (US-01). Relies on the `PRIMARY KEY` constraint to make a second
+    /// registration attempt a Postgres unique-violation (mapped by the
+    /// caller to HTTP 409, AC-16-04) — a database-enforced invariant, not an
+    /// application-level check that could drift from the schema (ADR-025).
+    pub async fn insert_client_identity_credential(
+        &self,
+        project_id: &str,
+        public_key: &[u8; 32],
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO client_identity_credentials (project_id, public_key_current, algorithm) \
+             VALUES ($1, $2, 'EdDSA')",
+        )
+        .bind(project_id)
+        .bind(&public_key[..])
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            if let sqlx::Error::Database(ref db_err) = e {
+                // PostgreSQL unique_violation = "23505" — the PRIMARY KEY on
+                // project_id (AC-16-04: a second registration is rejected,
+                // not silently overwritten).
+                if db_err.code().as_deref() == Some("23505") {
+                    return CoreError::AlreadyExists(format!(
+                        "client identity credential already registered for project {project_id}"
+                    ));
+                }
+            }
+            CoreError::BackendUnavailable(format!(
+                "insert_client_identity_credential failed: {e}"
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Rotate a project's client-identity credential (US-03): shifts
+    /// current -> previous, sets the new current key, stamps `rotated_at`.
+    /// One rotation generation retained (ADR-025 — not an unbounded
+    /// history), identical shape to ADR-018's `admin_key`/`admin_key_previous`.
+    pub async fn rotate_client_identity_credential(
+        &self,
+        project_id: &str,
+        new_public_key: &[u8; 32],
+    ) -> Result<(), CoreError> {
+        let _ = (project_id, new_public_key);
+        panic!(
+            "SystemDb::rotate_client_identity_credential: RED scaffold (DISTILL, client-auth) — \
+             not yet implemented. See ADR-025 § Rotation (UPDATE public_key_previous = \
+             public_key_current, public_key_current = $2, rotated_at = now() WHERE project_id = $1)."
+        )
     }
 }
 

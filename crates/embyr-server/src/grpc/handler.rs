@@ -141,6 +141,24 @@ impl FirestoreService {
             .ok_or_else(|| Status::unauthenticated("authorization must be bearer token"))
     }
 
+    /// client-auth (ADR-026 step 4, additive): extract the OPTIONAL
+    /// client-identity token from the `x-embyr-client-identity` gRPC
+    /// metadata key (REST's `X-Embyr-Client-Identity` header arrives here
+    /// too, once tonic-web lowercases it into gRPC metadata).
+    ///
+    /// Unlike `extract_api_key`, absence is NOT an error — this is a new,
+    /// separate, optional credential slot; the existing `authorization`
+    /// metadata key (and everything `extract_api_key`/`authenticate` do
+    /// with it) is completely untouched by this function's existence
+    /// (ADR-026 § Decision — Wire Composition).
+    fn extract_client_identity_token<T>(request: &Request<T>) -> Option<String> {
+        let val = request.metadata().get("x-embyr-client-identity")?;
+        let val = val.to_str().ok()?;
+        val.strip_prefix("Bearer ")
+            .or_else(|| val.strip_prefix("bearer "))
+            .map(|s| s.to_string())
+    }
+
     /// Authenticate the request and resolve the backend adapter.
     ///
     /// Checks the credential cache first; on miss performs Argon2id verification
@@ -314,6 +332,57 @@ impl FirestoreService {
         Ok((shared, row.status, dsn))
     }
 
+    /// client-auth (ADR-026 step 4, additive): optional, best-effort
+    /// client-identity resolution — appended AFTER the existing three-role
+    /// `api_key` check (`authenticate()`, above) completes exactly as it
+    /// does today, per ADR-026's structural non-regression argument.
+    ///
+    ///   absent  -> `None`, and — load-bearing for AC-16-08(c) — ZERO calls
+    ///              into `embyr_core::client_identity`. The routing check
+    ///              below (`extract_client_identity_token` returning `None`)
+    ///              is real, already-correct control flow, not "missing
+    ///              functionality" — only the verification computation
+    ///              itself is a RED scaffold (see
+    ///              `embyr_core::client_identity::verify_client_identity_token`).
+    ///   present -> verified or not, but NEVER rejects the caller's request
+    ///              either way (ADR-026: "failure -> attach nothing; DOES
+    ///              NOT reject the request"). Callers that want to surface a
+    ///              rejection reason to the end user use the dedicated
+    ///              sign-in action (US-02) instead.
+    ///
+    /// DISTILL scope note: wired into `handle_get_document` only (the exact
+    /// call every DISCUSS/DESIGN domain example uses — Maria's `getDoc`).
+    /// Extending the identical additive call to the other 8 RPC methods for
+    /// AC-16-09's full "available to embyr's own request handling" surface
+    /// is explicit DELIVER-wave follow-through, not a DISTILL gap — see
+    /// feature-delta.md § DISTILL scaffolds note.
+    async fn attach_client_identity_if_present<T>(
+        &self,
+        request: &Request<T>,
+        project_id_str: &str,
+    ) -> Option<embyr_core::client_identity::VerifiedEndUserIdentity> {
+        let token = Self::extract_client_identity_token(request)?;
+
+        let row = self
+            .system_db
+            .get_client_identity_credential(project_id_str)
+            .await
+            .ok()??;
+        let credential = embyr_core::client_identity::ClientIdentityCredential {
+            public_key_current: row.public_key_current.try_into().ok()?,
+            public_key_previous: row
+                .public_key_previous
+                .and_then(|v| v.try_into().ok()),
+        };
+
+        embyr_core::client_identity::verify_client_identity_token(
+            Some(&token),
+            project_id_str,
+            &credential,
+        )
+        .ok()
+    }
+
     /// Convert a proto `Precondition` to a domain `WritePrecondition`.
     fn convert_precondition(
         p: Option<embyr_proto::firestore::Precondition>,
@@ -452,6 +521,16 @@ impl FirestoreService {
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
+
+        // client-auth (ADR-026 step 4, additive-only): optional
+        // client-identity resolution. Absent header -> zero calls into
+        // embyr_core::client_identity (AC-16-08c); present-but-invalid ->
+        // this call never rejects `getDoc` (AC-16-08b). Everything above
+        // this line is the pre-existing, UNCHANGED authenticate() path
+        // (AC-16-08a — regression guardrail).
+        let _verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id)
+            .await;
 
         // Record read operation — best-effort, fire-and-forget.
         self.metrics_adapter.record_read(&project_id, 1).await;
@@ -1236,5 +1315,53 @@ fn core_error_to_status(e: CoreError) -> Status {
         CoreError::ResourceExhausted(_) => Status::resource_exhausted(e.to_string()),
         CoreError::FailedPrecondition(_) => Status::failed_precondition(e.to_string()),
         _ => Status::internal(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod client_identity_extension_tests {
+    //! client-auth (ADR-026 step 4) — pure, IO-free unit coverage for the
+    //! new metadata-extraction routing logic. This is real, already-correct
+    //! code (not a RED scaffold — see `FirestoreService::extract_client_identity_token`'s
+    //! own doc comment): only the verification COMPUTATION downstream
+    //! (`embyr_core::client_identity::verify_client_identity_token`) is a
+    //! RED scaffold, tested at layer 1 in `embyr-core`.
+    //!
+    //! AC-16-08(c)'s structural-unreachability claim starts here: proving
+    //! the extraction function itself correctly distinguishes "header
+    //! absent" from "header present" is the pure-function half of that
+    //! proof; the acceptance-level half (a real getDoc call succeeding
+    //! without ever reaching the scaffold panic) lives in
+    //! tests/client_auth/acceptance/ca02_signin_and_reject_invalid_tokens.rs.
+    use super::FirestoreService;
+    use tonic::Request;
+
+    #[test]
+    fn extract_client_identity_token_returns_none_when_header_absent() {
+        let request = Request::new(());
+        assert_eq!(FirestoreService::extract_client_identity_token(&request), None);
+    }
+
+    #[test]
+    fn extract_client_identity_token_strips_bearer_prefix_when_present() {
+        let mut request = Request::new(());
+        request
+            .metadata_mut()
+            .insert("x-embyr-client-identity", "Bearer abc.def.ghi".parse().unwrap());
+        assert_eq!(
+            FirestoreService::extract_client_identity_token(&request),
+            Some("abc.def.ghi".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_client_identity_token_ignores_the_unrelated_authorization_header() {
+        // Regression guard for ADR-026's "existing authorization metadata
+        // key is untouched" claim — the new extractor must never read it.
+        let mut request = Request::new(());
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer some-api-key".parse().unwrap());
+        assert_eq!(FirestoreService::extract_client_identity_token(&request), None);
     }
 }

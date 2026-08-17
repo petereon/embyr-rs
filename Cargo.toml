@@ -44,6 +44,10 @@ hex = "0.4"
 totp-rs = { version = "5", features = ["otpauth"] }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 subtle = "2"
+# client-auth (ADR-024): mints real Ed25519-signed test tokens simulating a
+# customer's own backend (Trailmark) — not used in any production adapter
+# (production verification is jsonwebtoken/aws_lc_rs only, per ADR-024).
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 # TLS
 rustls = { version = "0.23", features = ["ring"] }
