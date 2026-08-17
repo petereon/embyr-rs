@@ -117,7 +117,6 @@ async fn first_time_rule_definition_succeeds_and_is_immediately_active() {
 ///
 /// @error @driving_port @real-io @US-01 @AC-17-02
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn redefining_an_existing_rule_fully_replaces_it_with_no_overlap_window() {
     let ctx = SecurityRulesAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -163,7 +162,6 @@ async fn redefining_an_existing_rule_fully_replaces_it_with_no_overlap_window() 
 ///
 /// @error @driving_port @real-io @US-01 @AC-17-03
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn a_condition_using_an_out_of_v1_scope_construct_is_rejected_naming_whats_unsupported() {
     let ctx = SecurityRulesAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -202,7 +200,6 @@ async fn a_condition_using_an_out_of_v1_scope_construct_is_rejected_naming_whats
 ///
 /// @error @driving_port @real-io @US-01 @AC-17-04
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn a_condition_with_invalid_syntax_is_rejected_with_a_specific_reason() {
     let ctx = SecurityRulesAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
@@ -237,7 +234,6 @@ async fn a_condition_with_invalid_syntax_is_rejected_with_a_specific_reason() {
 ///
 /// @error @driving_port @real-io @US-01 @AC-17-05
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn rule_definition_without_valid_admin_credentials_is_rejected() {
     let ctx = SecurityRulesAdminContext::new().await;
     ctx.insert_project("trailmark-prod").await;
