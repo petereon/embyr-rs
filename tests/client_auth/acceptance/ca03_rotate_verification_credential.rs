@@ -224,3 +224,29 @@ async fn a_viewer_role_cannot_rotate_a_verification_credential() {
         "AC-16-13: Viewer role must not be able to rotate a credential"
     );
 }
+
+/// Boundary scenario — an Admin-role session (exactly the gate's threshold,
+/// Role::Admin = 2) must succeed at rotation, not just Owner (=3). A
+/// mutation-testing pass found `session.role < Role::Admin` mutable to
+/// `<=` with no test failing: that mutant incorrectly rejects Admin-exactly
+/// sessions (Admin <= Admin is true) while every existing rotate scenario
+/// used Owner, which passes under either operator. Only an exact-Admin
+/// session distinguishes `<` from `<=`.
+///
+/// @driving_port @real-io @US-03 @AC-16-13
+#[tokio::test]
+async fn an_admin_role_session_can_rotate_a_verification_credential() {
+    let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-admin").await;
+    let cookie = ctx.seed_session("admin@trailmark.example", "Admin").await;
+    let original_key = SigningKey::generate(&mut OsRng);
+    ctx.seed_credential(&original_key.verifying_key().to_bytes())
+        .await;
+
+    let new_key = SigningKey::generate(&mut OsRng);
+    let status = rotate(&ctx, Some(&cookie), &new_key).await;
+
+    assert_eq!(
+        status, 200,
+        "AC-16-13: an Admin-role session (the gate's exact threshold) must be able to rotate"
+    );
+}
