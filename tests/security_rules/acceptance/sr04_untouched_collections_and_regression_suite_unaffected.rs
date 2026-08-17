@@ -88,7 +88,6 @@ async fn a_collection_that_has_never_had_a_rule_defined_is_unaffected_by_this_fe
 ///
 /// @error @driving_port @real-io @US-04 @AC-17-15
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn a_rule_on_one_collection_does_not_affect_a_sibling_collection_without_its_own_rule() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-sr04-isolation").await;
     // journal_entries HAS a strict ownership rule; trail_guides has NONE.
