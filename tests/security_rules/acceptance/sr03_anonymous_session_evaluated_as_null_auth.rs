@@ -80,7 +80,6 @@ async fn a_never_signed_in_session_is_denied_by_a_rule_requiring_identity() {
 ///
 /// @driving_port @real-io @US-03 @AC-17-12
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn a_never_signed_in_session_succeeds_against_a_rule_allowing_public_read() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-sr03-publicread").await;
     ctx.seed_access_rule("trail_guides", "true").await;
@@ -112,7 +111,6 @@ async fn a_never_signed_in_session_succeeds_against_a_rule_allowing_public_read(
 ///
 /// @error @driving_port @real-io @US-03 @AC-17-13
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn an_invalid_client_identity_header_is_evaluated_identically_to_no_header_at_all() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-sr03-invalidheader").await;
     ctx.seed_access_rule("journal_entries", "request.auth != null").await;
