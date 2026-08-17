@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrations_apply_all_three_tables() {
+    async fn migrations_apply_all_tables() {
         let (_container, url) = start_postgres().await;
         let db = SystemDb::new(&url).await.unwrap();
         db.migrate().await.unwrap();
@@ -346,6 +346,10 @@ mod tests {
         );
         assert!(
             tables.contains(&"composite_indexes".to_string()),
+            "tables: {tables:?}"
+        );
+        assert!(
+            tables.contains(&"client_identity_credentials".to_string()),
             "tables: {tables:?}"
         );
     }
