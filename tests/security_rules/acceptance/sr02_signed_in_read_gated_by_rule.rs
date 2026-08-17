@@ -96,7 +96,6 @@ async fn a_signed_in_end_user_reading_their_own_document_succeeds_unchanged() {
 ///
 /// @error @driving_port @real-io @US-02 @AC-17-07
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn a_different_signed_in_end_users_read_of_the_same_document_is_denied() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-sr02-nonowner").await;
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -135,7 +134,6 @@ async fn a_different_signed_in_end_users_read_of_the_same_document_is_denied() {
 ///
 /// @driving_port @real-io @US-02 @AC-17-08
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn a_rule_not_based_on_ownership_allows_any_signed_in_caller() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-sr02-authreq").await;
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -169,7 +167,6 @@ async fn a_rule_not_based_on_ownership_allows_any_signed_in_caller() {
 ///
 /// @error @driving_port @real-io @US-02 @AC-17-09
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn a_condition_referencing_a_missing_field_fails_closed_not_with_an_error() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-sr02-missingfield").await;
     let signing_key = SigningKey::generate(&mut OsRng);
@@ -223,7 +220,6 @@ async fn a_condition_referencing_a_missing_field_fails_closed_not_with_an_error(
 ///
 /// @error @driving_port @real-io @US-02 @AC-17-10 @security-regression
 #[tokio::test]
-#[ignore = "one-scenario-at-a-time RED discipline — DELIVER unskips per step"]
 async fn a_denied_read_never_reveals_whether_the_target_document_exists() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-sr02-nonleak").await;
     let signing_key = SigningKey::generate(&mut OsRng);
