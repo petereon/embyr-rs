@@ -93,7 +93,8 @@ use embyr_proto::firestore::firestore_client::FirestoreClient;
 async fn marias_valid_token_signs_in_and_her_subsequent_getdoc_call_succeeds() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02").await;
     let signing_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&signing_key.verifying_key().to_bytes()).await;
+    ctx.seed_credential(&signing_key.verifying_key().to_bytes())
+        .await;
 
     let token = mint_client_identity_token(
         &signing_key,
@@ -112,10 +113,30 @@ async fn marias_valid_token_signs_in_and_her_subsequent_getdoc_call_succeeds() {
         .await
         .expect("sign-in request failed");
 
-    assert_eq!(sign_in_resp.status().as_u16(), 200, "AC-16-06: valid token sign-in must succeed");
-    let sign_in_body: serde_json::Value = sign_in_resp.json().await.expect("sign-in body must be JSON");
+    assert_eq!(
+        sign_in_resp.status().as_u16(),
+        200,
+        "AC-16-06: valid token sign-in must succeed"
+    );
+    let sign_in_body: serde_json::Value = sign_in_resp
+        .json()
+        .await
+        .expect("sign-in body must be JSON");
     assert_eq!(sign_in_body["localId"], "maria-santos");
-    assert!(sign_in_body.get("expiresIn").is_some());
+    // Mutation-testing gap (client-auth mutation pass): the value, not just
+    // presence, must be the actual remaining seconds until `exp` (token
+    // minted for `now_unix() + 3600`) — catches `expires_at_unix - now`
+    // degenerating into `+` or `/`.
+    let expires_in: i64 = sign_in_body["expiresIn"]
+        .as_str()
+        .expect("expiresIn must be a string")
+        .parse()
+        .expect("expiresIn must be a parseable integer");
+    assert!(
+        (3590..=3600).contains(&expires_in),
+        "AC-16-06: expiresIn must be the token's actual remaining seconds-to-expiry \
+         (expected ~3600, got {expires_in})"
+    );
 
     // Maria's subsequent getDoc call — still succeeds, exactly as any other
     // authenticated Firestore call (AC-16-06's "identity carried forward",
@@ -130,9 +151,10 @@ async fn marias_valid_token_signs_in_and_her_subsequent_getdoc_call_succeeds() {
         name: ctx.document_resource_name(),
         ..Default::default()
     });
-    request
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {}", ctx.api_key).parse().unwrap());
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
 
     let get_doc_resp = client.get_document(request).await;
     assert!(
@@ -172,7 +194,8 @@ async fn sign_in(ctx: &ClientAuthFullContext, token: Option<&str>) -> (u16, serd
 async fn signing_in_with_no_token_is_rejected_with_missing_token_reason() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-missing").await;
     let signing_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&signing_key.verifying_key().to_bytes()).await;
+    ctx.seed_credential(&signing_key.verifying_key().to_bytes())
+        .await;
 
     let (status, body) = sign_in(&ctx, None).await;
 
@@ -187,7 +210,8 @@ async fn signing_in_with_no_token_is_rejected_with_missing_token_reason() {
 async fn signing_in_with_a_corrupted_token_is_rejected_with_malformed_reason() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-malformed").await;
     let signing_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&signing_key.verifying_key().to_bytes()).await;
+    ctx.seed_credential(&signing_key.verifying_key().to_bytes())
+        .await;
 
     let (status, body) = sign_in(&ctx, Some("not-a-valid-jwt")).await;
 
@@ -203,9 +227,11 @@ async fn signing_in_with_a_corrupted_token_is_rejected_with_malformed_reason() {
 async fn danas_expired_token_is_rejected_with_expiry_reason() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-expired").await;
     let signing_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&signing_key.verifying_key().to_bytes()).await;
+    ctx.seed_credential(&signing_key.verifying_key().to_bytes())
+        .await;
 
-    let token = mint_client_identity_token(&signing_key, "dana-kim", &ctx.project_id, now_unix() - 3600);
+    let token =
+        mint_client_identity_token(&signing_key, "dana-kim", &ctx.project_id, now_unix() - 3600);
     let (status, body) = sign_in(&ctx, Some(&token)).await;
 
     assert_eq!(status, 400, "AC-16-07: expired token must be rejected");
@@ -220,7 +246,8 @@ async fn danas_expired_token_is_rejected_with_expiry_reason() {
 async fn token_minted_for_a_different_project_is_rejected_with_project_mismatch_reason() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-mismatch").await;
     let signing_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&signing_key.verifying_key().to_bytes()).await;
+    ctx.seed_credential(&signing_key.verifying_key().to_bytes())
+        .await;
 
     let token = mint_client_identity_token(
         &signing_key,
@@ -230,7 +257,10 @@ async fn token_minted_for_a_different_project_is_rejected_with_project_mismatch_
     );
     let (status, body) = sign_in(&ctx, Some(&token)).await;
 
-    assert_eq!(status, 400, "AC-16-07: wrong-project token must be rejected");
+    assert_eq!(
+        status, 400,
+        "AC-16-07: wrong-project token must be rejected"
+    );
     assert_eq!(body["reason"], "PROJECT_MISMATCH");
 }
 
@@ -249,13 +279,10 @@ async fn token_minted_for_a_different_project_is_rejected_with_project_mismatch_
 async fn an_expired_client_identity_header_does_not_break_an_ordinary_getdoc_call() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-guardrail-b").await;
     let signing_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&signing_key.verifying_key().to_bytes()).await;
-    let expired_token = mint_client_identity_token(
-        &signing_key,
-        "dana-kim",
-        &ctx.project_id,
-        now_unix() - 3600,
-    );
+    ctx.seed_credential(&signing_key.verifying_key().to_bytes())
+        .await;
+    let expired_token =
+        mint_client_identity_token(&signing_key, "dana-kim", &ctx.project_id, now_unix() - 3600);
 
     let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
         .expect("valid endpoint")
@@ -267,12 +294,14 @@ async fn an_expired_client_identity_header_does_not_break_an_ordinary_getdoc_cal
         name: ctx.document_resource_name(),
         ..Default::default()
     });
-    request
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {}", ctx.api_key).parse().unwrap());
-    request
-        .metadata_mut()
-        .insert("x-embyr-client-identity", format!("Bearer {expired_token}").parse().unwrap());
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    request.metadata_mut().insert(
+        "x-embyr-client-identity",
+        format!("Bearer {expired_token}").parse().unwrap(),
+    );
 
     let resp = client.get_document(request).await;
     assert!(
@@ -297,7 +326,8 @@ async fn an_expired_client_identity_header_does_not_break_an_ordinary_getdoc_cal
 ///
 /// @driving_port @real-io @US-02 @AC-16-08
 #[tokio::test]
-async fn a_session_that_never_presents_the_client_identity_header_never_reaches_the_new_verification_branch() {
+async fn a_session_that_never_presents_the_client_identity_header_never_reaches_the_new_verification_branch(
+) {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca02-guardrail-c").await;
     // Deliberately: no client_identity_credentials row seeded at all — the
     // unit-level proof (grpc/handler.rs::client_identity_extension_tests)
@@ -314,9 +344,10 @@ async fn a_session_that_never_presents_the_client_identity_header_never_reaches_
         name: ctx.document_resource_name(),
         ..Default::default()
     });
-    request
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {}", ctx.api_key).parse().unwrap());
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
     // No x-embyr-client-identity header at all.
 
     let resp = client.get_document(request).await;

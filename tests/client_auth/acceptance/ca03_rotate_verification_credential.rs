@@ -78,15 +78,23 @@ async fn a_valid_rotation_activates_the_new_credential_for_new_tokens() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-basic").await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     let original_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&original_key.verifying_key().to_bytes()).await;
+    ctx.seed_credential(&original_key.verifying_key().to_bytes())
+        .await;
 
     let new_key = SigningKey::generate(&mut OsRng);
     let rotate_status = rotate(&ctx, Some(&cookie), &new_key).await;
-    assert_eq!(rotate_status, 200, "AC-16-10: valid rotation must return 200");
+    assert_eq!(
+        rotate_status, 200,
+        "AC-16-10: valid rotation must return 200"
+    );
 
-    let new_token = mint_client_identity_token(&new_key, "maria-santos", &ctx.project_id, now_unix() + 3600);
+    let new_token =
+        mint_client_identity_token(&new_key, "maria-santos", &ctx.project_id, now_unix() + 3600);
     let (status, _) = sign_in(&ctx, &new_token).await;
-    assert_eq!(status, 200, "AC-16-10: a token minted under the NEW credential must verify");
+    assert_eq!(
+        status, 200,
+        "AC-16-10: a token minted under the NEW credential must verify"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,17 +105,23 @@ async fn a_valid_rotation_activates_the_new_credential_for_new_tokens() {
 ///
 /// @driving_port @real-io @US-03 @AC-16-11
 #[tokio::test]
-async fn a_token_minted_under_the_immediately_previous_credential_still_verifies_during_the_window() {
+async fn a_token_minted_under_the_immediately_previous_credential_still_verifies_during_the_window()
+{
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-prev").await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     let original_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&original_key.verifying_key().to_bytes()).await;
+    ctx.seed_credential(&original_key.verifying_key().to_bytes())
+        .await;
 
     // Maria's session, signed under the ORIGINAL credential, minted just
     // before Alex's rotation (US-03 Domain Example 1: "Maria's session,
     // signed in at 1:50pm under the old credential").
-    let marias_token =
-        mint_client_identity_token(&original_key, "maria-santos", &ctx.project_id, now_unix() + 3600);
+    let marias_token = mint_client_identity_token(
+        &original_key,
+        "maria-santos",
+        &ctx.project_id,
+        now_unix() + 3600,
+    );
 
     let new_key = SigningKey::generate(&mut OsRng);
     rotate(&ctx, Some(&cookie), &new_key).await;
@@ -135,8 +149,14 @@ async fn a_token_signed_under_a_credential_two_rotations_ago_is_rejected_as_no_l
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-stale").await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     let stale_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&stale_key.verifying_key().to_bytes()).await;
-    let stale_token = mint_client_identity_token(&stale_key, "maria-santos", &ctx.project_id, now_unix() + 3600);
+    ctx.seed_credential(&stale_key.verifying_key().to_bytes())
+        .await;
+    let stale_token = mint_client_identity_token(
+        &stale_key,
+        "maria-santos",
+        &ctx.project_id,
+        now_unix() + 3600,
+    );
 
     // Two rotations: stale_key -> intermediate_key -> final_key. After both,
     // {final_key, intermediate_key} are the only valid generations —
@@ -148,7 +168,10 @@ async fn a_token_signed_under_a_credential_two_rotations_ago_is_rejected_as_no_l
     rotate(&ctx, Some(&cookie), &final_key).await;
 
     let (status, body) = sign_in(&ctx, &stale_token).await;
-    assert_eq!(status, 400, "AC-16-12: a two-rotations-ago token must be rejected");
+    assert_eq!(
+        status, 400,
+        "AC-16-12: a two-rotations-ago token must be rejected"
+    );
     assert_eq!(
         body["reason"], "MALFORMED_TOKEN",
         "ADR-025: no separate 'stale credential' error class — rejected via the ordinary Malformed path"
@@ -166,11 +189,38 @@ async fn a_token_signed_under_a_credential_two_rotations_ago_is_rejected_as_no_l
 async fn rotation_without_a_valid_session_is_rejected() {
     let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-unauth").await;
     let original_key = SigningKey::generate(&mut OsRng);
-    ctx.seed_credential(&original_key.verifying_key().to_bytes()).await;
+    ctx.seed_credential(&original_key.verifying_key().to_bytes())
+        .await;
 
     let new_key = SigningKey::generate(&mut OsRng);
     // No Cookie header at all.
     let status = rotate(&ctx, None, &new_key).await;
 
-    assert_eq!(status, 401, "AC-16-13: rotation without a valid session must return 401");
+    assert_eq!(
+        status, 401,
+        "AC-16-13: rotation without a valid session must return 401"
+    );
+}
+
+/// Boundary scenario — role gate mirrors ca01's identical Viewer-cannot-
+/// register precedent, but exercised against rotate's own `session.role <
+/// Role::Admin` check (a separate source occurrence from register's; a
+/// mutation-testing pass found rotate's copy of this guard under-covered).
+///
+/// @error @driving_port @real-io @US-03 @AC-16-13
+#[tokio::test]
+async fn a_viewer_role_cannot_rotate_a_verification_credential() {
+    let ctx = ClientAuthFullContext::new("trailmark-prod-ca03-viewer").await;
+    let cookie = ctx.seed_session("viewer@trailmark.example", "Viewer").await;
+    let original_key = SigningKey::generate(&mut OsRng);
+    ctx.seed_credential(&original_key.verifying_key().to_bytes())
+        .await;
+
+    let new_key = SigningKey::generate(&mut OsRng);
+    let status = rotate(&ctx, Some(&cookie), &new_key).await;
+
+    assert_eq!(
+        status, 403,
+        "AC-16-13: Viewer role must not be able to rotate a credential"
+    );
 }
