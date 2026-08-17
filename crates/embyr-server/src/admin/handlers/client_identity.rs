@@ -103,6 +103,34 @@ fn rejection_reason(err: ClientIdentityVerifyError) -> &'static str {
     }
 }
 
+/// AC-16-02: malformed verification material named specifically (byte count
+/// found vs. the required 32), not a raw parse error. Shared by register and
+/// rotate — the identical validation shape and 400 JSON body both handlers
+/// used to build independently (mechanical dedup, zero behavior change).
+// axum::Response (~128+ bytes: status + header map + body) is the idiomatic
+// error type here — every other handler in this file already returns it as
+// its `Ok` variant; boxing it for this one error path would add noise
+// without a real correctness or performance benefit (mirrors
+// grpc/handler.rs's identical `result_large_err` allowance for `Status`).
+#[allow(clippy::result_large_err)]
+fn validate_public_key_length(raw: Vec<u8>) -> Result<[u8; 32], Response> {
+    if raw.len() != 32 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "public_key must be exactly 32 bytes, found {} byte(s)",
+                    raw.len()
+                )
+            })),
+        )
+            .into_response());
+    }
+    Ok(raw
+        .try_into()
+        .expect("length already verified to be exactly 32"))
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -128,26 +156,13 @@ pub async fn register_client_identity_credential(
     // `sdk_keys.rs::verify_project_ownership`, promoted to `shared.rs`).
     verify_project_ownership(pool, &project_id, session.account_id).await?;
 
-    // AC-16-02: malformed verification material named specifically (byte
-    // count found vs. the required 32), not a raw parse error.
     let raw = URL_SAFE_NO_PAD
         .decode(body.public_key.as_bytes())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if raw.len() != 32 {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "public_key must be exactly 32 bytes, found {} byte(s)",
-                    raw.len()
-                )
-            })),
-        )
-            .into_response());
-    }
-    let public_key: [u8; 32] = raw
-        .try_into()
-        .expect("length already verified to be exactly 32");
+    let public_key = match validate_public_key_length(raw) {
+        Ok(key) => key,
+        Err(response) => return Ok(response),
+    };
 
     match state
         .system_db
@@ -198,27 +213,15 @@ pub async fn rotate_client_identity_credential(
     let pool = state.system_db.pool();
     verify_project_ownership(pool, &project_id, session.account_id).await?;
 
-    // AC-16-02 (same shape as registration's validation): malformed
-    // verification material named specifically (byte count found vs. the
-    // required 32), not a raw parse error.
+    // AC-16-02 (same shape as registration's validation, via
+    // `validate_public_key_length`).
     let raw = URL_SAFE_NO_PAD
         .decode(body.public_key.as_bytes())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if raw.len() != 32 {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "public_key must be exactly 32 bytes, found {} byte(s)",
-                    raw.len()
-                )
-            })),
-        )
-            .into_response());
-    }
-    let public_key: [u8; 32] = raw
-        .try_into()
-        .expect("length already verified to be exactly 32");
+    let public_key = match validate_public_key_length(raw) {
+        Ok(key) => key,
+        Err(response) => return Ok(response),
+    };
 
     match state
         .system_db

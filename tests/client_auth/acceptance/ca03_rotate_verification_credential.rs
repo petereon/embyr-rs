@@ -39,6 +39,27 @@ async fn sign_in(ctx: &ClientAuthFullContext, token: &str) -> (u16, serde_json::
     (status, body)
 }
 
+/// Rotate `ctx.project_id`'s verification credential to `new_key`, via the
+/// session cookie in `cookie` (or none, when `cookie` is `None` — AC-16-13's
+/// unauthenticated-rotation scenario). Shared by every scenario in this file
+/// — identical POST shape at every call site.
+async fn rotate(ctx: &ClientAuthFullContext, cookie: Option<&str>, new_key: &SigningKey) -> u16 {
+    let mut req = reqwest::Client::new()
+        .post(ctx.admin_url(&format!(
+            "/admin/v1/projects/{}/client_identity_credential/rotate",
+            ctx.project_id
+        )))
+        .json(&serde_json::json!({"public_key": common::public_key_b64(new_key)}));
+    if let Some(cookie) = cookie {
+        req = req.header("Cookie", cookie);
+    }
+    req.send()
+        .await
+        .expect("rotate request failed")
+        .status()
+        .as_u16()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AC-16-10: valid rotation activates the new credential for new tokens
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,17 +81,8 @@ async fn a_valid_rotation_activates_the_new_credential_for_new_tokens() {
     ctx.seed_credential(&original_key.verifying_key().to_bytes()).await;
 
     let new_key = SigningKey::generate(&mut OsRng);
-    let rotate_resp = reqwest::Client::new()
-        .post(ctx.admin_url(&format!(
-            "/admin/v1/projects/{}/client_identity_credential/rotate",
-            ctx.project_id
-        )))
-        .header("Cookie", &cookie)
-        .json(&serde_json::json!({"public_key": common::public_key_b64(&new_key)}))
-        .send()
-        .await
-        .expect("rotate request failed");
-    assert_eq!(rotate_resp.status().as_u16(), 200, "AC-16-10: valid rotation must return 200");
+    let rotate_status = rotate(&ctx, Some(&cookie), &new_key).await;
+    assert_eq!(rotate_status, 200, "AC-16-10: valid rotation must return 200");
 
     let new_token = mint_client_identity_token(&new_key, "maria-santos", &ctx.project_id, now_unix() + 3600);
     let (status, _) = sign_in(&ctx, &new_token).await;
@@ -98,16 +110,7 @@ async fn a_token_minted_under_the_immediately_previous_credential_still_verifies
         mint_client_identity_token(&original_key, "maria-santos", &ctx.project_id, now_unix() + 3600);
 
     let new_key = SigningKey::generate(&mut OsRng);
-    reqwest::Client::new()
-        .post(ctx.admin_url(&format!(
-            "/admin/v1/projects/{}/client_identity_credential/rotate",
-            ctx.project_id
-        )))
-        .header("Cookie", &cookie)
-        .json(&serde_json::json!({"public_key": common::public_key_b64(&new_key)}))
-        .send()
-        .await
-        .expect("rotate request failed");
+    rotate(&ctx, Some(&cookie), &new_key).await;
 
     let (status, _) = sign_in(&ctx, &marias_token).await;
     assert_eq!(
@@ -139,28 +142,10 @@ async fn a_token_signed_under_a_credential_two_rotations_ago_is_rejected_as_no_l
     // {final_key, intermediate_key} are the only valid generations —
     // stale_key is neither current nor previous.
     let intermediate_key = SigningKey::generate(&mut OsRng);
-    reqwest::Client::new()
-        .post(ctx.admin_url(&format!(
-            "/admin/v1/projects/{}/client_identity_credential/rotate",
-            ctx.project_id
-        )))
-        .header("Cookie", &cookie)
-        .json(&serde_json::json!({"public_key": common::public_key_b64(&intermediate_key)}))
-        .send()
-        .await
-        .expect("first rotate request failed");
+    rotate(&ctx, Some(&cookie), &intermediate_key).await;
 
     let final_key = SigningKey::generate(&mut OsRng);
-    reqwest::Client::new()
-        .post(ctx.admin_url(&format!(
-            "/admin/v1/projects/{}/client_identity_credential/rotate",
-            ctx.project_id
-        )))
-        .header("Cookie", &cookie)
-        .json(&serde_json::json!({"public_key": common::public_key_b64(&final_key)}))
-        .send()
-        .await
-        .expect("second rotate request failed");
+    rotate(&ctx, Some(&cookie), &final_key).await;
 
     let (status, body) = sign_in(&ctx, &stale_token).await;
     assert_eq!(status, 400, "AC-16-12: a two-rotations-ago token must be rejected");
@@ -184,16 +169,8 @@ async fn rotation_without_a_valid_session_is_rejected() {
     ctx.seed_credential(&original_key.verifying_key().to_bytes()).await;
 
     let new_key = SigningKey::generate(&mut OsRng);
-    let resp = reqwest::Client::new()
-        .post(ctx.admin_url(&format!(
-            "/admin/v1/projects/{}/client_identity_credential/rotate",
-            ctx.project_id
-        )))
-        // No Cookie header at all.
-        .json(&serde_json::json!({"public_key": common::public_key_b64(&new_key)}))
-        .send()
-        .await
-        .expect("rotate request failed");
+    // No Cookie header at all.
+    let status = rotate(&ctx, None, &new_key).await;
 
-    assert_eq!(resp.status().as_u16(), 401, "AC-16-13: rotation without a valid session must return 401");
+    assert_eq!(status, 401, "AC-16-13: rotation without a valid session must return 401");
 }
