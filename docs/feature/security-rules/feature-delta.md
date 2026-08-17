@@ -734,3 +734,353 @@ The remaining 0.03 gap is OQ-SR-01 below (query-path scoping detail for a future
 
 ### Upstream Changes
 - None — no DISCOVER/DIVERGE artifacts exist for this feature (same as `client-auth`); this DISCUSS is grounded directly in `client-auth`'s own shipped artifacts and `docs/product/jobs.yaml`, per the task's own instruction that this is greenfield for the rules-evaluation piece landing on a mature existing system.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Wave**: DESIGN | **Agent**: Morgan (nw-solution-architect) | **Date**: 2026-08-17 | **Mode**: Propose (autonomous analysis, no live user available — options presented with trade-offs below, self-selected with rationale, exactly as a propose-mode session would resolve them)
+
+✓ `docs/product/architecture/brief.md` § System Architecture, § Domain Model (Bounded Contexts, Aggregates, Context Map), § Application Architecture (Development Paradigm, Architectural Pattern, Component Decomposition, Driving/Driven Ports, Technology Choices, Reuse Analysis, Application-Level Decisions Table) — read in full
+✓ `docs/product/architecture/brief.md` § Application Architecture — client-auth (lines 3316-3478) — read in full; direct structural precedent for this feature's own section
+✓ `docs/product/architecture/adr-002-bounded-contexts.md` — read in full; Option D's rejection reasoning quoted verbatim and re-applied below (§ Bounded-Context Placement)
+✓ `docs/feature/security-rules/feature-delta.md` (this file, DISCUSS sections, full) — 5 user stories, 19 ACs, 3 Framing Resolutions, System Constraints, Journey, Story Map, Outcome KPIs, Open Questions, and the 8-item Explicit-flags-for-DESIGN list, all consulted directly below
+✓ `docs/feature/client-auth/feature-delta.md` (DESIGN wave section, full) — `VerifiedEndUserIdentity` shape, ADR-024/025/026's structure and shape, the admin-handler pattern in `client_identity.rs`, the register-then-rotate lifecycle this feature deliberately does NOT reuse (Resolution 3)
+✓ `crates/embyr-server/src/grpc/handler.rs` (full, 1369 lines) — `authenticate()` (129-333, unchanged, three-role `api_key` check confirmed not restructured), `extract_client_identity_token`/`attach_client_identity_if_present` (144-383), and `handle_get_document` (506-551) — confirmed the exact current shape of the discarded `_verified_identity` binding
+✓ `crates/embyr-core/src/client_identity/mod.rs` (full) — confirms `VerifiedEndUserIdentity { end_user_id, project_id, expires_at_unix }` is the complete identity shape available; no custom-claims map
+✓ `crates/embyr-server/src/admin/handlers/client_identity.rs` (full) — register/rotate/verify handler pattern, direct precedent for the new rule-definition/simulation handler
+✓ `crates/embyr-server/src/admin/handlers/shared.rs` (full) — `verify_project_ownership`, reused directly (not re-implemented)
+✓ `crates/embyr-server/src/adapters/system_db.rs` (targeted read: `ClientIdentityCredentialRow`, `insert_client_identity_credential`, `get_client_identity_credential`, `rotate_client_identity_credential`, lines 9-282) — direct adapter-method-shape precedent
+✓ Migration directory listing (`crates/embyr-server/migrations/*.sql`) — confirms 0021 is the highest existing migration; this feature adds 0022
+✓ ADR directory listing (`docs/product/architecture/adr-*.md`) — confirms 026 is the highest existing ADR; this feature adds 027, 028, 029, and amends 002
+
+No contradictions found between DISCUSS's requirements and existing architecture. `nwave-ai outcomes check-delta` was **skipped** — the CLI is not available in this environment; noted here rather than silently omitted, per the task's explicit instruction not to block on it.
+
+---
+
+## Wave: DESIGN / [REF] Quality Attribute Priorities
+
+See `docs/product/architecture/brief.md` § Application Architecture — security-rules § Quality Attribute Priorities for the full ranked table (reproduced there for SSOT completeness). Summary, ranked: (1) no regression to collections with no rule defined — structurally enforced, not just tested; (2) existence non-leakage (AC-17-10); (3) fail-closed correctness (AC-17-09); (4) shared-artifact integrity between simulation and real enforcement (HIGH integration risk, § Handoff Package flag 8); (5) identity-reuse integrity (HIGH integration risk, flag 5); (6) grammar containment (flag 1).
+
+---
+
+## Wave: DESIGN / [REF] Existing System Analysis
+
+Confirmed by direct code read (not assumed): `handle_get_document` (grpc/handler.rs:506-551) is the exact, single call site DISCUSS's Pre-requisites section names. `_verified_identity` (line 530) is genuinely computed and genuinely discarded today — the binding's underscore prefix is not decorative, `cargo build` would warn on an unused binding without it, confirming no other code path already consumes this value. `client_identity.rs`'s three handlers (register/rotate/verify) and `system_db.rs`'s matching adapter methods (169-281) are the closest available precedent for both the admin-handler shape and the storage-adapter shape a new rule subsystem needs — reused directly, not reimplemented (see § Reuse Analysis below). No existing code anywhere evaluates a boolean condition over identity + document data — confirmed independently during DESIGN (not just carried from DISCUSS's own Walking Skeleton Evaluation) by reading `grpc/handler.rs` in full and finding no such logic in any `handle_*` method.
+
+---
+
+## Wave: DESIGN / [REF] Constraint and Priority Analysis
+
+The single highest-consequence constraint (§ System Constraints, "critical regression guardrail") is quantified precisely, not asserted: 113 pre-existing scenarios (72 `embyr-rs` + 41 `client-auth`), 0% of which define a rule today. Any design that adds even a single unconditional branch of new logic to the no-rule-defined path risks all 113. This is why § Composition (ADR-029) treats the `get_access_rule` → `None` short-circuit as the load-bearing structural decision of the whole feature, not an incidental implementation detail — it is the single point where 100% of the regression risk is retired by construction. Constraint-free opportunity: the parser/evaluator (ADR-027) has zero interaction with existing code paths at all — it is pure, additive, new code with no regression surface of its own; effort there is unconstrained by the regression risk and was prioritized on correctness/simplicity grounds instead (hand-rolled parser, Decision Driver 4 in ADR-027).
+
+---
+
+## Wave: DESIGN / [REF] Architecture Design
+
+**Pattern**: No change to the project's Hexagonal (ports-and-adapters) architecture or Cargo-workspace enforcement mechanism (brief.md § Architectural Pattern). This feature adds one new inner hexagon (BC-4) using the identical mechanism BC-1/BC-2/BC-3 already use.
+
+**The 8 Explicit Flags for DESIGN — resolved in order:**
+
+**1. Grammar scope — confirmed NOT widened or narrowed.** Resolution 1's Option C
+(comparison + boolean combinators over `request.auth`/`resource.data.<field>`/
+`true`/`false`, no cross-document reads/functions/wildcards) is implemented
+exactly as locked. ADR-027's grammar (EBNF, § Decision) has no production for
+`get()`/`exists()`, function calls, or wildcard paths — they are explicitly
+*recognized and rejected* (`ConditionParseError::UnsupportedConstruct`), not
+silently accepted or silently absent. One scoped clarification is flagged, not
+silently resolved: the locked grammar's literal-operand set (`true`/`false` only,
+no string/number literals) is narrower than some real-world Firestore rules would
+need — recorded as **OQ-SR-04** for DISTILL, not resolved unilaterally by DESIGN
+in either direction (see ADR-027 § Grammar Gap Flagged for DISTILL).
+
+**2. Rule lifecycle — confirmed idempotent upsert, not register-then-rotate.**
+ADR-028's schema (`access_rules`, composite PK `(project_id, collection_path)`,
+single `upsert_access_rule` method using `INSERT ... ON CONFLICT ... DO UPDATE`)
+makes "define" and "redefine" the *same SQL statement* — there is no code branch
+distinguishing first-time definition from replacement, unlike `client_identity_credentials`'s
+deliberate `insert_*`/`rotate_*` split. Persistence shape decided: single row per
+collection, in-place UPDATE (not versioned rows) — see ADR-028 § Considered
+Options for the two versioned-row/audit-log alternatives considered and rejected
+(both explicitly deferred to Epic 2e, not silently dropped).
+
+**3. Structural regression guardrail — designed as a structural guarantee, not
+just a tested one.** `get_access_rule(project_id, collection_path)` returning
+`None` short-circuits `handle_get_document` before `embyr_core::access_control::evaluate()`
+is ever called — the exact code-path shape flagged by the task's own hint,
+mirroring `extract_client_identity_token` returning `None` short-circuiting
+`attach_client_identity_if_present`. Every one of the 113 pre-existing regression
+scenarios exercises a project/collection with zero rows in `access_rules`, so
+every one of them takes this identical, unmodified branch — the guarantee is a
+property of that branch containing no new code (ADR-029 § Structural
+no-rule-defined guardrail), not merely a property re-verified by running the
+suite (though AC-17-16 does that too, independently).
+
+**4. Existence non-leakage — designed structurally.** Document existence is
+checked (`adapter.get_document`) *before* the allow/deny decision, exactly as
+today; the rule-lookup existence-check is independent of document existence
+(keyed only on project+collection). When a rule is defined, `evaluate()` runs
+unconditionally against either the real fetched fields or an empty field map (for
+a non-existent document) — `Deny` always produces the identical `PermissionDenied`
+response regardless of which. This structurally collapses "denied" and "not
+found" into one indistinguishable wire-level outcome **for any rule that
+references `resource.data`** (ADR-029 § Existence non-leakage) — the exact class
+AC-17-10's own UAT scenario is written against. A scoped clarification for
+content-blind rules (never referencing `resource.data`) is flagged as **OQ-SR-06**
+rather than silently resolved.
+
+**5. Identity reuse — exact mechanism designed.** In `handle_get_document`,
+`_verified_identity` (line 530, currently discarded) is renamed to
+`verified_identity` and threaded into the new evaluation step via a pure, local
+translation (`verified_identity.as_ref().map(|v| AuthContext { uid: v.end_user_id.clone() })`)
+performed at the call site — `attach_client_identity_if_present()` itself is not
+modified in any way (ADR-029 § Identity reuse). No second verification path is
+introduced anywhere.
+
+**6. `GetDocument`-only enforcement surface — confirmed.** The single call site
+touched is `crates/embyr-server/src/grpc/handler.rs::handle_get_document`. No
+other RPC handler (`handle_create_document`, `handle_update_document`,
+`handle_delete_document`, `handle_batch_get_documents`, `handle_begin_transaction`,
+`handle_commit`, `handle_rollback`, `handle_run_query`, `handle_listen`) is
+modified by this design — confirmed by direct enumeration against the full file
+read during Prior Wave Consultation.
+
+**7. Bounded-context placement — resolved: a new 4th bounded context, BC-4
+Access Control.** See § Bounded-Context Placement below for the full alternatives
+analysis against ADR-002's own five decision drivers, and
+`docs/product/architecture/adr-002-bounded-contexts.md` § Changed Assumptions for
+the formal amendment.
+
+**8. Simulation shares the exact evaluation routine — designed and named.**
+`embyr_core::access_control::evaluate()` (ADR-027) is called from exactly two
+production sites: (a) `handle_get_document` (real enforcement, US-02/03/04), auth
+sourced from `attach_client_identity_if_present()`'s result, resource fields from
+`adapter.get_document()`'s result; (b) `admin::handlers::access_rules::simulate_access_rule`
+(US-05, new), auth sourced from the caller-supplied synthetic identity in the
+request body (or `None`), resource fields from the caller-supplied synthetic
+document payload. `parse_condition()` is likewise shared across three call sites
+(define/redefine's validation, real enforcement's re-parse, simulation's
+candidate-condition parse). No third, independently-maintained evaluation
+implementation exists anywhere (ADR-029 § Simulation shares the exact evaluation
+routine).
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement
+
+**Options presented (propose-mode, self-selected with rationale — no live user available):**
+
+| Option | Description | Fit against ADR-002's 5 decision drivers |
+|---|---|---|
+| **(A) Extend BC-1 Tenant Management** | Add `AccessRule` to BC-1's ubiquitous language alongside `Project`/`AuthKey`/`BackendConfig`/`ClientIdentityCredential`. | **Rejected.** Storage locality (System DB) superficially fits, but a `Rule` has an entity, a lifecycle, and invariants — exactly the three properties Option D's *rejection* of a BC-1 fold-in turned on being *absent* for credential resolution. Applying Option D's conclusion to a case that fails Option D's own test would be inconsistent. Continues a "BC-1 as junk drawer" drift. |
+| **(B) Extend BC-2 Document Storage** | Add `AccessRule` alongside `Document`/`Transaction`/`Index`, since evaluation reads `resource.data`. | **Rejected — weakest fit.** Rule *storage* is System-DB-scoped; BC-2's own defining boundary (ADR-002's "primary signal") is "Customer DB only... BC-2 never reads the System DB." Folding rule storage into BC-2 breaks that boundary directly. BC-2's OCC consistency model also has no analog for a rule (idempotent replace, not version-conflict-detected). |
+| **(C) A fourth bounded context, BC-4 Access Control** | New context owns the `AccessRule` aggregate; read-only, non-transactional dependency on BC-2's already-fetched `resource.data`, mirroring BC-3's own established read-only dependency on BC-2. | **Accepted — strongest fit on all 5 drivers**, most decisively on language divergence (Rule/Condition/Evaluation vocabulary exists nowhere else) and codebase isolation (independently unit-testable with no `Project` or `Document` aggregate at all). |
+
+**Selected: Option C.** Full driver-by-driver analysis, the BC-3 precedent this
+option directly mirrors, and the formal ADR-002 amendment are in
+`docs/product/architecture/adr-029-access-control-composition-and-bounded-context.md`
+§ Considered Options — Bounded-Context Placement and
+`docs/product/architecture/adr-002-bounded-contexts.md` § Changed Assumptions
+(Option D's original text quoted verbatim, new assumption stated, Context Map
+addition appended — ADR-002's existing content is not deleted or rewritten).
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+See `docs/product/architecture/brief.md` § Application Architecture —
+security-rules § Component Decomposition for the full table (reproduced there for
+SSOT completeness). Summary: `embyr-core::access_control` (new, pure, BC-4),
+`embyr-server::admin::handlers::access_rules` (new, BC-4 driving adapter),
+`embyr-server::adapters::system_db` (extended, BC-4 driven adapter),
+`embyr-server::grpc::handler::handle_get_document` (extended, single call site),
+`access_rules` table (new, migration 0022).
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports
+
+See `docs/product/architecture/brief.md` § Application Architecture —
+security-rules § Driving Ports (Inbound) for the full table. Summary:
+`AccessRuleAdminPort` (`POST /admin/v1/projects/:project_id/access_rules`,
+define/redefine, US-01, Owner/Admin), `AccessRuleSimulationPort`
+(`POST .../access_rules/simulate`, US-05, any role, zero writes), and
+`FirestoreGrpcPort`/`RestPort` extended additively (no new RPC, no new endpoint —
+`GetDocument`'s existing shape now additionally reflects rule evaluation).
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters
+
+No new driven port. `upsert_access_rule`/`get_access_rule` reuse the existing,
+already-probed `SystemDb` connection pool. No new adapter, no new `probe()` — see
+`docs/product/architecture/brief.md` § Driven Ports + Adapters — security-rules
+additions for the full Earned Trust (Principle 12) reasoning: `embyr_core::access_control`'s
+`evaluate()`/`parse_condition()` are pure, deterministic CPU computation with no
+partial-trust surface, identical in kind to `verify_client_identity_token()`'s own
+"no new probe needed" justification (ADR-024).
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new workspace dependency. Condition parser: hand-rolled recursive-descent
+(zero new crate) — `pest`/`nom` parser-generator crates were considered and
+rejected (ADR-027 § Considered Options) specifically because their expressiveness
+invites silently widening the locked grammar (Decision Driver 1), and because a
+generator is disproportionate tooling for a grammar this small and deliberately
+closed. `resource.data.<field>` values reuse the existing `embyr_core::domain::field_value::FieldValue`
+type unchanged — no new value-representation type.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table
+
+See `docs/product/architecture/brief.md` § Application Architecture —
+security-rules § Decisions Table (DDD-SR-1 through DDD-SR-9) for the full table.
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis (hard gate)
+
+See `docs/product/architecture/brief.md` § Application Architecture —
+security-rules § Reuse Analysis for the full 12-row table (10 EXTEND, 2 justified
+CREATE NEW, 0 unjustified CREATE NEW). The two CREATE NEW rows: the condition
+parser/evaluator (no existing mechanism evaluates a boolean condition over
+identity + document data — confirmed independently by DESIGN's own code read, not
+just carried from DISCUSS) and the `access_rules` table (no existing table stores
+per-collection conditions; its schema shape mirrors an existing precedent, but the
+data itself is new).
+
+---
+
+## Wave: DESIGN / [REF] C4 Diagrams
+
+See `docs/product/architecture/brief.md` § Application Architecture —
+security-rules for the full C4 System Context, Container, and Component (BC-4
+Access Control) diagrams in Mermaid. No new external system is introduced;
+Trailmark's end users (Maria, Dana) and Alex's admin credential are the same
+actors `client-auth` already established. A Component diagram is included
+(warranted: 5 separable pieces — parser, evaluator, storage adapter, 2 admin
+handlers, 1 composition point — whose call-graph is exactly what makes flags 3 and
+8 above verifiable at a glance).
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+Style: Hexagonal (ports-and-adapters), unchanged. `embyr-core::access_control` has
+zero IO imports, enforced by the existing `cargo-deny`/`deny.toml` rule already
+covering all of `embyr-core` — no new crate-specific configuration needed (new
+submodule, not a new crate). No new adapter, no new `probe()`, so no new
+enforcement-tooling requirement (unlike `client-auth`, which needed none either,
+for the identical "no new substrate" reason).
+
+---
+
+## Wave: DESIGN / [REF] Open Questions
+
+See `docs/product/architecture/brief.md` § Application Architecture —
+security-rules § Open Questions for the full table. New this wave: **OQ-SR-04**
+(literal-operand grammar gap — string/number literals not expressible in v1,
+flagged for DISTILL to confirm scope), **OQ-SR-05** (parsed-AST caching, deferred
+pending profiling, mirrors OQ-CA-02), **OQ-SR-06** (content-blind-rule existence
+-leak scoped clarification, flagged for DISTILL). Carried and resolved this wave:
+**OQ-SR-01** (bounded-context placement — now closed, BC-4). Carried and still
+open, out of this feature's scope: OQ-SR-02 (Epic 2b's `resource`/`request.resource`
+need), OQ-SR-03 (custom claims / role-based rules).
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package
+
+**To DISTILL (acceptance-designer)**: this `feature-delta.md` (DISCUSS + DESIGN
+sections), `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md`,
+`adr-028-access-rule-storage-and-lifecycle.md`,
+`adr-029-access-control-composition-and-bounded-context.md`,
+`docs/product/architecture/adr-002-bounded-contexts.md` § Changed Assumptions,
+`docs/product/architecture/brief.md` § Application Architecture — security-rules.
+
+**To DEVOPS (platform-architect)**: § Outcome KPIs (DISCUSS section, unchanged)
+for instrumentation planning; § External Integrations — security-rules confirms
+zero new outbound network dependency, no contract-testing surface introduced.
+
+**Explicit flags for DISTILL/DELIVER**:
+1. **ADR-029's structural regression argument is the acceptance-test design
+   center of gravity** — mirrors `client-auth`'s ADR-026 precedent exactly.
+   DISTILL should design the "collection with no rule defined is unaffected"
+   scenario as a direct re-run of the existing 113-scenario suite, unmodified, not
+   just one more happy-path test.
+2. **OQ-SR-04 (literal-operand grammar gap) should be confirmed before DELIVER
+   locks the parser's literal-operand support** — DESIGN implemented the literal
+   locked-grammar reading (booleans only), not a guess in either direction.
+3. **OQ-SR-06 (content-blind-rule existence-leak nuance) is a genuine, scoped
+   edge case, not an oversight** — DISTILL should decide explicitly whether to
+   write an acceptance scenario for it.
+4. **Write/query/listen enforcement remains explicitly out of scope** —
+   `embyr_core::access_control`'s types are read-path-shaped; Epic 2b/2c/2d will
+   need to extend, not replace, `Condition`/`Operand` if/when they start.
+5. **No new Earned Trust probe was added** — flagged explicitly (not silently
+   skipped) per Principle 12 discipline; the reasoning (pure computation, reused
+   already-probed `SystemDb`) is in ADR-029 § Enforcement.
+
+Peer review: not invoked per-wave (default skip; reviewing against the four named
+triggers — contested ADR: no, all three ADRs have single accepted options with
+documented, evidence-driven alternatives; novel pattern: no, BC-4 deliberately
+mirrors BC-3's already-established read-only-dependency precedent rather than
+inventing a new relationship kind; performance-budget unverified by spike: no
+explicit performance budget was set, and the grammar's CPU cost is
+well-characterized as negligible relative to the existing Postgres round-trip
+already on this hot path; security boundary change: arguably yes, in the sense
+that a new authorization dimension is introduced, but the boundary itself
+[fail-closed, non-leaking, identity-reuse-only] is the entire subject of
+ADR-027/028/029's Alternatives analysis, already peer-reviewable from the
+documents as written — mirrors `client-auth`'s own identical reasoning for
+skipping per-wave review). Mandatory consolidated review fires at end of DISTILL
+covering all 4 waves in parallel, per standard process.
+
+---
+
+## Wave: DESIGN / [REF] SSOT Updates
+
+- `docs/product/architecture/brief.md` — new `## Application Architecture — security-rules` section added.
+- `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md` — new.
+- `docs/product/architecture/adr-028-access-rule-storage-and-lifecycle.md` — new.
+- `docs/product/architecture/adr-029-access-control-composition-and-bounded-context.md` — new.
+- `docs/product/architecture/adr-002-bounded-contexts.md` — **amended** (§ Changed
+  Assumptions appended; no existing content deleted or rewritten). This is the
+  one deliberate, documented reversal this wave makes: Option D's fold-into-BC-1
+  conclusion is confirmed correct for credential resolution and confirmed *not*
+  transferable to this feature's rule subsystem.
+
+---
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] Grammar implemented exactly as Resolution 1's Option C locks it — hand-rolled recursive-descent parser, zero new dependency, structurally incapable of silently widening (see: ADR-027)
+- [D2] Rule lifecycle is a single idempotent-upsert SQL statement (`ON CONFLICT DO UPDATE`), not a register/rotate split — matches Resolution 3's lock structurally, not just observably (see: ADR-028)
+- [D3] The no-rule-defined guardrail (AC-17-14/15/16) is structural: `get_access_rule` returning `None` short-circuits before any evaluation logic runs, mirroring `attach_client_identity_if_present`'s own AC-16-08(c) precedent (see: ADR-029)
+- [D4] Existence non-leakage (AC-17-10) is structural for any rule referencing `resource.data`: `Deny` always produces an identical `PermissionDenied` response regardless of document existence, via a shared fail-closed/empty-field-map mechanism (see: ADR-029)
+- [D5] A 4th bounded context, BC-4 Access Control, is added — evaluated against ADR-002's own 5 decision drivers, not defaulted by inertia; amends ADR-002 via an appended, non-destructive § Changed Assumptions (see: ADR-029, adr-002 amendment)
+
+### Architecture Summary
+- Pattern: Hexagonal (ports-and-adapters), modular monolith — unchanged project-wide pattern, one new inner hexagon (BC-4)
+- Paradigm: Functional-where-practical Rust — unchanged; `evaluate()`/`parse_condition()` are pure, total/infallible-by-design functions
+- Key components: `embyr-core::access_control` (parser + evaluator, pure), `embyr-server::admin::handlers::access_rules` (define/redefine + simulate), `embyr-server::adapters::system_db` (extended: `upsert_access_rule`/`get_access_rule`), `embyr-server::grpc::handler::handle_get_document` (extended, single call site), `access_rules` table (migration 0022)
+
+### Reuse Analysis
+10 EXTEND, 2 justified CREATE NEW (condition parser/evaluator; `access_rules` table), 0 unjustified CREATE NEW. Full table: `docs/product/architecture/brief.md` § Application Architecture — security-rules § Reuse Analysis.
+
+### Technology Stack
+- No new workspace dependency. Hand-rolled recursive-descent parser (rejected `pest`/`nom` — grammar-widening risk, disproportionate tooling for a deliberately small closed grammar). Reuses `embyr_core::domain::field_value::FieldValue`, existing `SystemDb`/`sqlx`, existing `SessionContext`/Axum session sub-router.
+
+### Constraints Established
+- v1 enforcement surface is `GetDocument` only — single call site, confirmed by full-file enumeration.
+- Rule evaluation consumes `client-auth`'s existing `VerifiedEndUserIdentity`/`None`, never re-derives it.
+- A denied read never reveals document existence, for any rule referencing `resource.data` (scoped clarification for content-blind rules: OQ-SR-06).
+- A collection with no rule defined is provably unaffected by construction, not just by test.
+- Literal-operand grammar is booleans-only in v1 (OQ-SR-04, flagged not silently decided).
+
+### Upstream Changes
+- `docs/product/architecture/adr-002-bounded-contexts.md` amended (§ Changed Assumptions, appended) — a new 4th bounded context, BC-4 Access Control, is established. This is the one architecture-driven reversal this wave makes to a prior-wave (DESIGN-owned, cross-feature) artifact; it does not change any DISCUSS-locked observable behavior or user story.

@@ -3475,4 +3475,266 @@ SDK/app's own network path to embyr, not a new embyr-to-Trailmark integration). 
 a deliberate consequence of ADR-024's Option C selection over Option B (JWKS discovery),
 which would have introduced exactly such an integration.
 
+---
+
+## Application Architecture — security-rules
+
+> Updated: 2026-08-17
+> Feature: security-rules (JOB-17 — per-collection access-control rules gating
+> `GetDocument` reads by identity + document content, Epic 2a of the two-epic
+> Firebase-security-model initiative's second epic; epic 1 = `client-auth`)
+> Mode: Propose (autonomous analysis per Decision 1, propose-mode dispatch)
+> ADRs: `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md`
+> (new), `adr-028-access-rule-storage-and-lifecycle.md` (new),
+> `adr-029-access-control-composition-and-bounded-context.md` (new). Also amends
+> `adr-002-bounded-contexts.md` (§ Changed Assumptions, appended, not rewritten).
+
+---
+
+### Wave: DESIGN / [REF] Quality Attribute Priorities — security-rules
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|---------------------|
+| 1 | **No regression to collections/traffic with no rule defined** | KPI #3 guardrail (AC-17-14/15/16) — this feature's single highest-consequence defect class. Structurally enforced via `get_access_rule` returning `None` short-circuiting before any evaluation logic runs (ADR-029), not just tested. |
+| 2 | **Existence non-leakage** | AC-17-10, a locked security-observable behavior. Drives ADR-029's evaluation-ordering and uniform-`PermissionDenied`-response decisions. |
+| 3 | **Fail-closed correctness (never crash, never over-permit on missing data)** | AC-17-09. Drives ADR-027's total, infallible `evaluate()` signature. |
+| 4 | **Shared-artifact integrity (no evaluation-routine drift between real enforcement and simulation)** | § Handoff Package flag 8, HIGH integration risk. Drives ADR-029's two-call-sites-one-function design. |
+| 5 | **Identity-reuse integrity (no re-derivation of `request.auth`)** | § Handoff Package flag 5, HIGH integration risk. Drives ADR-029's identity-threading design. |
+| 6 | **Grammar containment (do not silently widen the locked v1 expressiveness)** | § Handoff Package flag 1. Drives ADR-027's hand-rolled-parser-over-parser-generator decision. |
+
+---
+
+### Wave: DESIGN / [REF] Reuse Analysis — security-rules (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---------------------|------|---------|----------|----------------|
+| `SessionContext` extractor + session sub-router | `admin/extractors/session_context.rs`, `admin/middleware/session_auth.rs`, `admin/router.rs` | Project-owner-scoped admin action auth | **EXTEND** | 2 new routes (define/redefine, simulate) added to the existing session sub-router, reusing `SessionContext` verbatim. Zero new auth middleware. |
+| `verify_project_ownership` (shared helper) | `admin/handlers/shared.rs` | Project-ownership-by-account_id check | **EXTEND** | Called directly by the new `access_rules.rs` handler — no second, independently-maintained copy. |
+| Admin handler shape (Owner/Admin gate, no-raw-material-in-response convention, JSON error body shape) | `admin/handlers/client_identity.rs`, `admin/handlers/sdk_keys.rs` | Handler structure for project-scoped mutating admin actions | **EXTEND (pattern reuse)** | The new `access_rules.rs` handler follows the identical shape — `Role::Admin` gate on define/redefine, any-role on simulate (mirroring `verify_client_identity_credential`'s debug-verify precedent). |
+| `client_identity_credentials`-style adapter CRUD (`insert_*`/`get_*`/`rotate_*`) | `adapters/system_db.rs:169-281` | CRUD pattern for project-scoped System DB state | **EXTEND (pattern reuse; new table, new upsert shape)** | `upsert_access_rule`/`get_access_rule` follow the identical method shape (typed row struct, `try_get` field mapping, `CoreError::BackendUnavailable` on failure) but collapse insert/rotate into one upsert method — a deliberate deviation from the pattern, justified in ADR-028 by Resolution 3's idempotent-upsert lock (register/rotate's *split* exists because those two actions are observably different; define/redefine are not). |
+| `embyr-core::client_identity` module shape (pure fn + value types + error enum, zero IO) | `client_identity/mod.rs` | Zero-IO domain module pattern | **EXTEND (pattern reuse)** | `embyr-core::access_control` follows the identical shape (ADR-027). |
+| `VerifiedEndUserIdentity` / `attach_client_identity_if_present` | `client_identity/mod.rs`; `grpc/handler.rs:358-383` | Identity available to `request.auth` | **EXTEND (consume, not modify)** | Zero changes to this function; its previously-discarded return value (`_verified_identity`) is now consumed (renamed, threaded into evaluation) — see ADR-029. |
+| `handle_get_document` | `grpc/handler.rs:506-551` | The single `GetDocument` call site | **EXTEND** | Additive rule-lookup + evaluation step inserted after identity-attach, before the response is finalized. No other RPC handler touched. |
+| Admin router registration (`build_admin_router`/session_router) | `admin/router.rs` | Route registration | **EXTEND** | 2 new routes added; zero new middleware, zero signature changes. |
+| `embyr_core::domain::field_value::FieldValue` | `domain/field_value.rs` | Document field-value representation | **EXTEND (reuse unchanged)** | `resource.data.<field>` values are represented directly as the existing `FieldValue` type — no new value-representation type introduced for BC-4. |
+| `authenticate()`'s "fast-path status check before expensive verification" precedent | `grpc/handler.rs:200-207` | Cheap existence/status check gating an expensive step | **EXTEND (pattern reuse)** | `get_access_rule`'s existence-check-before-evaluation shape directly reuses this precedent, per DISCUSS's own NFR note request. |
+| Condition parser/evaluator (`parse_condition`, `evaluate`) | — | Boolean-expression evaluation over identity + document data | **CREATE NEW** | Confirmed by DISCUSS's own Walking Skeleton Evaluation: "no existing mechanism evaluates a boolean condition over identity + document data — that computation does not exist anywhere in the codebase today." |
+| `access_rules` table | `migrations/0022_access_rules.sql` | Rule storage | **CREATE NEW** | No existing table stores per-collection conditions. Schema shape mirrors an existing precedent (EXTEND-pattern, above) but the data itself is new. |
+
+**Verdict: 10 EXTEND, 2 CREATE NEW (both extensively justified — no existing
+mechanism evaluates a condition over identity+document data, confirmed by
+DISCUSS's own walking-skeleton analysis; no existing table stores rule
+conditions), 0 unjustified CREATE NEW.**
+
+---
+
+### Wave: DESIGN / [REF] Development Paradigm Confirmation — security-rules
+
+No change to the project-wide paradigm. `embyr-core::access_control` follows the
+existing "functional-where-practical Rust" discipline (§ Development Paradigm,
+above): a pure, total `evaluate()` function (no `Result`, `Deny` absorbs every
+failure mode per ADR-027's fail-closed design), a pure `parse_condition()`
+function returning `Result<Condition, ConditionParseError>`, zero IO, zero shared
+mutable state. `CLAUDE.md`'s existing paradigm section requires no update.
+
+---
+
+### Wave: DESIGN / [REF] Bounded-Context Placement — security-rules
+
+**BC-4: Access Control** is added — see
+`docs/product/architecture/adr-029-access-control-composition-and-bounded-context.md`
+§ Considered Options — Bounded-Context Placement for the full alternatives
+analysis (Option A extend BC-1, rejected; Option B extend BC-2, rejected; Option C
+new BC-4, accepted) evaluated against ADR-002's own five decision drivers, and
+`docs/product/architecture/adr-002-bounded-contexts.md` § Changed Assumptions for
+the formal amendment (Option D's original rejection text quoted verbatim, new
+assumption stated, Context Map addition appended).
+
+---
+
+### Wave: DESIGN / [REF] Component Decomposition — security-rules
+
+| Component | Crate/Module Path | Responsibility | Bounded Context |
+|-----------|--------------------|------------------|------------------|
+| `embyr-core::access_control` | `crates/embyr-core/src/access_control/mod.rs` (new) | `Condition` AST, `Operand`, `CompareOp`, `AuthContext`, `EvaluationOutcome`, `ConditionParseError` value types; pure `parse_condition()` and `evaluate()` functions (ADR-027). No IO. | BC-4 |
+| `embyr-server::admin::handlers::access_rules` | `crates/embyr-server/src/admin/handlers/access_rules.rs` (new) | `define_access_rule` (US-01, define+redefine as one idempotent-upsert action), `simulate_access_rule` (US-05) — session-auth Axum handlers, mirroring `client_identity.rs`'s shape | New module | BC-4 (driving adapter) |
+| `embyr-server::adapters::system_db` (extended) | `crates/embyr-server/src/adapters/system_db.rs` | Adds `AccessRuleRow`, `upsert_access_rule()`, `get_access_rule()` (ADR-028) | Extended (existing file) | BC-4 (driven adapter) |
+| `embyr-server::grpc::handler::handle_get_document` (extended) | `crates/embyr-server/src/grpc/handler.rs` | Adds rule-lookup + evaluation step, threading the already-computed `VerifiedEndUserIdentity` into `AuthContext` and the fetched document's fields into `resource_fields` (ADR-029). Zero change to any other `handle_*` method. | Extended (existing file) | BC-4 (consumes BC-1 + BC-2 data, read-only) |
+| `access_rules` (System DB table) | `crates/embyr-server/migrations/0022_access_rules.sql` (new) | Storage for the per-`(project_id, collection_path)` condition (ADR-028) | New table | BC-4 |
+
+---
+
+### Wave: DESIGN / [REF] Driving Ports (Inbound) — security-rules additions
+
+| Port | Protocol | Location | New/Extended | What it does |
+|------|----------|----------|---------------|---------------|
+| `AccessRuleAdminPort` | HTTP (admin `:9090`, session sub-router) | `admin/handlers/access_rules.rs` | New | `POST /admin/v1/projects/:project_id/access_rules` (define/redefine, US-01, body `{collection_path, condition}` — collection path in the body, not the URL, to sidestep subcollection-path URL-encoding entirely). Session auth, Owner/Admin only, mirroring `client_identity.rs::register_client_identity_credential`. |
+| `AccessRuleSimulationPort` | HTTP (admin `:9090`, session sub-router) | `admin/handlers/access_rules.rs` | New | `POST /admin/v1/projects/:project_id/access_rules/simulate` (US-05, body `{condition, auth: {uid}|null, document: {...}}`). Session auth, any role — mirrors `verify_client_identity_credential`'s read-only/debug-only, any-role precedent. Zero writes (AC-17-18). |
+| `FirestoreGrpcPort` / `RestPort` (existing) | gRPC `:8080` / REST `:8081` | `grpc/handler.rs::handle_get_document` | **Extended, additively** | `GetDocument`'s existing, unchanged call shape now additionally reflects rule evaluation when a rule is defined for the target collection (US-02/03/04). No new RPC, no new endpoint. Every other data-plane RPC is unmodified (§ Handoff Package flag 6). |
+
+---
+
+### Wave: DESIGN / [REF] Driven Ports + Adapters — security-rules additions
+
+No new *driven* (outbound infrastructure) port. `upsert_access_rule`/
+`get_access_rule` execute through the existing, already-probed `SystemDb`
+connection pool — the identical substrate BC-1's own System-DB reads already use.
+No new adapter, no new `probe()`.
+
+**Earned Trust note (Principle 12 discipline, explicit, not silently skipped):**
+no new Earned Trust probe is required because no new *substrate* dependency is
+introduced. `embyr_core::access_control::evaluate()`/`parse_condition()` are pure,
+deterministic CPU computation over values already resident in memory (a
+`Condition` AST, an `Option<AuthContext>`, a `BTreeMap<String, FieldValue>`) — the
+identical "no partial-trust / no substrate-lie scenario" reasoning ADR-024
+established for `verify_client_identity_token()` applies here without
+modification: a condition either parses/evaluates deterministically given its
+inputs, or it does not; there is no environment that can lie to a pure function.
+Full reasoning: `docs/product/architecture/adr-029-access-control-composition-and-bounded-context.md`
+§ Enforcement.
+
+---
+
+### Wave: DESIGN / [REF] Technology Choices — security-rules additions
+
+| Layer | Choice | Version | License | Rationale |
+|-------|--------|---------|---------|-----------|
+| Condition parser | Hand-rolled recursive-descent (new, in-crate) | N/A (no crate) | N/A | Zero new dependency. Rejected alternatives: `pest`/`nom` parser-generator crates — expressiveness that invites silently widening the locked grammar (ADR-027), and a new dependency for a deliberately tiny, closed, locked grammar. See ADR-027 § Considered Options. |
+| Condition/document value representation | `embyr_core::domain::field_value::FieldValue` (existing, reused) | N/A | N/A | No new value type — `resource.data.<field>` maps directly onto the type BC-2 already uses for document fields. |
+
+No new workspace dependency is added by this feature.
+
+---
+
+### Wave: DESIGN / [REF] Decisions Table — security-rules
+
+| ID | Decision | Verdict |
+|----|----------|---------|
+| DDD-SR-1 | Rule-expressiveness grammar: comparison + boolean combinators over `request.auth`/`resource.data.<field>`/`true`/`false`, hand-rolled recursive-descent parser, zero new dependency | Accepted — ADR-027 |
+| DDD-SR-2 | Missing-field evaluation semantics: top-level short-circuit to `Deny` for the entire condition tree, not per-operator null propagation | Accepted — ADR-027 |
+| DDD-SR-3 | Rule storage: single row per `(project_id, collection_path)`, idempotent `INSERT ... ON CONFLICT DO UPDATE`, no versioning/history columns | Accepted — ADR-028 |
+| DDD-SR-4 | Condition persisted as raw source text, re-parsed per evaluation (not a cached/serialized AST) | Accepted — ADR-028 (OQ-SR-05 flags future caching if profiling warrants) |
+| DDD-SR-5 | Bounded-context placement: new BC-4 Access Control, not folded into BC-1 or BC-2 | Accepted — ADR-029, amends ADR-002 |
+| DDD-SR-6 | Composition: single call site (`handle_get_document`), identity threaded not re-derived, existence-check-before-evaluation short-circuit for the no-rule-defined guardrail | Accepted — ADR-029 |
+| DDD-SR-7 | Existence non-leakage: evaluate unconditionally against real-or-empty resource fields; `Deny` always produces an identical `PermissionDenied` response regardless of document existence | Accepted — ADR-029 (OQ-SR-06 flags a scoped clarification for content-blind rules) |
+| DDD-SR-8 | Simulation (US-05) and real enforcement (US-02/03) call the identical `evaluate()`/`parse_condition()` functions — two call sites, one implementation | Accepted — ADR-029 |
+| DDD-SR-9 | Admin endpoint shapes: `POST .../access_rules` (define/redefine, collection path in body) and `POST .../access_rules/simulate` (any role, read-only) | Accepted — this section, § Driving Ports |
+
+---
+
+### Wave: DESIGN / [REF] C4 System Context (Mermaid) — security-rules
+
+No new external system. Trailmark's own end users (Maria, Dana) and Alex's admin
+credential are the same actors `client-auth` already established; this feature
+adds new relationship labels, not new boxes:
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (security-rules delta)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Defines/redefines per-collection access rules; tests candidate rules via simulation before publishing")
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK", "Client library. getDoc() calls are now additionally evaluated against a published rule, if one exists for the target collection.")
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Now also stores and evaluates per-collection access-control rules on GetDocument reads.")
+    System_Ext(systemDB, "System Postgres", "Adds access_rules table (project- and collection-scoped condition storage).")
+
+    Rel(sdkDev, embyr, "Defines/redefines a rule; simulates a candidate rule", "Admin API :9090")
+    Rel(firebaseSDK, embyr, "getDoc() — now evaluated against the target collection's published rule, if any", "gRPC :8080 / REST :8081 (UNCHANGED for collections with no rule defined)")
+    Rel(embyr, systemDB, "Reads/writes access_rules", "Postgres SQL")
+```
+
+---
+
+### Wave: DESIGN / [REF] C4 Container Diagram (Mermaid) — security-rules
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (security-rules delta)
+
+    Person(sdkDev, "SDK Developer (Alex)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)", "Never calls embyr directly — experiences this feature only through whether getDoc() succeeds or fails inside the Trailmark app")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(embyrA, "embyr-rs instance", "Rust binary", "Existing: gRPC :8080, REST :8081, Admin :9090. Extended: 2 new admin routes (define/redefine, simulate); additive rule-lookup + evaluation step inside handle_get_document only.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "Existing projects/client_identity_credentials tables. New: access_rules (1 row per project+collection, idempotent upsert).")
+        ContainerDb(custDB, "Customer Postgres (BC-2, per-project)", "PostgreSQL", "Unchanged. resource.data for rule evaluation is read from the document already fetched by the existing GetDocument path — no new query issued against this database by this feature.")
+    }
+
+    Rel(sdkDev, embyrA, "Defines/redefines/simulates access rules (admin session auth)", "HTTP :9090")
+    Rel(endUser, embyrA, "getDoc() — gated by the collection's rule, if any, and the already-established VerifiedEndUserIdentity", "gRPC :8080 / REST :8081")
+    Rel(embyrA, sysDB, "CRUD access_rules; unchanged project/credential reads", "Postgres SQL")
+    Rel(embyrA, custDB, "Unchanged document fetch (adapter.get_document) — evaluation reads its already-returned result, issues no new query", "Postgres SQL, via BackendAdapter")
+```
+
+---
+
+### Wave: DESIGN / [REF] C4 Component Diagram — BC-4 Access Control (Mermaid)
+
+Warranted per the SKILL's "5+ components, complex subsystem" threshold: the
+parser, evaluator, storage adapter, two admin handlers, and the `GetDocument`
+composition point are five separable pieces whose call-graph (two call sites into
+one evaluation function) is exactly the property this feature's HIGH-risk flags
+depend on being visible.
+
+```mermaid
+C4Component
+    title Component Diagram — BC-4 Access Control
+
+    Container_Boundary(core, "embyr-core::access_control (pure, zero IO)") {
+        Component(parser, "parse_condition()", "Rust fn", "Recursive-descent parser. Source text -> Condition AST or ConditionParseError (SyntaxError | UnsupportedConstruct).")
+        Component(evaluator, "evaluate()", "Rust fn", "Total, infallible. (Condition, Option<AuthContext>, resource fields) -> Allow | Deny. Fail-closed on any missing field reference.")
+    }
+
+    Container_Boundary(server, "embyr-server (adapters + composition)") {
+        Component(storage, "SystemDb::{upsert_access_rule, get_access_rule}", "sqlx adapter", "ADR-028. Single row per (project_id, collection_path), idempotent upsert.")
+        Component(adminHandler, "admin::handlers::access_rules", "Axum handlers", "define_access_rule (US-01) calls parse_condition then upsert_access_rule. simulate_access_rule (US-05) calls parse_condition then evaluate directly, no storage write.")
+        Component(getDocHandler, "grpc::handler::handle_get_document", "Tonic handler", "Real enforcement (US-02/03/04). Calls get_access_rule; if Some, calls parse_condition then evaluate against the already-fetched document and already-verified identity.")
+    }
+
+    Rel(adminHandler, parser, "validates candidate condition")
+    Rel(adminHandler, storage, "upsert_access_rule (define handler only)")
+    Rel(adminHandler, evaluator, "evaluate (simulate handler only) -- SAME function real enforcement calls")
+    Rel(getDocHandler, storage, "get_access_rule -- None short-circuits before parser/evaluator are ever reached")
+    Rel(getDocHandler, parser, "re-parses stored condition_source")
+    Rel(getDocHandler, evaluator, "evaluate -- SAME function simulation calls")
+```
+
+---
+
+### Wave: DESIGN / [REF] Architecture Enforcement — security-rules
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern. BC-4 is a
+new inner hexagon within the existing Cargo-workspace enforcement mechanism
+(AD-01/AD-06) — no new crate, no new tooling.
+
+Rules enforced (existing, applying unchanged to the new module):
+- `embyr-core::access_control` has zero IO imports (`cargo-deny`, `deny.toml`,
+  already covers all of `embyr-core`).
+- `embyr-core` defines the value-type/function surface; `embyr-server` consumes
+  it — dependency direction inward, matching AD-02's existing rule.
+- No new adapter, no new `probe()` required (see § Driven Ports + Adapters,
+  above, and ADR-029 § Enforcement for the explicit Principle 12 reasoning).
+
+---
+
+### Wave: DESIGN / [REF] Open Questions — security-rules
+
+| ID | Question | Impact | Resolution owner |
+|----|----------|--------|-------------------|
+| OQ-SR-04 | The locked v1 grammar (Resolution 1, Option C) admits only `true`/`false` as literal operands, not arbitrary string/number literals — is a rule like `resource.data.status == "published"` intentionally out of v1 scope, or an unintended gap? | Affects DISTILL's acceptance-scenario design and DELIVER's parser scope; no story's domain examples require it, so DESIGN implements the literal locked-grammar reading and flags rather than silently widening | DISTILL (acceptance-designer), confirm scope before DELIVER locks the parser |
+| OQ-SR-05 | Should the parsed `Condition` AST be cached (keyed by `(project_id, collection_path, updated_at)`) once real traffic volume is known, avoiding re-parse-per-request? | Not required for V1 correctness (grammar is tiny, parse cost believed negligible); pure performance follow-up | Platform-architect, post-launch, if profiling warrants — mirrors OQ-CA-02's precedent |
+| OQ-SR-06 | A rule that never references `resource.data` (content-blind, e.g. `allow read: if true`) still resolves to `NotFound` against a non-existent document — is this in-scope existence-leakage acceptable, since AC-17-10's own UAT scenario is written against a content-referencing rule? | Does not block this feature's WS scope; affects whether DISTILL writes an acceptance scenario for this specific edge case | DISTILL (acceptance-designer) |
+| OQ-SR-01 (carried from DISCUSS) | Bounded-context placement | **Resolved by this DESIGN pass** — BC-4 Access Control, see § Bounded-Context Placement above and ADR-029 | Closed |
+| OQ-SR-02 (carried from DISCUSS) | Whether Epic 2b (write-path) needs `resource`/`request.resource` as two distinct grammar symbols | Out of this feature's scope; ADR-027's `Condition`/`Operand` types are read-only-shaped today and would need extension, not replacement, if Epic 2b needs old/new document state | Product Discovery / DISCUSS, triggered when Epic 2b starts |
+| OQ-SR-03 (carried from DISCUSS) | Whether custom claims on `VerifiedEndUserIdentity` will ever be needed | Out of this feature's scope; `AuthContext` (ADR-027) mirrors `VerifiedEndUserIdentity`'s current shape exactly (uid only) and would need a corresponding `client-auth`/ADR-024 extension first | Product Discovery, cross-referenced with `client-auth` |
+
+---
+
+### Wave: DESIGN / [REF] External Integrations — security-rules
+
+**None requiring contract tests.** This feature introduces no new outbound
+network dependency: rule storage reuses the existing, already-probed `SystemDb`
+Postgres connection; rule evaluation is pure in-process computation over data
+already fetched by the existing `GetDocument` path. No new adapter, no new
+external service, no new consumer-driven-contract surface.
+
 

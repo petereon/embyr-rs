@@ -137,3 +137,54 @@ BC-3 Real-Time Delivery
 - `docs/product/architecture/brief.md` §§ Domain Model, System Architecture
 - `docs/feature/embyr-rs/discuss/feature-delta.md` §§ Locked Decisions (D9, D10)
 - Vaughn Vernon, "Implementing Domain-Driven Design," Chapter 2 (Bounded Contexts) and Chapter 10 (Aggregates)
+
+---
+
+## Changed Assumptions (appended by feature `security-rules`, DESIGN wave, 2026-08-17)
+
+**Original assumption, quoted verbatim (§ Option D, above):**
+
+> Credential resolution has no entities, no aggregate roots, no lifecycle, and no
+> invariants of its own. It is a stateless translation of a `BackendConfig` value
+> object (owned by the `Project` aggregate in BC-1) into a live storage
+> connection. Making it a context would create a context with no domain objects —
+> only a service. That is a domain service within BC-1, not a separate context.
+
+**Why this is being appended, not reopened:** Option D's rejection stands
+unchanged for credential resolution — nothing about that reasoning is wrong or
+being walked back. This amendment records a *new* subsystem, evaluated fresh
+against the same test Option D applied, that reaches the opposite conclusion.
+
+**New assumption:** The `security-rules` feature (Epic 2a, `docs/feature/
+security-rules/feature-delta.md`) introduces a per-collection access-control
+`AccessRule` subsystem that — unlike credential resolution — **does** have an
+entity with identity (`(project_id, collection_path)` → condition), **does** have
+a lifecycle (define → redefine, an idempotent-upsert lifecycle locked by that
+feature's Resolution 3), and **does** have invariants of its own (grammar
+validity of the stored condition). It fails all three of the absence-tests Option
+D's rejection turned on. Applying Option D's fold-into-BC-1 conclusion to a case
+that fails Option D's own test would be inconsistent with this ADR's stated
+methodology (Decision Drivers 1–5, applied per-case, not by inertia).
+
+**Decision:** A fourth bounded context, **BC-4: Access Control**, is added. Full
+alternatives analysis (Option A: extend BC-1; Option B: extend BC-2; Option C:
+new BC-4, accepted) against this ADR's own five decision drivers is recorded in
+`docs/product/architecture/adr-029-access-control-composition-and-bounded-context.md`
+§ Considered Options — Bounded-Context Placement. That ADR also establishes BC-4's
+read-only, non-transactional dependency on BC-2 (for `resource.data` during
+evaluation) as directly mirroring this ADR's own already-established BC-3→BC-2
+dependency shape (§ BC-3, "Dependency on BC-2," above) — no new kind of
+inter-context relationship is introduced, only a new instance of a kind ADR-002
+already sanctions.
+
+**Context Map addition** (additive to § Context Map Summary, above, not a
+rewrite):
+
+```
+BC-4 Access Control
+    → BC-2 Document Storage   [read-only, non-transactional: resource.data during GetDocument evaluation]
+    → BC-1 Tenant Management  [read-only, indirect: AuthContext built from VerifiedEndUserIdentity, never re-verified]
+```
+
+This context map entry does not modify BC-1, BC-2, or BC-3's own existing map
+entries above — it is purely additive.
