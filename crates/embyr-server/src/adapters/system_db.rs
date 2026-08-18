@@ -37,6 +37,19 @@ pub struct AccessRuleRow {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// security-rules-write-path (ADR-030): a project's per-collection WRITE
+/// rule row, as stored in `write_access_rules` — a table entirely
+/// independent of `access_rules` (ADR-030 § Decision — Storage Shape).
+/// Schema-identical shape to `AccessRuleRow`, deliberately a separate type
+/// (not shared), mirroring `write_access_rules`' own independent-table
+/// decision at the Rust type level.
+#[derive(Debug, Clone)]
+pub struct WriteAccessRuleRow {
+    pub condition_source: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Project row returned for credential verification.
 #[derive(Debug)]
 pub struct ProjectAuthRow {
@@ -393,6 +406,45 @@ impl SystemDb {
             CoreError::BackendUnavailable(format!("upsert_write_access_rule failed: {e}"))
         })?;
         Ok(())
+    }
+
+    /// Look up the write rule for `(project_id, collection_path)`. `Ok(None)`
+    /// is this feature's own version of ADR-029's structural
+    /// no-rule-defined guardrail (AC-17-42, mirrors `get_access_rule`'s
+    /// identical shape exactly): when `None`,
+    /// `grpc::handler::handle_create_document` (and Update/Delete, Slices
+    /// 03/04) takes the EXACT unmodified pre-`security-rules-write-path`
+    /// code path — `embyr_core::access_control::evaluate()` is never called.
+    pub async fn get_write_access_rule(
+        &self,
+        project_id: &str,
+        collection_path: &str,
+    ) -> Result<Option<WriteAccessRuleRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT condition_source, created_at, updated_at \
+             FROM write_access_rules WHERE project_id = $1 AND collection_path = $2",
+        )
+        .bind(project_id)
+        .bind(collection_path)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(format!("get_write_access_rule failed: {e}")))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(WriteAccessRuleRow {
+            condition_source: r
+                .try_get("condition_source")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            updated_at: r
+                .try_get("updated_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
     }
 }
 

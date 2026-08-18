@@ -313,6 +313,10 @@ path = "../../tests/security_rules/acceptance/sr05_simulate_rule_before_publish.
 name = "security_rules_write_path_define_write_rule"
 path = "../../tests/security_rules_write_path/acceptance/define_write_rule.rs"
 
+[[test]]
+name = "security_rules_write_path_create_gated_by_write_rule"
+path = "../../tests/security_rules_write_path/acceptance/create_gated_by_write_rule.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -591,7 +591,20 @@ impl FirestoreService {
                     std::collections::BTreeMap::new();
                 let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
 
-                match embyr_core::access_control::evaluate(&condition, auth_ctx.as_ref(), resource_fields) {
+                // security-rules-write-path (ADR-030): one new argument at
+                // this existing call site — an empty map for the new
+                // `request_resource_fields` parameter. `GetDocument` has no
+                // "proposed new document" concept; any read rule that
+                // references `request.resource.data.<field>` (grammar-legal
+                // but semantically nonsensical for a read) denies via the
+                // same fail-closed mechanism, never a crash. Zero other
+                // change to this function.
+                match embyr_core::access_control::evaluate(
+                    &condition,
+                    auth_ctx.as_ref(),
+                    resource_fields,
+                    &empty_fields,
+                ) {
                     // AC-17-10: `Deny` ALWAYS produces the identical
                     // `PermissionDenied` response — never distinguishes
                     // "wrong owner" from "document does not exist" for a
@@ -659,6 +672,56 @@ impl FirestoreService {
             })
             .transpose()?
             .unwrap_or_default();
+
+        // security-rules-write-path (ADR-030 § Decision — Composition,
+        // "Three new call sites, one shared pattern" — Create case, Slice
+        // 02/US-02). Inserted after the existing authenticate()/rate-limit
+        // checks and before the existing adapter.create_document(...) call,
+        // mirroring `handle_get_document`'s own identity-attach +
+        // rule-lookup shape exactly.
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
+        // Write-rule lookup (queries `write_access_rules` ONLY — never
+        // `access_rules`, the structural mechanism behind AC-17-43). `None`
+        // -> proceed to the existing adapter.create_document(...) call,
+        // completely unmodified (AC-17-42, this slice's own "no rule =
+        // unaffected" regression guardrail).
+        let write_rule_row = self
+            .system_db
+            .get_write_access_rule(&project_id_str, &req.collection_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if let Some(write_rule_row) = write_rule_row {
+            let condition =
+                embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
+                    .map_err(|e| {
+                        Status::internal(format!("stored write rule failed to re-parse: {e:?}"))
+                    })?;
+            let auth_ctx = verified_identity
+                .as_ref()
+                .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+
+            // Create: `resource_fields` is empty (no document exists yet —
+            // AC-17-28's fail-closed mechanism reuse); `request_resource_fields`
+            // is the proposed new document already parsed above, no new I/O.
+            let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
+                std::collections::BTreeMap::new();
+
+            match embyr_core::access_control::evaluate(
+                &condition,
+                auth_ctx.as_ref(),
+                &empty_resource_fields,
+                &fields,
+            ) {
+                embyr_core::access_control::EvaluationOutcome::Deny => {
+                    return Err(Status::permission_denied("access denied by write rule"));
+                }
+                embyr_core::access_control::EvaluationOutcome::Allow => {}
+            }
+        }
 
         let write_result = adapter
             .create_document(&path, fields.clone())

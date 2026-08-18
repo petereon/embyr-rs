@@ -66,6 +66,11 @@ pub enum Operand {
     AuthUid,
     AuthNullSentinel,
     ResourceField(String),
+    /// The proposed new document's field (security-rules-write-path,
+    /// ADR-030): `request.resource.data.<field>`. Coexists with
+    /// `ResourceField` (pre-write state) — non-overlapping token prefixes,
+    /// no ordering risk (ADR-030 § Decision — Grammar Extension).
+    RequestResourceField(String),
     BoolLiteral(bool),
     NullLiteral,
 }
@@ -271,6 +276,13 @@ fn word_to_operand(word: &str) -> Result<Operand, ConditionParseError> {
         "request.auth.uid" => Ok(Operand::AuthUid),
         "request.auth" => Ok(Operand::AuthNullSentinel),
         "null" => Ok(Operand::NullLiteral),
+        w if w.starts_with("request.resource.data.") => {
+            let field = &w["request.resource.data.".len()..];
+            if field.is_empty() {
+                return Err(syntax_error("'request.resource.data.' requires a field name"));
+            }
+            Ok(Operand::RequestResourceField(field.to_string()))
+        }
         w if w.starts_with("resource.data.") => {
             let field = &w["resource.data.".len()..];
             if field.is_empty() {
@@ -370,23 +382,31 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Evaluate a parsed `Condition` against an `(auth, resource)` pair.
-/// Infallible and total by construction once implemented — see § Fail-Closed
-/// Semantics below (ADR-027).
+/// Evaluate a parsed `Condition` against an `(auth, resource, request_resource)`
+/// triple. Infallible and total by construction once implemented — see §
+/// Fail-Closed Semantics below (ADR-027, extended ADR-030).
 ///
 /// Fail-closed semantics (AC-17-09, ADR-027 § Fail-Closed Semantics on
-/// Missing Field): a `resource.data.<field>` reference absent from
-/// `resource_fields` is a TOP-LEVEL evaluation short-circuit to `Deny` —
-/// the first `FieldMissing` encountered anywhere in the condition tree
-/// collapses the entire evaluation to `Deny`, regardless of `&&`/`||`/`!`
-/// structure. There is no `Result::Err` branch to forget to handle, because
-/// there is no `Result` in this function's return type.
+/// Missing Field; AC-17-28, ADR-030 — the identical mechanism reused
+/// verbatim): a `resource.data.<field>` reference absent from
+/// `resource_fields`, OR a `request.resource.data.<field>` reference absent
+/// from `request_resource_fields`, is a TOP-LEVEL evaluation short-circuit
+/// to `Deny` — the first `FieldMissing` encountered anywhere in the
+/// condition tree collapses the entire evaluation to `Deny`, regardless of
+/// `&&`/`||`/`!` structure. There is no `Result::Err` branch to forget to
+/// handle, because there is no `Result` in this function's return type.
+///
+/// `request_resource_fields` is the proposed new document (Create/Update) —
+/// empty for Read (`handle_get_document`, ADR-030: no "proposed new
+/// document" concept) and Delete (no proposed new state). `resource_fields`
+/// is the pre-write document — empty for Create (no document exists yet).
 pub fn evaluate(
     condition: &Condition,
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
+    request_resource_fields: &BTreeMap<String, FieldValue>,
 ) -> EvaluationOutcome {
-    match eval_bool(condition, auth, resource_fields) {
+    match eval_bool(condition, auth, resource_fields, request_resource_fields) {
         Ok(true) => EvaluationOutcome::Allow,
         Ok(false) | Err(FieldMissing) => EvaluationOutcome::Deny,
     }
@@ -407,18 +427,19 @@ fn eval_bool(
     condition: &Condition,
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
+    request_resource_fields: &BTreeMap<String, FieldValue>,
 ) -> Result<bool, FieldMissing> {
     match condition {
         Condition::Literal(value) => Ok(*value),
-        Condition::Not(inner) => Ok(!eval_bool(inner, auth, resource_fields)?),
-        Condition::And(left, right) => {
-            Ok(eval_bool(left, auth, resource_fields)? && eval_bool(right, auth, resource_fields)?)
+        Condition::Not(inner) => {
+            Ok(!eval_bool(inner, auth, resource_fields, request_resource_fields)?)
         }
-        Condition::Or(left, right) => {
-            Ok(eval_bool(left, auth, resource_fields)? || eval_bool(right, auth, resource_fields)?)
-        }
+        Condition::And(left, right) => Ok(eval_bool(left, auth, resource_fields, request_resource_fields)?
+            && eval_bool(right, auth, resource_fields, request_resource_fields)?),
+        Condition::Or(left, right) => Ok(eval_bool(left, auth, resource_fields, request_resource_fields)?
+            || eval_bool(right, auth, resource_fields, request_resource_fields)?),
         Condition::Compare(left, op, right) => {
-            let equal = compare_operands(left, right, auth, resource_fields)?;
+            let equal = compare_operands(left, right, auth, resource_fields, request_resource_fields)?;
             Ok(match op {
                 CompareOp::Eq => equal,
                 CompareOp::Ne => !equal,
@@ -427,21 +448,35 @@ fn eval_bool(
     }
 }
 
-/// Comparison semantics (ADR-027 § Comparison Semantics). Named pairings
-/// (`AuthUid`/`ResourceField`, `{AuthUid,AuthNullSentinel}`/`NullLiteral`)
-/// use identity-specific rules; every other grammar-legal pairing falls
-/// through to ordinary `FieldValue::PartialEq`.
+/// Comparison semantics (ADR-027 § Comparison Semantics, extended
+/// ADR-030). Named pairings (`AuthUid`/`ResourceField`,
+/// `AuthUid`/`RequestResourceField`, `{AuthUid,AuthNullSentinel}`/
+/// `NullLiteral`) use identity-specific rules; every other grammar-legal
+/// pairing falls through to ordinary `FieldValue::PartialEq` — including
+/// `ResourceField`/`RequestResourceField` cross-map comparisons (the
+/// immutable-field pattern, Slice 03's concern), which need no
+/// special-casing here (ADR-030 § Decision — Grammar Extension).
 fn compare_operands(
     left: &Operand,
     right: &Operand,
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
+    request_resource_fields: &BTreeMap<String, FieldValue>,
 ) -> Result<bool, FieldMissing> {
     match (left, right) {
         (Operand::AuthUid, Operand::ResourceField(name))
         | (Operand::ResourceField(name), Operand::AuthUid) => {
             let auth = auth.ok_or(FieldMissing)?;
             let field = resource_fields.get(name).ok_or(FieldMissing)?;
+            Ok(matches!(field, FieldValue::String(v) if v == &auth.uid))
+        }
+        // security-rules-write-path (ADR-030): the proposed-new-document
+        // analog of the pairing above — `request.resource.data.<field> ==
+        // request.auth.uid` (US-02's own domain example).
+        (Operand::AuthUid, Operand::RequestResourceField(name))
+        | (Operand::RequestResourceField(name), Operand::AuthUid) => {
+            let auth = auth.ok_or(FieldMissing)?;
+            let field = request_resource_fields.get(name).ok_or(FieldMissing)?;
             Ok(matches!(field, FieldValue::String(v) if v == &auth.uid))
         }
         // The `request.auth == null` / `!= null` idiom (AC-17-11/12): auth
@@ -451,8 +486,8 @@ fn compare_operands(
         | (Operand::AuthUid, Operand::NullLiteral)
         | (Operand::NullLiteral, Operand::AuthUid) => Ok(auth.is_none()),
         _ => {
-            let left_value = resolve_field_value(left, auth, resource_fields)?;
-            let right_value = resolve_field_value(right, auth, resource_fields)?;
+            let left_value = resolve_field_value(left, auth, resource_fields, request_resource_fields)?;
+            let right_value = resolve_field_value(right, auth, resource_fields, request_resource_fields)?;
             Ok(left_value == right_value)
         }
     }
@@ -462,9 +497,16 @@ fn resolve_field_value(
     operand: &Operand,
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
+    request_resource_fields: &BTreeMap<String, FieldValue>,
 ) -> Result<FieldValue, FieldMissing> {
     match operand {
         Operand::ResourceField(name) => resource_fields.get(name).cloned().ok_or(FieldMissing),
+        // security-rules-write-path (ADR-030): identical fail-closed shape
+        // to `ResourceField` above, resolved against the OTHER map — the
+        // SAME `FieldMissing` short-circuit, reused verbatim (AC-17-28).
+        Operand::RequestResourceField(name) => {
+            request_resource_fields.get(name).cloned().ok_or(FieldMissing)
+        }
         Operand::BoolLiteral(value) => Ok(FieldValue::Boolean(*value)),
         Operand::NullLiteral => Ok(FieldValue::Null),
         Operand::AuthUid | Operand::AuthNullSentinel => {
@@ -492,6 +534,13 @@ mod tests {
         map
     }
 
+    /// `evaluate()`'s new `request_resource_fields` parameter (ADR-030),
+    /// empty for every pre-existing `security-rules`-era test in this file
+    /// — none of them reference `request.resource.data.<field>`.
+    fn empty_fields() -> BTreeMap<String, FieldValue> {
+        BTreeMap::new()
+    }
+
     // ── parse_condition: grammar acceptance + distinguishable rejection reasons ──
 
     #[test]
@@ -503,6 +552,22 @@ mod tests {
                 Operand::AuthUid,
                 CompareOp::Eq,
                 Operand::ResourceField("owner_id".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn request_resource_field_condition_parses_into_a_compare_ast() {
+        // security-rules-write-path (ADR-030) Slice 02: `request.resource.data.<field>`
+        // (proposed new document, US-02 domain example) must parse distinctly
+        // from `resource.data.<field>` (pre-existing document).
+        let result = parse_condition("request.resource.data.owner_id == request.auth.uid");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::RequestResourceField("owner_id".to_string()),
+                CompareOp::Eq,
+                Operand::AuthUid,
             ))
         );
     }
@@ -587,7 +652,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource), EvaluationOutcome::Allow);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Allow);
     }
 
     #[test]
@@ -600,7 +665,7 @@ mod tests {
         let auth = AuthContext { uid: "dana-kim".to_string() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
     }
 
     #[test]
@@ -613,7 +678,69 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string() };
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new(); // owner_id absent
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
+    }
+
+    // ── evaluate: request.resource.data.<field> (security-rules-write-path, ADR-030) ──
+
+    #[test]
+    fn owner_uid_matching_proposed_new_document_field_allows_ac_17_26() {
+        // security-rules-write-path US-02 domain example: `request.resource.data.owner_id
+        // == request.auth.uid`, evaluated with an EMPTY `resource_fields`
+        // map (Create — no document exists yet) and a POPULATED
+        // `request_resource_fields` map (the proposed new document).
+        let condition = Condition::Compare(
+            Operand::RequestResourceField("owner_id".to_string()),
+            CompareOp::Eq,
+            Operand::AuthUid,
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
+
+        assert_eq!(
+            evaluate(&condition, Some(&auth), &empty_fields(), &proposed),
+            EvaluationOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn missing_referenced_proposed_field_denies_never_panics_ac_17_28() {
+        // AC-17-28: `request.resource.data.<field>` absent from
+        // `request_resource_fields` fails closed — the SAME `FieldMissing`
+        // short-circuit AC-17-09 already proves for `resource.data.<field>`,
+        // now exercised against the OTHER map.
+        let condition = Condition::Compare(
+            Operand::RequestResourceField("owner_id".to_string()),
+            CompareOp::Eq,
+            Operand::AuthUid,
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+
+        assert_eq!(
+            evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields()),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn resource_field_reference_on_a_nonexistent_create_time_document_denies_ac_17_28() {
+        // AC-17-28's OTHER half: a write rule referencing the OLD
+        // `resource.data.<field>` operand, evaluated at CREATE time (no
+        // document exists yet -> `resource_fields` is empty) — denies via
+        // the identical fail-closed mechanism, never a crash, never a new
+        // special case for "document doesn't exist yet".
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
+
+        assert_eq!(
+            evaluate(&condition, Some(&auth), &empty_fields(), &proposed),
+            EvaluationOutcome::Deny
+        );
     }
 
     #[test]
@@ -626,14 +753,14 @@ mod tests {
         );
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-        assert_eq!(evaluate(&condition, None, &resource), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, None, &resource, &empty_fields()), EvaluationOutcome::Deny);
     }
 
     #[test]
     fn bare_true_literal_allows_regardless_of_auth_or_resource_ac_17_12() {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
         assert_eq!(
-            evaluate(&Condition::Literal(true), None, &resource),
+            evaluate(&Condition::Literal(true), None, &resource, &empty_fields()),
             EvaluationOutcome::Allow
         );
     }
@@ -661,7 +788,7 @@ mod tests {
             let auth = AuthContext { uid };
             let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
         }
 
         /// Property (AC-17-10's underlying mechanism): for ANY
@@ -685,7 +812,7 @@ mod tests {
             let mut resource = resource_with("owner_id", FieldValue::String(owner_uid));
             resource.insert("title".to_string(), FieldValue::String(unrelated_value));
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
         }
     }
 }

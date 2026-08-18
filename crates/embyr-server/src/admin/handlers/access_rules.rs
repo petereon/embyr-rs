@@ -342,7 +342,19 @@ pub async fn simulate_access_rule(
     // ADR-029 § Simulation shares the exact evaluation routine: the SAME
     // `evaluate()` real enforcement (`grpc::handler::handle_get_document`)
     // calls — no second, independently-maintained copy anywhere.
-    let outcome = evaluate(&condition, auth_ctx.as_ref(), &resource_fields);
+    //
+    // security-rules-write-path (ADR-030): `evaluate()`'s signature gained a
+    // `request_resource_fields` parameter. Extending `SimulateAccessRuleBody`
+    // to accept a caller-supplied `request_resource` map is Slice 07's own
+    // scope (US-07) — this call site passes an empty map for now, the
+    // minimal compiler-forced change, zero other behavior change here.
+    let empty_request_resource_fields: BTreeMap<String, FieldValue> = BTreeMap::new();
+    let outcome = evaluate(
+        &condition,
+        auth_ctx.as_ref(),
+        &resource_fields,
+        &empty_request_resource_fields,
+    );
 
     Ok((
         StatusCode::OK,
