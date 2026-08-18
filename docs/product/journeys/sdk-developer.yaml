@@ -7,7 +7,7 @@ jobs:
   - JOB-03  # live-sync
   - JOB-16  # client-identity-verification (added by client-auth DISCUSS, 2026-08-16)
   - JOB-17  # document-access-control (added by security-rules DISCUSS, 2026-08-17)
-updated: "2026-08-17"
+updated: "2026-08-18"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
 # NOTE (client-auth DISCUSS, 2026-08-16): JOB-16 is a new, distinct job for
 # per-end-user identity verification (P1 Alex is still the persona who
@@ -26,3 +26,13 @@ source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
 # docs/feature/security-rules/feature-delta.md per the single-narrative-file
 # convention, not as a separate journey-*.yaml artifact. v1 scope (this
 # feature) covers read-path (GetDocument) enforcement only.
+# NOTE (security-rules-write-path DISCUSS, 2026-08-18): JOB-17 now also
+# covers write-path (CreateDocument/UpdateDocument/DeleteDocument)
+# enforcement via this feature — same job, same persona, not a new job (see
+# docs/product/jobs.yaml JOB-17 NOTE). Decision 3 (UX Research Depth) =
+# Lightweight for this feature — Alex's authoring mental model and Maria/
+# Dana's stakes are already comprehensively established in security-rules'
+# own journey; only a short delta (the resource/request.resource
+# distinction) is added, inline in
+# docs/feature/security-rules-write-path/feature-delta.md § Journey, not as
+# a separate journey-*.yaml artifact.

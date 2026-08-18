@@ -633,3 +633,21 @@ jobs:
     # only (write/query/listen-path enforcement are named, deferred
     # follow-up epics) — see docs/feature/security-rules/feature-delta.md
     # § Scope Assessment for the Elephant Carpaccio split rationale.
+    # NOTE (security-rules-write-path DISCUSS, 2026-08-18): this feature is
+    # JOB-17's own write-path realization, not a new job — same persona (P1
+    # Alex), same goal (per-collection access-control enforcement), already
+    # named in JOB-17's own functional dimension text ("have embyr enforce
+    # them on every request") and its very first NOTE above ("write-path...
+    # are named, deferred follow-up epics"). This mirrors the project's
+    # "make it real" extension pattern (JOB-14 -> card-payments-backend,
+    # JOB-10 -> admin-api-v2) rather than the "same persona, different goal
+    # => new job" pattern JOB-17 itself used against JOB-16. This feature
+    # adds CreateDocument/UpdateDocument/DeleteDocument enforcement on top
+    # of security-rules' GetDocument-only v1 scope, via a SECOND, INDEPENDENT
+    # write condition per collection (never sharing or retroactively
+    # reusing the existing read condition — see the feature's own Resolution
+    # 1) plus a `request.resource` grammar extension (Resolution 2, closes
+    # OQ-SR-02). Query-path and real-time-listen enforcement remain named,
+    # deferred follow-up epics (Epic 2c, Epic 2d) — see
+    # docs/feature/security-rules-write-path/feature-delta.md § Job
+    # Discovery Framing Resolution and § Scope Assessment.
