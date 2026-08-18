@@ -28,7 +28,8 @@
 //!
 //! Error ratio: 3 error/edge (AC-17-07/09/10) out of 5 = 60%.
 //!
-//! One scenario enabled at a time (RED scaffold discipline, ADR-025 D2).
+//! All 5 scenarios enabled — unignored one at a time across DELIVER's steps
+//! (per DISTILL's one-at-a-time discipline), now GREEN.
 
 #![allow(unused_imports)]
 

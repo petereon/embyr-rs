@@ -30,7 +30,8 @@
 //! Error ratio: 2 edge/guardrail (AC-17-15 isolation, AC-17-16 full-suite
 //! proof) out of 3 = 67%.
 //!
-//! One scenario enabled at a time (RED scaffold discipline, ADR-025 D2).
+//! Both executable scenarios enabled — unignored one at a time across
+//! DELIVER's steps (per DISTILL's one-at-a-time discipline), now GREEN.
 //! AC-17-16's marker test is `#[ignore]`d unconditionally (see its own doc
 //! comment) — it is never meant to execute as a Rust assertion.
 

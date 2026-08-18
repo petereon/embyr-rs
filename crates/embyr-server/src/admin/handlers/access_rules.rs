@@ -23,19 +23,14 @@
 //!   routine) — never a second, independently-maintained copy. 200
 //!   { outcome: "allow" | "deny" } on success; 400 with the same
 //!   SYNTAX_ERROR/UNSUPPORTED_CONSTRUCT taxonomy as define/redefine if the
-//!   candidate condition itself fails to parse.
+//!   candidate condition itself fails to parse. Implemented (DELIVER,
+//!   step 06-01).
 //!
-//! RED scaffold note (Mandate 7): the session-auth / role-gate / project
-//! -ownership checks below are REAL, already-correct code (mirrors
-//! `client_identity.rs`'s own doc-comment distinction) — only the two
-//! `embyr_core::access_control` calls and the two `SystemDb` calls they
-//! transitively reach are RED scaffolds (`crates/embyr-core/src/access_control/mod.rs`,
-//! `crates/embyr-server/src/adapters/system_db.rs::{upsert_access_rule,get_access_rule}`).
-//! A request that reaches this handler will panic inside one of those
-//! scaffolds, surfacing to the caller as HTTP 500 — the expected,
-//! classified-RED (not BROKEN) failure mode for every scenario in
-//! `tests/security_rules/acceptance/sr01_*.rs` and `sr05_*.rs` until
-//! DELIVER implements them.
+//! Both handlers implemented (DELIVER steps 01-01 through 06-01) — mirrors
+//! `client_identity.rs`'s own doc-comment convention of marking each handler
+//! "Implemented" once its RED scaffolds (`embyr_core::access_control::
+//! {parse_condition,evaluate}`, `SystemDb::{upsert_access_rule,
+//! get_access_rule}`) are real, tested code.
 
 use std::collections::BTreeMap;
 
@@ -193,14 +188,12 @@ pub async fn define_access_rule(
     // AC-17-03/AC-17-04: validate the condition against the locked v1
     // grammar BEFORE storing anything (ADR-028: `condition_source` is
     // stored only after successful parse — never a raw, unvalidated string).
-    let condition = match parse_condition(&body.condition) {
-        Ok(c) => c,
-        Err(e) => return Ok(condition_parse_error_response(e)),
-    };
-    // `condition` is re-derivable from `body.condition` on every future
-    // `GetDocument` call (ADR-028 § Store Source, Not AST) — this parse is
-    // purely a define-time validation gate, not a value that gets stored.
-    let _ = condition;
+    // The parsed AST itself is discarded — it is re-derivable from
+    // `body.condition` on every future `GetDocument` call (ADR-028 § Store
+    // Source, Not AST); this parse is purely a define-time validation gate.
+    if let Err(e) = parse_condition(&body.condition) {
+        return Ok(condition_parse_error_response(e));
+    }
 
     match state
         .system_db

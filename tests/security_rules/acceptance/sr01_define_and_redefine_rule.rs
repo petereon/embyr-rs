@@ -20,9 +20,8 @@
 //! Error ratio: 3 error/edge (AC-17-03/04/05) out of 5 scenarios = 60% —
 //! comfortably over the 40% mandate.
 //!
-//! One scenario enabled at a time (RED scaffold discipline, ADR-025 D2) —
-//! all 5 marked `#[ignore]` except the walking skeleton; DELIVER unskips
-//! one at a time.
+//! All 5 scenarios enabled — unignored one at a time across DELIVER's steps
+//! (per DISTILL's one-at-a-time discipline), now GREEN.
 
 #![allow(unused_imports)]
 

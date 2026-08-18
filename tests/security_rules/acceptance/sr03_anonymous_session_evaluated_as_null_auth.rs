@@ -24,9 +24,10 @@
 //! Error ratio: 2 error/edge (AC-17-11 denial, AC-17-13 equivalence) out of
 //! 3 = 67%.
 //!
-//! One scenario enabled at a time (RED scaffold discipline, ADR-025 D2) —
-//! the walking skeleton (scenario 1) is DISCUSS's own "Happy Path (expected
-//! deny)" domain example for US-03.
+//! All 3 scenarios enabled — unignored one at a time across DELIVER's steps
+//! (per DISTILL's one-at-a-time discipline), now GREEN. The walking
+//! skeleton (scenario 1) is DISCUSS's own "Happy Path (expected deny)"
+//! domain example for US-03.
 
 #![allow(unused_imports)]
 
