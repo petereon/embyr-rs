@@ -13,18 +13,23 @@
 //!   401/403 on missing/insufficient session (AC-17-05).
 //!
 //! simulate_access_rule (POST /admin/v1/projects/:project_id/access_rules/simulate):
-//!   Session auth, ANY role (US-05, read-only, zero writes — AC-17-18).
+//!   Session auth, ANY role (US-05, read-only, zero writes — AC-17-18/47).
 //!   Parses a caller-supplied CANDIDATE condition (never read from or
-//!   written to `access_rules`) and evaluates it against a caller-supplied
-//!   synthetic identity (or none, for the anonymous case — AC-17-19) and
-//!   synthetic document payload. Calls the IDENTICAL
+//!   written to `access_rules`/`write_access_rules`) and evaluates it
+//!   against a caller-supplied synthetic identity (or none, for the
+//!   anonymous case — AC-17-19/48), a synthetic `resource` (pre-write
+//!   state), and a synthetic `request_resource` (proposed new state,
+//!   security-rules-write-path US-07, ADR-030 — AC-17-46). Which of the two
+//!   maps are populated vs. empty drives create/update/delete semantics
+//!   identically to real write enforcement (Slices 02-04); `operation` is a
+//!   documentation-only annotation, never consumed. Calls the IDENTICAL
 //!   `embyr_core::access_control::{parse_condition, evaluate}` real
-//!   enforcement uses (ADR-029 § Simulation shares the exact evaluation
-//!   routine) — never a second, independently-maintained copy. 200
-//!   { outcome: "allow" | "deny" } on success; 400 with the same
-//!   SYNTAX_ERROR/UNSUPPORTED_CONSTRUCT taxonomy as define/redefine if the
-//!   candidate condition itself fails to parse. Implemented (DELIVER,
-//!   step 06-01).
+//!   enforcement (read AND write) uses (ADR-029/ADR-030 § Simulation shares
+//!   the exact evaluation routine) — never a second, independently
+//!   -maintained copy. 200 { outcome: "allow" | "deny" } on success; 400
+//!   with the same SYNTAX_ERROR/UNSUPPORTED_CONSTRUCT taxonomy as
+//!   define/redefine if the candidate condition itself fails to parse.
+//!   Implemented (DELIVER, step 06-01; extended step 07-01, US-07).
 //!
 //! Both handlers implemented (DELIVER steps 01-01 through 06-01) — mirrors
 //! `client_identity.rs`'s own doc-comment convention of marking each handler
@@ -122,8 +127,20 @@ pub struct SimulatedAuth {
 pub struct SimulateAccessRuleBody {
     pub condition: String,
     pub auth: Option<SimulatedAuth>,
+    /// Documentation-only (security-rules-write-path, US-07, ADR-030):
+    /// `"create"|"update"|"delete"`, NOT consumed by `evaluate()`. Evaluation
+    /// semantics are driven entirely by which of `resource`/`request_resource`
+    /// are populated vs. empty — the same natural create/update/delete
+    /// differentiation real write enforcement uses.
+    #[serde(default)]
+    pub operation: Option<String>,
     #[serde(default)]
     pub resource: BTreeMap<String, serde_json::Value>,
+    /// NEW (security-rules-write-path, US-07, ADR-030): the proposed new
+    /// document state, translated via `json_value_to_field_value` exactly
+    /// like `resource` above — reused, not duplicated.
+    #[serde(default)]
+    pub request_resource: BTreeMap<String, serde_json::Value>,
 }
 
 /// Response for POST .../access_rules/simulate — 200. `outcome` is
@@ -338,22 +355,29 @@ pub async fn simulate_access_rule(
         .iter()
         .map(|(k, v)| (k.clone(), json_value_to_field_value(v)))
         .collect();
+    // security-rules-write-path (US-07, ADR-030): the caller-supplied
+    // `request_resource` map (the proposed new document state), translated
+    // via the SAME `json_value_to_field_value` helper as `resource` above —
+    // reused, not duplicated.
+    let request_resource_fields: BTreeMap<String, FieldValue> = body
+        .request_resource
+        .iter()
+        .map(|(k, v)| (k.clone(), json_value_to_field_value(v)))
+        .collect();
 
-    // ADR-029 § Simulation shares the exact evaluation routine: the SAME
-    // `evaluate()` real enforcement (`grpc::handler::handle_get_document`)
-    // calls — no second, independently-maintained copy anywhere.
-    //
-    // security-rules-write-path (ADR-030): `evaluate()`'s signature gained a
-    // `request_resource_fields` parameter. Extending `SimulateAccessRuleBody`
-    // to accept a caller-supplied `request_resource` map is Slice 07's own
-    // scope (US-07) — this call site passes an empty map for now, the
-    // minimal compiler-forced change, zero other behavior change here.
-    let empty_request_resource_fields: BTreeMap<String, FieldValue> = BTreeMap::new();
+    // ADR-029/ADR-030 § Simulation shares the exact evaluation routine: the
+    // SAME `evaluate()` real write/read enforcement calls (Slices 02-04's
+    // `handle_create_document`/`handle_update_document`/
+    // `handle_delete_document`, and `handle_get_document`) — no second,
+    // independently-maintained copy anywhere. Which of `resource`/
+    // `request_resource` are populated vs. empty drives create/update/delete
+    // semantics identically to real enforcement — `body.operation` is never
+    // read here.
     let outcome = evaluate(
         &condition,
         auth_ctx.as_ref(),
         &resource_fields,
-        &empty_request_resource_fields,
+        &request_resource_fields,
     );
 
     Ok((

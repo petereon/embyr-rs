@@ -96,6 +96,27 @@ pub async fn seed_write_access_rule_full(
     .expect("insert write_access_rules row");
 }
 
+/// Read the currently-stored `condition_source` for `(project_id,
+/// collection_path)` in `write_access_rules`, against a
+/// `SecurityRulesFullContext`'s own `sys_pool`/`project_id` — used by Slice
+/// 07 (US-07, AC-17-47) to prove `simulate_access_rule` never calls
+/// `upsert_write_access_rule` (the stored row must be byte-identical before
+/// and after a simulation). Mirrors `write_access_rule_condition_source`
+/// above, against the OTHER context type this feature's two contexts use.
+pub async fn write_access_rule_condition_source_full(
+    ctx: &SecurityRulesFullContext,
+    collection_path: &str,
+) -> Option<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT condition_source FROM write_access_rules WHERE project_id = $1 AND collection_path = $2",
+    )
+    .bind(&ctx.project_id)
+    .bind(collection_path)
+    .fetch_optional(&ctx.sys_pool)
+    .await
+    .unwrap_or(None)
+}
+
 /// A single-field string value, the shape every domain example in this
 /// slice's ACs needs (`owner_id` equality) — kept minimal rather than a
 /// full `serde_json`-style value builder (no other `FieldValue` shape is
