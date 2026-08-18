@@ -1148,6 +1148,15 @@ impl FirestoreService {
             return Err(Status::permission_denied("project is suspended"));
         }
 
+        // security-rules-query-path (ADR-031 § Decision — Composition, step
+        // 1): identical call shape to `handle_get_document`'s own
+        // `attach_client_identity_if_present` placement — the function
+        // itself is unchanged, this is a new consumer of its existing
+        // return value.
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
         // Extract the structured query from the request
         let sq_proto = match &req.query_type {
             Some(QueryType::StructuredQuery(sq)) => sq,
@@ -1220,6 +1229,44 @@ impl FirestoreService {
             end_at: None,
             since_update_time: None,
         };
+
+        // security-rules-query-path (ADR-031 § Decision — Composition, step
+        // 3): a single indexed lookup on `(project_id, collection_path)`,
+        // identical shape/cost to `handle_get_document`'s own
+        // `get_access_rule` call, reading the SAME `access_rules` table
+        // (never `write_access_rules`). `None` -> the `if let` below simply
+        // does not execute — the composite-index check and
+        // `adapter.run_query()` calls immediately below are reached
+        // completely unmodified, the EXACT pre-feature code path
+        // (regression guardrail).
+        let rule_row = self
+            .system_db
+            .get_access_rule(&project_id_str, &collection.collection_path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if let Some(rule_row) = rule_row {
+            let condition = embyr_core::access_control::parse_condition(&rule_row.condition_source)
+                .map_err(|e| {
+                    Status::internal(format!("stored access rule failed to re-parse: {e:?}"))
+                })?;
+            let auth_ctx = verified_identity
+                .as_ref()
+                .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+
+            // ADR-031 § OQ-SRQ-03 Resolution: compliance-checking runs
+            // strictly BEFORE the composite-index check below — a caller
+            // never entitled to query this collection at all must never
+            // learn whether it also requires a composite index.
+            match embyr_core::access_control::check_query_compliance(
+                &condition,
+                domain_query.filter.as_ref(),
+                auth_ctx.as_ref(),
+            ) {
+                embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
+                outcome => return Err(query_compliance_rejection(&outcome)),
+            }
+        }
 
         // Composite index check: filter on field X + orderBy field Y (where Y != X)
         // requires a READY composite index in the system DB.
@@ -1498,6 +1545,32 @@ fn extract_project_id_from_listen_request(msg: &ListenRequest) -> Result<String,
             "invalid database path in ListenRequest: {db}"
         ))),
     }
+}
+
+/// Rejection response for a non-compliant `RunQuery` (security-rules-query-path,
+/// ADR-031), mirroring `handle_get_document`'s own `Status::permission_denied
+/// ("access denied by rule")` precedent. Slice 01 scope: a minimal,
+/// genuinely-observable "rejected, not executed" response — the exact
+/// reason-code/message-wording taxonomy (AC-17-56/68) is a later slice's
+/// job, this slice only needs SOME observable rejection distinguishable from
+/// success (AC-17-51's own test asserts on the gRPC status code).
+fn query_compliance_rejection(
+    outcome: &embyr_core::access_control::QueryComplianceOutcome,
+) -> Status {
+    use embyr_core::access_control::QueryComplianceOutcome;
+    let message = match outcome {
+        QueryComplianceOutcome::RejectedUnsupportedRuleShape => {
+            "query rejected: this collection's access rule is not a shape supported for query \
+             enforcement"
+                .to_string()
+        }
+        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts } => format!(
+            "query rejected by access rule: {} unsatisfied filter requirement(s)",
+            unsatisfied_conjuncts.len()
+        ),
+        QueryComplianceOutcome::Admitted => unreachable!("Admitted never reaches this function"),
+    };
+    Status::permission_denied(message)
 }
 
 /// Translate a proto `Filter` to a domain `QueryFilter`.

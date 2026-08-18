@@ -41,6 +41,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::field_value::FieldValue;
+use crate::domain::query::QueryFilter;
 
 // ---------------------------------------------------------------------------
 // Types (ADR-027 § Decision — Types)
@@ -515,6 +516,160 @@ fn resolve_field_value(
     }
 }
 
+// ---------------------------------------------------------------------------
+// check_query_compliance (security-rules-query-path, Slice 01, ADR-031)
+// ---------------------------------------------------------------------------
+
+/// Outcome of a query-shape compliance check (security-rules-query-path).
+/// Distinct from `EvaluationOutcome` (Allow/Deny only) — a `RunQuery`'s
+/// compliance decision is made from the query's own filter SHAPE, before any
+/// document is fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryComplianceOutcome {
+    /// The query's filter tree, together with the caller's auth context,
+    /// satisfies every decidable conjunct of the rule. The query may proceed.
+    Admitted,
+    /// The rule is a fully decidable shape, but the query does not satisfy
+    /// one or more conjuncts. Carries every conjunct that failed.
+    Rejected { unsatisfied_conjuncts: Vec<UnsatisfiedConjunct> },
+    /// The rule's `Condition` tree contains a shape outside this slice's
+    /// locked decidable set (only pure ownership-equality, Slice 01) —
+    /// the entire rule is undecidable; every query against the collection
+    /// is rejected, regardless of filter shape.
+    RejectedUnsupportedRuleShape,
+}
+
+/// One AND-conjunct that failed to be satisfied by the query's filter tree
+/// and/or auth context. Slice 01 scope: only `OwnershipFilterMissing` — the
+/// other reasons (`DenyAll`/`AuthRequired`/`AuthForbidden`) belong to later
+/// slices' own decidable shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsatisfiedConjunct {
+    /// `request.auth.uid == resource.data.<field>` conjunct unmet — no
+    /// query filter binds `<field>` with `==` to the caller's own verified
+    /// uid.
+    OwnershipFilterMissing { field_path: String },
+}
+
+/// Decide whether a `RunQuery`'s filter tree, together with the caller's
+/// auth context, satisfies a rule's `Condition` — WITHOUT fetching or
+/// inspecting any document. Total and infallible by construction: every
+/// unrecognized `Condition` shape resolves to `RejectedUnsupportedRuleShape`
+/// via `decompose_decidable`'s own explicit catch-all — reject is the ONLY
+/// reachable outcome for a shape this function does not name, never an
+/// accidental allow-list gap.
+///
+/// `filter` is the query's ALREADY-TRANSLATED domain `QueryFilter` (or
+/// `None` for an unfiltered query) — this function performs zero proto
+/// translation and zero IO.
+///
+/// `auth` is the caller's server-VERIFIED identity (or `None`), the
+/// identical `Option<&AuthContext>` `evaluate()` already takes — this
+/// function never derives or accepts an identity from anywhere else. This is
+/// the load-bearing security property behind AC-17-51: the caller's own uid
+/// used for the ownership-equality comparison always comes from this
+/// parameter, NEVER from the query filter's own bound value. The filter's
+/// bound value is only ever the thing being CHECKED against `auth.uid`,
+/// never trusted as proof of `auth.uid`'s own value.
+pub fn check_query_compliance(
+    condition: &Condition,
+    filter: Option<&QueryFilter>,
+    auth: Option<&AuthContext>,
+) -> QueryComplianceOutcome {
+    let atoms = match decompose_decidable(condition) {
+        Err(Undecidable) => return QueryComplianceOutcome::RejectedUnsupportedRuleShape,
+        Ok(atoms) => atoms,
+    };
+
+    let mut unsatisfied = Vec::new();
+    for atom in &atoms {
+        match atom {
+            Atom::OwnershipEquality(field) => {
+                let satisfied = auth
+                    .map(|a| filter_binds_field_to_uid(filter, field, &a.uid))
+                    .unwrap_or(false);
+                if !satisfied {
+                    unsatisfied.push(UnsatisfiedConjunct::OwnershipFilterMissing {
+                        field_path: field.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    if unsatisfied.is_empty() {
+        QueryComplianceOutcome::Admitted
+    } else {
+        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts: unsatisfied }
+    }
+}
+
+/// The one shape `decompose_decidable` recognizes in Slice 01: pure
+/// ownership equality. Later slices (03/04/05) add `AlwaysTrue`/
+/// `AlwaysFalse`/`AuthPresence` variants and their own `Condition` match
+/// arms — Slice 01 deliberately does not build them ahead of a test that
+/// requires them.
+enum Atom {
+    OwnershipEquality(String),
+}
+
+struct Undecidable;
+
+/// Recursively decomposes a `Condition` into a flat list of atoms. Returns
+/// `Err(Undecidable)` for ANY shape outside Slice 01's own locked set (pure
+/// ownership equality, either operand order) — this is the ONLY path to
+/// `RejectedUnsupportedRuleShape`, reached by an explicit wildcard match arm,
+/// not by the absence of a match (Decision Driver 1, ADR-031).
+fn decompose_decidable(condition: &Condition) -> Result<Vec<Atom>, Undecidable> {
+    match condition {
+        // `request.auth.uid == resource.data.<field>`, either operand
+        // order. `CompareOp::Eq` ONLY.
+        Condition::Compare(Operand::AuthUid, CompareOp::Eq, Operand::ResourceField(f))
+        | Condition::Compare(Operand::ResourceField(f), CompareOp::Eq, Operand::AuthUid) => {
+            Ok(vec![Atom::OwnershipEquality(f.clone())])
+        }
+
+        // Everything else (Slice 01 scope): `Condition::Literal`, `Or`,
+        // `Not`, `And`, `Ne` on this pairing, `RequestResourceField`, the
+        // `request.auth != null` idiom, etc. — undecidable for THIS slice.
+        _ => Err(Undecidable),
+    }
+}
+
+/// Does the query's filter tree (recursively, through `QueryFilter::
+/// Composite`'s AND structure — no other composite shape exists) contain an
+/// equality filter on `field_path` whose bound VALUE equals `caller_uid`?
+///
+/// SECURITY-CRITICAL (AC-17-51): `caller_uid` is ALWAYS `auth.uid` — the
+/// server-verified identity threaded in from `check_query_compliance`'s own
+/// `auth` parameter, never from anything client-supplied. This function
+/// reads the filter's bound value ONLY to compare it against that
+/// already-server-verified uid — it never treats the filter's presence, or
+/// its field name matching, as sufficient proof of entitlement on its own. A
+/// filter reading `owner_id == "maria-santos"` issued by Dana does NOT match
+/// here, because `caller_uid` is `"dana-kim"` — the field name is right, the
+/// VALUE is wrong, and value is what this check binds on.
+///
+/// Field-path matching is exact-string, case-sensitive (AC-17-52) — plain
+/// `==` on `field_path: String`, no normalization.
+fn filter_binds_field_to_uid(
+    filter: Option<&QueryFilter>,
+    field_path: &str,
+    caller_uid: &str,
+) -> bool {
+    match filter {
+        None => false,
+        Some(QueryFilter::Field(ff)) => {
+            ff.field_path == field_path
+                && ff.op == crate::domain::query::FilterOp::Equal
+                && ff.value == FieldValue::String(caller_uid.to_string())
+        }
+        Some(QueryFilter::Composite(filters)) => filters
+            .iter()
+            .any(|f| filter_binds_field_to_uid(Some(f), field_path, caller_uid)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Layer 1 (unit) coverage per Mandate 9 — PBT full where the input
@@ -813,6 +968,232 @@ mod tests {
             resource.insert("title".to_string(), FieldValue::String(unrelated_value));
 
             prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
+        }
+    }
+
+    // ── check_query_compliance (security-rules-query-path, Slice 01, ADR-031) ──
+    //
+    // Pure sibling to `evaluate()` — decides whether a RunQuery's filter tree
+    // satisfies an ownership-equality rule WITHOUT fetching any document.
+    // Slice 01 scope: only the ownership-equality shape
+    // (`request.auth.uid == resource.data.<field>`, either operand order).
+    // Everything else is undecidable for this slice (Slices 03/04/05 extend
+    // `decompose_decidable` with the remaining shapes).
+
+    use crate::domain::query::{FieldFilter, FilterOp, QueryFilter};
+
+    fn owner_id_field_equals(value: &str) -> QueryFilter {
+        QueryFilter::Field(FieldFilter {
+            field_path: "owner_id".to_string(),
+            op: FilterOp::Equal,
+            value: FieldValue::String(value.to_string()),
+        })
+    }
+
+    #[test]
+    fn ownership_equality_admits_when_filter_binds_field_to_callers_own_uid_ac_17_49() {
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = owner_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Admitted
+        );
+    }
+
+    #[test]
+    fn ownership_equality_admits_regardless_of_operand_order() {
+        // `resource.data.owner_id == request.auth.uid` — the reverse
+        // pairing, grammar-legal and equally decidable (this slice's own
+        // scope: "either operand order").
+        let condition = Condition::Compare(
+            Operand::ResourceField("owner_id".to_string()),
+            CompareOp::Eq,
+            Operand::AuthUid,
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = owner_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Admitted
+        );
+    }
+
+    #[test]
+    fn additional_filters_beyond_the_required_one_do_not_affect_compliance_ac_17_50() {
+        // A composite (AND) filter carrying the required ownership filter
+        // PLUS an unrelated extra filter — the query has MORE filters than
+        // strictly required and must still be admitted.
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = QueryFilter::Composite(vec![
+            owner_id_field_equals("maria-santos"),
+            QueryFilter::Field(FieldFilter {
+                field_path: "status".to_string(),
+                op: FilterOp::Equal,
+                value: FieldValue::String("active".to_string()),
+            }),
+        ]);
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Admitted
+        );
+    }
+
+    #[test]
+    fn filter_bound_to_someone_elses_uid_is_rejected_ac_17_51() {
+        // THE single most security-critical property in this feature: Dana
+        // (uid "dana-kim") submits a filter `owner_id == "maria-santos"` —
+        // syntactically on the right field, with the right operator, but
+        // bound to a value OTHER than her own verified uid. A compliance
+        // check that only verifies "a filter exists on the right field"
+        // would wrongly admit this and let Dana enumerate Maria's data.
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let dana = AuthContext { uid: "dana-kim".to_string() };
+        let filter_naming_someone_elses_uid = owner_id_field_equals("maria-santos");
+
+        let outcome =
+            check_query_compliance(&condition, Some(&filter_naming_someone_elses_uid), Some(&dana));
+
+        assert_eq!(
+            outcome,
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::OwnershipFilterMissing {
+                    field_path: "owner_id".to_string(),
+                }],
+            },
+            "a filter on the right field bound to ANOTHER caller's uid must be REJECTED, \
+             not admitted — field-name presence alone is never proof of entitlement"
+        );
+    }
+
+    #[test]
+    fn field_reference_matching_is_exact_string_case_sensitive_ac_17_52() {
+        // A rule referencing `owner_id` must NOT be satisfied by a filter on
+        // `Owner_Id` — no fuzzy/partial/case-insensitive matching.
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = QueryFilter::Field(FieldFilter {
+            field_path: "Owner_Id".to_string(),
+            op: FilterOp::Equal,
+            value: FieldValue::String("maria-santos".to_string()),
+        });
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::OwnershipFilterMissing {
+                    field_path: "owner_id".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn no_signed_in_caller_can_never_satisfy_an_ownership_equality_rule() {
+        // `auth` is `None` (no signed-in caller) — there is no uid to bind
+        // to, so no filter, however shaped, can ever satisfy the rule.
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let filter = owner_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), None),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::OwnershipFilterMissing {
+                    field_path: "owner_id".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn an_unfiltered_query_is_rejected_when_the_rule_requires_ownership_equality() {
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+
+        assert_eq!(
+            check_query_compliance(&condition, None, Some(&auth)),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::OwnershipFilterMissing {
+                    field_path: "owner_id".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn a_rule_shape_outside_the_locked_decidable_set_is_rejected_as_unsupported() {
+        // Fail-closed default arm (Decision Driver 1): a rule shape this
+        // slice does not name (e.g. bare `true`) is REJECTED, never
+        // silently admitted — the ONLY reachable path for an unrecognized
+        // `Condition` shape.
+        let condition = Condition::Literal(true);
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = owner_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::RejectedUnsupportedRuleShape
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Property (AC-17-51, strengthened): for ANY two DIFFERENT uids and
+        /// ANY field name, a filter binding that field to the OTHER uid
+        /// never satisfies an ownership-equality rule for the caller's own
+        /// uid — generatively, not just the one pinned Dana/Maria example.
+        #[test]
+        fn filter_bound_to_a_different_uid_never_admits(
+            caller_uid in "[a-z][a-z0-9-]{1,20}",
+            other_uid in "[a-z][a-z0-9-]{1,20}",
+            field_name in "[a-z][a-z0-9_]{0,20}",
+        ) {
+            prop_assume!(caller_uid != other_uid);
+            let condition = Condition::Compare(
+                Operand::AuthUid,
+                CompareOp::Eq,
+                Operand::ResourceField(field_name.clone()),
+            );
+            let auth = AuthContext { uid: caller_uid };
+            let filter = QueryFilter::Field(FieldFilter {
+                field_path: field_name,
+                op: FilterOp::Equal,
+                value: FieldValue::String(other_uid),
+            });
+
+            prop_assert_ne!(
+                check_query_compliance(&condition, Some(&filter), Some(&auth)),
+                QueryComplianceOutcome::Admitted
+            );
         }
     }
 }
