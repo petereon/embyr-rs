@@ -651,3 +651,23 @@ jobs:
     # deferred follow-up epics (Epic 2c, Epic 2d) — see
     # docs/feature/security-rules-write-path/feature-delta.md § Job
     # Discovery Framing Resolution and § Scope Assessment.
+    # NOTE (security-rules-query-path DISCUSS, 2026-08-18): this feature is
+    # JOB-17's own query-path realization, not a new job — same persona (P1
+    # Alex), same goal, already named in JOB-17's "on every request" text and
+    # in security-rules' own Out of Scope entry (candidate id
+    # security-rules-query-path). Closes an actively-exploitable bypass:
+    # RunQuery ignored access_rules entirely prior to this feature. Reuses
+    # the EXISTING read condition (access_rules, unchanged) — no new rule-
+    # authoring surface — via a genuinely NEW mechanism: a query's filter
+    # shape is checked for static compliance against the rule's Condition
+    # AST BEFORE execution (never executed-then-filtered), admitting only a
+    # closed set of decidable rule shapes (pure ownership-equality,
+    # auth-presence-only, public, and AND-composition of these) and
+    # rejecting every other shape outright, whole-collection, until future
+    # evidence justifies extending it. `embyr_core::access_control::
+    # evaluate()` is NOT reused (requires an already-fetched document
+    # unavailable at query-planning time); `parse_condition()`/the
+    # `Condition`/`Operand`/`AuthContext` types ARE reused unchanged.
+    # Real-time-listen enforcement remains a named, deferred follow-up epic
+    # (Epic 2d) — see docs/feature/security-rules-query-path/feature-delta.md
+    # § Job Discovery Framing Resolution and § Scope Assessment.
