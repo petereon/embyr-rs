@@ -307,6 +307,12 @@ path = "../../tests/security_rules/acceptance/sr04_untouched_collections_and_reg
 name = "security_rules_sr05_simulate_rule_before_publish"
 path = "../../tests/security_rules/acceptance/sr05_simulate_rule_before_publish.rs"
 
+# security-rules-write-path acceptance tests (Slice 01, ADR-030) — mirrors
+# the security_rules_srNN registration convention.
+[[test]]
+name = "security_rules_write_path_define_write_rule"
+path = "../../tests/security_rules_write_path/acceptance/define_write_rule.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

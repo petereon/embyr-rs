@@ -30,7 +30,10 @@ use super::handlers::client_identity::{
     verify_client_identity_credential,
 };
 // security-rules (US-01/US-05, ADR-029): access-rule define/redefine + simulate.
-use super::handlers::access_rules::{define_access_rule, simulate_access_rule};
+// security-rules-write-path (US-01, ADR-030): independent write-rule define/redefine.
+use super::handlers::access_rules::{
+    define_access_rule, define_write_access_rule, simulate_access_rule,
+};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
@@ -198,6 +201,14 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/access_rules/simulate",
             post(simulate_access_rule),
+        )
+        // security-rules-write-path (US-01, ADR-030): independent
+        // write-rule define/redefine (Owner/Admin, gated in-handler) — a
+        // NEW, distinct route/handler, not a branch on the read-rule route
+        // above (ADR-030 § Decision — Composition, rejected alternative).
+        .route(
+            "/admin/v1/projects/:project_id/write_access_rules",
+            post(define_write_access_rule),
         )
         .route(
             "/admin/v1/projects/:project_id/metrics",

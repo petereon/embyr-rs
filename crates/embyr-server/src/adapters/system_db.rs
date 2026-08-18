@@ -361,6 +361,39 @@ impl SystemDb {
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
     }
+
+    // -----------------------------------------------------------------------
+    // security-rules-write-path (ADR-030) — write_access_rules CRUD.
+    // -----------------------------------------------------------------------
+
+    /// Define OR redefine (same idempotent-upsert shape as
+    /// `upsert_access_rule` — ADR-030 § Decision — Storage Shape) the WRITE
+    /// rule for `(project_id, collection_path)`. Operates against
+    /// `write_access_rules` EXCLUSIVELY — no `access_rules` in this
+    /// statement's FROM/INTO clause at all, the structural mechanism behind
+    /// AC-17-43/AC-17-22's independence guarantee.
+    pub async fn upsert_write_access_rule(
+        &self,
+        project_id: &str,
+        collection_path: &str,
+        condition_source: &str,
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO write_access_rules (project_id, collection_path, condition_source) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (project_id, collection_path) \
+             DO UPDATE SET condition_source = EXCLUDED.condition_source, updated_at = now()",
+        )
+        .bind(project_id)
+        .bind(collection_path)
+        .bind(condition_source)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("upsert_write_access_rule failed: {e}"))
+        })?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

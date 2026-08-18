@@ -45,7 +45,9 @@ use serde::{Deserialize, Serialize};
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::handlers::shared::verify_project_ownership;
 use crate::admin::state::UserAdminState;
-use embyr_core::access_control::{evaluate, parse_condition, AuthContext, ConditionParseError, EvaluationOutcome};
+use embyr_core::access_control::{
+    evaluate, parse_condition, AuthContext, ConditionParseError, EvaluationOutcome,
+};
 use embyr_core::admin::account::Role;
 use embyr_core::domain::field_value::FieldValue;
 
@@ -68,6 +70,33 @@ pub struct DefineAccessRuleBody {
 /// response either way, no distinct 201).
 #[derive(Serialize)]
 pub struct AccessRuleResponse {
+    pub project_id: String,
+    pub collection_path: String,
+    pub condition: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Body for POST /admin/v1/projects/:project_id/write_access_rules
+/// (security-rules-write-path, US-01, ADR-030). Same shape as
+/// `DefineAccessRuleBody` — a distinct type, not a shared struct, since the
+/// two request bodies are independently evolvable (ADR-030 § Decision —
+/// Composition, "two single-purpose routes, not one route with a
+/// discriminated body").
+#[derive(Deserialize)]
+pub struct DefineWriteAccessRuleBody {
+    pub collection_path: String,
+    pub condition: String,
+}
+
+/// Response for POST /admin/v1/projects/:project_id/write_access_rules —
+/// 200, either first-time definition OR redefinition, mirroring
+/// `AccessRuleResponse`'s shape exactly. A separate type (not shared) so it
+/// can never be mistaken for — or accidentally echo — the read condition
+/// (ADR-030 § Decision — Composition, "never echo the raw condition back in
+/// a way that implies it's the read condition").
+#[derive(Serialize)]
+pub struct WriteAccessRuleResponse {
     pub project_id: String,
     pub collection_path: String,
     pub condition: String,
@@ -217,6 +246,65 @@ pub async fn define_access_rule(
             .into_response()),
         Err(e) => {
             tracing::error!("define_access_rule upsert error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// POST /admin/v1/projects/:project_id/write_access_rules
+/// (security-rules-write-path, US-01, ADR-030).
+///
+/// Owner or Admin only (AC-17-25), mirrors `define_access_rule`'s exact
+/// shape — session auth, role gate, `verify_project_ownership` reuse,
+/// `parse_condition` validation before storage, same
+/// `condition_parse_error_response`/SYNTAX_ERROR/UNSUPPORTED_CONSTRUCT
+/// taxonomy (AC-17-24). Storage + admin-API surface ONLY — this handler
+/// never touches `access_rules` and is never called by any write-time
+/// evaluation path (that is Slices 02-04, out of this slice's scope).
+pub async fn define_write_access_rule(
+    Path(project_id): Path<String>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+    Json(body): Json<DefineWriteAccessRuleBody>,
+) -> Result<Response, StatusCode> {
+    // AC-17-25: Owner or Admin only.
+    if session.role < Role::Admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    // AC-17-23/AC-17-24: validate against the SAME, unmodified locked v1
+    // grammar `define_access_rule` uses — this slice adds no grammar
+    // extension (`request.resource.data.<field>` is Slice 02's job).
+    if let Err(e) = parse_condition(&body.condition) {
+        return Ok(condition_parse_error_response(e));
+    }
+
+    match state
+        .system_db
+        .upsert_write_access_rule(&project_id, &body.collection_path, &body.condition)
+        .await
+    {
+        // AC-17-20/AC-17-21: the SAME response shape whether this was a
+        // first-time definition or a full replacement — mirrors
+        // `define_access_rule`'s identical no-branch shape, against
+        // `write_access_rules` exclusively (AC-17-22/AC-17-43: this
+        // statement never reads or writes `access_rules`).
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(WriteAccessRuleResponse {
+                project_id,
+                collection_path: body.collection_path,
+                condition: body.condition,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }),
+        )
+            .into_response()),
+        Err(e) => {
+            tracing::error!("define_write_access_rule upsert error: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
