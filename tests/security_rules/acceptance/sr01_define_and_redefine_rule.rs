@@ -255,3 +255,41 @@ async fn rule_definition_without_valid_admin_credentials_is_rejected() {
         "AC-17-05: missing session must be rejected exactly as other admin endpoints reject it"
     );
 }
+
+/// Journey:
+///   Given: a valid, signed-in session with the Viewer role (below Admin)
+///   When:  that session attempts to define a rule
+///   Then:  rejected 403 — Viewer is insufficient, distinct from the
+///          401 "no session at all" case above (AC-17-05's own doc comment:
+///          "Owner or Admin only ... Viewer -> 403" — mutation-testing gap,
+///          security-rules DELIVER Phase 5: only Owner-role coverage existed
+///          before this test, so the `<` role-rank comparison's boundary
+///          had no pinned assertion).
+///
+/// AC-17-05
+///
+/// @error @driving_port @real-io @US-01 @AC-17-05
+#[tokio::test]
+async fn rule_definition_by_a_viewer_role_session_is_rejected_403() {
+    let ctx = SecurityRulesAdminContext::new().await;
+    let cookie = ctx.seed_session("dana@trailmark.example", "Viewer").await;
+    ctx.insert_project("trailmark-prod").await;
+
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/projects/trailmark-prod/access_rules"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({
+            "collection_path": "journal_entries",
+            "condition": "true",
+        }))
+        .send()
+        .await
+        .expect("define request failed");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        403,
+        "AC-17-05: Viewer role must be rejected 403 — insufficient role, distinct from 401 (no session)"
+    );
+}

@@ -546,6 +546,26 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_path_condition_is_rejected_as_unsupported_not_syntax_error() {
+        // AC-17-03 (mutation-testing gap, security-rules DELIVER Phase 5):
+        // `**`/`{...}` wildcard-path shapes must be a NAMED unsupported
+        // construct, distinguishable from a plain syntax error (AC-17-04) —
+        // same distinguishability requirement as
+        // `cross_document_read_call_syntax_is_rejected_as_unsupported_not_syntax_error`
+        // above, but for the OTHER named construct (`detect_unsupported_construct`'s
+        // `**`/`{` branch had no direct pinned coverage; only the call-syntax
+        // branch did).
+        let result = parse_condition("resource.data.path.matches('/users/**')");
+        assert_eq!(
+            result,
+            Err(ConditionParseError::UnsupportedConstruct {
+                construct: UnsupportedConstruct::WildcardPath,
+                detail: "wildcard/recursive path matching is not supported in v1".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn unbalanced_parentheses_is_rejected_as_a_plain_syntax_error() {
         // AC-17-04: distinguishable from AC-17-03's UnsupportedConstruct.
         let result = parse_condition("(request.auth.uid == resource.data.owner_id");
