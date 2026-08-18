@@ -200,3 +200,46 @@ pub async fn update_document(
 
     client.update_document(request).await
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 04 (US-04, ADR-030) — real `DeleteDocument` gRPC calls, mirroring
+// `update_document`'s shape (addressed by a full resource name), but with no
+// `document`/fields payload at all — a delete has no proposed new document.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Real gRPC `DeleteDocument` call — driving port entry (Pillar 3), mirroring
+/// `update_document`'s own shape (real `FirestoreClient`, real
+/// `authorization` + optional `x-embyr-client-identity` metadata). No
+/// `current_document` precondition — this slice does not exercise
+/// preconditions, mirroring `handle_delete_document`'s own current scope.
+pub async fn delete_document(
+    ctx: &SecurityRulesFullContext,
+    resource_name: &str,
+    client_identity_token: Option<&str>,
+) -> Result<tonic::Response<()>, tonic::Status> {
+    use embyr_proto::firestore::{firestore_client::FirestoreClient, DeleteDocumentRequest};
+
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let mut request = tonic::Request::new(DeleteDocumentRequest {
+        name: resource_name.to_string(),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    client.delete_document(request).await
+}
