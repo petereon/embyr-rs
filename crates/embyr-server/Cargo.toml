@@ -325,6 +325,10 @@ path = "../../tests/security_rules_write_path/acceptance/update_gated_by_both_re
 name = "security_rules_write_path_delete_gated_by_resource"
 path = "../../tests/security_rules_write_path/acceptance/delete_gated_by_resource.rs"
 
+[[test]]
+name = "security_rules_write_path_anonymous_write_sessions"
+path = "../../tests/security_rules_write_path/acceptance/anonymous_write_sessions.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
