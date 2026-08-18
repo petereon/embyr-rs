@@ -765,3 +765,375 @@ The remaining 0.03 gap is OQ-SRW-01 below (whole-object presence sentinel, defer
 
 ### Upstream Changes
 - None — no DISCOVER/DIVERGE artifacts exist for this feature (same as `security-rules`/`client-auth`); this DISCUSS is grounded directly in `security-rules`' own shipped artifacts, its own ADRs, and `docs/product/jobs.yaml`.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ `docs/product/architecture/brief.md` § Application Architecture — security-rules (lines 3480-3739, full) — the direct structural precedent: Quality Attribute Priorities, Reuse Analysis (12-row table), Bounded-Context Placement (BC-4), Component Decomposition, Driving/Driven Ports, Decisions Table (DDD-SR-1..9), C4 System Context/Container/Component diagrams, Architecture Enforcement, Open Questions, External Integrations — mirrored below at the same density.
+✓ `docs/feature/security-rules-write-path/feature-delta.md` (full DISCUSS output, this file, read in full above) — 7 user stories (US-01..07), both Framing Resolutions (two independent condition slots; `request.resource` grammar), AC-17-20 through AC-17-48, § Handoff Package's 8 explicit flags.
+✓ `docs/feature/security-rules/feature-delta.md` § DESIGN section — the exact precedent this feature extends (confirmed via the brief.md read above, which contains this feature's DESIGN output verbatim).
+✓ `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md` (full) — locked v1 grammar EBNF, `Condition`/`Operand`/`CompareOp`/`AuthContext`/`EvaluationOutcome` types, fail-closed-on-missing-field mechanism.
+✓ `docs/product/architecture/adr-028-access-rule-storage-and-lifecycle.md` (full) — confirmed `access_rules` has exactly one row per `(project_id, collection_path)`, single `condition_source` column, idempotent-upsert lock (Resolution 3), Option A/B (versioned rows / audit log) rejection reasoning reused below.
+✓ `docs/product/architecture/adr-029-access-control-composition-and-bounded-context.md` (full) — confirmed `handle_get_document` is the sole 2a call site, BC-4's five-driver placement justification, identity-reuse pattern, existence-non-leakage mechanism, "no new probe" reasoning — all directly extended below.
+✓ `crates/embyr-core/src/access_control/mod.rs` (full, 692 lines) — confirmed exact current `Condition`/`Operand` (4 variants, no `RequestResourceField` yet)/`CompareOp`/`AuthContext`/`EvaluationOutcome` shapes; confirmed `tokenize()`'s word-character class already admits multi-segment dotted paths (no tokenizer change needed for the new operand); confirmed `word_to_operand`/`compare_operands`/`resolve_field_value`'s exact current match arms before designing the extension.
+✓ `crates/embyr-server/src/adapters/system_db.rs` (full) — confirmed `AccessRuleRow { condition_source: String, created_at, updated_at }` (non-`Option` `condition_source`), `upsert_access_rule`/`get_access_rule`'s exact SQL and method shape, confirming the single-condition-column schema ADR-028 describes and the direct adapter-method precedent for `write_access_rules`.
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` (full) — confirmed `define_access_rule`/`simulate_access_rule`'s exact current bodies, `ConditionRejectionResponse`/`json_value_to_field_value` shared helpers, the Owner/Admin-vs-any-role gate distinction.
+✓ `crates/embyr-server/src/admin/router.rs` (full) — confirmed exact route-registration precedent (session sub-router, `POST .../access_rules`, `POST .../access_rules/simulate`) for the new `write_access_rules` route.
+✓ `crates/embyr-server/src/grpc/handler.rs` (targeted full reads: `attach_client_identity_if_present` lines 358-383, `handle_get_document` lines 506-616, `handle_create_document` lines 618-679, `handle_update_document` lines 681-728, `handle_delete_document` lines 730-760) — **confirmed by direct read**: none of the three write handlers calls `attach_client_identity_if_present` or any rule-lookup method today; each already has `adapter`/`path`/`fields` in local scope at the point the new logic must be inserted.
+✓ `crates/embyr-core/src/storage/backend_adapter.rs` (full) — confirmed `BackendAdapter::get_document(&self, path: &DocumentPath) -> Result<Option<FirestoreDocument>, CoreError>` is the exact, already-probed trait method reused for the new pre-write fetch; zero trait change needed.
+✓ `crates/embyr-core/src/domain/document.rs` (full) — confirmed `FirestoreDocument.fields: BTreeMap<String, FieldValue>` — the exact shape `resource_fields`/`request_resource_fields` are built from.
+✓ Migration numbering — confirmed `migrations/0022_access_rules.sql` is the highest existing migration; `0023_write_access_rules.sql` is next-free.
+
+⊘ `nwave-ai outcomes check-delta` — not run. No Bash tool available to this agent invocation (documentation/design-only dispatch), mirroring this feature's own DISCUSS-wave precedent for `resolve_density`'s identical unavailability. This is a code-feature pipeline (new typed contract surface: `Operand::RequestResourceField`, `write_access_rules` table, 2 new admin routes), so per D-6 the check is not skip-eligible on scope grounds — it is skipped only for tooling-availability reasons, noted explicitly rather than silently omitted. Flagged for whichever wave next has Bash access to run it retroactively against this feature-delta.
+
+No contradictions found between DESIGN's decisions and DISCUSS's locked Resolutions. Both Framing Resolutions (independent condition slots; `request.resource` grammar) are implemented as specified, not reinterpreted — see § Decisions Table below for the point-by-point mapping.
+
+---
+
+## Wave: DESIGN / [REF] Interaction Mode
+
+**Propose** (autonomous analysis, self-selected). No live user available for this dispatch's back-and-forth (per task framing); mirrors `security-rules`' own DESIGN dispatch mode exactly. Two candidate framings were weighed for the storage-shape decision (the one genuinely open design question DISCUSS left to DESIGN) and presented with trade-offs below (§ ADR-030 Decision — Storage Shape) rather than silently picked — the closest approximation to "Propose" available without a live reviewer: full alternatives-considered writeup, self-selected with explicit rationale, exactly as ADR-030 documents.
+
+---
+
+## Wave: DESIGN / [REF] Quality Attribute Priorities — security-rules-write-path
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|---------------------|
+| 1 | **Structural independence of read vs. write conditions** | AC-17-43, this feature's single highest-consequence guardrail (DISCUSS's own framing). Drives the entire storage-shape decision (ADR-030): a new, independent table, not a shared column. |
+| 2 | **No regression to collections/traffic with no write rule defined** | AC-17-42, mirrors `security-rules`' own KPI #2/#3 guardrail. Structurally enforced via `get_write_access_rule` returning `None` short-circuiting before any evaluation logic or extra I/O runs (ADR-030), not just tested. |
+| 3 | **Fail-closed correctness across the two-resource-state case** | AC-17-28/33/37. Drives `evaluate()`'s extended-but-still-total signature (ADR-030) — this feature's own designated mutation-testing surface (per-feature mutation strategy, CLAUDE.md). |
+| 4 | **Existence non-leakage, extended to update/delete** | AC-17-34/38. Reuses ADR-029's exact evaluate-unconditionally/`Deny`-always-identical mechanism verbatim — no second non-leakage mechanism. |
+| 5 | **Shared-artifact integrity (no evaluation-routine drift between real write enforcement and simulation)** | § Handoff Package flag 8. `evaluate()` is extended once, called from 3 real call sites + 1 simulation call site — never duplicated. |
+| 6 | **Identity-reuse integrity (no re-derivation of `request.auth` on writes)** | § Handoff Package flag 4 (US-05). `attach_client_identity_if_present()` gains 3 call sites, zero modification. |
+| 7 | **No regression to `security-rules`' own already-shipped read path** | Explicit scope boundary. `access_rules`, `get_access_rule`/`upsert_access_rule`, `handle_get_document` receive zero code changes from this feature. |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis — security-rules-write-path (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---------------------|------|---------|----------|----------------|
+| `embyr_core::access_control::{Operand, evaluate, parse_condition}` | `crates/embyr-core/src/access_control/mod.rs` | Boolean-condition evaluation over identity + document data | **EXTEND** | New `RequestResourceField` operand variant + new `evaluate()` parameter, reusing the exact fail-closed mechanism (ADR-027) — not a second evaluator. ADR-029 DDD-SR-8's no-duplication guarantee extends to this feature's own mutation-testing surface. |
+| `AccessRuleRow` / `upsert_access_rule` / `get_access_rule` (read table) | `adapters/system_db.rs:28-38,299-363` | Existing read-rule CRUD pattern | **EXTEND (pattern reuse only; code itself untouched)** | `WriteAccessRuleRow`/`upsert_write_access_rule`/`get_write_access_rule` mirror this method shape exactly but operate on the new, separate `write_access_rules` table — zero lines of the existing read-rule methods change. |
+| `admin::handlers::access_rules` module shape | `admin/handlers/access_rules.rs` | Admin-handler shape for rule definition | **EXTEND** | New `define_write_access_rule` function added to the SAME file, reusing `condition_parse_error_response` and the Owner/Admin role-gate pattern verbatim. |
+| `simulate_access_rule` handler | `admin/handlers/access_rules.rs:229-269` | Rule simulation | **EXTEND** | Body extended with optional `request_resource` (+ `operation` hint, documentation-only); calls the SAME extended `evaluate()`. No second simulation handler, per US-07's explicit steer. |
+| `admin::router::build_admin_router` session sub-router | `admin/router.rs:163-250` | Route registration | **EXTEND** | 1 new route (`POST .../write_access_rules`); the existing `simulate` route registration is unchanged (same path, extended body schema only). |
+| `attach_client_identity_if_present` | `grpc/handler.rs:358-383` | `request.auth` identity resolution | **EXTEND (consume; 3 new call sites; function itself untouched)** | Mirrors `security-rules`' own reuse of this function for `handle_get_document` — identical zero-modification discipline, now 3 more call sites (US-05). |
+| `handle_create_document` | `grpc/handler.rs:618-679` | `CreateDocument` RPC handling | **EXTEND** | Additive identity-attach + write-rule lookup + evaluation step inserted before the existing `adapter.create_document` call; `None` write-rule short-circuits to the exact pre-feature code path (AC-17-42). |
+| `handle_update_document` | `grpc/handler.rs:681-728` | `UpdateDocument` RPC handling | **EXTEND** | Same additive shape, plus a pre-write `adapter.get_document` fetch (only when a write rule exists) to populate `resource.data`. |
+| `handle_delete_document` | `grpc/handler.rs:730-760` | `DeleteDocument` RPC handling | **EXTEND** | Same additive shape (fetch + evaluate); `request.resource.data` naturally empty, no fetch/build needed for proposed data. |
+| `BackendAdapter::get_document` (trait method) | `embyr-core/src/storage/backend_adapter.rs:63-66` | Document fetch | **EXTEND (reuse, zero trait change)** | The SAME already-probed trait method `handle_get_document` already calls is reused from 2 new call sites (update/delete) — no new port, no new adapter, no new probe. |
+| `embyr_core::domain::field_value::FieldValue` | `domain/field_value.rs` | Document field-value representation | **EXTEND (reuse unchanged)** | `request.resource.data.<field>` values reuse the identical existing type — no new value-representation type. |
+| `access_rules` table / `get_access_rule` / `upsert_access_rule` / `handle_get_document` guardrail | `migrations/0022_access_rules.sql`; `adapters/system_db.rs`; `grpc/handler.rs:506-616` | Read-rule storage and enforcement | **UNCHANGED — explicitly NOT touched** | The single most consequence-heavy non-decision of this feature: this table, its adapter methods, and `handle_get_document`'s existing guardrail branch are read-only reference points, never written to or altered — the structural mechanism behind AC-17-43. Listed here to make the non-decision explicit and auditable, not silently assumed. |
+| `write_access_rules` table (new) | `migrations/0023_write_access_rules.sql` (new) | Write-rule storage | **CREATE NEW** | No existing table stores a write-specific condition. Genuinely structurally independent from `access_rules` (separate table, separate PK, separate adapter methods, zero shared code path) — the storage-shape decision DISCUSS flagged as this feature's most consequential design risk (AC-17-43). See ADR-030 § Decision — Storage Shape for the full column-vs-table alternatives analysis (Option A rejected, Option B accepted). |
+
+**Verdict: 11 EXTEND (one of which is an explicit "confirmed unchanged" row), 1 CREATE NEW
+(extensively justified — no existing table stores a write-specific condition, and Option A's
+column-based alternative was rejected specifically because it could not achieve this
+without either modifying `handle_get_document`'s existing guardrail or contaminating the
+read-condition column), 0 unjustified CREATE NEW.**
+
+---
+
+## Wave: DESIGN / [REF] Development Paradigm Confirmation — security-rules-write-path
+
+No change to the project-wide paradigm. The extended `evaluate()` remains total and
+infallible (still no `Result`, `Deny` still absorbs every failure mode, now across
+two resource-field maps instead of one) — `functional-where-practical Rust`
+(CLAUDE.md) is preserved exactly, not relaxed, by this extension. `parse_condition()`
+remains pure, zero IO. No new shared mutable state anywhere in this feature's scope.
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement — security-rules-write-path
+
+No new bounded context. BC-4 Access Control (ADR-029) is extended with a second,
+independent aggregate — `WriteAccessRule`, alongside the existing `AccessRule` —
+sharing BC-4's existing ubiquitous language (`Condition`, `EvaluationOutcome`,
+`AuthContext`) and its existing read-only dependencies on BC-1 (identity) and BC-2
+(document fields), now exercised from 3 additional BC-2 call sites
+(`CreateDocument`/`UpdateDocument`/`DeleteDocument`) instead of only
+`GetDocument`. No re-evaluation of ADR-002's five decision drivers is needed —
+`WriteAccessRule` has the identical language/storage/consistency/failure
+/codebase-isolation shape as `AccessRule` did when ADR-029 placed it in BC-4.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition — security-rules-write-path
+
+| Component | Crate/Module Path | Responsibility | Bounded Context |
+|-----------|--------------------|------------------|------------------|
+| `embyr-core::access_control` (extended) | `crates/embyr-core/src/access_control/mod.rs` | Adds `Operand::RequestResourceField(String)`; extends `evaluate()` with a `request_resource_fields` parameter; extends `word_to_operand`/`compare_operands`/`resolve_field_value` (ADR-030). No IO. | BC-4 |
+| `embyr-server::admin::handlers::access_rules` (extended) | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Adds `define_write_access_rule` (US-01, write-rule define+redefine); extends `simulate_access_rule`'s body/call (US-07) | BC-4 (driving adapter) |
+| `embyr-server::adapters::system_db` (extended) | `crates/embyr-server/src/adapters/system_db.rs` | Adds `WriteAccessRuleRow`, `upsert_write_access_rule()`, `get_write_access_rule()` (ADR-030) — new methods, new table, zero change to existing read-rule methods | BC-4 (driven adapter) |
+| `embyr-server::grpc::handler::{handle_create_document, handle_update_document, handle_delete_document}` (extended) | `crates/embyr-server/src/grpc/handler.rs` | Each adds identity-attach + write-rule lookup + (fetch, update/delete only) + evaluation step, gating the existing adapter write call. `handle_get_document` itself receives only a 1-argument addition to its existing `evaluate()` call (empty `request_resource_fields`) — see ADR-030. | BC-4 (consumes BC-1 + BC-2 data, read-only), BC-2 (write gating) |
+| `write_access_rules` (System DB table, new) | `migrations/0023_write_access_rules.sql` (new) | Storage for the per-`(project_id, collection_path)` write condition (ADR-030), fully independent of `access_rules` | BC-4 |
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports (Inbound) — security-rules-write-path additions
+
+| Port | Protocol | Location | New/Extended | What it does |
+|------|----------|----------|---------------|---------------|
+| `WriteAccessRuleAdminPort` | HTTP (admin `:9090`, session sub-router) | `admin/handlers/access_rules.rs::define_write_access_rule` | New | `POST /admin/v1/projects/:project_id/write_access_rules` (define/redefine, US-01, body `{collection_path, condition}`). Session auth, Owner/Admin only — mirrors `define_access_rule` exactly, distinct route/table (ADR-030's rejected-`rule_type`-field reasoning). |
+| `AccessRuleSimulationPort` (existing, extended) | HTTP (admin `:9090`, session sub-router) | `admin/handlers/access_rules.rs::simulate_access_rule` | Extended | Body gains optional `operation` (documentation-only) + `request_resource` (proposed new state) fields, backward-compatible (`#[serde(default)]`). Supports write-rule simulation across create/update/delete (US-07) via the identical handler and the extended `evaluate()` call. |
+| `FirestoreGrpcPort` / `RestPort` (existing, extended) | gRPC `:8080` / REST `:8081` | `grpc/handler.rs::{handle_create_document, handle_update_document, handle_delete_document}` | **Extended, additively** | Each RPC's existing, unchanged call shape now additionally reflects write-rule evaluation when a write rule is defined for the target collection (US-02/03/04/05/06). No new RPC, no new endpoint. `handle_get_document` retains its existing shape with one internal-only argument addition (empty `request_resource_fields`). |
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters — security-rules-write-path additions
+
+No new *driven* (outbound infrastructure) port. `upsert_write_access_rule`/
+`get_write_access_rule` execute through the existing, already-probed `SystemDb`
+connection pool — the identical substrate every other System DB read/write in
+this codebase already uses. The new pre-write fetch (`adapter.get_document`,
+called from 2 new call sites in `handle_update_document`/`handle_delete_document`)
+reuses the existing, already-probed `BackendAdapter` trait method — no new
+adapter, no new `probe()`.
+
+**Earned Trust note (Principle 12 discipline, explicit, not silently skipped):** no
+new Earned Trust probe is required. Neither the extended `SystemDb` usage nor the
+new `BackendAdapter::get_document` call sites introduce a new *substrate*
+dependency — both reuse connections/trait methods already probed at the
+composition root. `embyr_core::access_control::evaluate()`/`parse_condition()`
+remain pure, deterministic CPU computation over values already resident in memory
+— the identical "no environment can lie to a pure function" reasoning ADR-029 §
+Enforcement established applies unmodified to the extended signature. Full
+reasoning: `docs/product/architecture/adr-030-write-path-grammar-storage-and-composition.md`
+§ Enforcement.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices — security-rules-write-path additions
+
+No new workspace dependency. The extended parser/evaluator remain hand-rolled,
+in-crate (same rationale as ADR-027 — a general-purpose parser-generator crate
+would still invite silently widening the locked grammar, now doubly so with two
+operand families). The new `write_access_rules` table reuses `sqlx` (existing).
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table — security-rules-write-path
+
+| ID | Decision | Verdict |
+|----|----------|---------|
+| DDD-SRW-1 | Storage shape: new, fully independent table `write_access_rules` (own PK, own adapter methods, zero shared code path with `access_rules`) — not a shared/nullable column on the existing table | Accepted — ADR-030 § Decision — Storage Shape |
+| DDD-SRW-2 | Grammar extension: new `Operand::RequestResourceField(String)` variant; no tokenizer change needed (existing word-character class already admits the dotted path); reuses the fail-closed-on-missing-field mechanism verbatim | Accepted — ADR-030 § Decision — Grammar Extension |
+| DDD-SRW-3 | `evaluate()` signature extended (not duplicated) with a `request_resource_fields` parameter; `handle_get_document`'s existing call site receives one new empty-map argument, zero branch/logic change | Accepted — ADR-030 § Decision — Grammar Extension |
+| DDD-SRW-4 | Composition: 3 new call sites (`handle_create_document`/`handle_update_document`/`handle_delete_document`), each gated by a cheap `get_write_access_rule` existence check before any extra I/O or evaluation; `None` short-circuits to the unmodified pre-feature code path (AC-17-42/43) | Accepted — ADR-030 § Decision — Composition |
+| DDD-SRW-5 | Pre-write document fetch: reuses existing `BackendAdapter::get_document`, called only for update/delete and only when a write rule is defined; create needs no fetch (proposed fields already in memory) | Accepted — ADR-030 § Decision — Composition |
+| DDD-SRW-6 | Admin handler: distinct `define_write_access_rule` action + distinct route, not a `rule_type`-discriminated single handler | Accepted — ADR-030 § Decision — Composition |
+| DDD-SRW-7 | Simulation: extend the existing `simulate_access_rule` body with optional `request_resource` (+ documentation-only `operation`), sharing the identical extended `evaluate()` call — no second simulation handler | Accepted — ADR-030 § Decision — Composition |
+| DDD-SRW-8 | Identity-attach wiring: 3 new call sites into the unchanged `attach_client_identity_if_present()` — function itself untouched | Accepted — ADR-030 § Decision — Composition (mirrors ADR-029's identical discipline) |
+| DDD-SRW-9 | Existence non-leakage extended to update/delete: evaluate unconditionally against real-or-empty resource fields, `Deny` always produces an identical `PermissionDenied` response, before the adapter write call is ever reached | Accepted — ADR-030 § Decision — Composition (reuses ADR-029's mechanism verbatim) |
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context (Mermaid) — security-rules-write-path
+
+No new external system, no new actor. `security-rules`' own System Context
+diagram (`brief.md` § Application Architecture — security-rules) is unchanged in
+its boxes; only relationship labels gain write-path scope:
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (security-rules-write-path delta)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Defines/redefines per-collection READ rules (unchanged, security-rules) and, independently, WRITE rules (new); simulates candidate rules of either kind before publishing")
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK", "Client library. addDoc()/setDoc()/updateDoc()/deleteDoc() calls are now additionally evaluated against a published WRITE rule, if one exists for the target collection — independent of any READ rule.")
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Now also stores and evaluates per-collection WRITE rules on CreateDocument/UpdateDocument/DeleteDocument, independent of the existing READ-rule mechanism.")
+    System_Ext(systemDB, "System Postgres", "Adds write_access_rules table (project- and collection-scoped write-condition storage, independent of the existing access_rules table).")
+
+    Rel(sdkDev, embyr, "Defines/redefines a write rule; simulates a candidate write rule", "Admin API :9090")
+    Rel(firebaseSDK, embyr, "addDoc()/updateDoc()/deleteDoc() — now evaluated against the target collection's published write rule, if any", "gRPC :8080 / REST :8081 (UNCHANGED for collections with no write rule defined)")
+    Rel(embyr, systemDB, "Reads/writes write_access_rules (new); reads access_rules unchanged (read-path only, never touched by writes)", "Postgres SQL")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Container Diagram (Mermaid) — security-rules-write-path
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (security-rules-write-path delta)
+
+    Person(sdkDev, "SDK Developer (Alex)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)", "Never calls embyr directly — experiences this feature only through whether addDoc()/updateDoc()/deleteDoc() succeed inside the Trailmark app")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(embyrA, "embyr-rs instance", "Rust binary", "Existing: gRPC :8080, REST :8081, Admin :9090. Extended: 1 new admin route (define/redefine write rule); simulate route body extended; additive identity-attach + write-rule-lookup + evaluation step inside handle_create_document/handle_update_document/handle_delete_document only.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "Existing access_rules table UNCHANGED. New: write_access_rules (1 row per project+collection, idempotent upsert, fully independent table).")
+        ContainerDb(custDB, "Customer Postgres (BC-2, per-project)", "PostgreSQL", "Extended usage: update/delete write-rule evaluation now issues a pre-write GetDocument-shaped fetch via the existing BackendAdapter, only when a write rule is defined for the target collection.")
+    }
+
+    Rel(sdkDev, embyrA, "Defines/redefines/simulates write rules (admin session auth)", "HTTP :9090")
+    Rel(endUser, embyrA, "addDoc()/updateDoc()/deleteDoc() — gated by the collection's WRITE rule, if any, independent of its READ rule", "gRPC :8080 / REST :8081")
+    Rel(embyrA, sysDB, "CRUD write_access_rules (new); access_rules reads/writes unchanged", "Postgres SQL")
+    Rel(embyrA, custDB, "New pre-write fetch (adapter.get_document) for update/delete, gated behind the cheap write-rule-existence check", "Postgres SQL, via BackendAdapter")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Component Diagram — BC-4 Access Control, Write-Path Extension (Mermaid)
+
+Warranted per the SKILL's "5+ components, complex subsystem" threshold: the
+extended evaluator, the new storage adapter, the new admin handler, and 3 new
+composition call sites are five-plus separable pieces whose call-graph (one
+extended evaluator, four call sites: 3 real + 1 simulation) is exactly the
+property this feature's structural guardrails (AC-17-42/43) depend on being
+visible.
+
+```mermaid
+C4Component
+    title Component Diagram — BC-4 Access Control (security-rules-write-path delta)
+
+    Container_Boundary(core, "embyr-core::access_control (pure, zero IO)") {
+        Component(parser, "parse_condition()", "Rust fn (extended)", "Adds one word_to_operand arm for 'request.resource.data.<field>' -> Operand::RequestResourceField. No tokenizer change.")
+        Component(evaluator, "evaluate()", "Rust fn (extended)", "Gains request_resource_fields parameter. Total, infallible, unchanged for callers that pass an empty map (handle_get_document).")
+    }
+
+    Container_Boundary(server, "embyr-server (adapters + composition)") {
+        Component(readStorage, "SystemDb::{upsert_access_rule, get_access_rule}", "sqlx adapter (UNCHANGED)", "ADR-028. Zero code change from this feature — the structural mechanism behind AC-17-43.")
+        Component(writeStorage, "SystemDb::{upsert_write_access_rule, get_write_access_rule}", "sqlx adapter (NEW)", "ADR-030. Separate write_access_rules table, own PK, own methods.")
+        Component(adminHandler, "admin::handlers::access_rules (extended)", "Axum handlers", "define_write_access_rule (NEW, US-01) calls parse_condition then upsert_write_access_rule. simulate_access_rule (EXTENDED, US-07) calls parse_condition then the extended evaluate() with both maps.")
+        Component(getDocHandler, "grpc::handler::handle_get_document", "Tonic handler (UNCHANGED behavior)", "Existing call to get_access_rule/evaluate unmodified except one new empty-map argument to evaluate().")
+        Component(createHandler, "grpc::handler::handle_create_document", "Tonic handler (NEW call sites)", "Identity-attach + get_write_access_rule + evaluate (empty resource, proposed request_resource) gating adapter.create_document.")
+        Component(updateHandler, "grpc::handler::handle_update_document", "Tonic handler (NEW call sites)", "Identity-attach + get_write_access_rule + fetch pre-write doc + evaluate (both maps populated) gating adapter.update_document.")
+        Component(deleteHandler, "grpc::handler::handle_delete_document", "Tonic handler (NEW call sites)", "Identity-attach + get_write_access_rule + fetch pre-write doc + evaluate (empty request_resource) gating adapter.delete_document.")
+    }
+
+    Rel(adminHandler, parser, "validates candidate condition (read or write)")
+    Rel(adminHandler, writeStorage, "upsert_write_access_rule (define_write_access_rule only)")
+    Rel(adminHandler, evaluator, "evaluate (simulate_access_rule only) -- SAME function all real enforcement calls")
+    Rel(getDocHandler, readStorage, "get_access_rule -- None short-circuits, UNCHANGED")
+    Rel(getDocHandler, evaluator, "evaluate(condition, auth, resource, EMPTY) -- one new argument, zero logic change")
+    Rel(createHandler, writeStorage, "get_write_access_rule -- None short-circuits, never reads access_rules")
+    Rel(createHandler, evaluator, "evaluate(condition, auth, EMPTY, proposed_fields)")
+    Rel(updateHandler, writeStorage, "get_write_access_rule -- None short-circuits, never reads access_rules")
+    Rel(updateHandler, evaluator, "evaluate(condition, auth, fetched_fields, proposed_fields)")
+    Rel(deleteHandler, writeStorage, "get_write_access_rule -- None short-circuits, never reads access_rules")
+    Rel(deleteHandler, evaluator, "evaluate(condition, auth, fetched_fields, EMPTY)")
+```
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement — security-rules-write-path
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern. No new
+crate, no new tooling, no new bounded context.
+
+Rules enforced (existing, applying unchanged to the extended module):
+- `embyr-core::access_control` retains zero IO imports (`cargo-deny`, `deny.toml`,
+  already covers all of `embyr-core`) — the extended `Operand`/`evaluate()` add no
+  import.
+- `embyr-core` defines the value-type/function surface; `embyr-server` consumes
+  it — dependency direction inward, unchanged.
+- No new adapter, no new `probe()` required (see § Driven Ports + Adapters,
+  above, and ADR-030 § Enforcement for the explicit Principle 12 reasoning).
+- `access_rules`, `get_access_rule`/`upsert_access_rule`, and
+  `handle_get_document`'s existing guardrail branch receive zero source changes —
+  verifiable by diff, not merely by test pass, at DELIVER time.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions — security-rules-write-path
+
+| ID | Question | Impact | Resolution owner |
+|----|----------|--------|-------------------|
+| OQ-SRW-02 (new) | A benign TOCTOU race exists between the new pre-write fetch (rule evaluation) and the actual write for update/delete — is best-effort fetch-then-decide sufficient for v1, or does a stronger consistency guarantee (e.g., evaluating inside the same precondition/transaction as the write) become necessary once real concurrent-write volume is observed? | Does not block this feature's WS scope (the same race class already exists around `WritePrecondition`/OCC for other reasons); flagged rather than silently assumed away | DISTILL (acceptance-designer) to confirm scope; DELIVER/platform-architect if evidence emerges post-launch |
+| OQ-SRW-05 (new) | Should the parsed write-condition AST be cached (keyed by `(project_id, collection_path, updated_at)`), mirroring OQ-SR-05's identical reasoning for read conditions, once real traffic volume is known? | Not required for v1 correctness; pure performance follow-up, doubly relevant now that update/delete also pay a pre-write fetch | Platform-architect, post-launch, if profiling warrants — mirrors OQ-SR-05 |
+| OQ-SRW-01 (carried from DISCUSS, unresolved by DESIGN) | Whether a whole-object presence sentinel (`resource == null` / `request.resource == null` as literal comparable operands) will ever be needed beyond what the fail-closed-on-missing-field mechanism already provides | Does not block this feature — no domain example requires it; DESIGN implements the literal locked-grammar reading (§ ADR-030 Decision — Grammar Extension) and does not build it speculatively | Product Discovery, triggered by future evidence |
+| OQ-SR-02 (carried from DISCUSS, now CLOSED by DESIGN) | Whether write-path needs `resource`/`request.resource` as two distinct grammar symbols | **Resolved by this DESIGN pass** — `Operand::RequestResourceField`, ADR-030 § Decision — Grammar Extension | Closed, this DESIGN |
+| OQ-SR-06 (carried from `security-rules` DESIGN, unrelated to writes) | A content-blind READ rule still resolves to `NotFound` against a non-existent document — in-scope existence-leakage, per `security-rules`' own DESIGN scoping | Not reopened by this feature; the identical scoped acceptance is extended to content-blind WRITE rules (§ ADR-030 § Decision — Composition, Existence non-leakage, extended) | Closed, `security-rules` DESIGN; extended reading confirmed here |
+
+---
+
+## Wave: DESIGN / [REF] External Integrations — security-rules-write-path
+
+**None requiring contract tests.** This feature introduces no new outbound
+network dependency: `write_access_rules` storage reuses the existing,
+already-probed `SystemDb` Postgres connection; the new pre-write fetch reuses the
+existing, already-probed `BackendAdapter::get_document` trait method; rule
+evaluation remains pure in-process computation. No new adapter, no new external
+service, no new consumer-driven-contract surface.
+
+---
+
+## Wave: DESIGN / [REF] SSOT Updates
+
+- `docs/product/architecture/brief.md` — new `## Application Architecture —
+  security-rules-write-path` section appended (mirrors this file's DESIGN
+  sections; SSOT is the integration point DEVOPS/DISTILL consult).
+- `docs/product/architecture/adr-030-write-path-grammar-storage-and-composition.md`
+  — new ADR (combined grammar/storage/composition, per DISCUSS's own
+  smaller-decision-surface steer).
+- No update to `adr-027`/`adr-028`/`adr-029` — all three remain accurate as
+  written; this feature extends, never contradicts, any of their decisions.
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package — to DISTILL (acceptance-designer)
+
+- This `feature-delta.md` (DISCUSS + DESIGN sections combined).
+- `docs/product/architecture/adr-030-write-path-grammar-storage-and-composition.md`.
+- `docs/product/architecture/brief.md` § Application Architecture —
+  security-rules-write-path.
+- **Explicit flags for DISTILL** (mirrors DISCUSS's own flag-forward discipline):
+  1. AC-17-43's structural mechanism is now fully specified (separate table,
+     separate adapter methods, separate call sites) — acceptance scenarios
+     should include at least one that would FAIL under a shared-column design
+     (e.g., redefine a write rule, then assert the read rule's `condition_source`
+     is byte-for-byte unchanged in `access_rules`) to make the structural claim
+     observable, not just asserted.
+  2. OQ-SRW-02 (TOCTOU race) and OQ-SRW-05 (AST caching) are deferred,
+     non-blocking — confirm DISTILL agrees no acceptance scenario requires
+     resolving either first.
+  3. `evaluate()`'s extended signature is this feature's designated
+     mutation-testing surface (per-feature strategy) — DISTILL's acceptance
+     scenarios for AC-17-28/33/37 (fail-closed across the two-resource-state
+     case) are the scenarios DELIVER's mutation pass will lean on most heavily;
+     ensure coverage of both "field missing from `resource`" and "field missing
+     from `request.resource`" independently, not just one combined case.
+
+**To DEVOPS (platform-architect)**: no new external integration, no new deployed
+container, no new probe. `write_access_rules` migration (`0023_write_access_rules.sql`)
+should ship in the same migration-application step as any other DELIVER-wave
+schema change — no special ordering constraint relative to `0022_access_rules.sql`.
+
+Peer review: not invoked per-wave (default skip — no contested ADR beyond the
+storage-shape decision, which is fully alternatives-documented in ADR-030 with an
+explicit rejected option and rationale; no novel pattern beyond ADR-027/028/029's
+own already-accepted precedent; no unverified performance budget; no new security
+boundary beyond what ADR-029 already established for BC-4). Mandatory
+consolidated review fires at end of DISTILL covering all 4 waves in parallel.
+
+---
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] Storage shape: a new, fully independent `write_access_rules` table (own PK, own adapter methods) — not a shared/nullable column on `access_rules`. Rejected the column alternative specifically because it could not cleanly support a first-time write-only rule (no pre-existing read rule) without either modifying `handle_get_document`'s already-shipped structural guardrail or contaminating the read-condition column — see ADR-030 § Decision — Storage Shape.
+- [D2] Grammar: `Operand::RequestResourceField(String)` added; no tokenizer change needed; `evaluate()`'s signature extended (not duplicated) with a `request_resource_fields` parameter, with `handle_get_document`'s existing call site receiving one new empty-map argument and zero logic change — see ADR-030 § Decision — Grammar Extension.
+- [D3] Composition: 3 new call sites (`handle_create_document`/`handle_update_document`/`handle_delete_document`), each gated by a cheap write-rule-existence check before any extra I/O; pre-write fetch reuses the existing `BackendAdapter::get_document`, paid only when a write rule exists and only for update/delete — see ADR-030 § Decision — Composition.
+- [D4] Admin surface: a distinct `define_write_access_rule` action/route (not a `rule_type`-discriminated single handler); `simulate_access_rule` extended in place (not a new endpoint) — see ADR-030 § Decision — Composition.
+
+### Architecture Summary
+- Pattern: Hexagonal (ports-and-adapters), unchanged — no new bounded context, BC-4 Access Control extended with a second independent aggregate (`WriteAccessRule`).
+- Paradigm: functional-where-practical Rust, unchanged — `evaluate()`/`parse_condition()` remain pure, total, zero IO.
+- Key components: `embyr-core::access_control` (extended), `write_access_rules` table (new), `SystemDb::{upsert_write_access_rule, get_write_access_rule}` (new), `admin::handlers::access_rules::define_write_access_rule` (new) + `simulate_access_rule` (extended), `grpc::handler::{handle_create_document, handle_update_document, handle_delete_document}` (extended).
+
+### Reuse Analysis
+See § Wave: DESIGN / [REF] Reuse Analysis — security-rules-write-path above — 12 rows total (11 EXTEND including one explicit "confirmed unchanged," 1 CREATE NEW, 0 unjustified).
+
+### Technology Stack
+- No new workspace dependency. Hand-rolled parser/evaluator extension (no `pest`/`nom`), `sqlx` (existing) for the new table.
+
+### Constraints Established
+- `access_rules`, `get_access_rule`/`upsert_access_rule`, and `handle_get_document`'s existing guardrail branch must remain byte-for-byte unmodified by this feature's DELIVER wave — a diff-level constraint, not just a behavioral one.
+- Collections with no write rule defined must pay zero additional I/O (create: always; update/delete: gated behind the write-rule-existence check before any fetch).
+- `evaluate()` remains the sole shared evaluation routine across all 4 call sites (3 real + 1 simulation) — no second implementation, ever.
+
+### Upstream Changes
+- None. No DISCUSS assumption was contradicted or revised by DESIGN; both Framing Resolutions (independent condition slots, `request.resource` grammar) are implemented exactly as locked, with the storage-shape and composition specifics DISCUSS explicitly deferred to DESIGN now resolved (§ Decisions Table above).

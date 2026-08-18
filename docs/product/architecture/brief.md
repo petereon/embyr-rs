@@ -3737,4 +3737,64 @@ Postgres connection; rule evaluation is pure in-process computation over data
 already fetched by the existing `GetDocument` path. No new adapter, no new
 external service, no new consumer-driven-contract surface.
 
+---
+
+## Application Architecture — security-rules-write-path
+
+> Updated: 2026-08-18
+> Feature: security-rules-write-path (JOB-17 — extends per-collection
+> access-control rules to `CreateDocument`/`UpdateDocument`/`DeleteDocument`,
+> Epic 2b of the access-control initiative; Epic 2a = `security-rules`)
+> Mode: Propose (autonomous analysis, no live user for this dispatch)
+> ADRs: `docs/product/architecture/adr-030-write-path-grammar-storage-and-composition.md`
+> (new — combined grammar/storage/composition, per DISCUSS's smaller-decision
+> -surface steer). Does not amend `adr-027`/`adr-028`/`adr-029` — all three
+> remain accurate as written; this feature extends, never contradicts, them.
+
+Full DESIGN content (Quality Attribute Priorities, Reuse Analysis, Bounded-Context
+Placement, Component Decomposition, Driving/Driven Ports, Technology Choices,
+Decisions Table DDD-SRW-1..9, C4 System Context/Container/Component diagrams,
+Architecture Enforcement, Open Questions, External Integrations, Handoff Package)
+lives in `docs/feature/security-rules-write-path/feature-delta.md` §§ Wave:
+DESIGN — the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Storage shape (this feature's central decision)**: a new, fully independent
+`write_access_rules` table (`migrations/0023_write_access_rules.sql`), own primary
+key `(project_id, collection_path)`, own adapter methods
+(`upsert_write_access_rule`/`get_write_access_rule`) — not a shared or nullable
+column on the existing `access_rules` table. This makes AC-17-43 ("a collection's
+read rule has zero effect on writes unless a separate write rule is explicitly
+defined") structurally true: `access_rules`, `get_access_rule`,
+`upsert_access_rule`, and `handle_get_document`'s existing guardrail branch
+receive **zero** code changes from this feature.
+
+**Grammar extension**: `Operand::RequestResourceField(String)` added to
+`embyr-core::access_control::Operand` (ADR-027, extended). `evaluate()`'s
+signature is extended (not duplicated) with a `request_resource_fields`
+parameter — the same total, infallible, fail-closed function real write
+enforcement and simulation both call, mirroring ADR-029's no-duplication
+guarantee.
+
+**Composition**: `handle_create_document`/`handle_update_document`/
+`handle_delete_document` each gain an identity-attach call (reusing
+`attach_client_identity_if_present`, unchanged) and a `get_write_access_rule`
+existence check that short-circuits to the exact pre-feature code path when no
+write rule is defined (AC-17-42). Update/delete additionally fetch the pre-write
+document (reusing the existing `BackendAdapter::get_document`) only when a write
+rule is defined, mirroring `handle_get_document`'s own fetch-then-decide pattern
+and existence-non-leakage mechanism (ADR-029), now extended to writes.
+
+**Bounded context**: no new context. BC-4 Access Control (ADR-029) is extended
+with a second, independent aggregate (`WriteAccessRule`) alongside the existing
+`AccessRule`.
+
+**No new external integration, no new driven port, no new Earned Trust probe** —
+all new I/O reuses already-probed substrate (`SystemDb` pool,
+`BackendAdapter::get_document`).
+
+Full alternatives-considered analysis (including the rejected shared-column
+storage option and the rejected `rule_type`-discriminated admin-handler option):
+`docs/product/architecture/adr-030-write-path-grammar-storage-and-composition.md`.
 
