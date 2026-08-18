@@ -771,6 +771,75 @@ impl FirestoreService {
 
         let precondition = Self::convert_precondition(req.current_document);
 
+        // security-rules-write-path (ADR-030 § Decision — Composition,
+        // "Three new call sites, one shared pattern" — Update case, Slice
+        // 03/US-03). Identical 5-step sequence to `handle_create_document`,
+        // with ONE difference at step 3: the pre-write fetch populates
+        // `resource_fields` from the REAL existing document (or an empty
+        // map, existence non-leakage — AC-17-34), instead of Create's
+        // always-empty map.
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
+        // Write-rule lookup (queries `write_access_rules` ONLY). `None` ->
+        // proceed to the existing adapter.update_document(...) call,
+        // completely unmodified (regression guardrail — collections with no
+        // write rule pay zero additional I/O, including the pre-write
+        // fetch below).
+        let write_rule_row = self
+            .system_db
+            .get_write_access_rule(&project_id_str, &path.collection_path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if let Some(write_rule_row) = write_rule_row {
+            let condition =
+                embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
+                    .map_err(|e| {
+                        Status::internal(format!("stored write rule failed to re-parse: {e:?}"))
+                    })?;
+            let auth_ctx = verified_identity
+                .as_ref()
+                .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+
+            // Pre-write state (DIFFERENT from Create): reuses the existing,
+            // already-probed `BackendAdapter::get_document` — no new port.
+            // Paid only when a write rule is defined for the target
+            // collection (gated behind the cheap lookup above).
+            //
+            // AC-17-34 (existence non-leakage, mirrors ADR-029's own
+            // mechanism verbatim): the fetch happens BEFORE the Allow/Deny
+            // decision, `resource_fields` falls back to an empty map when
+            // the document does not exist, and `evaluate()` is called
+            // UNCONDITIONALLY — `Deny` always produces the identical
+            // `PermissionDenied` response regardless of whether `doc_opt`
+            // was `Some` or `None`.
+            let doc_opt = adapter
+                .get_document(&path)
+                .await
+                .map_err(core_error_to_status)?;
+            let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
+                std::collections::BTreeMap::new();
+            let resource_fields =
+                doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_resource_fields);
+
+            // Proposed new state: the already-parsed update body fields, no
+            // new I/O — the two-value old-vs-new comparison this slice
+            // exists to prove.
+            match embyr_core::access_control::evaluate(
+                &condition,
+                auth_ctx.as_ref(),
+                resource_fields,
+                &fields,
+            ) {
+                embyr_core::access_control::EvaluationOutcome::Deny => {
+                    return Err(Status::permission_denied("access denied by write rule"));
+                }
+                embyr_core::access_control::EvaluationOutcome::Allow => {}
+            }
+        }
+
         let write_result = adapter
             .update_document(&path, fields.clone(), precondition)
             .await

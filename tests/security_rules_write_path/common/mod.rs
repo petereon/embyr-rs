@@ -154,3 +154,49 @@ pub async fn create_document(
 
     client.create_document(request).await
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 03 (US-03, ADR-030) — real `UpdateDocument` gRPC calls, mirroring
+// `create_document`'s shape exactly but addressed by a full resource name
+// (an update targets an existing-or-not document, not a fresh collection +
+// generated/explicit id).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Real gRPC `UpdateDocument` call — driving port entry (Pillar 3), mirroring
+/// `create_document`'s own shape (real `FirestoreClient`, real
+/// `authorization` + optional `x-embyr-client-identity` metadata). No
+/// `update_mask`/`mask`/`current_document` — this slice does not exercise
+/// partial-field updates or preconditions, mirroring
+/// `handle_update_document`'s own current scope.
+pub async fn update_document(
+    ctx: &SecurityRulesFullContext,
+    resource_name: &str,
+    fields: std::collections::HashMap<String, embyr_proto::firestore::Value>,
+    client_identity_token: Option<&str>,
+) -> Result<tonic::Response<embyr_proto::firestore::Document>, tonic::Status> {
+    use embyr_proto::firestore::{firestore_client::FirestoreClient, Document, UpdateDocumentRequest};
+
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let mut request = tonic::Request::new(UpdateDocumentRequest {
+        document: Some(Document { name: resource_name.to_string(), fields, ..Default::default() }),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    client.update_document(request).await
+}
