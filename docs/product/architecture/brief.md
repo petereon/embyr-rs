@@ -3798,3 +3798,98 @@ Full alternatives-considered analysis (including the rejected shared-column
 storage option and the rejected `rule_type`-discriminated admin-handler option):
 `docs/product/architecture/adr-030-write-path-grammar-storage-and-composition.md`.
 
+---
+
+## Application Architecture — security-rules-query-path
+
+> Updated: 2026-08-18
+> Feature: security-rules-query-path (JOB-17 — closes the RunQuery bypass of
+> `access_rules`, Epic 2c of the access-control initiative; Epic 2a =
+> `security-rules`, Epic 2b = `security-rules-write-path`)
+> Mode: Propose (autonomous analysis, no live user for this dispatch)
+> ADR: `docs/product/architecture/adr-031-query-shape-compliance-check.md`
+> (new — combined algorithm/composition/rejection-shape/simulation-extension
+> decision, per this feature's own smaller-decision-surface reasoning,
+> mirroring ADR-030's precedent). Does not amend `adr-027`/`adr-028`/
+> `adr-029`/`adr-030` — all four remain accurate as written; this feature
+> extends, never contradicts, them.
+
+Full DESIGN content (Quality Attribute Priorities, Reuse Analysis,
+Bounded-Context Placement, Component Decomposition, Driving/Driven Ports,
+Technology Choices, Decisions Table DDD-SRQ-1..8, C4 System Context/Container
+/Component diagrams, Architecture Enforcement, Open Questions, External
+Integrations, Handoff Package) lives in
+`docs/feature/security-rules-query-path/feature-delta.md` §§ Wave: DESIGN —
+the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**The central decision**: a new, pure sibling function,
+`embyr_core::access_control::check_query_compliance(condition, filter, auth)
+-> QueryComplianceOutcome`, statically compares a rule's parsed `Condition`
+tree against a `RunQuery`'s already-translated `QueryFilter` tree and the
+caller's server-verified `AuthContext` — **without fetching or inspecting any
+document**. `evaluate()` itself is confirmed untouched and gains no new
+caller; the two functions answer structurally different questions (document
+-value truth vs. query-shape provability).
+
+**Fail-closed by construction**: `decompose_decidable()` — the internal
+helper that flattens the locked 5-shape decidable set (`Literal`,
+`request.auth != null`/`== null`, `request.auth.uid ==
+resource.data.<field>`, and AND-composition of those) — has a single,
+explicit wildcard match arm that is the *only* path to
+`QueryComplianceOutcome::RejectedUnsupportedRuleShape`. `Condition::Or`,
+`Condition::Not`, any `RequestResourceField` reference, and any other
+unnamed `Compare` shape all fall through to that one arm — the entire
+collection is rejected outright, never partially enforced, never silently
+allowed (US-05, this feature's designated mutation-testing surface).
+
+**The caller's-own-uid binding (this feature's single most security-critical
+property, AC-17-51)**: ownership-equality compliance is decided by
+`filter_binds_field_to_uid`, which compares the query filter's bound VALUE
+against `auth.uid` — the server-verified identity, never anything
+client-asserted. A filter naming the right field but bound to someone else's
+id (Dana filtering `owner_id == "maria-santos"`) does not satisfy the check;
+only a filter bound to the caller's own verified uid does.
+
+**Composition**: `handle_run_query` gains an identity-attach call (reusing
+`attach_client_identity_if_present`, unchanged) and a `get_access_rule`
+existence check (the SAME method `handle_get_document` already calls,
+zero modification) that short-circuits to the exact pre-feature code path
+when no read rule is defined (US-06). When a rule is defined,
+`check_query_compliance`'s verdict gates the EXISTING
+`requires_composite_index`/`is_index_ready` check and `adapter.run_query()`
+call, both otherwise unmodified — **the compliance check runs strictly
+BEFORE the composite-index check** (OQ-SRQ-03, resolved: minimizes
+information leakage on double-failure, adds zero cost on the common
+no-rule path).
+
+**Rejection shape**: `Status::permission_denied`, mirroring
+`handle_get_document`'s own precedent — not a new status code, not new
+`Status` metadata machinery. Distinguishability within that status family
+(missing-filter vs. auth-required vs. deny-all vs. unsupported-shape) uses a
+stable `[REASON_CODE]` message-text convention, consistent with this
+codebase's existing message-string-only precedent at the gRPC boundary.
+
+**Bounded context**: no new context. BC-4 Access Control (ADR-029) is
+extended with a third pure function alongside `parse_condition`/`evaluate`.
+
+**No new storage, no new external integration, no new driven port, no new
+Earned Trust probe** — this feature reads the existing `access_rules` table
+only (never `write_access_rules`); `check_query_compliance` and its internal
+helpers are pure CPU computation over values already resident in memory.
+
+**Release 2 (US-07)**: a new, distinct admin handler
+`simulate_query_compliance` (`POST .../access_rules/simulate_query`) — a
+deliberate departure from DISCUSS's own non-binding Technical Note to extend
+`simulate_access_rule` in place, because the response contract
+(`{compliant, reasons}`, shape-compliance) is genuinely different from
+`simulate_access_rule`'s (`{outcome}`, allow/deny). Calls the identical
+`check_query_compliance()` real enforcement uses — never a second,
+independently-maintained implementation.
+
+Full alternatives-considered analysis (including the rejected
+`evaluate()`-reuse framings and the rejected extend-`simulate_access_rule`
+-in-place option):
+`docs/product/architecture/adr-031-query-shape-compliance-check.md`.
+

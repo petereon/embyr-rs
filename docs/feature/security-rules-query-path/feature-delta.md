@@ -768,3 +768,417 @@ The remaining 0.04 gap is the AND-decomposition scoping uncertainty (§ Handoff 
 
 ### Upstream Changes
 - None — no DISCOVER/DIVERGE artifacts exist for this feature (same as `security-rules`/`security-rules-write-path`); this DISCUSS is grounded directly in `security-rules`' own shipped artifacts, direct reads of `crates/embyr-core/src/domain/query.rs`/`crates/embyr-core/src/access_control/mod.rs`/`crates/embyr-server/src/grpc/handler.rs`, and `docs/product/jobs.yaml`.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ `docs/product/architecture/brief.md` § Application Architecture — security-rules (lines 3480-3739, full) and § Application Architecture — security-rules-write-path (lines 3742-3801, full) — the direct structural precedents this DESIGN mirrors: Quality Attribute Priorities, Reuse Analysis, Bounded-Context Placement, Component Decomposition, Driving/Driven Ports, Decisions Table, C4 System Context/Container/Component diagrams, Architecture Enforcement, Open Questions, External Integrations.
+✓ `docs/feature/security-rules-query-path/feature-delta.md` (full DISCUSS output, this file, read in full above) — 7 user stories (US-01..07), the locked 5-shape decidable set (Resolution 1, Option C), Resolution 2 (`evaluate()` not reusable), OQ-SRQ-01 (RESOLVED: AND-composition stays in v1 — user-confirmed), OQ-SRQ-02 (OR-composed queries, deferred to Product Discovery), OQ-SRQ-03 (composite-index ordering, unresolved — resolved by this DESIGN pass below).
+✓ `docs/feature/security-rules-write-path/feature-delta.md` § DESIGN section (full, lines 771-1130) — the closest architectural precedent (ADR-030's shape: combined single ADR, Reuse Analysis discipline, "confirmed unchanged" rows, Component Decomposition table shape) — read in full to confirm the precedent's exact structure before mirroring it, while noting explicitly (per this task's own framing) that this feature's mechanism is structurally different: query-shape compliance checking against a filter TREE, not document evaluation against a fetched field MAP.
+✓ `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md`, `adr-028-access-rule-storage-and-lifecycle.md`, `adr-029-access-control-composition-and-bounded-context.md`, `adr-030-write-path-grammar-storage-and-composition.md` (full) — the exact machinery this ADR (ADR-031) extends: `Condition`/`Operand`/`CompareOp`/`AuthContext` types, `parse_condition()`, BC-4's placement, the identity-reuse pattern, the "single shared evaluation routine, never duplicated" discipline (DDD-SR-8/DDD-SRW-3).
+✓ `crates/embyr-core/src/access_control/mod.rs` (full, 819 lines including tests, re-read fresh) — confirmed exact current `Condition` (5 variants: `Literal`, `Compare`, `And`, `Or`, `Not`), `Operand` (6 variants including `RequestResourceField` from ADR-030), `CompareOp` (`Eq`/`Ne` only), `AuthContext { uid: String }` shapes; confirmed `eval_bool`'s internal `Result<bool, FieldMissing>` control-flow pattern — the direct structural precedent for this feature's own `decompose_decidable`'s `Result<Vec<Atom>, Undecidable>` internal signaling (ADR-031).
+✓ `crates/embyr-core/src/domain/query.rs` (full, 71 lines, re-read fresh) — confirmed `QueryFilter` is exactly `Field(FieldFilter)` or `Composite(Vec<QueryFilter>)` ("Composite AND filter" doc comment) — no OR representation anywhere, the structural fact ADR-031's tractability rests on. Confirmed `FieldFilter { field_path: String, op: FilterOp, value: FieldValue }` and `FilterOp::Equal` as the exact operator this feature's ownership-equality check binds on.
+✓ `crates/embyr-server/src/grpc/handler.rs` (targeted full reads: `attach_client_identity_if_present` lines 358-383, `requires_composite_index` lines 446-458, `handle_get_document` lines 506-625, `handle_run_query` lines 1131-1267, `translate_filter` lines 1504-1553) — confirmed `handle_run_query`'s EXACT current ordering: rate-limit check → `authenticate()`/suspended check → structured-query proto extraction → `translate_filter` → order_by/limit/cursor translation → `domain_query`/`collection` construction → `requires_composite_index` + `index_manager.is_index_ready` check (→ `Status::failed_precondition` if not ready) → `adapter.run_query()` → response-stream construction. Confirmed the exact insertion points ADR-031 § Decision — Composition specifies, not assumed from DISCUSS's own paraphrase alone.
+✓ `crates/embyr-server/src/adapters/system_db.rs` (targeted full reads: `AccessRuleRow` lines 28-38, `upsert_access_rule`/`get_access_rule` lines 319-368) — confirmed `get_access_rule`'s exact signature/SQL/`None`-short-circuit shape — the direct precedent this feature's new `handle_run_query` call site reuses verbatim, zero modification.
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` (full) — confirmed `simulate_access_rule`'s exact current body/response shape (`{outcome: "allow"|"deny"}`), `condition_parse_error_response`/`ConditionRejectionResponse`/`SYNTAX_ERROR`/`UNSUPPORTED_CONSTRUCT` taxonomy, `json_value_to_field_value` — the direct precedent for the Release-2 `simulate_query_compliance` handler, and the evidence behind this DESIGN's deliberate departure from DISCUSS's Technical Note (extend `simulate_access_rule` in place) toward a distinct handler with a distinct response contract — see ADR-031 § Decision — Release 2 Simulation Extension for the full reasoning.
+✓ `crates/embyr-pg-storage/src/backend_adapter.rs` (targeted read: `run_query`, line 530+) — re-confirmed builds SQL directly from the already-translated domain `StructuredQuery`; zero change from this feature.
+✓ Migration/ADR numbering — confirmed `adr-030-write-path-grammar-storage-and-composition.md` is the highest existing ADR; `adr-031-query-shape-compliance-check.md` (this DESIGN's output) is next-free. No new migration — this feature introduces no new table.
+
+⊘ `nwave-ai outcomes check-delta` — not run. No Bash tool available to this dispatch (documentation/design-only, per task boundary). This is a code-feature pipeline (new typed contract surface: `QueryComplianceOutcome`/`UnsatisfiedConjunct`/`check_query_compliance()`, 1 new gRPC-adjacent rejection path, 1 new admin route deferred to Release 2), so per D-6 the check is not skip-eligible on scope grounds — skipped only for tooling-availability reasons, noted explicitly. Flagged for whichever wave next has Bash access to run it retroactively against this feature-delta.
+
+No contradictions found between this DESIGN's decisions and DISCUSS's locked Resolutions. All of § Handoff Package's 8 explicit flags are honored as written, not reinterpreted — see § Decisions Table below for the point-by-point mapping. OQ-SRQ-03 (the one DISCUSS explicitly left open for DESIGN) is resolved below, not deferred further.
+
+---
+
+## Wave: DESIGN / [REF] Interaction Mode
+
+**Propose** (autonomous analysis, self-selected), per this dispatch's own task framing: no live user available for back-and-forth. Mirrors `security-rules`' and `security-rules-write-path`'s own DESIGN dispatch mode exactly. Two candidate framings were weighed and presented with trade-offs, self-selected with explicit rationale, rather than silently picked:
+
+1. **ADR structure — 1 combined ADR vs. a split** (2-3 ADRs mirroring ADR-027/028/029's original three-way split). **Selected: 1 combined ADR (031)**, mirroring ADR-030's own precedent. Rationale: this feature's decision surface, while including one genuinely novel algorithm (the compliance-check function), has only two other axes — call-site composition/ordering, and a Release-2 admin extension — both of which are bounded, additive consequences of the one novel decision, not independently wide option spaces of their own. Splitting would produce two near-empty ADRs referencing the same core algorithm decision. Rejected alternative: 3 ADRs (algorithm; composition/ordering; simulation) — rejected as over-fragmenting a feature DISCUSS's own Scope Assessment already confirmed is right-sized (0/5 oversized signals).
+2. **Release-2 simulation: extend `simulate_access_rule` in place (DISCUSS's own Technical Note) vs. a new, distinct handler.** **Selected: new, distinct handler** (`simulate_query_compliance`), a deliberate departure from DISCUSS's Technical Note — DISCUSS's Technical Notes are explicitly marked "(Optional)" implementation hints, not locked decisions (unlike § Job Discovery Framing Resolution, which IS locked). Rationale and full trade-off: ADR-031 § Decision — Release 2 Simulation Extension, mirroring ADR-030's own DDD-SRW-6 rejection of a `rule_type`-discriminated single handler for the identical reason (a genuinely different RESPONSE CONTRACT, not just an optional input field, should not live behind a runtime branch in one handler).
+
+---
+
+## Wave: DESIGN / [REF] Quality Attribute Priorities — security-rules-query-path
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|---------------------|
+| 1 | **Fail-closed on undecidable rule shapes — never a false-allow** | US-05, this feature's single highest-consequence design risk. Structurally enforced via `decompose_decidable`'s explicit wildcard match arm being the ONLY path to `RejectedUnsupportedRuleShape` — not an allow-list gap. Designated mutation-testing surface (per-feature strategy, CLAUDE.md). |
+| 2 | **The caller's-own-uid binding property (AC-17-51)** | The load-bearing security guarantee of the entire feature — a compliance check that only verifies "a filter exists on the right field" without binding its VALUE to the server-verified `auth.uid` would let any signed-in caller enumerate another user's data. Drives `filter_binds_field_to_uid`'s exact contract (ADR-031 § Decision — Algorithm and Types). |
+| 3 | **No regression to collections/traffic with no read rule, and zero regression to `GetDocument`/write-path behavior** | AC-17-69/70/71/72 (US-06). Structurally enforced via `get_access_rule` returning `None` short-circuiting before `check_query_compliance` is ever called — the identical guardrail shape ADR-029/030 already established, applied a third time. |
+| 4 | **Minimal information leakage on double-failure (non-compliant AND missing-index)** | OQ-SRQ-03, resolved by this DESIGN pass. Drives the compliance-check-before-composite-index-check ordering (ADR-031 § Decision — Composition). |
+| 5 | **Shared-artifact integrity (no compliance-checking-routine drift between real enforcement and Release-2 simulation)** | Mirrors DDD-SR-8/DDD-SRW-3's precedent. Drives ADR-031's "one function, two call sites" design and `UnsatisfiedConjunct::reason_code()`'s single shared vocabulary. |
+| 6 | **No new substrate dependency, no new Earned Trust probe required** | `check_query_compliance` is pure CPU computation over in-memory values — zero filesystem/network/subprocess/clock/vendor-SDK surface. Confirmed explicitly, not silently assumed (ADR-031 § Enforcement). |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis — security-rules-query-path (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---------------------|------|---------|----------|----------------|
+| `embyr_core::access_control::{parse_condition, Condition, Operand, AuthContext}` | `crates/embyr-core/src/access_control/mod.rs` | Grammar parsing, AST/type surface | **EXTEND (reuse unchanged)** | Zero modification. `check_query_compliance` pattern-matches over the EXISTING `Condition` enum; `parse_condition()` re-parses the SAME stored `condition_source` `handle_get_document` already re-parses. No new grammar, no new parser. |
+| `embyr_core::access_control::evaluate()` | `crates/embyr-core/src/access_control/mod.rs` | Boolean-condition evaluation | **CONFIRMED NOT REUSED — explicit non-decision, not silently skipped** | `evaluate()` requires an already-fetched `resource_fields: &BTreeMap<String, FieldValue>`, unavailable at query-planning time (DISCUSS Resolution 2, re-confirmed by direct code read). Zero modification to `evaluate()` itself; it gains no new caller from this feature. |
+| `embyr_core::access_control::check_query_compliance()` (+ `QueryComplianceOutcome`/`UnsatisfiedConjunct` types) | `crates/embyr-core/src/access_control/mod.rs` (extended file, new function/types) | Query-shape-vs-condition-tree compliance | **CREATE NEW** | Confirmed by DISCUSS's own Walking Skeleton Evaluation: "no existing mechanism decides, before execution, whether a query's shape satisfies a rule." A pure, zero-IO sibling to `evaluate()`, reusing `Condition`/`Operand`/`AuthContext` unchanged — the single genuinely novel component this feature adds (ADR-031). |
+| `crates/embyr-core/src/domain/query.rs::{QueryFilter, FieldFilter, FilterOp}` | `crates/embyr-core/src/domain/query.rs` | Query filter representation | **EXTEND (reuse unchanged, read-only consumer)** | `check_query_compliance`/`filter_binds_field_to_uid` read `QueryFilter`'s existing AND-only shape; zero modification to this module. |
+| `embyr-server::adapters::system_db::{AccessRuleRow, get_access_rule}` | `crates/embyr-server/src/adapters/system_db.rs:28-38,346-368` | Read-rule lookup | **EXTEND (new call site, method itself unmodified)** | `handle_run_query` gains a second call site to the SAME `get_access_rule`, identical signature, identical `None`-short-circuit shape `handle_get_document` already established. Zero lines of `get_access_rule`/`AccessRuleRow` change. |
+| `embyr-server::grpc::handler::attach_client_identity_if_present` | `crates/embyr-server/src/grpc/handler.rs:358-383` | `request.auth` identity resolution | **EXTEND (consume; new call site; function itself untouched)** | Mirrors `security-rules`'/`security-rules-write-path`'s own identical reuse discipline — one more call site, zero modification to the function. |
+| `embyr-server::grpc::handler::handle_run_query` | `crates/embyr-server/src/grpc/handler.rs:1131-1267` | `RunQuery` RPC handling | **EXTEND** | Additive identity-attach + rule-lookup + compliance-check steps inserted before the existing `requires_composite_index` check; `translate_filter`/order_by/cursor translation and the final `adapter.run_query()`/response-stream construction are otherwise unchanged (ADR-031 § Decision — Composition). |
+| `embyr-server::grpc::handler::{requires_composite_index, translate_filter, collect_filter_fields}` | `crates/embyr-server/src/grpc/handler.rs:446-458,1504-1553` | Composite-index detection; proto→domain filter translation | **UNCHANGED — explicitly NOT touched** | Listed here to make the non-decision explicit and auditable (mirrors ADR-030's identical discipline for `access_rules`/`get_access_rule`). Only their relative ORDER after the new compliance check changes (they now run strictly after it); zero change to their internal logic. |
+| `embyr-pg-storage::backend_adapter::run_query` (SQL-building layer) | `crates/embyr-pg-storage/src/backend_adapter.rs:530+` | Query execution against Customer Postgres | **UNCHANGED — explicitly NOT touched** | Confirmed by direct code read (DISCUSS and re-confirmed here): builds SQL directly from the already-translated domain `StructuredQuery`. The compliance check runs entirely upstream, inside `grpc::handler::handle_run_query`, before this function is ever called. |
+| `embyr-server::admin::handlers::access_rules` module shape (`ConditionRejectionResponse`/`condition_parse_error_response`, session-auth/role-gate pattern, `verify_project_ownership` reuse) | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Admin-handler shape for rule-related actions | **EXTEND (pattern reuse, Release 2)** | New `simulate_query_compliance` function added to the SAME file, reusing `condition_parse_error_response`/`verify_project_ownership`/the any-role read-only gate pattern verbatim — a distinct function with a distinct response type, not a further branch inside `simulate_access_rule` (ADR-031 § Decision — Release 2 Simulation Extension). |
+| `embyr-server::admin::router::build_admin_router` session sub-router | `crates/embyr-server/src/admin/router.rs` | Route registration | **EXTEND (Release 2)** | 1 new route (`POST .../access_rules/simulate_query`) added; zero new middleware, zero change to any existing route. |
+| `embyr_core::domain::field_value::FieldValue` | `crates/embyr-core/src/domain/field_value.rs` | Document/filter field-value representation | **EXTEND (reuse unchanged)** | `filter_binds_field_to_uid`'s equality comparison (`ff.value == FieldValue::String(caller_uid.to_string())`) reuses the identical existing type — no new value-representation type introduced. |
+
+**Verdict: 9 EXTEND (2 of which are explicit "confirmed unchanged" rows), 1 explicit
+"confirmed NOT reused" (`evaluate()`), 1 CREATE NEW (`check_query_compliance()` +
+its 2 companion types — extensively justified: no existing component compares a
+`Condition` AST against a `QueryFilter` tree, confirmed by DISCUSS's own
+walking-skeleton analysis and re-verified here against the actual current source),
+0 unjustified CREATE NEW. 12 rows total.**
+
+---
+
+## Wave: DESIGN / [REF] Development Paradigm Confirmation — security-rules-query-path
+
+No change to the project-wide paradigm. `check_query_compliance`/
+`decompose_decidable`/`filter_binds_field_to_uid` are pure, total functions —
+no `Result` in `check_query_compliance`'s own public signature (mirrors
+`evaluate()`'s infallible-by-construction discipline exactly: every rejection
+reason is a value in `QueryComplianceOutcome`, never a panic, never an
+`Err`); `decompose_decidable`'s internal `Result<Vec<Atom>, Undecidable>` is
+pure control-flow signaling within the module, the identical pattern
+`eval_bool`'s own internal `Result<bool, FieldMissing>` already establishes —
+not a new idiom. Zero IO, zero shared mutable state. `functional-where-practical
+Rust` (CLAUDE.md) is preserved exactly, not relaxed.
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement — security-rules-query-path
+
+No new bounded context. BC-4 Access Control (ADR-029, extended ADR-030) gains
+a third pure function, `check_query_compliance`, alongside the existing
+`parse_condition`/`evaluate` — sharing BC-4's existing ubiquitous language
+(`Condition`, `AuthContext`) and its existing read-only dependency on BC-1
+(identity), now additionally consumed from a second BC-2 call site
+(`handle_run_query`, alongside the existing `handle_get_document`). No
+re-evaluation of ADR-002's five decision drivers is needed — this function has
+the identical zero-IO, pure-computation shape ADR-027/029 already placed in
+BC-4.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition — security-rules-query-path
+
+| Component | Crate/Module Path | Responsibility | Bounded Context |
+|-----------|--------------------|------------------|------------------|
+| `embyr-core::access_control` (extended) | `crates/embyr-core/src/access_control/mod.rs` | Adds `check_query_compliance()`, `decompose_decidable()` (internal), `filter_binds_field_to_uid()` (internal), `QueryComplianceOutcome`, `UnsatisfiedConjunct` (ADR-031). No IO. | BC-4 |
+| `embyr-server::grpc::handler::handle_run_query` (extended) | `crates/embyr-server/src/grpc/handler.rs` | Adds identity-attach + `get_access_rule` lookup + `check_query_compliance` call, gating the existing `requires_composite_index`/`adapter.run_query()` calls (US-01–06). Adds `query_compliance_rejection()` (new free function, builds the `Status::permission_denied` message). | BC-4 (consumes BC-1 + BC-2 data, read-only), BC-2 (query gating) |
+| `embyr-server::admin::handlers::access_rules` (extended, Release 2) | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Adds `simulate_query_compliance` (US-07) — session-auth, any-role Axum handler, distinct response contract from `simulate_access_rule` | BC-4 (driving adapter) |
+| `embyr-server::adapters::system_db::get_access_rule` (existing, new call site only) | `crates/embyr-server/src/adapters/system_db.rs` | Unchanged method, one new caller (`handle_run_query`) | BC-4 (driven adapter) |
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports (Inbound) — security-rules-query-path additions
+
+| Port | Protocol | Location | New/Extended | What it does |
+|------|----------|----------|---------------|---------------|
+| `FirestoreGrpcPort` / `RestPort` (existing) | gRPC `:8080` / REST `:8081` | `grpc/handler.rs::handle_run_query` | **Extended, additively** | `RunQuery`'s existing, unchanged call shape now additionally reflects query-shape compliance when a read rule is defined for the target collection (US-01–06). No new RPC, no new endpoint. Every other RPC handler (`GetDocument`, write handlers, `Listen`) is unmodified. |
+| `QueryComplianceSimulationPort` | HTTP (admin `:9090`, session sub-router) | `admin/handlers/access_rules.rs::simulate_query_compliance` (Release 2) | **New** | `POST /admin/v1/projects/:project_id/access_rules/simulate_query` (US-07, body `{condition, auth: {uid}|null, query_filters: [...]}`). Session auth, any role — mirrors `simulate_access_rule`'s read-only/any-role precedent. Zero writes, zero effect on live traffic (AC-17-73..76). |
+
+No new gRPC/REST RPC, no new data-plane port. 1 new admin HTTP action, deferred to Release 2.
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters — security-rules-query-path additions
+
+No new *driven* (outbound infrastructure) port. `get_access_rule`'s new call
+site executes through the existing, already-probed `SystemDb` connection
+pool — the identical substrate `handle_get_document`'s own call already uses.
+No new adapter, no new `probe()`.
+
+**Earned Trust note (Principle 12 discipline, explicit, not silently
+skipped):** no new Earned Trust probe is required because no new *substrate*
+dependency is introduced. `check_query_compliance()`/`decompose_decidable()`/
+`filter_binds_field_to_uid()` are pure, deterministic CPU computation over
+values already resident in memory (a `Condition` AST, an
+`Option<QueryFilter>`, an `Option<AuthContext>`) — the identical "no
+partial-trust / no substrate-lie scenario" reasoning ADR-029/030 § Enforcement
+already established applies here without modification: this function either
+decides deterministically given its inputs, or it does not; there is no
+environment that can lie to a pure function. Full reasoning: ADR-031 §
+Enforcement.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices — security-rules-query-path additions
+
+No new workspace dependency. `check_query_compliance` is a hand-rolled Rust
+function operating over existing types — the same "no new dependency for a
+deliberately small, closed decision surface" rationale ADR-027/028/030
+already established for this module.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table — security-rules-query-path
+
+| ID | Decision | Verdict |
+|----|----------|---------|
+| DDD-SRQ-1 | New pure function `check_query_compliance(condition, filter, auth) -> QueryComplianceOutcome` in `embyr_core::access_control` — a sibling to `evaluate()`, not a modification of it — decomposing an AND-only `Condition` tree into atoms via `decompose_decidable()`, whose explicit wildcard match arm is the sole path to `RejectedUnsupportedRuleShape` | Accepted — ADR-031 § Decision — Algorithm and Types |
+| DDD-SRQ-2 | Ownership-equality satisfaction binds STRICTLY to the caller's own server-verified `auth.uid` — `filter_binds_field_to_uid` compares the query filter's bound VALUE against `auth.uid`, never treats field-name presence alone as proof of entitlement (AC-17-51, load-bearing) | Accepted — ADR-031 § Decision — Algorithm and Types |
+| DDD-SRQ-3 | AND-composition (locked shape 5, OQ-SRQ-01 user-confirmed in v1 scope): each conjunct decomposed and checked independently via `Vec<Atom>` flattening; `Literal(false)` anywhere short-circuits the whole rule to `Rejected{[DenyAll]}` | Accepted — ADR-031 § Decision — Algorithm and Types |
+| DDD-SRQ-4 | Composition/ordering: identity-attach + `get_access_rule` lookup + `check_query_compliance` call inserted into `handle_run_query`, strictly BEFORE the existing `requires_composite_index`/`is_index_ready` check | Accepted — ADR-031 § Decision — Composition |
+| DDD-SRQ-5 | **OQ-SRQ-03 RESOLVED**: compliance check runs before the composite-index check — a query both non-compliant and missing an index surfaces the compliance rejection, minimizing information leakage about a collection's index topology to a caller never entitled to query it at all | Accepted — ADR-031 § Decision — Composition, § OQ-SRQ-03 Resolution |
+| DDD-SRQ-6 | Rejection shape: `Status::permission_denied`, mirroring `handle_get_document`'s own precedent — NOT `invalid_argument` (reserved for malformed request shapes) and NOT a new status code. Distinguishability within the `PermissionDenied` family via a stable `[REASON_CODE]` message-text convention driven by `UnsatisfiedConjunct::reason_code()`, consistent with this codebase's existing message-string-only precedent at the gRPC boundary (no new `Status` metadata mechanism invented) | Accepted — ADR-031 § Decision — Rejection Response Shape |
+| DDD-SRQ-7 | Release 2 simulation: a NEW, distinct handler `simulate_query_compliance` (not a further extension of `simulate_access_rule`'s body/response) — deliberate departure from DISCUSS's own (non-binding) Technical Note, because the response CONTRACTS are genuinely different, mirroring ADR-030 DDD-SRW-6's identical reasoning against a `rule_type`-discriminated single handler | Accepted — ADR-031 § Decision — Release 2 Simulation Extension |
+| DDD-SRQ-8 | No change to `embyr-pg-storage::backend_adapter::run_query`, `translate_filter`, `requires_composite_index`'s internal logic, `access_rules`'/`write_access_rules`' storage or adapter methods, or any write-path handler | Confirmed — ADR-031 § Decision — Composition, § Reuse Analysis |
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context (Mermaid) — security-rules-query-path
+
+No new external system, no new actor. `security-rules`'/`security-rules-write-path`'s
+own System Context diagrams are unchanged in their boxes; only relationship
+labels gain query-path scope:
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (security-rules-query-path delta)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Defines READ rules (unchanged, security-rules); now also relies on the SAME rule genuinely gating RunQuery, not just GetDocument")
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK", "Client library. getDocs(query(...)) calls are now additionally checked for query-shape compliance against a published READ rule, if one exists for the target collection.")
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Now also statically checks a RunQuery's filter shape against a published READ rule's decidable conjuncts BEFORE executing the query, rejecting outright anything it cannot prove compliant.")
+    System_Ext(systemDB, "System Postgres", "access_rules table (existing, unchanged schema) — now also read from RunQuery's new pre-execution guard, in addition to GetDocument.")
+
+    Rel(sdkDev, embyr, "Defines/redefines a read rule (unchanged); (Release 2) simulates a candidate query filter shape against a candidate rule", "Admin API :9090")
+    Rel(firebaseSDK, embyr, "getDocs(query(...)) — now statically checked for query-shape compliance against the target collection's published READ rule, if any, BEFORE any document row is read", "gRPC :8080 / REST :8081 (UNCHANGED for collections with no read rule defined)")
+    Rel(embyr, systemDB, "Reads access_rules (unchanged schema, new RunQuery-time read path)", "Postgres SQL")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Container Diagram (Mermaid) — security-rules-query-path
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (security-rules-query-path delta)
+
+    Person(sdkDev, "SDK Developer (Alex)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)", "Never calls embyr directly — experiences this feature only through whether getDocs(query(...)) succeeds, or is rejected before any row is read, inside the Trailmark app")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(embyrA, "embyr-rs instance", "Rust binary", "Existing: gRPC :8080, REST :8081, Admin :9090. Extended: additive identity-attach + access_rules lookup + query-shape-compliance check inside handle_run_query only, strictly before the existing composite-index check and adapter.run_query(). (Release 2) 1 new admin route.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "Existing access_rules table, UNCHANGED schema. New: a second read call site (handle_run_query), reusing get_access_rule verbatim.")
+        ContainerDb(custDB, "Customer Postgres (BC-2, per-project)", "PostgreSQL", "UNCHANGED. A non-compliant query never reaches adapter.run_query() at all — this database is queried ONLY for queries this feature admits, the same set (or a subset) of queries it would have received before this feature shipped.")
+    }
+
+    Rel(sdkDev, embyrA, "Defines/redefines read rules (unchanged); (Release 2) simulates candidate query filter shapes", "HTTP :9090")
+    Rel(endUser, embyrA, "getDocs(query(...)) — gated by the collection's READ rule, if any, checked against the query's filter SHAPE before execution", "gRPC :8080 / REST :8081")
+    Rel(embyrA, sysDB, "Reads access_rules (unchanged); no new write from this feature", "Postgres SQL")
+    Rel(embyrA, custDB, "adapter.run_query() — UNCHANGED SQL-building layer, now only ever reached for compliance-admitted queries", "Postgres SQL, via BackendAdapter")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Component Diagram — BC-4 Access Control, Query-Path Extension (Mermaid)
+
+Warranted per the SKILL's "5+ components, complex subsystem" threshold: the
+new compliance function, its internal decomposition/filter-walk helpers, the
+existing `get_access_rule` adapter, the extended `handle_run_query`
+composition point, and (Release 2) the new admin handler are five-plus
+separable pieces whose call-graph — one new function reached from two call
+sites (real enforcement + Release-2 simulation), gated by the SAME
+`get_access_rule` existence check `handle_get_document` already established —
+is exactly the property this feature's HIGH-risk flags (US-05's reject-default,
+AC-17-51's uid-binding) depend on being visible.
+
+```mermaid
+C4Component
+    title Component Diagram — BC-4 Access Control (security-rules-query-path delta)
+
+    Container_Boundary(core, "embyr-core::access_control (pure, zero IO)") {
+        Component(parser, "parse_condition()", "Rust fn (UNCHANGED)", "Re-parses the SAME stored condition_source, reused verbatim.")
+        Component(decompose, "decompose_decidable()", "Rust fn (NEW, internal)", "Condition AST -> Result<Vec<Atom>, Undecidable>. The ONLY path to 'undecidable' is its explicit wildcard arm (US-05's reject-default).")
+        Component(filterwalk, "filter_binds_field_to_uid()", "Rust fn (NEW, internal)", "Walks QueryFilter::Composite's AND tree; binds STRICTLY to auth.uid, never to the filter's own literal alone (AC-17-51).")
+        Component(compliance, "check_query_compliance()", "Rust fn (NEW, public)", "(Condition, Option<QueryFilter>, Option<AuthContext>) -> QueryComplianceOutcome. Total, infallible.")
+    }
+
+    Container_Boundary(server, "embyr-server (adapters + composition)") {
+        Component(storage, "SystemDb::get_access_rule", "sqlx adapter (UNCHANGED)", "ADR-028. Zero code change from this feature -- one new caller.")
+        Component(runQueryHandler, "grpc::handler::handle_run_query", "Tonic handler (EXTENDED)", "NEW: identity-attach + get_access_rule + check_query_compliance, gating the EXISTING requires_composite_index check and adapter.run_query() call, both otherwise unmodified.")
+        Component(simHandler, "admin::handlers::access_rules::simulate_query_compliance", "Axum handler (NEW, Release 2)", "Calls the SAME check_query_compliance() real enforcement uses -- never a second implementation. Distinct response contract from simulate_access_rule.")
+    }
+
+    Rel(compliance, decompose, "decomposes the Condition tree into atoms, or signals Undecidable")
+    Rel(compliance, filterwalk, "checks each OwnershipEquality atom against the query's filter tree")
+    Rel(runQueryHandler, storage, "get_access_rule -- None short-circuits before check_query_compliance is ever reached (US-06)")
+    Rel(runQueryHandler, parser, "re-parses stored condition_source")
+    Rel(runQueryHandler, compliance, "check_query_compliance -- gates requires_composite_index and adapter.run_query()")
+    Rel(simHandler, parser, "validates candidate condition")
+    Rel(simHandler, compliance, "check_query_compliance -- SAME function real enforcement calls")
+```
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement — security-rules-query-path
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern. No new
+crate, no new bounded context, no new tooling.
+
+Rules enforced (existing, applying unchanged to the extended module):
+- `embyr-core::access_control` retains zero IO imports (`cargo-deny`,
+  `deny.toml`, already covers all of `embyr-core`) — `check_query_compliance`/
+  `decompose_decidable`/`filter_binds_field_to_uid` add no import.
+- `embyr-core` defines the value-type/function surface; `embyr-server`
+  consumes it — dependency direction inward, unchanged.
+- No new adapter, no new `probe()` required (see § Driven Ports + Adapters,
+  above, and ADR-031 § Enforcement for the explicit Principle 12 reasoning).
+- `translate_filter`, `requires_composite_index`, `access_rules`'s schema,
+  `get_access_rule`/`upsert_access_rule`, `handle_get_document`, and every
+  write-path handler receive zero source changes — verifiable by diff, not
+  merely by test pass, at DELIVER time (mirrors ADR-030's identical
+  discipline).
+
+---
+
+## Wave: DESIGN / [REF] Open Questions — security-rules-query-path
+
+| ID | Question | Impact | Resolution owner |
+|----|----------|--------|-------------------|
+| OQ-SRQ-03 (carried from DISCUSS) | Interaction between the new compliance check and the existing `requires_composite_index`/index-readiness check | **Resolved by this DESIGN pass** — compliance check runs strictly BEFORE the composite-index check (minimizes information leakage on double-failure; zero added cost on the common no-rule path) — see § Decisions Table DDD-SRQ-5 and ADR-031 § OQ-SRQ-03 Resolution | Closed, this DESIGN |
+| OQ-SRQ-01 (carried from DISCUSS) | Whether `Condition::And` decomposition belongs in v1's locked scope | **Already RESOLVED by DISCUSS** (user-confirmed 2026-08-18) — implemented as locked, no further DESIGN-time change | Closed, DISCUSS |
+| OQ-SRQ-02 (carried, unrelated to this DESIGN pass) | Whether OR-composed rules will need query support badly enough to justify a UNION-of-queries execution mechanism in `embyr-pg-storage` | Not reopened by this DESIGN — confirmed, per Resolution 1 Option A's rejection, that no part of this feature's scope requires or anticipates that mechanism | Product Discovery, triggered by future evidence |
+| OQ-SRQ-04 (new, DESIGN-identified) | `check_query_compliance`'s reason-code-in-message-text convention (ADR-031 § Decision — Rejection Response Shape) is weaker than structured gRPC error details (`google.rpc.ErrorInfo`) would provide — should this codebase adopt structured gRPC error metadata project-wide? | Does not block this feature — the chosen convention is consistent with this codebase's existing, unanimous message-string-only precedent at the gRPC boundary; a project-wide change is out of this feature's scope to unilaterally decide | Platform-architect / a future cross-cutting ADR, if evidence emerges that acceptance/integration tooling needs richer machine-readable rejection metadata |
+| OQ-SRQ-05 (new, DESIGN-identified) | Should `check_query_compliance`'s decidable-shape set ever be extended (e.g., a 6th shape) via config/feature-flag rather than a code change, to de-risk future widening? | Not required for v1 — the locked set is intentionally closed and code-level (Decision Driver 6: "widening requires a new AST variant, parser branch, and evaluator arm," mirroring ADR-027's own grammar-containment discipline) | Product Discovery, only if evidence emerges that the decidable set needs frequent, non-code-review-gated extension |
+
+---
+
+## Wave: DESIGN / [REF] External Integrations — security-rules-query-path
+
+**None requiring contract tests.** This feature introduces no new outbound
+network dependency: the new `get_access_rule` call site reuses the existing,
+already-probed `SystemDb` Postgres connection; `check_query_compliance` is
+pure in-process computation over data already available at
+`handle_run_query`'s call site (the already-translated `StructuredQuery`,
+the already-verified `AuthContext`). No new adapter, no new external
+service, no new consumer-driven-contract surface.
+
+---
+
+## Wave: DESIGN / [REF] SSOT Updates
+
+- `docs/product/architecture/brief.md` — new `## Application Architecture —
+  security-rules-query-path` section appended (mirrors this file's DESIGN
+  sections at summary density, per `security-rules-write-path`'s own
+  precedent for a feature whose full DESIGN content lives in its own
+  `feature-delta.md`).
+- `docs/product/architecture/adr-031-query-shape-compliance-check.md` — new
+  ADR (combined algorithm/composition/rejection-shape/simulation-extension
+  decision, per this DESIGN's own smaller-decision-surface reasoning, § Wave:
+  DESIGN / [REF] Interaction Mode above).
+- No update to `adr-027`/`adr-028`/`adr-029`/`adr-030` — all four remain
+  accurate as written; this feature extends, never contradicts, any of their
+  decisions.
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package — to DISTILL (acceptance-designer)
+
+- This `feature-delta.md` (DISCUSS + DESIGN sections combined).
+- `docs/product/architecture/adr-031-query-shape-compliance-check.md`.
+- `docs/product/architecture/brief.md` § Application Architecture —
+  security-rules-query-path.
+- **Explicit flags for DISTILL** (mirrors DISCUSS's/write-path DESIGN's own
+  flag-forward discipline):
+  1. `check_query_compliance`'s exact algorithm (ADR-031 § Decision —
+     Algorithm and Types) is fully specified, including the caller's-own-uid
+     binding contract — acceptance scenarios for AC-17-51 should include at
+     least one that would FAIL under a weaker "field-name-only" compliance
+     check (Dana filtering on `owner_id == "maria-santos"`), to make the
+     structural claim observable, not just asserted (mirrors write-path
+     DESIGN's identical discipline for AC-17-43).
+  2. US-05's undecidable-shape reject-default (`decompose_decidable`'s
+     wildcard arm) is this feature's designated mutation-testing surface
+     (per-feature strategy, CLAUDE.md) — DISTILL's acceptance scenarios for
+     AC-17-65/66/67 are the scenarios DELIVER's mutation pass will lean on
+     most heavily; ensure independent coverage of `Or`, `Not`, and a
+     read-rule `RequestResourceField` reference, not just one combined case.
+  3. OQ-SRQ-03 is now RESOLVED (compliance-check-before-composite-index) —
+     DISTILL's acceptance scenarios should include at least one query that is
+     BOTH non-compliant AND would require a composite index, asserting the
+     compliance rejection is what the caller observes, not the
+     `FAILED_PRECONDITION`.
+  4. The `check_query_compliance`/`decompose_decidable` pairing is a strong
+     property-based-testing target (this project's `proptest`-based
+     paradigm, mirroring `access_control::mod::tests`'s own PBT-full block):
+     a property like "for any AND-composed condition of N decidable
+     conjuncts, compliance holds iff every conjunct independently has a
+     matching filter/auth-state" is a natural PBT candidate. This is a
+     design-time observation for DELIVER's test authorship under the TDD
+     flow this feature will use — DESIGN does not author the test itself.
+  5. Release 2 (US-07, `simulate_query_compliance`) has a genuinely different
+     response contract (`{compliant, reasons}`) than `simulate_access_rule`'s
+     (`{outcome}`) — DISTILL should design Release-2 acceptance scenarios
+     against the NEW response shape specified in ADR-031, not by analogy to
+     the existing simulation endpoint's shape.
+  6. OQ-SRQ-02 (OR-composed query support) and OQ-SRQ-04/05 (new, this
+     DESIGN pass) are deferred, non-blocking — confirm DISTILL agrees no
+     acceptance scenario requires resolving any of them first.
+
+**To DEVOPS (platform-architect)**: no new external integration, no new
+deployed container, no new probe, no new migration. § Outcome KPIs (DISCUSS)
+— 4 KPIs (1 North Star, 2 Leading, 1 Guardrail) — unchanged by this DESIGN
+pass.
+
+Peer review: not invoked per-wave (default skip). Rationale, checked against
+the SKILL's own trigger list: no contested ADR beyond the algorithm decision,
+which is fully alternatives-documented (Resolution 1's Options A/B rejection,
+carried from DISCUSS, re-affirmed here) with explicit reasoning; no novel
+pattern beyond ADR-027/028/029/030's own already-accepted precedent (pure
+sibling function, `Result`-as-control-flow, "one function two call sites");
+no unverified performance budget (the NFR note's "cheap existence-check
+before the compliance walk" is structurally the same `get_access_rule() ->
+None` short-circuit already shipped and measured in `security-rules`); a
+security boundary IS being changed here (closing an actively-exploitable
+bypass) — but the caller's-own-uid-binding contract (Decision Driver 2) is
+written down explicitly and precisely enough (ADR-031 § Decision — Algorithm
+and Types, § Decision Drivers) that DISTILL's acceptance scenarios, not an
+additional architecture review, are the correct next checkpoint per the
+SKILL's own "mandatory consolidated review fires at end of DISTILL" default.
+This DESIGN pass explicitly flags AC-17-51's binding contract in § Handoff
+Package flag 1 above specifically so that consolidated review has a clear,
+written contract to check against, per this dispatch's own boundary
+instruction.
+
+---
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] New pure function `check_query_compliance()` (+ `QueryComplianceOutcome`/`UnsatisfiedConjunct` types) added to `embyr_core::access_control` as a sibling to `evaluate()` — decomposes an AND-only `Condition` tree via `decompose_decidable()`, whose explicit wildcard arm is the SOLE path to "undecidable, reject outright" (US-05's fail-closed default). Reuses `parse_condition()`/`Condition`/`Operand`/`AuthContext` unchanged; `evaluate()` itself is confirmed untouched. See ADR-031 § Decision — Algorithm and Types.
+- [D2] Ownership-equality satisfaction is bound STRICTLY to the caller's own server-verified `auth.uid` — `filter_binds_field_to_uid` compares the query filter's bound VALUE against `auth.uid`, never accepts field-name presence alone as proof of entitlement (AC-17-51, this feature's single most security-critical property, treated with explicit written scrutiny per this dispatch's own instruction). See ADR-031 § Decision — Algorithm and Types.
+- [D3] Composition: identity-attach + `get_access_rule` lookup + `check_query_compliance` call inserted into `handle_run_query`, gating the EXISTING `requires_composite_index`/`adapter.run_query()` calls — `None` rule short-circuits to the exact pre-feature code path (US-06). See ADR-031 § Decision — Composition.
+- [D4] **OQ-SRQ-03 RESOLVED**: the compliance check runs strictly BEFORE the composite-index check — minimizes information leakage on double-failure, costs nothing extra on the common unarmed-collection path. See ADR-031 § OQ-SRQ-03 Resolution.
+- [D5] Rejection shape: `Status::permission_denied`, mirroring `handle_get_document`'s own precedent; distinguishability within that status family via a stable `[REASON_CODE]` message-text convention (`UnsatisfiedConjunct::reason_code()`), consistent with this codebase's existing message-string-only gRPC-boundary precedent — no new `Status` metadata mechanism invented. See ADR-031 § Decision — Rejection Response Shape.
+- [D6] Release 2 (US-07): a NEW, distinct admin handler `simulate_query_compliance`, not a further extension of `simulate_access_rule` — a deliberate, reasoned departure from DISCUSS's own (non-binding) Technical Note, because the response CONTRACT is genuinely different (compliant/reasons vs. allow/deny), mirroring ADR-030 DDD-SRW-6's identical reasoning. Calls the SAME `check_query_compliance()` real enforcement uses. See ADR-031 § Decision — Release 2 Simulation Extension.
+- [D7] 1 combined ADR (031), mirroring ADR-030's precedent, not a 3-way split — the decision surface beyond the one novel algorithm is bounded/additive, not independently wide.
+
+### Architecture Summary
+- Pattern: Hexagonal (ports-and-adapters), unchanged — no new bounded context, BC-4 Access Control extended with a third pure function (`check_query_compliance`) alongside `parse_condition`/`evaluate`.
+- Paradigm: functional-where-practical Rust, unchanged — the new function and its internal helpers are pure, total, zero IO; `Result`-as-control-flow reused from `eval_bool`'s own existing pattern.
+- Key components: `embyr-core::access_control` (extended: `check_query_compliance`, `decompose_decidable`, `filter_binds_field_to_uid`, `QueryComplianceOutcome`, `UnsatisfiedConjunct`), `embyr-server::grpc::handler::handle_run_query` (extended), `embyr-server::admin::handlers::access_rules::simulate_query_compliance` (new, Release 2).
+
+### Reuse Analysis
+See § Wave: DESIGN / [REF] Reuse Analysis — security-rules-query-path above — 12 rows total (9 EXTEND including 2 explicit "confirmed unchanged," 1 explicit "confirmed NOT reused" (`evaluate()`), 1 CREATE NEW, 0 unjustified).
+
+### Technology Stack
+- No new workspace dependency. Rust, `embyr-core::access_control` extended in-place.
+
+### Constraints Established
+- The 5-shape decidable set (DISCUSS Resolution 1, Option C) is the closed, code-level boundary of what this feature can ever admit for a query — extending it requires a new `Condition`/`Atom` match arm and a new DESIGN pass, never a config change (mirrors ADR-027's grammar-containment discipline).
+- `check_query_compliance` is a pure sibling to `evaluate()`, never a modification of it; `evaluate()` gains zero new callers from this feature.
+- No change to `embyr-pg-storage`'s SQL-building layer, `translate_filter`, `requires_composite_index`'s internal logic, or any `security-rules`/`security-rules-write-path`-shipped code.
+- The compliance check runs strictly before the composite-index check in `handle_run_query` (OQ-SRQ-03, resolved).
+
+### Upstream Changes
+- None — no DISCUSS assumption was contradicted by this DESIGN pass. OQ-SRQ-03 was explicitly left open BY DISCUSS for DESIGN to resolve, and is resolved above, not a back-propagated change to a DISCUSS decision.
