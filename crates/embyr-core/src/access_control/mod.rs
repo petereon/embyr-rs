@@ -549,6 +549,13 @@ pub enum UnsatisfiedConjunct {
     /// query filter binds `<field>` with `==` to the caller's own verified
     /// uid.
     OwnershipFilterMissing { field_path: String },
+    /// `Condition::Literal(false)` anywhere in the tree (Slice 03, ADR-031)
+    /// — deny-all. No filter shape, and no auth context, could ever satisfy
+    /// this.
+    DenyAll,
+    /// `request.auth != null` conjunct unmet (Slice 03, ADR-031) — the
+    /// caller is not signed in.
+    AuthRequired,
 }
 
 impl UnsatisfiedConjunct {
@@ -563,6 +570,8 @@ impl UnsatisfiedConjunct {
     pub fn reason_code(&self) -> &'static str {
         match self {
             Self::OwnershipFilterMissing { .. } => "OWNERSHIP_FILTER_MISSING",
+            Self::DenyAll => "RULE_DENIES_ALL",
+            Self::AuthRequired => "AUTH_REQUIRED",
         }
     }
 }
@@ -600,6 +609,19 @@ pub fn check_query_compliance(
     let mut unsatisfied = Vec::new();
     for atom in &atoms {
         match atom {
+            Atom::Literal(true) => {}
+            Atom::Literal(false) => {
+                // Deny-all short-circuits the WHOLE rule the moment it's
+                // found, regardless of any other conjunct's own
+                // satisfiability (mirrors the locked shape's own exception).
+                return QueryComplianceOutcome::Rejected {
+                    unsatisfied_conjuncts: vec![UnsatisfiedConjunct::DenyAll],
+                };
+            }
+            Atom::AuthRequired if auth.is_none() => {
+                unsatisfied.push(UnsatisfiedConjunct::AuthRequired);
+            }
+            Atom::AuthRequired => {}
             Atom::OwnershipEquality(field) => {
                 let satisfied = auth
                     .map(|a| filter_binds_field_to_uid(filter, field, &a.uid))
@@ -620,13 +642,21 @@ pub fn check_query_compliance(
     }
 }
 
-/// The one shape `decompose_decidable` recognizes in Slice 01: pure
-/// ownership equality. Later slices (03/04/05) add `AlwaysTrue`/
-/// `AlwaysFalse`/`AuthPresence` variants and their own `Condition` match
-/// arms — Slice 01 deliberately does not build them ahead of a test that
-/// requires them.
+/// The decidable-shape atoms `decompose_decidable` recognizes. Slice 01
+/// built `OwnershipEquality`. Slice 03 (ADR-031) adds `Literal`/
+/// `AuthRequired` — no "AuthNull"/anonymous-required atom is built
+/// speculatively; no domain example needs the `request.auth == null`
+/// inverse.
 enum Atom {
     OwnershipEquality(String),
+    /// `Condition::Literal(bool)` — bare `true`/`false`. `true` is always
+    /// satisfied (public read, AC-17-59); `false` is NEVER satisfied
+    /// (deny-all).
+    Literal(bool),
+    /// The `request.auth != null` idiom
+    /// (`Compare(AuthNullSentinel, Ne, NullLiteral)`) — satisfied iff
+    /// `auth.is_some()` (AC-17-57/58).
+    AuthRequired,
 }
 
 struct Undecidable;
@@ -638,6 +668,17 @@ struct Undecidable;
 /// not by the absence of a match (Decision Driver 1, ADR-031).
 fn decompose_decidable(condition: &Condition) -> Result<Vec<Atom>, Undecidable> {
     match condition {
+        // Bare `true`/`false` (Slice 03, ADR-031, AC-17-59).
+        Condition::Literal(b) => Ok(vec![Atom::Literal(*b)]),
+
+        // `request.auth != null` (Slice 03, ADR-031, AC-17-57/58). ONLY this
+        // exact operand order and `CompareOp::Ne` — the reverse operand
+        // order and the `== null` inverse are NOT in this slice's locked
+        // set (fall through to the catch-all below).
+        Condition::Compare(Operand::AuthNullSentinel, CompareOp::Ne, Operand::NullLiteral) => {
+            Ok(vec![Atom::AuthRequired])
+        }
+
         // `request.auth.uid == resource.data.<field>`, either operand
         // order. `CompareOp::Eq` ONLY.
         Condition::Compare(Operand::AuthUid, CompareOp::Eq, Operand::ResourceField(f))
@@ -645,9 +686,10 @@ fn decompose_decidable(condition: &Condition) -> Result<Vec<Atom>, Undecidable> 
             Ok(vec![Atom::OwnershipEquality(f.clone())])
         }
 
-        // Everything else (Slice 01 scope): `Condition::Literal`, `Or`,
-        // `Not`, `And`, `Ne` on this pairing, `RequestResourceField`, the
-        // `request.auth != null` idiom, etc. — undecidable for THIS slice.
+        // Everything else (out of Slice 01/03 scope): `Or`, `Not`, `And`,
+        // `Eq` on the auth-null pairing, the reverse auth-null operand
+        // order, `Ne` on the ownership pairing, `RequestResourceField`,
+        // etc. — undecidable.
         _ => Err(Undecidable),
     }
 }
@@ -1167,16 +1209,106 @@ mod tests {
     #[test]
     fn a_rule_shape_outside_the_locked_decidable_set_is_rejected_as_unsupported() {
         // Fail-closed default arm (Decision Driver 1): a rule shape this
-        // slice does not name (e.g. bare `true`) is REJECTED, never
-        // silently admitted — the ONLY reachable path for an unrecognized
-        // `Condition` shape.
-        let condition = Condition::Literal(true);
+        // slice does not name (`Condition::Not`, out of scope through
+        // Slice 05) is REJECTED, never silently admitted — the ONLY
+        // reachable path for an unrecognized `Condition` shape. (Slice 03,
+        // ADR-031: bare `true`/`false` moved INTO the decidable set — see
+        // `bare_true_rule_admits_regardless_of_filter_or_auth_ac_17_59` below
+        // — so this pinned example uses `Not` instead, which stays
+        // undecidable.)
+        let condition = Condition::Not(Box::new(Condition::Literal(true)));
         let auth = AuthContext { uid: "maria-santos".to_string() };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
             check_query_compliance(&condition, Some(&filter), Some(&auth)),
             QueryComplianceOutcome::RejectedUnsupportedRuleShape
+        );
+    }
+
+    // ── check_query_compliance: Literal(bool) + AuthRequired atoms (Slice 03, ADR-031) ──
+    //
+    // AC-17-59: `Condition::Literal(true)` admits regardless of caller
+    // identity or filter shape. AC-17-57/58: `request.auth != null` admits a
+    // signed-in caller (with or without a filter) and rejects a
+    // never-signed-in caller. Also pinned for completeness (implied by the
+    // locked 5-shape set, not separately numbered): `Literal(false)` denies
+    // unconditionally.
+
+    #[test]
+    fn bare_true_rule_admits_regardless_of_filter_or_auth_ac_17_59() {
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = owner_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&Condition::Literal(true), Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Admitted,
+            "a bare `true` rule must admit a signed-in caller with a filter present"
+        );
+        assert_eq!(
+            check_query_compliance(&Condition::Literal(true), None, None),
+            QueryComplianceOutcome::Admitted,
+            "a bare `true` rule must admit an anonymous caller with no filter at all"
+        );
+    }
+
+    #[test]
+    fn bare_false_rule_denies_unconditionally_regardless_of_filter_or_auth() {
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = owner_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&Condition::Literal(false), Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::DenyAll],
+            },
+            "a bare `false` rule must deny even a signed-in caller with a matching filter"
+        );
+        assert_eq!(
+            check_query_compliance(&Condition::Literal(false), None, None),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::DenyAll],
+            }
+        );
+    }
+
+    #[test]
+    fn auth_required_rule_admits_a_signed_in_caller_with_or_without_a_filter_ac_17_57() {
+        let condition =
+            Condition::Compare(Operand::AuthNullSentinel, CompareOp::Ne, Operand::NullLiteral);
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = owner_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Admitted,
+            "request.auth != null must admit a signed-in caller when a filter is present"
+        );
+        assert_eq!(
+            check_query_compliance(&condition, None, Some(&auth)),
+            QueryComplianceOutcome::Admitted,
+            "request.auth != null must admit a signed-in caller with NO filter requirement"
+        );
+    }
+
+    #[test]
+    fn auth_required_rule_rejects_a_never_signed_in_caller_ac_17_58() {
+        let condition =
+            Condition::Compare(Operand::AuthNullSentinel, CompareOp::Ne, Operand::NullLiteral);
+        let filter = owner_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), None),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::AuthRequired],
+            },
+            "request.auth != null must reject a never-signed-in caller even with a filter present"
+        );
+        assert_eq!(
+            check_query_compliance(&condition, None, None),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::AuthRequired],
+            }
         );
     }
 

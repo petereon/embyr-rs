@@ -1584,6 +1584,10 @@ fn query_compliance_rejection(
                          caller's own identity",
                         c.reason_code()
                     ),
+                    // Slice 03 (ADR-031): `DenyAll`/`AuthRequired` carry no
+                    // extra data — the bare reason-code token is enough for
+                    // distinguishability (AC-17-56's own convention).
+                    other => format!("[{}]", other.reason_code()),
                 })
                 .collect();
             format!("query rejected by access rule: {}", reasons.join("; "))
