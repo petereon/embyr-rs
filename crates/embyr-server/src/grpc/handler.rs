@@ -1554,20 +1554,40 @@ fn extract_project_id_from_listen_request(msg: &ListenRequest) -> Result<String,
 /// reason-code/message-wording taxonomy (AC-17-56/68) is a later slice's
 /// job, this slice only needs SOME observable rejection distinguishable from
 /// success (AC-17-51's own test asserts on the gRPC status code).
+/// security-rules-query-path (Slice 02, ADR-031 § Decision — Rejection
+/// Response Shape): the message now embeds a stable `[REASON_CODE]` token
+/// per unsatisfied conjunct (`UnsatisfiedConjunct::reason_code()`) plus,
+/// for `OwnershipFilterMissing`, the specific field name — so the
+/// rejection names the specific missing constraint (AC-17-56) instead of
+/// Slice 01's placeholder conjunct COUNT. Slice 01's own gRPC status CODE
+/// choice (`Status::permission_denied`) is unchanged — distinguishability
+/// from `authenticate()`'s `Status::unauthenticated` and the
+/// composite-index check's `Status::failed_precondition` was already true
+/// by status code alone; this only strengthens distinguishability WITHIN
+/// the `PermissionDenied` family itself.
 fn query_compliance_rejection(
     outcome: &embyr_core::access_control::QueryComplianceOutcome,
 ) -> Status {
-    use embyr_core::access_control::QueryComplianceOutcome;
+    use embyr_core::access_control::{QueryComplianceOutcome, UnsatisfiedConjunct};
     let message = match outcome {
         QueryComplianceOutcome::RejectedUnsupportedRuleShape => {
-            "query rejected: this collection's access rule is not a shape supported for query \
-             enforcement"
+            "query rejected [UNSUPPORTED_RULE_SHAPE]: this collection's access rule is not a \
+             shape supported for query enforcement"
                 .to_string()
         }
-        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts } => format!(
-            "query rejected by access rule: {} unsatisfied filter requirement(s)",
-            unsatisfied_conjuncts.len()
-        ),
+        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts } => {
+            let reasons: Vec<String> = unsatisfied_conjuncts
+                .iter()
+                .map(|c| match c {
+                    UnsatisfiedConjunct::OwnershipFilterMissing { field_path } => format!(
+                        "[{}] missing required equality filter on '{field_path}' bound to the \
+                         caller's own identity",
+                        c.reason_code()
+                    ),
+                })
+                .collect();
+            format!("query rejected by access rule: {}", reasons.join("; "))
+        }
         QueryComplianceOutcome::Admitted => unreachable!("Admitted never reaches this function"),
     };
     Status::permission_denied(message)

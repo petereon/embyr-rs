@@ -45,18 +45,33 @@ fn equality_filter(field_path: &str, value: &str) -> Filter {
     }
 }
 
-/// Real gRPC `RunQuery` call — driving port entry (Pillar 3), mirroring
-/// `create_document`/`update_document`'s own shape (real `FirestoreClient`
-/// against the real composition root, real `authorization` + optional
-/// `x-embyr-client-identity` metadata). `equality_filters` is a list of
-/// `(field_path, string_value)` pairs, AND-composed via `CompositeFilter`
-/// when more than one — the only filter shape this slice's ACs exercise
-/// (string equality on `owner_id`-style fields).
-pub async fn run_query(
+/// AC-17-55 (Slice 02): a filter using an operator OTHER than `==` on the
+/// rule's referenced field — the Slice-01 `run_query` helper below only
+/// ever builds `==` filters, so a dedicated builder is needed to prove a
+/// superficially-"right field" `!=` filter does not satisfy an equality
+/// rule.
+pub fn not_equal_filter(field_path: &str, value: &str) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::FieldFilter(FieldFilter {
+            field: Some(FieldReference { field_path: field_path.to_string() }),
+            op: FieldOp::NotEqual as i32,
+            value: Some(string_value(value)),
+        })),
+    }
+}
+
+/// Real gRPC `RunQuery` call taking an already-built raw `Filter` (or
+/// `None`) and an explicit `api_key` (Slice 02: AC-17-56's distinguishability
+/// test needs a deliberately WRONG api key to observe `authenticate()`'s own
+/// rejection shape). `run_query` below (Slice 01's existing equality-only,
+/// ctx-api-key entry point) delegates here unchanged — additive only, no
+/// existing caller's signature or behavior changes.
+pub async fn run_query_raw(
     ctx: &SecurityRulesFullContext,
     collection_id: &str,
-    equality_filters: &[(&str, &str)],
+    filter: Option<Filter>,
     client_identity_token: Option<&str>,
+    api_key: &str,
 ) -> Result<Vec<Document>, tonic::Status> {
     let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
         .expect("valid endpoint")
@@ -65,23 +80,12 @@ pub async fn run_query(
         .expect("connect to gRPC server");
     let mut client = FirestoreClient::new(channel);
 
-    let where_filter = match equality_filters {
-        [] => None,
-        [(field, value)] => Some(equality_filter(field, value)),
-        many => Some(Filter {
-            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
-                op: CompositeOp::And as i32,
-                filters: many.iter().map(|(f, v)| equality_filter(f, v)).collect(),
-            })),
-        }),
-    };
-
     let sq = StructuredQuery {
         from: vec![CollectionSelector {
             collection_id: collection_id.to_string(),
             all_descendants: false,
         }],
-        r#where: where_filter,
+        r#where: filter,
         ..Default::default()
     };
 
@@ -95,7 +99,7 @@ pub async fn run_query(
     });
     request.metadata_mut().insert(
         "authorization",
-        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+        format!("Bearer {api_key}").parse().unwrap(),
     );
     if let Some(token) = client_identity_token {
         request.metadata_mut().insert(
@@ -114,4 +118,32 @@ pub async fn run_query(
         }
     }
     Ok(docs)
+}
+
+/// Real gRPC `RunQuery` call — driving port entry (Pillar 3), mirroring
+/// `create_document`/`update_document`'s own shape (real `FirestoreClient`
+/// against the real composition root, real `authorization` + optional
+/// `x-embyr-client-identity` metadata). `equality_filters` is a list of
+/// `(field_path, string_value)` pairs, AND-composed via `CompositeFilter`
+/// when more than one — the only filter shape Slice 01's own ACs exercise
+/// (string equality on `owner_id`-style fields). Delegates to
+/// `run_query_raw` using `ctx.api_key`.
+pub async fn run_query(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    equality_filters: &[(&str, &str)],
+    client_identity_token: Option<&str>,
+) -> Result<Vec<Document>, tonic::Status> {
+    let where_filter = match equality_filters {
+        [] => None,
+        [(field, value)] => Some(equality_filter(field, value)),
+        many => Some(Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: many.iter().map(|(f, v)| equality_filter(f, v)).collect(),
+            })),
+        }),
+    };
+
+    run_query_raw(ctx, collection_id, where_filter, client_identity_token, &ctx.api_key).await
 }

@@ -551,6 +551,22 @@ pub enum UnsatisfiedConjunct {
     OwnershipFilterMissing { field_path: String },
 }
 
+impl UnsatisfiedConjunct {
+    /// Stable reason vocabulary (security-rules-query-path, Slice 02,
+    /// ADR-031 § Decision — Rejection Response Shape) — never changes shape
+    /// based on caller (gRPC message text vs. Release-2 JSON `reason`
+    /// field), mirroring `ConditionParseError`'s SYNTAX_ERROR/
+    /// UNSUPPORTED_CONSTRUCT discipline at the same abstraction level. This
+    /// is the ONE vocabulary `grpc::handler::query_compliance_rejection`'s
+    /// message text and the future Release-2 simulation JSON response both
+    /// embed — never two independently-maintained copies.
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            Self::OwnershipFilterMissing { .. } => "OWNERSHIP_FILTER_MISSING",
+        }
+    }
+}
+
 /// Decide whether a `RunQuery`'s filter tree, together with the caller's
 /// auth context, satisfies a rule's `Condition` — WITHOUT fetching or
 /// inspecting any document. Total and infallible by construction: every

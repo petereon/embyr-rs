@@ -344,6 +344,11 @@ path = "../../tests/security_rules_write_path/acceptance/simulate_write_rule.rs"
 name = "security_rules_query_path_ownership_equality_query_compliance"
 path = "../../tests/security_rules_query_path/acceptance/ownership_equality_query_compliance.rs"
 
+# security-rules-query-path acceptance tests (Slice 02, ADR-031).
+[[test]]
+name = "security_rules_query_path_noncompliant_query_rejected_preexecution"
+path = "../../tests/security_rules_query_path/acceptance/noncompliant_query_rejected_preexecution.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
