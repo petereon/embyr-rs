@@ -383,6 +383,13 @@ path = "../../tests/security_rules_query_path/acceptance/simulate_candidate_quer
 name = "security_rules_collection_group_rules_define_group_rule"
 path = "../../tests/security_rules_collection_group_rules/acceptance/define_group_rule.rs"
 
+# security-rules-collection-group-rules acceptance tests (Slice 04, ADR-032)
+# — US-04, a collection-group query against an ungoverned collection id is
+# rejected outright, regardless of any same-named exact-path rule.
+[[test]]
+name = "security_rules_collection_group_rules_reject_ungoverned_group_query"
+path = "../../tests/security_rules_collection_group_rules/acceptance/reject_ungoverned_group_query.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

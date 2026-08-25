@@ -1230,34 +1230,45 @@ impl FirestoreService {
             since_update_time: None,
         };
 
-        // security-rules-query-path (ADR-031 § Decision — Composition, step
-        // 3): a single indexed lookup on `(project_id, collection_path)`,
-        // identical shape/cost to `handle_get_document`'s own
-        // `get_access_rule` call, reading the SAME `access_rules` table
-        // (never `write_access_rules`). `None` -> the `if let` below simply
-        // does not execute — the composite-index check and
-        // `adapter.run_query()` calls immediately below are reached
-        // completely unmodified, the EXACT pre-feature code path
-        // (regression guardrail).
-        let rule_row = self
-            .system_db
-            .get_access_rule(&project_id_str, &collection.collection_path)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        // security-rules-collection-group-rules (ADR-032 § Decision —
+        // Composition): `all_descendants` is mutually exclusive by
+        // construction (a StructuredQuery either targets a single
+        // collection instance or the whole group, never both) — an
+        // if/else is the structurally correct shape, not two independent
+        // checks that could both fire or both be skipped.
+        if all_descendants {
+            // A WHOLLY NEW, mutually-exclusive arm (Slice 04, US-04). Reads
+            // group_access_rules ONLY — never access_rules — the
+            // structural (not conventional) mechanism behind AC-17-89/90/91.
+            let group_rule_row = self
+                .system_db
+                .get_group_access_rule(&project_id_str, &collection.collection_path)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
 
-        if let Some(rule_row) = rule_row {
-            let condition = embyr_core::access_control::parse_condition(&rule_row.condition_source)
-                .map_err(|e| {
-                    Status::internal(format!("stored access rule failed to re-parse: {e:?}"))
-                })?;
+            let Some(group_rule_row) = group_rule_row else {
+                // US-04, Resolution 2 (universal fail-closed default): no
+                // group rule defined -> reject outright, regardless of any
+                // same-named exact-path rule's existence (AC-17-89). This
+                // feature's single highest-consequence arm (designated
+                // mutation-testing surface, CLAUDE.md).
+                return Err(group_rule_not_defined_rejection());
+            };
+
+            let condition =
+                embyr_core::access_control::parse_condition(&group_rule_row.condition_source)
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "stored group access rule failed to re-parse: {e:?}"
+                        ))
+                    })?;
             let auth_ctx = verified_identity
                 .as_ref()
                 .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
 
-            // ADR-031 § OQ-SRQ-03 Resolution: compliance-checking runs
-            // strictly BEFORE the composite-index check below — a caller
-            // never entitled to query this collection at all must never
-            // learn whether it also requires a composite index.
+            // SAME check_query_compliance()/query_compliance_rejection()
+            // real, non-group enforcement uses (ADR-031) — never a second,
+            // independently-maintained shape-compliance path.
             match embyr_core::access_control::check_query_compliance(
                 &condition,
                 domain_query.filter.as_ref(),
@@ -1265,6 +1276,45 @@ impl FirestoreService {
             ) {
                 embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
                 outcome => return Err(query_compliance_rejection(&outcome)),
+            }
+        } else {
+            // EXISTING ARM (security-rules-query-path, ADR-031), PRESERVED
+            // UNCHANGED. Reads access_rules ONLY. `None` -> the `if let`
+            // below simply does not execute — the composite-index check and
+            // `adapter.run_query()` calls immediately below are reached
+            // completely unmodified, the EXACT pre-security-rules-
+            // collection-group-rules code path (AC-17-90 regression proof).
+            let rule_row = self
+                .system_db
+                .get_access_rule(&project_id_str, &collection.collection_path)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            if let Some(rule_row) = rule_row {
+                let condition =
+                    embyr_core::access_control::parse_condition(&rule_row.condition_source)
+                        .map_err(|e| {
+                            Status::internal(format!(
+                                "stored access rule failed to re-parse: {e:?}"
+                            ))
+                        })?;
+                let auth_ctx = verified_identity
+                    .as_ref()
+                    .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+
+                // ADR-031 § OQ-SRQ-03 Resolution: compliance-checking runs
+                // strictly BEFORE the composite-index check below — a
+                // caller never entitled to query this collection at all
+                // must never learn whether it also requires a composite
+                // index.
+                match embyr_core::access_control::check_query_compliance(
+                    &condition,
+                    domain_query.filter.as_ref(),
+                    auth_ctx.as_ref(),
+                ) {
+                    embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
+                    outcome => return Err(query_compliance_rejection(&outcome)),
+                }
             }
         }
 
@@ -1595,6 +1645,25 @@ fn query_compliance_rejection(
         QueryComplianceOutcome::Admitted => unreachable!("Admitted never reaches this function"),
     };
     Status::permission_denied(message)
+}
+
+/// security-rules-collection-group-rules (ADR-032 § Decision — Composition,
+/// "GROUP_RULE_NOT_DEFINED is not a QueryComplianceOutcome variant"): the
+/// US-04 "no group rule defined" default rejection. `check_query_compliance`
+/// only ever receives an ALREADY-PARSED `Condition` — it has no way to
+/// represent "there was no rule at all" — so this decision is made entirely
+/// in `handle_run_query`'s own composition, before `parse_condition`/
+/// `check_query_compliance` are ever reached, mirroring how
+/// `get_access_rule`/`get_write_access_rule`'s own `None` short-circuits
+/// already work (ADR-029), just with the opposite default. The bracketed
+/// `[GROUP_RULE_NOT_DEFINED]` token is distinguishable from
+/// `UNSUPPORTED_RULE_SHAPE`/`OWNERSHIP_FILTER_MISSING`/`AUTH_REQUIRED`/
+/// `RULE_DENIES_ALL` (AC-17-92).
+fn group_rule_not_defined_rejection() -> Status {
+    Status::permission_denied(
+        "query rejected [GROUP_RULE_NOT_DEFINED]: no collection-group rule \
+         is defined for this collection id",
+    )
 }
 
 /// Translate a proto `Filter` to a domain `QueryFilter`.

@@ -21,9 +21,109 @@
 #[path = "../../security_rules_write_path/common/mod.rs"]
 mod security_rules_write_path_common;
 pub use security_rules_write_path_common::{
-    assert_state_delta, seed_write_access_rule, set_to, unchanged,
-    write_access_rule_condition_source, SecurityRulesAdminContext,
+    assert_state_delta, mint_client_identity_token, now_unix, seed_write_access_rule, set_to,
+    unchanged, write_access_rule_condition_source, SecurityRulesAdminContext,
+    SecurityRulesFullContext,
 };
+
+use embyr_proto::firestore::{
+    firestore_client::FirestoreClient,
+    run_query_request::QueryType,
+    structured_query::{
+        composite_filter::Operator as CompositeOp, field_filter::Operator as FieldOp,
+        filter::FilterType, CollectionSelector, CompositeFilter, FieldFilter, FieldReference,
+        Filter,
+    },
+    value::ValueType,
+    Document, RunQueryRequest, StructuredQuery, Value,
+};
+
+fn string_value(s: &str) -> Value {
+    Value { value_type: Some(ValueType::StringValue(s.to_string())) }
+}
+
+fn equality_filter(field_path: &str, value: &str) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::FieldFilter(FieldFilter {
+            field: Some(FieldReference { field_path: field_path.to_string() }),
+            op: FieldOp::Equal as i32,
+            value: Some(string_value(value)),
+        })),
+    }
+}
+
+/// Real gRPC `RunQuery` call, explicit `all_descendants` — driving port
+/// entry (Pillar 3). Slice 04 needs BOTH `true` (the collection-group case
+/// under test, AC-17-89/91/92) and `false` (AC-17-90's regression proof that
+/// non-group querying on the SAME ungoverned collection id remains
+/// unrestricted) — a dedicated helper here rather than reusing
+/// `security_rules_query_path`'s own `run_query` (a sibling feature's
+/// fixture, never imported across; this feature's own hierarchy only
+/// imports from an ancestor wave — `security_rules_write_path`).
+pub async fn run_query(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    all_descendants: bool,
+    equality_filters: &[(&str, &str)],
+    client_identity_token: Option<&str>,
+) -> Result<Vec<Document>, tonic::Status> {
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let where_filter = match equality_filters {
+        [] => None,
+        [(field, value)] => Some(equality_filter(field, value)),
+        many => Some(Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: many.iter().map(|(f, v)| equality_filter(f, v)).collect(),
+            })),
+        }),
+    };
+
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: collection_id.to_string(),
+            all_descendants,
+        }],
+        r#where: where_filter,
+        ..Default::default()
+    };
+
+    let mut request = tonic::Request::new(RunQueryRequest {
+        parent: format!(
+            "projects/{}/databases/(default)/documents",
+            ctx.project_id
+        ),
+        query_type: Some(QueryType::StructuredQuery(sq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    let mut stream = client.run_query(request).await?.into_inner();
+    use tokio_stream::StreamExt;
+    let mut docs = Vec::new();
+    while let Some(item) = stream.next().await {
+        let response = item?;
+        if let Some(document) = response.document {
+            docs.push(document);
+        }
+    }
+    Ok(docs)
+}
 
 /// Directly seed a `group_access_rules` row (bypassing the define endpoint
 /// and the adapter) — used by AC-17-78's redefine-precondition setup and
