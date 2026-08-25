@@ -50,6 +50,20 @@ pub struct WriteAccessRuleRow {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// security-rules-collection-group-rules (ADR-032): a project's per-
+/// collection-id COLLECTION-GROUP access-control rule, as stored in
+/// `group_access_rules` — a table structurally independent of both
+/// `access_rules` (read, exact-path) and `write_access_rules` (write,
+/// exact-path). Schema-identical shape to both, deliberately a separate
+/// type (mirrors `WriteAccessRuleRow`'s own precedent of not sharing a type
+/// with `AccessRuleRow`).
+#[derive(Debug, Clone)]
+pub struct GroupAccessRuleRow {
+    pub condition_source: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Project row returned for credential verification.
 #[derive(Debug)]
 pub struct ProjectAuthRow {
@@ -446,6 +460,78 @@ impl SystemDb {
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
     }
+
+    // -----------------------------------------------------------------------
+    // security-rules-collection-group-rules (ADR-032) — group_access_rules
+    // CRUD.
+    // -----------------------------------------------------------------------
+
+    /// Define OR redefine (same idempotent-upsert shape as
+    /// `upsert_access_rule`/`upsert_write_access_rule`) the COLLECTION-GROUP
+    /// rule for `(project_id, collection_id)`. Operates against
+    /// `group_access_rules` EXCLUSIVELY — no `access_rules`/
+    /// `write_access_rules` in this statement's FROM/INTO clause at all, the
+    /// structural mechanism behind AC-17-79's independence guarantee.
+    pub async fn upsert_group_access_rule(
+        &self,
+        project_id: &str,
+        collection_id: &str,
+        condition_source: &str,
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO group_access_rules (project_id, collection_id, condition_source) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (project_id, collection_id) \
+             DO UPDATE SET condition_source = EXCLUDED.condition_source, updated_at = now()",
+        )
+        .bind(project_id)
+        .bind(collection_id)
+        .bind(condition_source)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("upsert_group_access_rule failed: {e}"))
+        })?;
+        Ok(())
+    }
+
+    /// Look up the collection-group rule for `(project_id, collection_id)`.
+    /// `Ok(None)` is this feature's own version of ADR-029's structural
+    /// no-rule-defined guardrail — but with the OPPOSITE default from
+    /// `get_access_rule`/`get_write_access_rule` (ADR-032 Resolution 2:
+    /// reject, not "unrestricted"). Consumed by Slice 02+'s
+    /// `handle_run_query` composition, not this slice.
+    pub async fn get_group_access_rule(
+        &self,
+        project_id: &str,
+        collection_id: &str,
+    ) -> Result<Option<GroupAccessRuleRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT condition_source, created_at, updated_at \
+             FROM group_access_rules WHERE project_id = $1 AND collection_id = $2",
+        )
+        .bind(project_id)
+        .bind(collection_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(format!("get_group_access_rule failed: {e}")))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(GroupAccessRuleRow {
+            condition_source: r
+                .try_get("condition_source")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            updated_at: r
+                .try_get("updated_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -519,5 +605,107 @@ mod tests {
             tables.contains(&"client_identity_credentials".to_string()),
             "tables: {tables:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // security-rules-collection-group-rules (ADR-032) — group_access_rules
+    // adapter tests. `upsert_group_access_rule`/`get_group_access_rule` have
+    // no handler-level caller in Slice 01 (that is Slice 02+'s
+    // `handle_run_query` composition) — exercised directly here instead.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn group_access_rule_upsert_and_get_round_trip() {
+        let (_container, url) = start_postgres().await;
+        let db = SystemDb::new(&url).await.unwrap();
+        db.migrate().await.unwrap();
+        let account_id: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO accounts (name) VALUES ('acc') RETURNING id")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO projects (id, account_id, backend_mode, api_key_hash_current, status, name) \
+             VALUES ('proj-1', $1, 'direct_pg', 'hash', 'active', 'proj-1')",
+        )
+        .bind(account_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        // AC-17-91-adjacent: no rule defined -> None (the opposite-default
+        // guardrail Slice 04 relies on; proven at the adapter level here).
+        assert!(db
+            .get_group_access_rule("proj-1", "journal_entries")
+            .await
+            .unwrap()
+            .is_none());
+
+        db.upsert_group_access_rule(
+            "proj-1",
+            "journal_entries",
+            "request.auth.uid == resource.data.owner_id",
+        )
+        .await
+        .unwrap();
+        let row = db
+            .get_group_access_rule("proj-1", "journal_entries")
+            .await
+            .unwrap()
+            .expect("row must exist after upsert");
+        assert_eq!(
+            row.condition_source,
+            "request.auth.uid == resource.data.owner_id"
+        );
+
+        // Redefine: full replace, no merge.
+        db.upsert_group_access_rule("proj-1", "journal_entries", "true")
+            .await
+            .unwrap();
+        let row = db
+            .get_group_access_rule("proj-1", "journal_entries")
+            .await
+            .unwrap()
+            .expect("row must exist after redefine");
+        assert_eq!(row.condition_source, "true");
+    }
+
+    /// ADR-032 § Decision — Schema: `CHECK (collection_id NOT LIKE '%/%')`
+    /// is a second, DB-level defense-in-depth layer alongside the admin
+    /// handler's own `validate_bare_collection_id` 400 — proven here by a
+    /// raw SQL bypass of the adapter/handler entirely.
+    #[tokio::test]
+    async fn group_access_rules_check_constraint_rejects_slash_containing_collection_id() {
+        let (_container, url) = start_postgres().await;
+        let db = SystemDb::new(&url).await.unwrap();
+        db.migrate().await.unwrap();
+        let account_id: uuid::Uuid =
+            sqlx::query_scalar("INSERT INTO accounts (name) VALUES ('acc') RETURNING id")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO projects (id, account_id, backend_mode, api_key_hash_current, status, name) \
+             VALUES ('proj-1', $1, 'direct_pg', 'hash', 'active', 'proj-1')",
+        )
+        .bind(account_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let result = sqlx::query(
+            "INSERT INTO group_access_rules (project_id, collection_id, condition_source) \
+             VALUES ('proj-1', 'expeditions/journal_entries', 'true')",
+        )
+        .execute(&db.pool)
+        .await;
+
+        let err = result.expect_err("CHECK constraint must reject a '/'-containing collection_id");
+        if let sqlx::Error::Database(db_err) = &err {
+            // PostgreSQL check_violation = "23514".
+            assert_eq!(db_err.code().as_deref(), Some("23514"), "err: {db_err}");
+        } else {
+            panic!("expected a database CHECK-constraint error, got: {err}");
+        }
     }
 }

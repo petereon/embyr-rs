@@ -376,6 +376,13 @@ path = "../../tests/security_rules_query_path/acceptance/no_rule_and_sibling_col
 name = "security_rules_query_path_simulate_candidate_query_before_shipping"
 path = "../../tests/security_rules_query_path/acceptance/simulate_candidate_query_before_shipping.rs"
 
+# security-rules-collection-group-rules acceptance tests (Slice 01, ADR-032)
+# — US-01, Alex defines (and redefines) an independent collection-group
+# rule, disjoint from access_rules/write_access_rules.
+[[test]]
+name = "security_rules_collection_group_rules_define_group_rule"
+path = "../../tests/security_rules_collection_group_rules/acceptance/define_group_rule.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -111,6 +111,31 @@ pub struct WriteAccessRuleResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Body for POST /admin/v1/projects/:project_id/group_access_rules
+/// (security-rules-collection-group-rules, US-01, ADR-032). `collection_id`
+/// is a BARE collection-group identifier — never a path (validated by
+/// `validate_bare_collection_id` below, AC-17-80). A distinct type from
+/// `DefineAccessRuleBody`/`DefineWriteAccessRuleBody` (field-renamed
+/// `collection_path` -> `collection_id` to match ADR-032 § Decision —
+/// Schema's column-naming rationale).
+#[derive(Deserialize)]
+pub struct DefineGroupAccessRuleBody {
+    pub collection_id: String,
+    pub condition: String,
+}
+
+/// Response for POST /admin/v1/projects/:project_id/group_access_rules —
+/// 200, either first-time definition OR redefinition, mirroring
+/// `WriteAccessRuleResponse`'s shape exactly.
+#[derive(Serialize)]
+pub struct GroupAccessRuleResponse {
+    pub project_id: String,
+    pub collection_id: String,
+    pub condition: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A synthetic identity for simulation (US-05). `None`/absent represents
 /// the anonymous case (AC-17-19) — matches real evaluation's
 /// `Option<AuthContext>` exactly (ADR-029 § Identity reuse).
@@ -212,6 +237,30 @@ fn condition_parse_error_response(err: ConditionParseError) -> Response {
         },
     };
     (StatusCode::BAD_REQUEST, Json(body)).into_response()
+}
+
+/// AC-17-80 (security-rules-collection-group-rules, ADR-032 § Decision —
+/// Admin Surface): a collection-group id is, by construction, a bare
+/// identifier, never a path. Run BEFORE `parse_condition` — an invalid
+/// collection id is rejected independent of the condition's own validity.
+/// Reuses `ConditionRejectionResponse` verbatim (already generic — no new
+/// response type for this one new rejection reason). The DB-level `CHECK
+/// (collection_id NOT LIKE '%/%')` constraint (migration 0024) is a second,
+/// independent defense-in-depth layer for the same invariant — this is the
+/// friendly, user-facing 400 path.
+fn validate_bare_collection_id(id: &str) -> Result<(), Response> {
+    if id.contains('/') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ConditionRejectionResponse {
+                reason: "INVALID_COLLECTION_ID",
+                error: "a collection-group id must be a bare collection identifier, not a path"
+                    .to_string(),
+            }),
+        )
+            .into_response());
+    }
+    Ok(())
 }
 
 /// Translate a simulation request's flat JSON resource-field map into the
@@ -404,6 +453,73 @@ pub async fn define_write_access_rule(
             .into_response()),
         Err(e) => {
             tracing::error!("define_write_access_rule upsert error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// POST /admin/v1/projects/:project_id/group_access_rules
+/// (security-rules-collection-group-rules, US-01, ADR-032).
+///
+/// Owner or Admin only (mirrors `define_write_access_rule`'s exact shape —
+/// session auth, role gate, `verify_project_ownership` reuse, same
+/// `condition_parse_error_response`/SYNTAX_ERROR/UNSUPPORTED_CONSTRUCT
+/// taxonomy) plus ONE new step, run BEFORE `parse_condition`
+/// (`validate_bare_collection_id`, AC-17-80). Storage + admin-API surface
+/// ONLY — this handler never touches `access_rules`/`write_access_rules`
+/// and is never called by any query-time evaluation path (that is Slices
+/// 02-04, out of this slice's scope).
+pub async fn define_group_access_rule(
+    Path(project_id): Path<String>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+    Json(body): Json<DefineGroupAccessRuleBody>,
+) -> Result<Response, StatusCode> {
+    // Owner or Admin only, mirrors define_write_access_rule/define_access_rule.
+    if session.role < Role::Admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    // AC-17-80: a collection-group id must be a bare identifier, never a
+    // path — validated BEFORE the condition itself (domain example: an
+    // invalid collection id is rejected independent of condition validity).
+    if let Err(resp) = validate_bare_collection_id(&body.collection_id) {
+        return Ok(resp);
+    }
+
+    // Validate against the SAME, unmodified locked v1 grammar
+    // define_access_rule/define_write_access_rule use — this feature adds
+    // no grammar extension (ADR-032 § Decision Drivers 3).
+    if let Err(e) = parse_condition(&body.condition) {
+        return Ok(condition_parse_error_response(e));
+    }
+
+    match state
+        .system_db
+        .upsert_group_access_rule(&project_id, &body.collection_id, &body.condition)
+        .await
+    {
+        // AC-17-77/78: the SAME response shape whether this was a
+        // first-time definition or a full replacement — mirrors
+        // define_write_access_rule's identical no-branch shape, against
+        // group_access_rules exclusively (AC-17-79: this statement never
+        // reads or writes access_rules/write_access_rules).
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(GroupAccessRuleResponse {
+                project_id,
+                collection_id: body.collection_id,
+                condition: body.condition,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }),
+        )
+            .into_response()),
+        Err(e) => {
+            tracing::error!("define_group_access_rule upsert error: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
