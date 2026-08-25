@@ -8,6 +8,15 @@ This project follows the **functional-where-practical** Rust paradigm. Use `@nw-
 
 `per-feature` — mutation testing runs after each feature's DELIVER wave.
 
+## Test-Run Token Discipline
+
+Full-workspace `cargo test` runs against this repo produce large output (~38 test binaries, several with testcontainers Postgres startup) and dispatched subagents have repeatedly burned hundreds of thousands of tokens polling for results instead of blocking on them. Applies to both the orchestrator and any dispatched crafter agent:
+
+- **Never poll manually.** Don't background a `cargo test`/`cargo check` and end your turn to wait for a notification, and don't chain multiple `sleep N` calls checking status. Run it in the foreground, or background it with a single Bash call that wraps a real wait loop: `until grep -qE "test result:|error\[" out.txt; do sleep 5; done`.
+- **Filter output before reading it back.** Redirect full output to a file and only read/report the summary lines (`test result:`, `FAILED`, `error`) — not the raw compile/test log.
+- **Scope test runs to what changed** during the inner dev loop (`--test <specific-target>`); reserve full-workspace/full-regression runs for pre-commit gates, not every intermediate check.
+- **Don't dispatch a subagent to run and wait on a long regression suite itself.** Have it implement and run its own narrow test target; the orchestrator runs and waits on the full regression suite once, after the agent reports done.
+
 ## Architecture Overview
 
 embyr-rs is a Rust reimplementation of the Google Firestore gRPC protocol server.

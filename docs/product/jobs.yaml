@@ -671,3 +671,28 @@ jobs:
     # Real-time-listen enforcement remains a named, deferred follow-up epic
     # (Epic 2d) — see docs/feature/security-rules-query-path/feature-delta.md
     # § Job Discovery Framing Resolution and § Scope Assessment.
+    # NOTE (security-rules-collection-group-rules DISCUSS, 2026-08-25): this
+    # feature is JOB-17's own collection-group-query realization within the
+    # query-path operation surface security-rules-query-path itself opened,
+    # not a new job and not a new operation surface. Closes a residual gap
+    # security-rules-query-path's own rule-lookup composition left open:
+    # RunQuery with all_descendants=true (collectionGroup() queries) was
+    # checked, if at all, against the wrong rule — a same-named single-
+    # location exact-path rule, which cannot safely or meaningfully govern a
+    # query that spans multiple different nested collection instances
+    # sharing one leaf collection id. Introduces a THIRD, independently-
+    # authored, independently-stored rule concept (`group_access_rules`,
+    # keyed by (project_id, collection_id) alone, disjoint from both
+    # `access_rules` and `write_access_rules`) — mirroring real Firestore's
+    # own collection-group rule declaration model
+    # (`match /{path=**}/collectionId/{doc}`) rather than composing per-path
+    # rules, which is confirmed structurally intractable and not
+    # well-defined. A collection-group query against a collection id with no
+    # group rule is rejected outright by design, regardless of whether a
+    # same-named exact-path rule exists — a deliberate, evidenced default
+    # distinct from (not a reopening of) security-rules' own Resolution 2.
+    # `embyr_core::access_control::check_query_compliance()` and its
+    # companion types (ADR-031) are reused completely unchanged; GetDocument,
+    # write-path, and non-group RunQuery receive zero code changes. See
+    # docs/feature/security-rules-collection-group-rules/feature-delta.md
+    # § Job Discovery Framing Resolution and § Scope Assessment.

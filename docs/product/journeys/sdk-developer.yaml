@@ -7,8 +7,17 @@ jobs:
   - JOB-03  # live-sync
   - JOB-16  # client-identity-verification (added by client-auth DISCUSS, 2026-08-16)
   - JOB-17  # document-access-control (added by security-rules DISCUSS, 2026-08-17)
-updated: "2026-08-18"
+updated: "2026-08-25"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (security-rules-collection-group-rules DISCUSS, 2026-08-25): JOB-17
+# now also covers collection-group (collectionGroup()/all_descendants=true)
+# query enforcement via this feature — same job, same persona, not a new
+# job. Decision 3 (UX Research Depth) = Lightweight for this feature; only a
+# short delta (a new, independently-authored, independently-stored
+# collection-group rule, disjoint from the existing exact-path rule) is
+# added, inline in
+# docs/feature/security-rules-collection-group-rules/feature-delta.md
+# § Journey, not as a separate journey-*.yaml artifact.
 # NOTE (security-rules-query-path DISCUSS, 2026-08-18): JOB-17 now also
 # covers query-path (RunQuery) enforcement via this feature — same job, same
 # persona, not a new job (see docs/product/jobs.yaml JOB-17 NOTE). Decision 3
