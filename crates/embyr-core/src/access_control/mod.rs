@@ -686,7 +686,22 @@ fn decompose_decidable(condition: &Condition) -> Result<Vec<Atom>, Undecidable> 
             Ok(vec![Atom::OwnershipEquality(f.clone())])
         }
 
-        // Everything else (out of Slice 01/03 scope): `Or`, `Not`, `And`,
+        // `Condition::And(left, right)` (Slice 04, ADR-031, AC-17-61/62/63/64)
+        // — recursively decompose both sides and concatenate their atom
+        // lists. Each conjunct becomes an independent `Atom` requirement;
+        // `check_query_compliance`'s existing per-atom loop already requires
+        // EVERY atom in the flattened list to be satisfied, so AND-compliance
+        // falls out of Slices 01/03's own per-atom satisfaction logic
+        // verbatim — no new per-atom semantics are introduced here. `?`
+        // propagates `Undecidable` from either side unchanged (mirrors
+        // `eval_bool`'s own `Condition::And` handling in this same module).
+        Condition::And(left, right) => {
+            let mut atoms = decompose_decidable(left)?;
+            atoms.extend(decompose_decidable(right)?);
+            Ok(atoms)
+        }
+
+        // Everything else (out of Slice 01/03/04 scope): `Or`, `Not`,
         // `Eq` on the auth-null pairing, the reverse auth-null operand
         // order, `Ne` on the ownership pairing, `RequestResourceField`,
         // etc. — undecidable.
@@ -1309,6 +1324,139 @@ mod tests {
             QueryComplianceOutcome::Rejected {
                 unsatisfied_conjuncts: vec![UnsatisfiedConjunct::AuthRequired],
             }
+        );
+    }
+
+    // ── check_query_compliance: Condition::And composition (Slice 04, ADR-031) ──
+    //
+    // AC-17-61/62/63: `decompose_decidable`'s `Condition::And` arm flattens
+    // both sides into one atom list; `check_query_compliance`'s existing
+    // per-atom loop requires ALL atoms satisfied — so AND-compliance reuses
+    // Slices 01/03's own `OwnershipEquality`/`AuthRequired` atom-satisfaction
+    // logic verbatim. AC-17-64: the tests below assert the EXACT SAME
+    // `UnsatisfiedConjunct` variants Slice 01's
+    // `filter_bound_to_someone_elses_uid_is_rejected_ac_17_51` and Slice 03's
+    // `auth_required_rule_rejects_a_never_signed_in_caller_ac_17_58` already
+    // assert on — proof this is the SAME per-atom matching path, not a
+    // parallel/duplicate one built for AND.
+
+    fn auth_required_condition() -> Condition {
+        Condition::Compare(Operand::AuthNullSentinel, CompareOp::Ne, Operand::NullLiteral)
+    }
+
+    fn ownership_condition(field: &str) -> Condition {
+        Condition::Compare(Operand::AuthUid, CompareOp::Eq, Operand::ResourceField(field.to_string()))
+    }
+
+    fn curator_id_field_equals(value: &str) -> QueryFilter {
+        QueryFilter::Field(FieldFilter {
+            field_path: "curator_id".to_string(),
+            op: FilterOp::Equal,
+            value: FieldValue::String(value.to_string()),
+        })
+    }
+
+    #[test]
+    fn and_composed_rule_admits_when_both_conjuncts_are_independently_satisfied_ac_17_61() {
+        // Trailmark `trip_photos` domain example: `request.auth != null &&
+        // request.auth.uid == resource.data.curator_id`.
+        let condition = Condition::And(
+            Box::new(auth_required_condition()),
+            Box::new(ownership_condition("curator_id")),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = curator_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Admitted
+        );
+    }
+
+    #[test]
+    fn and_composed_rule_rejects_naming_only_the_ownership_conjunct_when_auth_is_satisfied_ac_17_62() {
+        // Signed in (auth conjunct satisfied) but no filter at all (ownership
+        // conjunct unsatisfied) — only the unmet conjunct is named.
+        let condition = Condition::And(
+            Box::new(auth_required_condition()),
+            Box::new(ownership_condition("curator_id")),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+
+        assert_eq!(
+            check_query_compliance(&condition, None, Some(&auth)),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::OwnershipFilterMissing {
+                    field_path: "curator_id".to_string(),
+                }],
+            },
+            "AC-17-62: a signed-in caller with no ownership-binding filter must be rejected \
+             naming ONLY the unmet ownership conjunct"
+        );
+    }
+
+    #[test]
+    fn and_composed_rule_reports_both_conjuncts_independently_for_an_anonymous_caller_ac_17_63() {
+        // AC-17-63, the precise independence proof: `Atom::OwnershipEquality`'s
+        // own satisfaction check is itself gated on `auth.is_some()`
+        // (`filter_binds_field_to_uid` needs a `caller_uid` to bind against —
+        // Slice 01's own fail-closed design, untouched here) — so for an
+        // anonymous caller BOTH conjuncts are independently unsatisfied, even
+        // though the filter carries the exact value that WOULD satisfy
+        // ownership for a matching signed-in caller. Neither atom is
+        // short-circuited or masked by the other's failure: both are
+        // evaluated on their own and BOTH are named in the result — reusing
+        // Slice 01's `Atom::OwnershipEquality` arm and Slice 03's
+        // `Atom::AuthRequired if auth.is_none()` arm verbatim, with no new
+        // AND-only branch added to either. Contrast with
+        // `literal_false_anywhere_in_an_and_tree_short_circuits_to_deny_all`
+        // below, where a TRUE short-circuit DOES suppress the other
+        // conjunct's own report — proving this is a deliberate distinction,
+        // not an oversight.
+        let condition = Condition::And(
+            Box::new(auth_required_condition()),
+            Box::new(ownership_condition("curator_id")),
+        );
+        let filter = curator_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), None),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![
+                    UnsatisfiedConjunct::AuthRequired,
+                    UnsatisfiedConjunct::OwnershipFilterMissing {
+                        field_path: "curator_id".to_string(),
+                    },
+                ],
+            },
+            "AC-17-63: an anonymous caller must have BOTH conjuncts independently reported — \
+             the auth conjunct's failure never masks the ownership conjunct's own (also failing) \
+             evaluation, and vice versa"
+        );
+    }
+
+    #[test]
+    fn literal_false_anywhere_in_an_and_tree_short_circuits_to_deny_all() {
+        // Slice 04 IN-scope note: `Condition::Literal(false)` anywhere in the
+        // AND tree short-circuits to always-reject, regardless of other
+        // conjuncts' own satisfiability — the flattened atom list still
+        // contains `Atom::Literal(false)`, and `check_query_compliance`'s
+        // existing loop (unmodified by this slice) already returns `DenyAll`
+        // the moment it is encountered.
+        let condition = Condition::And(
+            Box::new(Condition::Literal(false)),
+            Box::new(ownership_condition("curator_id")),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let filter = curator_id_field_equals("maria-santos");
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::DenyAll],
+            },
+            "Literal(false) anywhere in an AND tree must deny unconditionally, even when every \
+             other conjunct is satisfied"
         );
     }
 
