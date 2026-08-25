@@ -31,8 +31,12 @@ use super::handlers::client_identity::{
 };
 // security-rules (US-01/US-05, ADR-029): access-rule define/redefine + simulate.
 // security-rules-write-path (US-01, ADR-030): independent write-rule define/redefine.
+// security-rules-query-path (US-07, ADR-031): simulate a candidate query
+// shape before shipping client code — a NEW, DISTINCT sibling handler, not
+// an extension of simulate_access_rule.
 use super::handlers::access_rules::{
     define_access_rule, define_write_access_rule, simulate_access_rule,
+    simulate_query_compliance,
 };
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
@@ -201,6 +205,14 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/access_rules/simulate",
             post(simulate_access_rule),
+        )
+        // security-rules-query-path (US-07, LAST slice, ADR-031): simulate
+        // a candidate query filter shape against a candidate/published rule
+        // (any role, read-only, gated in-handler) — a NEW, DISTINCT
+        // sibling route, not a branch on the read-rule simulate route above.
+        .route(
+            "/admin/v1/projects/:project_id/access_rules/simulate_query",
+            post(simulate_query_compliance),
         )
         // security-rules-write-path (US-01, ADR-030): independent
         // write-rule define/redefine (Owner/Admin, gated in-handler) — a

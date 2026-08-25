@@ -16,7 +16,7 @@
 mod security_rules_write_path_common;
 pub use security_rules_write_path_common::{
     create_document, mint_client_identity_token, now_unix, seed_write_access_rule_full,
-    string_field, SecurityRulesFullContext,
+    string_field, SecurityRulesAdminContext, SecurityRulesFullContext,
 };
 
 use embyr_proto::firestore::{

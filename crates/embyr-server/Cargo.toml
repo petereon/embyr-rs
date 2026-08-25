@@ -370,6 +370,12 @@ path = "../../tests/security_rules_query_path/acceptance/and_composed_query_comp
 name = "security_rules_query_path_no_rule_and_sibling_collection_regression_guardrail"
 path = "../../tests/security_rules_query_path/acceptance/no_rule_and_sibling_collection_regression_guardrail.rs"
 
+# security-rules-query-path acceptance tests (Slice 07, LAST slice, ADR-031)
+# — US-07, simulate a candidate query before shipping client code.
+[[test]]
+name = "security_rules_query_path_simulate_candidate_query_before_shipping"
+path = "../../tests/security_rules_query_path/acceptance/simulate_candidate_query_before_shipping.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

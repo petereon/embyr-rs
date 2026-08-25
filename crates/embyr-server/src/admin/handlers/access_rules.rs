@@ -51,10 +51,12 @@ use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::handlers::shared::verify_project_ownership;
 use crate::admin::state::UserAdminState;
 use embyr_core::access_control::{
-    evaluate, parse_condition, AuthContext, ConditionParseError, EvaluationOutcome,
+    check_query_compliance, evaluate, parse_condition, AuthContext, ConditionParseError,
+    EvaluationOutcome, QueryComplianceOutcome,
 };
 use embyr_core::admin::account::Role;
 use embyr_core::domain::field_value::FieldValue;
+use embyr_core::domain::query::{FieldFilter, FilterOp, QueryFilter};
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -152,6 +154,44 @@ pub struct SimulateAccessRuleResponse {
     pub outcome: &'static str,
 }
 
+/// Body for POST /admin/v1/projects/:project_id/access_rules/simulate_query
+/// (security-rules-query-path, US-07, ADR-031). A candidate condition
+/// (never read from or written to `access_rules`), a candidate identity (or
+/// none, anonymous), and a candidate query filter shape — the SAME
+/// `QueryFilter`-shaped input `handle_run_query` produces from a real proto
+/// query, expressed here as a flat JSON list for admin-API ergonomics
+/// (translated to `QueryFilter::Composite` internally via
+/// `translate_query_filters` below — AND-only, mirroring the domain shape
+/// exactly; no OR input accepted, consistent with the locked v1 scope).
+#[derive(Deserialize)]
+pub struct SimulateQueryComplianceBody {
+    pub condition: String,
+    pub auth: Option<SimulatedAuth>,
+    #[serde(default)]
+    pub query_filters: Vec<SimulatedQueryFilter>,
+}
+
+#[derive(Deserialize)]
+pub struct SimulatedQueryFilter {
+    pub field_path: String,
+    pub op: String,
+    pub value: serde_json::Value,
+}
+
+/// Response for POST .../access_rules/simulate_query — 200. GENUINELY
+/// DIFFERENT CONTRACT from `SimulateAccessRuleResponse` (shape compliance,
+/// not an allow/deny document-evaluation outcome) — ADR-031 § Decision —
+/// Release 2 Simulation Extension. `reasons` carries one
+/// `UnsatisfiedConjunct::reason_code()` per unmet conjunct, or exactly
+/// `["UNSUPPORTED_RULE_SHAPE"]` for a whole-rule undecidable verdict — the
+/// SAME vocabulary the gRPC rejection message embeds, never a second one.
+#[derive(Serialize)]
+pub struct SimulateQueryComplianceResponse {
+    pub compliant: bool,
+    #[serde(default)]
+    pub reasons: Vec<&'static str>,
+}
+
 /// Distinguishable rejection-reason body for a condition that fails to
 /// parse (AC-17-03 vs. AC-17-04), shared by both handlers below.
 #[derive(Serialize)]
@@ -205,6 +245,48 @@ fn json_value_to_field_value(value: &serde_json::Value) -> FieldValue {
                 .map(|(k, v)| (k.clone(), json_value_to_field_value(v)))
                 .collect(),
         ),
+    }
+}
+
+/// Translate `op`'s string spelling into `FilterOp`. Ordinary, non-scaffolded
+/// structural translation — `check_query_compliance` only ever tests
+/// `op == FilterOp::Equal` (`filter_binds_field_to_uid`), so an unrecognized
+/// spelling maps to `NotEqual` (fail-closed: it can never satisfy an
+/// equality-bound conjunct), never a parse failure.
+fn simulated_filter_op(op: &str) -> FilterOp {
+    match op {
+        "==" => FilterOp::Equal,
+        "!=" => FilterOp::NotEqual,
+        "<" => FilterOp::LessThan,
+        "<=" => FilterOp::LessThanOrEqual,
+        ">" => FilterOp::GreaterThan,
+        ">=" => FilterOp::GreaterThanOrEqual,
+        _ => FilterOp::NotEqual,
+    }
+}
+
+/// Translate a simulation request's flat `query_filters` list into the
+/// `Option<QueryFilter>` shape `check_query_compliance` expects — the SAME
+/// AND-only `QueryFilter::Composite` domain shape `handle_run_query`'s own
+/// `translate_filter` produces from a real proto query (ADR-031 § Decision
+/// — Release 2 Simulation Extension). An empty list translates to `None`
+/// (unfiltered query), mirroring a real `RunQuery` with no `where` clause.
+fn translate_query_filters(filters: &[SimulatedQueryFilter]) -> Option<QueryFilter> {
+    let fields: Vec<QueryFilter> = filters
+        .iter()
+        .map(|f| {
+            QueryFilter::Field(FieldFilter {
+                field_path: f.field_path.clone(),
+                op: simulated_filter_op(&f.op),
+                value: json_value_to_field_value(&f.value),
+            })
+        })
+        .collect();
+
+    match fields.len() {
+        0 => None,
+        1 => fields.into_iter().next(),
+        _ => Some(QueryFilter::Composite(fields)),
     }
 }
 
@@ -388,6 +470,64 @@ pub async fn simulate_access_rule(
                 EvaluationOutcome::Deny => "deny",
             },
         }),
+    )
+        .into_response())
+}
+
+/// POST /admin/v1/projects/:project_id/access_rules/simulate_query
+/// (security-rules-query-path, US-07, ADR-031).
+///
+/// Any role (mirrors `simulate_access_rule`'s identical any-role, read-only
+/// precedent — AC-17-18/47's shape, not `define_access_rule`'s Owner/Admin
+/// gate). A NEW, DISTINCT sibling handler/route (ADR-031 § Decision —
+/// Release 2 Simulation Extension) — never extends `simulate_access_rule`'s
+/// own body/response, since this feature's response contract (admit/reject
+/// PLUS which conjunct(s) failed) is a genuinely different shape. Calls the
+/// SAME `check_query_compliance` function Slices 01-06 built and real
+/// `handle_run_query` enforcement calls — no second, independently
+/// -maintained shape-compliance implementation. Read-only by construction:
+/// never calls `upsert_access_rule`/`upsert_write_access_rule`, never
+/// touches a live document, never issues a real `RunQuery`.
+pub async fn simulate_query_compliance(
+    Path(project_id): Path<String>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+    Json(body): Json<SimulateQueryComplianceBody>,
+) -> Result<Response, StatusCode> {
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    let condition = match parse_condition(&body.condition) {
+        Ok(c) => c,
+        Err(e) => return Ok(condition_parse_error_response(e)),
+    };
+
+    let auth_ctx = body.auth.map(|a| AuthContext { uid: a.uid });
+    let filter = translate_query_filters(&body.query_filters);
+
+    let outcome = check_query_compliance(&condition, filter.as_ref(), auth_ctx.as_ref());
+
+    // AC-17-74/75: the reason vocabulary must distinguish "the query is
+    // missing a required filter" from "this rule shape can't be enforced
+    // for queries at all" -- collapsing both into an empty reasons list
+    // (as an earlier draft of this handler did) makes the two outcomes
+    // indistinguishable to the caller, defeating the whole point of
+    // reporting reasons. Mirrors handler.rs::query_compliance_rejection's
+    // own "UNSUPPORTED_RULE_SHAPE" vocabulary for the undecidable case.
+    let (compliant, reasons): (bool, Vec<&'static str>) = match outcome {
+        QueryComplianceOutcome::Admitted => (true, Vec::new()),
+        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts } => (
+            false,
+            unsatisfied_conjuncts.iter().map(|c| c.reason_code()).collect(),
+        ),
+        QueryComplianceOutcome::RejectedUnsupportedRuleShape => {
+            (false, vec!["UNSUPPORTED_RULE_SHAPE"])
+        }
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(SimulateQueryComplianceResponse { compliant, reasons }),
     )
         .into_response())
 }
