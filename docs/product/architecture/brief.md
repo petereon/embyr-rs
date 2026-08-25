@@ -3893,3 +3893,101 @@ Full alternatives-considered analysis (including the rejected
 -in-place option):
 `docs/product/architecture/adr-031-query-shape-compliance-check.md`.
 
+---
+
+## Application Architecture — security-rules-collection-group-rules
+
+> Updated: 2026-08-25
+> Feature: security-rules-collection-group-rules (JOB-17 — closes the
+> collection-group (`all_descendants = true`) `RunQuery` rule-lookup gap
+> `security-rules-query-path` itself left in place; extends the query-path
+> operation surface, not a new epic number in the read/write/query
+> numbering)
+> Mode: Propose (autonomous analysis; DISCUSS's central architectural
+> question — Resolution 1 — was already locked before DESIGN started)
+> ADR: `docs/product/architecture/adr-032-collection-group-rule-storage-and-composition.md`
+> (new — combined schema/adapter/composition/simulation decision, per this
+> feature's own smaller-decision-surface reasoning, mirroring ADR-030/031's
+> precedent). Does not amend `adr-027`/`adr-028`/`adr-029`/`adr-030`/
+> `adr-031` — all five remain accurate as written; this feature extends,
+> never contradicts, them.
+
+Full DESIGN content (Quality Attribute Priorities, Reuse Analysis,
+Bounded-Context Placement, Component Decomposition, Driving/Driven Ports,
+Technology Choices, Decisions Table DDD-SRCG-1..8, C4 System Context/
+Container diagrams, Architecture Enforcement, Open Questions, External
+Integrations, Handoff Package) lives in
+`docs/feature/security-rules-collection-group-rules/feature-delta.md` §§
+Wave: DESIGN — the single narrative file per the lean output convention.
+Summary below.
+
+### Summary
+
+**The central decision (locked by DISCUSS, implemented here)**: a
+collection-group rule is a new, independently-authored, independently
+-stored rule concept — a third disjoint table, `group_access_rules`
+(`migrations/0024_group_access_rules.sql`), `PRIMARY KEY (project_id,
+collection_id)` — never auto-applied from a same-named exact-path rule and
+never execute-time-composed from per-path rules (both proven unsafe/
+intractable in DISCUSS). A collection-group query against a collection id
+with no group rule is rejected outright, universally, regardless of any
+same-named exact-path rule's existence — matching real Firestore's own
+documented behavior exactly (confirmed against Firebase's own docs during
+DISCUSS's escalation resolution).
+
+**Schema departure from ADR-028/030's own precedent, justified not
+mirrored**: the new table's collection-id column is named `collection_id`
+(not `collection_path`, since a group id is structurally never a path) and
+carries a NEW `CHECK (collection_id NOT LIKE '%/%')` constraint — the first
+time this initiative enforces its own "bare identifier, not a path"
+invariant at the DB layer rather than by convention alone (`access_rules`/
+`write_access_rules`' own "single-segment in v1" comment was confirmed,
+during this feature's own DISCUSS, to be unenforced by any code).
+
+**Adapter**: `GroupAccessRuleRow` + `upsert_group_access_rule`/
+`get_group_access_rule`, mirroring `upsert_write_access_rule`/
+`get_write_access_rule`'s exact shape.
+
+**Composition**: `handle_run_query` gains an `if all_descendants { .. }
+else { .. }` branch around its existing rule-lookup composition. The `else`
+arm is the EXISTING `get_access_rule`/`access_rules` composition
+(`security-rules-query-path`, ADR-031), preserved verbatim — the structural
+mechanism proving `GetDocument`, writes, and non-group `RunQuery` remain
+byte-for-byte unaffected. The new `if` arm reads `group_access_rules`
+exclusively; a `None` row short-circuits to an outright rejection
+(`GROUP_RULE_NOT_DEFINED`) BEFORE `parse_condition`/`check_query_compliance`
+are ever called — the opposite default from the non-group arm's own
+"no rule ⇒ unrestricted" guardrail, a deliberate, DISCUSS-locked asymmetry.
+When a group rule IS found, the identical `check_query_compliance()`/
+`QueryComplianceOutcome`/`UnsatisfiedConjunct`/`query_compliance_rejection()`
+machinery `security-rules-query-path` built is reused completely
+unchanged — zero new decidable shape, zero new evaluator branch, zero new
+type anywhere in `embyr_core::access_control`. The existing
+composite-index-check ordering guarantee (compliance strictly before
+index-readiness, ADR-031's own OQ-SRQ-03 resolution) is confirmed, not
+re-derived, to hold identically for the group arm.
+
+**Bounded context**: no new context. BC-4 Access Control (ADR-029) is
+extended with a third disjoint aggregate (`GroupAccessRule`) alongside the
+existing `AccessRule`/`WriteAccessRule`; no new pure function is added.
+
+**Admin surface**: `define_group_access_rule` (US-01, new handler, mirrors
+`define_write_access_rule` plus a new bare-collection-id validation step)
+and `simulate_group_query_compliance` (US-07, new sibling handler,
+`POST .../access_rules/simulate_group_query`) — the latter REUSES
+`simulate_query_compliance`'s response type verbatim (the response contract
+is identical in shape) while introducing a genuinely new, narrower request
+type (`group_condition: Option<String>`, modeling the "no group rule"
+default as a first-class simulatable scenario) — an evaluated, evidence
+-based departure from ADR-031's own precedent of duplicating both request
+and response types, not a blind re-application of it.
+
+**No new external integration, no new driven port, no new Earned Trust
+probe** — all new I/O reuses the already-probed `SystemDb` pool; the new DB
+CHECK constraint is a domain-invariant enforcement, not a substrate-lie
+probe (there is no new substrate dependency to probe against).
+
+Full alternatives-considered analysis (including the rejected
+handler-optional-field overload for US-07 and the rejected
+convention-only-schema option): `docs/product/architecture/adr-032-collection-group-rule-storage-and-composition.md`.
+

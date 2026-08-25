@@ -760,3 +760,283 @@ The remaining 0.04 gap is Resolution 2's universal-vs-conditional scoping uncert
 
 ### Upstream Changes
 - None — no DISCOVER/DIVERGE artifacts exist for this feature (same as all 3 prior epics); this DISCUSS is grounded directly in `security-rules-query-path`'s own shipped artifacts and ADR-031, direct reads of `crates/embyr-core/src/domain/query.rs`/`crates/embyr-core/src/domain/document.rs`/`crates/embyr-pg-storage/src/backend_adapter.rs`/`crates/embyr-server/src/grpc/handler.rs`/`crates/embyr-server/src/adapters/system_db.rs`/`crates/embyr-server/src/admin/handlers/access_rules.rs`, and `docs/product/jobs.yaml`.
+
+---
+
+## Wave: DESIGN / [REF] Density Resolution
+
+`~/.nwave/global-config.json` was not read this pass either — the density
+resolver script was not invoked (this agent's Propose-mode dispatch mirrors
+all 4 prior sibling features' own DESIGN-wave precedent for this exact
+unavailability). Tier-1 [REF] only, no Tier-2 expansions rendered by
+default; the reasoning behind every non-obvious decision below is inlined at
+[REF] density directly (mirroring `security-rules-query-path`'s own DESIGN
+density choice) rather than deferred to a separate [WHY] expansion, because
+this feature's decision surface is small enough that inlining costs little
+and a separate expansion would fragment two genuinely coupled reads (the
+`group_access_rules` schema decision and its CHECK-constraint rationale).
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation (DESIGN)
+
+✓ `docs/feature/security-rules-collection-group-rules/feature-delta.md` (full, this file's own DISCUSS sections, 763 lines) — 2 LOCKED+CONFIRMED Resolutions, 7 user stories (US-01 through US-07, AC-17-77 through AC-17-104), Handoff Package flags 1-9.
+✓ `docs/feature/security-rules-collection-group-rules/slices/slice-01-define-group-rule.md` through `slice-07-simulate-group-query.md` (full, all 7) — confirm slice-level IN/OUT scope and effort matches the story-level content above; no new information beyond what § User Stories already captures, confirmed by direct comparison of Slice 01 and Slice 04 (the two highest-consequence slices) against their respective user stories.
+✓ `docs/product/architecture/brief.md` (targeted: `## Application Architecture — security-rules`, `security-rules-write-path`, `security-rules-query-path` sections, lines 3480-3895) — SSOT to extend, not recreate; confirms the exact Reuse Analysis / Component Decomposition / C4 format this DESIGN mirrors, and confirms `security-rules-write-path`/`security-rules-query-path` both use the "Summary + pointer to feature-delta.md" format for their brief.md footprint, the precedent this feature's own brief.md addition follows.
+✓ `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md`, `adr-028-access-rule-storage-and-lifecycle.md`, `adr-029-access-control-composition-and-bounded-context.md`, `adr-030-write-path-grammar-storage-and-composition.md` (full, read across DISCUSS+DESIGN) — the locked grammar/storage/composition/bounded-context precedent this feature extends a fifth time.
+✓ `docs/product/architecture/adr-031-query-shape-compliance-check.md` (full, 696 lines) — confirmed the EXACT current shape of `check_query_compliance()`, `decompose_decidable()`, `filter_binds_field_to_uid()`, `QueryComplianceOutcome`, `UnsatisfiedConjunct`, `query_compliance_rejection()`, and `handle_run_query`'s composition/ordering (OQ-SRQ-03 resolution) — the machinery this DESIGN reuses unchanged and the ordering guarantee confirmed to hold for the new branch too (§ Wave: DESIGN / [REF] Decisions Table below).
+✓ `crates/embyr-core/src/access_control/mod.rs` (full, 1496 lines) — confirmed `check_query_compliance`/`QueryComplianceOutcome`/`UnsatisfiedConjunct`/`decompose_decidable`/`filter_binds_field_to_uid` exact current implementation and test coverage; confirms this module requires ZERO new code for this feature (no new decidable shape, no new evaluator branch, no new type) — reuse is total, not partial.
+✓ `crates/embyr-server/src/grpc/handler.rs::handle_run_query` (targeted full read, lines 1131-1290) — confirmed the exact current composition this DESIGN's branch is inserted into: identity attach (unchanged), structured-query extraction including the already-computed `all_descendants` local (unchanged), `collection`/`domain_query` construction (unchanged), the EXISTING unconditional `get_access_rule` block (lines 1242-1269, to be wrapped in an `else` arm, preserved verbatim), the composite-index check (unchanged, confirmed to run strictly after both arms resolve), `adapter.run_query()` (unchanged).
+✓ `crates/embyr-server/src/adapters/system_db.rs` (targeted read, lines 1-60 + 310-449) — confirmed the exact `AccessRuleRow`/`WriteAccessRuleRow` struct shapes and `upsert_access_rule`/`get_access_rule`/`upsert_write_access_rule`/`get_write_access_rule` method shapes this DESIGN's `GroupAccessRuleRow`/`upsert_group_access_rule`/`get_group_access_rule` mirror exactly.
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` (full, 534 lines) — confirmed exact current `define_access_rule`/`define_write_access_rule`/`simulate_access_rule`/`simulate_query_compliance` shapes, `ConditionRejectionResponse`/`condition_parse_error_response`/`translate_query_filters`/`json_value_to_field_value`/`SimulatedAuth`/`SimulatedQueryFilter` reusable-as-is types/functions, and — via targeted search across `crates/embyr-server/src` for `contains('/')`/collection-id-validation patterns — confirmed no existing bare-collection-id validator exists anywhere in this crate (zero matches), so `validate_bare_collection_id` is genuinely new work, not a duplicate.
+✓ `crates/embyr-server/src/admin/router.rs` (targeted read, lines 190-234) — confirmed exact current route-registration shape/ordering for `access_rules`/`access_rules/simulate`/`access_rules/simulate_query`/`write_access_rules`, the precedent the two new routes are added alongside.
+✓ `migrations/0022_access_rules.sql`, `migrations/0023_write_access_rules.sql` (full) — confirmed exact current schema shape (`PRIMARY KEY (project_id, collection_path)`, no CHECK constraint, no history columns) and confirmed via `Glob` across `migrations/*.sql` that `0024` is the next-free migration number (0001 through 0023 all present, sequential, no gap).
+
+No contradictions found between this DESIGN pass and any DISCUSS-locked decision. This DESIGN implements Resolution 1 (Option C) and Resolution 2 (Option C, CONFIRMED) exactly as locked — it does not reopen either.
+
+---
+
+## Wave: DESIGN / [REF] Quality Attribute Priorities
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|---------------------|
+| 1 | **No false-allow on an ungoverned collection-group query** | US-04, AC-17-89/90/91 — this feature's single highest-consequence defect class, designated mutation-testing surface (per-feature strategy, CLAUDE.md). Structurally enforced via `get_group_access_rule` returning `None` reaching an explicit `let...else` early return, not an omitted branch. |
+| 2 | **Structural (not conventional) independence from GetDocument, writes, and non-group RunQuery** | US-05/06, AC-17-93/94/95/96. Drives the `if all_descendants { .. } else { .. }` branch shape (mutually exclusive by construction) over any shared/parametrized lookup. |
+| 3 | **No overhead on the unarmed path** | AC-17-91, carried NFR note from all 4 prior epics — a single indexed PK lookup against `group_access_rules` only, no scan of `access_rules`. |
+| 4 | **Caller's-own-uid binding property preserved unchanged** | Inherited from ADR-031 Decision Driver 2, now proven across multiple nesting depths in one query (AC-17-81). Zero new logic — `filter_binds_field_to_uid` is reused verbatim. |
+| 5 | **Shared-vocabulary consistency between gRPC rejection and simulation JSON** | Mirrors ADR-031's own `UnsatisfiedConjunct::reason_code()` discipline; `GROUP_RULE_NOT_DEFINED` is the one new reason string, used identically in both renderings. |
+| 6 | **Enforceable bare-id invariant for the new table** | Principle 11/12 discipline — DISCUSS's own reading found `access_rules.collection_path`'s "single-segment in v1" constraint is convention-only, not code-enforced; this feature closes that specific gap for the new table via a two-layer (handler + DB CHECK) enforcement, not a repeat of the same gap. |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---------------------|------|---------|----------|----------------|
+| `write_access_rules` table + `WriteAccessRuleRow` | `migrations/0023_write_access_rules.sql`, `adapters/system_db.rs:40-51` | Disjoint-table-per-rule-concept storage shape | **EXTEND (pattern reuse; new table, new type)** | `group_access_rules`/`GroupAccessRuleRow` mirror the column shape and idempotent-upsert-only, no-history discipline exactly (ADR-030 precedent), with two justified departures (column name `collection_id`, new CHECK constraint) — see ADR-032 § Decision — Schema. |
+| `upsert_write_access_rule`/`get_write_access_rule` | `adapters/system_db.rs:388-448` | CRUD method shape for a disjoint rule table | **EXTEND (pattern reuse; new methods)** | `upsert_group_access_rule`/`get_group_access_rule` follow the identical method shape (single upsert statement, single indexed `SELECT`, identical error mapping, identical `Ok(None)` short-circuit contract) — zero deviation beyond the different table/column names. |
+| `check_query_compliance`/`QueryComplianceOutcome`/`UnsatisfiedConjunct`/`decompose_decidable`/`filter_binds_field_to_uid` | `embyr-core/src/access_control/mod.rs:523-744` | Query-shape compliance decision | **EXTEND (reuse completely unchanged)** | Confirmed by full-file read: zero new decidable shape, zero new evaluator branch, zero new type is needed — the group arm calls the SAME function with a condition sourced from a different table, exactly as DISCUSS's own Walking Skeleton Evaluation concluded. |
+| `query_compliance_rejection()` | `grpc/handler.rs` (private fn, same file as `handle_run_query`) | `QueryComplianceOutcome` -> `Status::permission_denied` rendering | **EXTEND (reuse verbatim)** | The group arm's `Admitted`/`Rejected`/`RejectedUnsupportedRuleShape` outcomes are rendered by the identical existing function — no second rendering path. |
+| `handle_run_query`'s existing `get_access_rule`/`if let Some` block | `grpc/handler.rs:1242-1269` | Non-group rule-lookup and compliance-check composition | **EXTEND (wrapped, not modified)** | Becomes the `else` arm of a new `if all_descendants` branch, preserved verbatim — the structural (not conventional) mechanism behind AC-17-93/94/95/96. |
+| `define_write_access_rule` | `admin/handlers/access_rules.rs:363-410` | Admin handler shape for defining a disjoint-table rule | **EXTEND (pattern reuse; new handler)** | `define_group_access_rule` follows the identical shape (Owner/Admin gate, `verify_project_ownership`, `parse_condition` validation, upsert, no-branch response) plus one new validation step (bare-id check, genuinely new — see below). |
+| `simulate_query_compliance`, `ConditionRejectionResponse`, `condition_parse_error_response`, `translate_query_filters`, `json_value_to_field_value`, `SimulatedAuth`, `SimulatedQueryFilter`, `SimulateQueryComplianceResponse` | `admin/handlers/access_rules.rs:157-533` | Query-compliance simulation handler shape and its supporting types/helpers | **EXTEND (mostly reuse verbatim; one new sibling handler + one new request type)** | `simulate_group_query_compliance` reuses `SimulateQueryComplianceResponse` (response type, identical shape), `translate_query_filters`, `json_value_to_field_value` (transitively), `condition_parse_error_response`, `SimulatedAuth`, `SimulatedQueryFilter` verbatim. Only a new request type (`SimulateGroupQueryComplianceBody`, optional `group_condition`) and the handler function itself are new — see ADR-032 § Decision — Admin Surface for why the response type is reused but the request type is not. |
+| `SessionContext` extractor, `verify_project_ownership`, admin router session sub-router | `admin/extractors/session_context.rs`, `admin/handlers/shared.rs`, `admin/router.rs` | Project-owner-scoped admin action auth + route registration | **EXTEND** | 2 new routes added, reusing `SessionContext`/`verify_project_ownership` verbatim — zero new auth middleware. |
+| `embyr-pg-storage::backend_adapter::run_query`'s `all_descendants` SQL branch | `embyr-pg-storage/src/backend_adapter.rs:530+` | Collection-group query execution | **ZERO CHANGE (not extended, not touched)** | Confirmed by DISCUSS's own direct code read, re-confirmed here: already correct, already collection-group-capable. This feature is purely an authorization gate inserted upstream, in `grpc::handler`, before this call. |
+| `access_rules` table, `get_access_rule`, `write_access_rules` table, `get_write_access_rule`, `handle_get_document`, every write-path handler | `migrations/0022*.sql`, `migrations/0023*.sql`, `adapters/system_db.rs`, `grpc/handler.rs` | Existing rule storage/lookup for GetDocument/writes/non-group RunQuery | **ZERO CHANGE (not extended, not touched)** | Confirmed by DISCUSS's own direct code read: all three already resolve rule lookups from the actual document/query's own fully-derived exact collection path, never a bare leaf id — no gap of this feature's kind exists for them. |
+| `group_access_rules` table | `migrations/0024_group_access_rules.sql` (new) | Collection-group rule storage | **CREATE NEW** | No existing table stores a condition keyed by bare collection id alone (independent of parent path) — confirmed by DISCUSS's own Walking Skeleton Evaluation: `access_rules`/`write_access_rules` are both keyed by exact `(project_id, collection_path)`, a concept with no meaning for a query spanning an open-ended, execution-time-unknown set of nested paths. |
+| `group_access_rules.collection_id`'s `CHECK (collection_id NOT LIKE '%/%')` constraint | `migrations/0024_group_access_rules.sql` (new) | DB-level bare-id enforcement | **CREATE NEW** | No existing rule table has a CHECK constraint of this kind (`access_rules`/`write_access_rules` rely on convention only, confirmed by direct read of `DefineAccessRuleBody` — no code rejects a `/`-containing value). Justified as a deliberate, evidenced departure, not a blind mirror — see ADR-032 § Decision — Schema for the full reasoning (a `/`-containing "collection id" is a category error for this table specifically, unlike for the other two). |
+| `validate_bare_collection_id` (admin handler validation) | `admin/handlers/access_rules.rs` (new fn) | User-facing bare-id rejection, AC-17-80 | **CREATE NEW** | Confirmed by targeted search across `crates/embyr-server/src` (patterns: `contains('/')`, collection-id validation, `INVALID_COLLECTION`) — zero existing matches. Reuses the EXISTING `ConditionRejectionResponse` struct for its response shape rather than inventing a new one. |
+
+**Verdict: 9 EXTEND (7 reuse-verbatim-or-near-verbatim, 2 wrapped-not-modified), 2 explicit ZERO-CHANGE confirmations, 3 CREATE NEW (all extensively justified — no existing table stores a bare-collection-id-keyed condition, no existing CHECK constraint of this shape exists, no existing bare-collection-id validator exists, confirmed by direct code search), 0 unjustified CREATE NEW.** This feature's CREATE NEW footprint (one table + its CHECK constraint + one small validator function) is narrower than any of its 4 predecessors' own DESIGN passes.
+
+---
+
+## Wave: DESIGN / [REF] Development Paradigm Confirmation
+
+No change to the project-wide paradigm (functional-where-practical Rust,
+`CLAUDE.md`). Per the Handoff Package's own explicit steer: `embyr_core::
+access_control` needs ZERO new logic for this feature (confirmed above,
+§ Reuse Analysis) — this feature's "pure core" surface is **none**, not
+merely minimal. Every new line of code this feature adds is IO/adapter/
+composition-level, inside `embyr-server`: a new table, two new adapter
+methods (thin `sqlx` wrappers, identical shape to existing ones), one new
+branch in an existing gRPC handler, and two new Axum admin handlers. This is
+stated explicitly, per the constraint's own instruction, rather than
+inventing an unnecessary core-layer change to satisfy the paradigm note in
+form only. `CLAUDE.md`'s existing paradigm section requires no update.
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement
+
+No new bounded context. **BC-4: Access Control** (ADR-029, unchanged
+placement) is extended with a third disjoint aggregate/table
+(`GroupAccessRule`, alongside the existing `AccessRule`/`WriteAccessRule`)
+and gains no new pure function — `check_query_compliance` (already BC-4's
+third pure function, added by ADR-031) is reused, not extended.
+`adr-002-bounded-contexts.md` requires no further amendment beyond ADR-029's
+own — this feature adds no new context boundary, only a new aggregate
+within the existing one.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component | Crate/Module Path | Responsibility | Change Type | Bounded Context |
+|-----------|--------------------|------------------|--------------|------------------|
+| `group_access_rules` (System DB table) | `migrations/0024_group_access_rules.sql` (new) | Storage for the per-`(project_id, collection_id)` collection-group condition, with a DB-level bare-id CHECK constraint | New | BC-4 |
+| `embyr-server::adapters::system_db` (extended) | `crates/embyr-server/src/adapters/system_db.rs` | Adds `GroupAccessRuleRow`, `upsert_group_access_rule()`, `get_group_access_rule()` | Extended (existing file) | BC-4 (driven adapter) |
+| `embyr-server::grpc::handler::handle_run_query` (extended) | `crates/embyr-server/src/grpc/handler.rs` | Gains an `if all_descendants { .. } else { .. }` branch; the `else` arm is the existing `get_access_rule` composition, preserved verbatim; the new `if` arm reads `group_access_rules` only and reuses `check_query_compliance`/`query_compliance_rejection` verbatim | Extended (existing file) | BC-4 (consumes BC-2 query-execution result, read-only rule gate) |
+| `embyr-server::admin::handlers::access_rules` (extended) | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Adds `define_group_access_rule` (US-01), `validate_bare_collection_id`, `simulate_group_query_compliance` (US-07) — session-auth Axum handlers, mirroring the file's existing 4 handlers' shape | Extended (existing file) | BC-4 (driving adapter) |
+| `embyr-server::admin::router` (extended) | `crates/embyr-server/src/admin/router.rs` | Registers 2 new routes alongside the existing 4 access-control routes | Extended (existing file) | BC-4 (driving adapter, route registration) |
+
+No change to `embyr-core` (any module), `embyr-pg-storage` (any module), or
+`embyr-proto`.
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports (Inbound)
+
+| Port | Protocol | Location | New/Extended | What it does |
+|------|----------|----------|---------------|---------------|
+| `GroupAccessRuleAdminPort` | HTTP (admin `:9090`, session sub-router) | `admin/handlers/access_rules.rs` | New | `POST /admin/v1/projects/:project_id/group_access_rules` (define/redefine, US-01, body `{collection_id, condition}`). Session auth, Owner/Admin only, mirrors `define_write_access_rule`'s identical gate. |
+| `GroupQueryComplianceSimulationPort` | HTTP (admin `:9090`, session sub-router) | `admin/handlers/access_rules.rs` | New | `POST /admin/v1/projects/:project_id/access_rules/simulate_group_query` (US-07, body `{group_condition: Option<String>, auth, query_filters}`). Session auth, any role, read-only (AC-17-104) — mirrors `simulate_query_compliance`'s identical any-role precedent. |
+| `FirestoreGrpcPort` / `RestPort` (existing) | gRPC `:8080` / REST `:8081` | `grpc/handler.rs::handle_run_query` | **Extended, additively** | `RunQuery`'s existing, unchanged call shape now additionally reflects collection-group compliance when `all_descendants = true` (US-01-06). No new RPC, no new endpoint. Every other data-plane RPC (`GetDocument`, `CreateDocument`/`UpdateDocument`/`DeleteDocument`, non-group `RunQuery`) is unmodified. |
+
+No new network-facing port. Both new admin actions live under the existing
+`:9090` admin HTTP surface's session sub-router.
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters
+
+No new *driven* (outbound infrastructure) port. `upsert_group_access_rule`/
+`get_group_access_rule` execute through the existing, already-probed
+`SystemDb` connection pool — the identical substrate `get_access_rule`/
+`get_write_access_rule` already use. No new adapter, no new `probe()`.
+
+**Earned Trust note (Principle 12 discipline, explicit, not silently
+skipped):** no new Earned Trust probe is required because no new
+*substrate* dependency is introduced — `check_query_compliance()` and its
+internal helpers remain pure, deterministic CPU computation over
+already-in-memory values (unchanged from ADR-031), and the new adapter
+methods reuse the already-probed `SystemDb` pool verbatim. The identical
+"no environment can lie to a pure function" / "no new substrate reliance"
+reasoning ADR-029/030/031 § Enforcement each established applies here
+without modification. Full reasoning:
+`docs/product/architecture/adr-032-collection-group-rule-storage-and-composition.md`
+§ Enforcement.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new workspace dependency. No new language/framework/runtime choice.
+`group_access_rules` uses the identical Postgres/`sqlx` stack every prior
+rule table already uses; the new admin routes use the identical Axum/
+`serde` stack every prior admin handler already uses.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table
+
+| ID | Decision | Verdict |
+|----|----------|---------|
+| DDD-SRCG-1 | Storage: new disjoint `group_access_rules` table, `PRIMARY KEY (project_id, collection_id)`, `collection_id` column name (not `collection_path`), plus a NEW `CHECK (collection_id NOT LIKE '%/%')` constraint — a deliberate, justified departure from ADR-028/030's convention-only precedent | Accepted — ADR-032 § Decision — Schema |
+| DDD-SRCG-2 | Adapter: `GroupAccessRuleRow` + `get_group_access_rule`/`upsert_group_access_rule`, mirrors `get_write_access_rule`/`upsert_write_access_rule` exactly | Accepted — ADR-032 § Decision — Schema |
+| DDD-SRCG-3 | Composition: `handle_run_query` branches on the already-computed `all_descendants` local; the existing non-group `get_access_rule` block is preserved verbatim as the `else` arm; whether the shared compliance-evaluation sequence is factored into a helper is left to software-crafter (HOW, not WHAT) | Accepted — ADR-032 § Decision — Composition |
+| DDD-SRCG-4 | `check_query_compliance()`/`QueryComplianceOutcome`/`UnsatisfiedConjunct`/`query_compliance_rejection()` reused completely unchanged for the group arm's Admitted/Rejected/RejectedUnsupportedRuleShape outcomes; `GROUP_RULE_NOT_DEFINED` is a new rejection decided BEFORE `check_query_compliance` is called, never added as a new `QueryComplianceOutcome` variant | Accepted — ADR-032 § Decision — Composition |
+| DDD-SRCG-5 | OQ-SRQ-03's ordering precedent (compliance check strictly before the composite-index check) confirmed to hold unchanged for the group arm — both arms resolve (continue or early-return) before the unchanged composite-index check code | Accepted — ADR-032 § Decision — Composition |
+| DDD-SRCG-6 | Admin: new `define_group_access_rule` handler + `POST .../group_access_rules` route, mirrors `define_write_access_rule` exactly plus one new `validate_bare_collection_id` step (AC-17-80), reusing the existing `ConditionRejectionResponse` type | Accepted — ADR-032 § Decision — Admin Surface |
+| DDD-SRCG-7 | Admin: new sibling `simulate_group_query_compliance` handler + `POST .../access_rules/simulate_group_query` route — REUSES `SimulateQueryComplianceResponse` (response type identical) but introduces a NEW request type (`group_condition: Option<String>`, vs. the existing handler's required `condition: String`) — evaluated independently from ADR-031's own precedent, not copy-pasted | Accepted — ADR-032 § Decision — Admin Surface |
+| DDD-SRCG-8 | `embyr_core::access_control` receives ZERO code changes — confirmed, no new decidable shape, no new evaluator branch, no new pure function, no new type. This feature's entire net-new surface is IO/adapter/composition-level in `embyr-server` | Accepted — this section, § Development Paradigm Confirmation |
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context (Mermaid)
+
+No new external system. Adds one new relationship label (collection-group
+compliance) to the existing `embyr-rs` system context all 3 prior epics
+already established:
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (security-rules-collection-group-rules delta)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Defines/redefines independent collection-group rules; simulates candidate group queries before publishing")
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK", "Client library. collectionGroup() queries (all_descendants=true) are now additionally evaluated against a published GROUP rule, if one exists for the target collection id.")
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Now also stores and evaluates independent, disjoint collection-group access-control rules on RunQuery(all_descendants=true) calls.")
+    System_Ext(systemDB, "System Postgres", "Adds group_access_rules table (project- and bare-collection-id-scoped condition storage, disjoint from access_rules/write_access_rules).")
+
+    Rel(sdkDev, embyr, "Defines/redefines a group rule; simulates a candidate group query", "Admin API :9090")
+    Rel(firebaseSDK, embyr, "collectionGroup() query — now evaluated against the group rule, if any; rejected outright if none exists", "gRPC :8080 / REST :8081 (UNCHANGED for GetDocument, writes, and non-group RunQuery)")
+    Rel(embyr, systemDB, "Reads/writes group_access_rules (never access_rules/write_access_rules)", "Postgres SQL")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Container Diagram (Mermaid)
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (security-rules-collection-group-rules delta)
+
+    Person(sdkDev, "SDK Developer (Alex)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)", "Never calls embyr directly — experiences this feature only through whether a collectionGroup() query succeeds or fails")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(embyrA, "embyr-rs instance", "Rust binary", "Existing: gRPC :8080, REST :8081, Admin :9090. Extended: 2 new admin routes (define/redefine group rule, simulate group query); one new mutually-exclusive branch inside handle_run_query only.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "Existing access_rules/write_access_rules tables, UNCHANGED. New: group_access_rules (1 row per project+bare-collection-id, idempotent upsert, CHECK-constrained bare id).")
+        ContainerDb(custDB, "Customer Postgres (BC-2, per-project)", "PostgreSQL", "Unchanged. Collection-group query execution (all_descendants SQL branch) already existed and is untouched by this feature.")
+    }
+
+    Rel(sdkDev, embyrA, "Defines/redefines/simulates group rules (admin session auth)", "HTTP :9090")
+    Rel(endUser, embyrA, "collectionGroup() query — gated by the group rule, if any, and the already-established VerifiedEndUserIdentity", "gRPC :8080 / REST :8081")
+    Rel(embyrA, sysDB, "CRUD group_access_rules; unchanged access_rules/write_access_rules reads on the non-group arm", "Postgres SQL")
+    Rel(embyrA, custDB, "Unchanged all_descendants query execution (adapter.run_query()) — gated by this feature's compliance check upstream, issues no new query shape", "Postgres SQL, via BackendAdapter")
+```
+
+**C4 Component diagram: not warranted.** This feature's net-new/extended
+component count (one table, one adapter-method pair, one branch inside one
+existing handler, two admin handlers) is narrower than `security-rules`'
+own 5-component threshold (parser, evaluator, storage adapter, two admin
+handlers, composition point) that justified its Component diagram — and
+narrower than `security-rules-write-path`/`security-rules-query-path`,
+which also did not produce one (both use the "Summary" format in
+`brief.md`, full detail in ADR-030/031 respectively — the precedent this
+feature's own ADR-032 and Component Decomposition table above follow).
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern. No
+new crate, no new bounded context — BC-4 gains a third disjoint storage
+table and one new branch in one existing call site.
+
+Rules enforced (existing, applying unchanged):
+- `embyr-core::access_control` retains zero IO imports (`cargo-deny`,
+  `deny.toml`) — this feature adds no code to that module at all.
+- `embyr-core` defines the value-type/function surface; `embyr-server`
+  consumes it — dependency direction inward, unchanged.
+- New: `group_access_rules.collection_id`'s DB-level `CHECK` constraint —
+  see ADR-032 § Enforcement for the full Principle 11/12 reasoning.
+- No new adapter, no new `probe()` required (see § Driven Ports + Adapters,
+  above, and ADR-032 § Enforcement for the explicit Principle 12 reasoning).
+
+---
+
+## Wave: DESIGN / [REF] External Integrations
+
+**None requiring contract tests.** This feature introduces no new outbound
+network dependency: rule storage reuses the existing, already-probed
+`SystemDb` Postgres connection; `check_query_compliance` is pure in-process
+computation, unchanged. No new adapter, no new external service, no new
+consumer-driven-contract surface.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions (DESIGN additions)
+
+| ID | Question | Impact | Resolution owner |
+|----|----------|--------|-------------------|
+| OQ-SRCG-04 | Whether the ~8-line compliance-evaluation sequence shared by `handle_run_query`'s group and non-group arms should be factored into a private helper during DELIVER, or left duplicated | Left as a crafter-level (HOW) choice per DDD-SRCG-3 — either satisfies the structural non-interference invariant; not a DESIGN-blocking decision | software-crafter, DELIVER |
+| OQ-SRCG-05 | Whether `"GROUP_RULE_NOT_DEFINED"`/`"UNSUPPORTED_RULE_SHAPE"`'s duplicated-string-literal convention (message text vs. simulation JSON) should be centralized behind shared constants project-wide | Pure maintainability follow-up, mirrors OQ-SR-05's own precedent; not required for V1 correctness | Platform-architect, post-launch, if evidence warrants |
+| OQ-SRCG-01 (carried from DISCUSS) | Universal vs. conditional fail-closed default | **CLOSED** — confirmed universal by DISCUSS's own orchestrator escalation resolution against real Firebase documentation | Closed |
+| OQ-SRCG-02 (carried, unrelated) | Future per-nesting-depth-varying group rules | Out of this feature's scope; unchanged from DISCUSS | Product Discovery, future evidence |
+| OQ-SRCG-03 (carried, unrelated) | `req.parent` never combined with `collection_id` for non-group `RunQuery` (pre-existing, non-security correctness gap) | Confirmed still out of scope for this DESIGN pass — no code touched by this feature is implicated | Solution-architect / troubleshooter, separate track |
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package (to DISTILL)
+
+**To DISTILL (acceptance-designer)**: this `feature-delta.md` (DISCUSS + DESIGN sections), `docs/product/architecture/adr-032-collection-group-rule-storage-and-composition.md`, the updated `## Application Architecture — security-rules-collection-group-rules` section in `docs/product/architecture/brief.md`.
+
+**Explicit flags for DISTILL**:
+1. The group arm's rejection vocabulary has 5 distinguishable reasons at the gRPC/simulation boundary: `GROUP_RULE_NOT_DEFINED` (US-04, new), `UNSUPPORTED_RULE_SHAPE`, `OWNERSHIP_FILTER_MISSING`, `AUTH_REQUIRED`, `RULE_DENIES_ALL` (all 4 reused verbatim from ADR-031) — acceptance scenarios should assert on the bracketed reason-code token, mirroring `security-rules-query-path`'s own acceptance-test convention.
+2. US-04's scenarios (AC-17-89 through AC-17-92) are this feature's designated mutation-testing surface — DISTILL should ensure scenario coverage is dense enough here specifically (both `journal_entries`-has-exact-path-rule-but-no-group-rule AND `app_config`-has-no-rule-of-any-kind cases, per the Domain Examples).
+3. US-05's scenarios must exercise a collection id carrying BOTH an active exact-path rule and an active group rule with DIFFERENT conditions simultaneously (the strongest independence proof) — already specified in the UAT Scenarios above, flagged here for DISTILL's own test-data setup.
+4. `simulate_group_query_compliance`'s `group_condition: Option<String>` field is the ONE request-shape difference from `simulate_query_compliance` — DISTILL's acceptance scenarios for US-07 should explicitly cover the omitted-field case (AC-17-103) as a first-class scenario, not an edge case bolted onto the "candidate condition supplied" scenarios.
+5. New migration `migrations/0024_group_access_rules.sql` and its `CHECK (collection_id NOT LIKE '%/%')` constraint are DESIGN-locked (ADR-032) — DISTILL/DELIVER should not treat the CHECK constraint as optional or defer it to a later migration.
+
+**To DEVOPS (platform-architect)**: no new deployment surface, no new external integration, no new probe. This feature's entire footprint is one new migration and code changes to an already-deployed binary — mirrors every prior epic's own DEVOPS footprint (none beyond the standard migration-then-deploy sequence).
