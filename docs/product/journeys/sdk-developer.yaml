@@ -9,6 +9,16 @@ jobs:
   - JOB-17  # document-access-control (added by security-rules DISCUSS, 2026-08-17)
 updated: "2026-08-26"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (custom-claims DISCUSS, 2026-08-26): JOB-17 now also covers
+# role/attribute-based (custom-claims) condition grammar via this feature —
+# same job, same persona, not a new job. Genuinely cross-cutting: this
+# feature also amends JOB-16's own token contract (ADR-024) to carry an
+# arbitrary claims map embedded by the customer's backend at mint time. No
+# new Alex-facing mental model beyond "a claim is something my own backend
+# already embeds in the token I already mint" — Decision 3 (UX Research
+# Depth) = Lightweight; no separate journey-*.yaml artifact, per the
+# established pattern for a pure grammar/mechanism extension. See
+# docs/feature/custom-claims/feature-delta.md § Journey.
 # NOTE (security-rules-realtime DISCUSS, 2026-08-26): JOB-17 now also
 # covers real-time Listen enforcement AND correctly-scoped real-time
 # delivery via this feature — same job, same persona, not a new job.

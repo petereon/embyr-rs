@@ -545,6 +545,17 @@ jobs:
     # extends BC-1 Tenant Management's existing auth middleware (ADR-002) —
     # it does not introduce a fourth bounded context. See
     # docs/feature/client-auth/feature-delta.md.
+    # NOTE (custom-claims DISCUSS, 2026-08-26): this job's own token contract
+    # (ADR-024, `VerifiedEndUserIdentity`/`ClientIdentityClaims`) is extended
+    # by the `custom-claims` feature to carry an arbitrary claims map embedded
+    # by the customer's backend at mint time (mirrors real Firebase's own
+    # `createCustomToken(uid, developerClaims)` mechanism for exactly this
+    # flow). This is an amendment to JOB-16's own architecture, not a new job
+    # — the primary job_id for `custom-claims`' own user stories is JOB-17
+    # (document-access-control), since the GOAL being served (role/attribute-
+    # based per-user data protection) is JOB-17's, not a new identity goal.
+    # See docs/feature/custom-claims/feature-delta.md § Job Discovery Framing
+    # Resolution, Resolution 1.
 
   - id: JOB-17
     name: document-access-control
@@ -717,3 +728,29 @@ jobs:
     # non-group) receive zero code changes. See
     # docs/feature/security-rules-realtime/feature-delta.md § Job Discovery
     # Framing Resolution and § Scope Assessment.
+    # NOTE (custom-claims DISCUSS, 2026-08-26): this feature is JOB-17's own
+    # 6th realization — same persona (P1 Alex), same goal (per-user data
+    # protection), not a new job — extending the condition grammar to
+    # reference `request.auth.token.<claim>` (role/attribute-based access,
+    # not just document-ownership-equality). Genuinely cross-cutting: this
+    # feature ALSO amends JOB-16's own token contract (ADR-024) to carry an
+    # arbitrary claims map, embedded by the customer's backend at mint time
+    # (mirrors real Firebase's `createCustomToken(uid, developerClaims)`
+    # mechanism) — a deliberate, evidenced cross-epic change `security-rules`'
+    # own § Out of Scope entry named and deferred explicitly. `Operand`
+    # extends cleanly (new `AuthTokenClaim(String)` variant, mirroring
+    # `RequestResourceField`'s own ADR-030 precedent); `evaluate()`-based
+    # surfaces (GetDocument, write-path, Listen per-event) gain claim support
+    # automatically via `AuthContext`'s already-uniform construction across
+    # all 5 prior call sites; `check_query_compliance()`-based surfaces
+    # (RunQuery, collection-group, Listen subscribe-time) receive ZERO code
+    # changes and instead safely, structurally reject any claim-referencing
+    # rule via the existing `RejectedUnsupportedRuleShape` catch-all — a
+    # named, deferred follow-up (claim-aware query-shape compliance), not
+    # built here. Also resolves OQ-SR-04 (string-literal comparison,
+    # `security-rules`' own ADR-027) narrowly, scoped to strings only,
+    # since role-based claims are this feature's own namesake use case and
+    # are unbuildable without it — flagged as a genuine judgment call for
+    # the orchestrator to confirm, not a silent decision. See
+    # docs/feature/custom-claims/feature-delta.md § Job Discovery Framing
+    # Resolution and § Scope Assessment.
