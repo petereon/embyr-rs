@@ -456,6 +456,14 @@ path = "../../tests/security_rules_realtime/acceptance/subscribe_time_compliance
 name = "security_rules_realtime_per_event_compliance_recheck"
 path = "../../tests/security_rules_realtime/acceptance/per_event_compliance_recheck.rs"
 
+# security-rules-realtime acceptance tests (Slice 05, ADR-033) — US-05: a
+# delete event for a document the subscriber's own rule would deny is not
+# delivered, using pre-deletion field data via the widened fetch_event()
+# query (ADR-033 § Decision — Delete Non-Leakage).
+[[test]]
+name = "security_rules_realtime_delete_event_non_leakage"
+path = "../../tests/security_rules_realtime/acceptance/delete_event_non_leakage.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

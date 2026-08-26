@@ -2,21 +2,31 @@
 ///
 /// Step 05-02: ListenRegistry with register() + fan_out() for NOTIFY-driven updates.
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::Arc,
 };
 
 use tokio::sync::{mpsc, Notify, RwLock};
 
-use embyr_core::domain::document::{DocumentPath, FirestoreDocument};
+use embyr_core::domain::{
+    document::{DocumentPath, FirestoreDocument},
+    field_value::FieldValue,
+};
 
 /// An event delivered to a registered Listen subscriber.
 #[derive(Clone, Debug)]
 pub enum ListenEvent {
     /// A document was created or updated.
     Changed(FirestoreDocument),
-    /// A document was deleted.
-    Removed(DocumentPath),
+    /// A document was deleted. `fields` carries the document's
+    /// PRE-DELETION field snapshot (from the soft-delete row) — used ONLY
+    /// as `evaluate()`'s own decision input inside each subscriber's loop
+    /// (ADR-033 § Decision — Delete Non-Leakage, US-05). It is NEVER
+    /// serialized into the wire-level `DocumentDelete` proto response.
+    Removed {
+        path: DocumentPath,
+        fields: BTreeMap<String, FieldValue>,
+    },
 }
 
 /// A registered subscriber handle.

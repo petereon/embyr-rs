@@ -78,7 +78,14 @@ impl PostgresNotifyListener {
 /// Fetch the document for a NOTIFY payload and produce a `ListenEvent`.
 ///
 /// Payload format: `{collection_path}/{document_id}`.
-/// If the document is not found (deleted), returns `ListenEvent::Removed`.
+///
+/// security-rules-realtime (ADR-033 § Decision — Delete Non-Leakage, US-05):
+/// the query is widened to also match soft-deleted rows and select the
+/// `deleted` column, branching in Rust — a soft-deleted row still carries
+/// its pre-deletion `fields`, needed by `evaluate()` (see
+/// `listen_handler.rs`'s `Removed` arm) to decide delete-event delivery
+/// without leaking existence. Zero additional round-trip: this query
+/// already ran on every delete NOTIFY before this change.
 async fn fetch_event(pool: &PgPool, project_id: &str, payload: &str) -> ListenEvent {
     // Split payload into collection_path and document_id.
     // The document_id is the last segment; collection_path is everything before.
@@ -87,11 +94,14 @@ async fn fetch_event(pool: &PgPool, project_id: &str, payload: &str) -> ListenEv
         None => {
             // Malformed payload — emit Removed with a best-effort path.
             let pid = ProjectId::new(project_id).unwrap_or_else(|_| ProjectId(project_id.to_string()));
-            return ListenEvent::Removed(DocumentPath {
-                project_id: pid,
-                collection_path: String::new(),
-                document_id: payload.to_string(),
-            });
+            return ListenEvent::Removed {
+                path: DocumentPath {
+                    project_id: pid,
+                    collection_path: String::new(),
+                    document_id: payload.to_string(),
+                },
+                fields: std::collections::BTreeMap::new(),
+            };
         }
     };
 
@@ -106,12 +116,11 @@ async fn fetch_event(pool: &PgPool, project_id: &str, payload: &str) -> ListenEv
     // Query the document from the pool.
     use sqlx::Row;
     let row_opt = sqlx::query(
-        "SELECT fields, version, create_time, update_time \
+        "SELECT fields, version, create_time, update_time, deleted \
          FROM documents \
          WHERE project_id = $1 \
            AND collection_path = $2 \
-           AND document_id = $3 \
-           AND NOT deleted",
+           AND document_id = $3",
     )
     .bind(project_id)
     .bind(&collection_path)
@@ -125,14 +134,19 @@ async fn fetch_event(pool: &PgPool, project_id: &str, payload: &str) -> ListenEv
             let fields_json: serde_json::Value = row
                 .try_get("fields")
                 .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+            let deleted: bool = row.try_get("deleted").unwrap_or(false);
+            let fields = crate::encoding::field_value::json_to_fields(&fields_json)
+                .unwrap_or_default();
+
+            if deleted {
+                return ListenEvent::Removed { path: doc_path, fields };
+            }
+
             let version: i64 = row.try_get("version").unwrap_or(0);
             let create_time: DateTime<Utc> =
                 row.try_get("create_time").unwrap_or_else(|_| Utc::now());
             let update_time: DateTime<Utc> =
                 row.try_get("update_time").unwrap_or_else(|_| Utc::now());
-
-            let fields = crate::encoding::field_value::json_to_fields(&fields_json)
-                .unwrap_or_default();
 
             ListenEvent::Changed(embyr_core::domain::document::FirestoreDocument {
                 path: doc_path,
@@ -148,6 +162,8 @@ async fn fetch_event(pool: &PgPool, project_id: &str, payload: &str) -> ListenEv
                 version,
             })
         }
-        _ => ListenEvent::Removed(doc_path),
+        // Row genuinely absent — defensive, should not occur for a
+        // NOTIFY-triggered event (documents never issue a hard DELETE).
+        _ => ListenEvent::Removed { path: doc_path, fields: std::collections::BTreeMap::new() },
     }
 }

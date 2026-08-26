@@ -265,10 +265,26 @@ pub async fn handle_add_target(
                             break;
                         }
                     }
-                    Some(ListenEvent::Removed(path)) => {
+                    Some(ListenEvent::Removed { path, fields }) => {
                         // US-01 (Finding 5 fix) — FIRST, unconditional, rule-independent.
                         if path.collection_path != collection.collection_path {
                             continue;
+                        }
+                        // security-rules-realtime (ADR-033 § Decision —
+                        // Delete Non-Leakage, US-05): re-check the
+                        // pre-deletion `fields` snapshot against the
+                        // subscription's own rule, identically to the
+                        // `Changed` arm's own US-04 gate above —
+                        // `fields` is NEVER serialized into the
+                        // `DocumentDelete` response below, it exists only
+                        // as `evaluate()`'s own decision input.
+                        if let Some(condition) = &condition {
+                            let empty_fields: BTreeMap<String, FieldValue> = BTreeMap::new();
+                            if evaluate(condition, auth_ctx.as_ref(), &fields, &empty_fields)
+                                == EvaluationOutcome::Deny
+                            {
+                                continue; // US-05: withheld, never sent.
+                            }
                         }
                         let doc_name = format!(
                             "projects/{}/databases/(default)/documents/{}/{}",
