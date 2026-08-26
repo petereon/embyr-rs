@@ -163,6 +163,10 @@ pub async fn handle_add_target(
             event = event_rx.recv() => {
                 match event {
                     Some(ListenEvent::Changed(doc)) => {
+                        // US-01 (Finding 5 fix) — FIRST, unconditional, rule-independent.
+                        if doc.path.collection_path != collection.collection_path {
+                            continue;
+                        }
                         let proto_doc = document_to_proto(doc);
                         let response = ListenResponse {
                             response_type: Some(listen_response::ResponseType::DocumentChange(DocumentChange {
@@ -176,6 +180,10 @@ pub async fn handle_add_target(
                         }
                     }
                     Some(ListenEvent::Removed(path)) => {
+                        // US-01 (Finding 5 fix) — FIRST, unconditional, rule-independent.
+                        if path.collection_path != collection.collection_path {
+                            continue;
+                        }
                         let doc_name = format!(
                             "projects/{}/databases/(default)/documents/{}/{}",
                             path.project_id.as_str(),

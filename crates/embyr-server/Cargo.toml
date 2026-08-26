@@ -426,6 +426,13 @@ path = "../../tests/security_rules_collection_group_rules/acceptance/regression_
 name = "security_rules_collection_group_rules_simulate_group_query_before_shipping"
 path = "../../tests/security_rules_collection_group_rules/acceptance/simulate_group_query_before_shipping.rs"
 
+# security-rules-realtime acceptance tests (Slice 01, ADR-033) — US-01, first
+# slice of the Walking Skeleton: Listen's live delivery becomes structurally
+# scoped to the subscriber's own collection, closing a project-wide leak.
+[[test]]
+name = "security_rules_realtime_collection_scoped_fanout"
+path = "../../tests/security_rules_realtime/acceptance/collection_scoped_fanout.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
