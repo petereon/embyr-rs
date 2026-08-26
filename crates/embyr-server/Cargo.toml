@@ -473,6 +473,16 @@ path = "../../tests/security_rules_realtime/acceptance/delete_event_non_leakage.
 name = "security_rules_realtime_other_surfaces_unaffected"
 path = "../../tests/security_rules_realtime/acceptance/other_surfaces_unaffected.rs"
 
+# security-rules-realtime acceptance tests (Slice 07, ADR-033) — US-07: a
+# pure regression/consistency-proof slice — proves AC-17-132 in-process (a
+# ruleless project retains fully unrestricted Listen content while gaining
+# correctly-scoped delivery, consistently across multiple collections).
+# AC-17-130/131/133 are proved by an out-of-band regression sweep, not
+# in-process. No new production logic.
+[[test]]
+name = "security_rules_realtime_regression_baseline_unaffected"
+path = "../../tests/security_rules_realtime/acceptance/regression_baseline_unaffected.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
