@@ -49,12 +49,19 @@ pub async fn handle_add_target(
 
     let target_id = add_target.target_id;
 
-    // Extract collection_id and project_id from the QueryTarget.
-    let (project_id, collection_id) = match &add_target.target_type {
+    // Extract collection_id, project_id, and the caller's own query filter
+    // from the QueryTarget. security-rules-realtime (ADR-033 § Decision —
+    // Subscribe-Time Composition, US-02): the filter is extracted and
+    // translated via the SAME `translate_filter()` `RunQuery` already uses
+    // — previously hardcoded to `None` (Finding 2), silently returning the
+    // entire unfiltered collection regardless of what the client's own
+    // StructuredQuery specified.
+    let (project_id, collection_id, filter) = match &add_target.target_type {
         Some(TargetType::Query(qt)) => {
             let collection_id = collection_id_from_query_target(qt)?;
             let project_id = project_id_from_parent(&qt.parent)?;
-            (project_id, collection_id)
+            let filter = filter_from_query_target(qt)?;
+            (project_id, collection_id, filter)
         }
         _ => return Err("target must have Query target type".into()),
     };
@@ -74,7 +81,7 @@ pub async fn handle_add_target(
     let domain_query = DomainQuery {
         collection_id: collection.collection_path.clone(),
         all_descendants: false,
-        filter: None,
+        filter,
         order_by: vec![],
         limit: None,
         offset: None,
@@ -242,6 +249,24 @@ fn collection_id_from_query_target(qt: &embyr_proto::firestore::target::QueryTar
                 .map(|cs| cs.collection_id.clone())
                 .ok_or_else(|| "structured query has no collection selector".into())
         }
+        None => Err("QueryTarget has no query_type".into()),
+    }
+}
+
+/// Extract and translate the caller's own `where_` filter from a
+/// `QueryTarget`'s `StructuredQuery`, reusing `translate_filter()` — the
+/// SAME function `handle_run_query` already uses — unchanged. security-
+/// rules-realtime (ADR-033 § Decision — Subscribe-Time Composition, US-02).
+fn filter_from_query_target(
+    qt: &embyr_proto::firestore::target::QueryTarget,
+) -> Result<Option<embyr_core::domain::query::QueryFilter>, String> {
+    use embyr_proto::firestore::target::query_target::QueryType;
+    match &qt.query_type {
+        Some(QueryType::StructuredQuery(sq)) => sq
+            .r#where
+            .as_ref()
+            .and_then(crate::grpc::handler::translate_filter)
+            .transpose(),
         None => Err("QueryTarget has no query_type".into()),
     }
 }

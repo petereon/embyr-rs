@@ -1667,7 +1667,14 @@ fn group_rule_not_defined_rejection() -> Status {
 }
 
 /// Translate a proto `Filter` to a domain `QueryFilter`.
-fn translate_filter(
+///
+/// security-rules-realtime (ADR-033 § Decision — Subscribe-Time Composition,
+/// US-02): widened from private `fn` to `pub(crate) fn` — visibility-only,
+/// zero behavior change — so `realtime::listen_handler::handle_add_target`
+/// can call the SAME function `handle_run_query` already uses to build
+/// `domain_query.filter`, instead of a second, independently-maintained
+/// filter-translation path.
+pub(crate) fn translate_filter(
     f: &embyr_proto::firestore::structured_query::Filter,
 ) -> Option<Result<QueryFilter, String>> {
     match f.filter_type.as_ref()? {

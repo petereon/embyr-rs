@@ -30,10 +30,16 @@ use std::time::Duration;
 use embyr_proto::firestore::{
     firestore_client::FirestoreClient,
     listen_request, listen_response,
-    structured_query::CollectionSelector,
+    run_query_request::QueryType as RunQueryType,
+    structured_query::{
+        composite_filter::Operator as CompositeOp, field_filter::Operator as FieldOp,
+        filter::FilterType, CollectionSelector, CompositeFilter, FieldFilter, FieldReference,
+        Filter,
+    },
     target::{self, query_target},
     target_change::TargetChangeType,
-    ListenRequest, ListenResponse, StructuredQuery, Target,
+    value::ValueType,
+    Document, ListenRequest, ListenResponse, RunQueryRequest, StructuredQuery, Target, Value,
 };
 use tokio_stream::StreamExt;
 
@@ -41,6 +47,17 @@ use tokio_stream::StreamExt;
 /// `us_05_listen_realtime.rs::add_target_request` exactly (Pillar 3: reuse
 /// the base WS's own established request shape, not a divergent one).
 pub fn add_target_request(project_id: &str, collection: &str) -> ListenRequest {
+    add_target_request_filtered(project_id, collection, None)
+}
+
+/// Build an `AddTarget` `ListenRequest` for `collection` carrying an
+/// OPTIONAL `where_` filter (Slice 02, US-02) — generalizes
+/// `add_target_request` above, which now delegates here with `filter: None`.
+pub fn add_target_request_filtered(
+    project_id: &str,
+    collection: &str,
+    filter: Option<Filter>,
+) -> ListenRequest {
     ListenRequest {
         database: format!("projects/{project_id}/databases/(default)"),
         target_change: Some(listen_request::TargetChange::AddTarget(Target {
@@ -52,6 +69,7 @@ pub fn add_target_request(project_id: &str, collection: &str) -> ListenRequest {
                         collection_id: collection.to_string(),
                         all_descendants: false,
                     }],
+                    r#where: filter,
                     ..Default::default()
                 })),
             })),
@@ -59,6 +77,104 @@ pub fn add_target_request(project_id: &str, collection: &str) -> ListenRequest {
         })),
         ..Default::default()
     }
+}
+
+fn string_value(s: &str) -> Value {
+    Value { value_type: Some(ValueType::StringValue(s.to_string())) }
+}
+
+fn equality_filter(field_path: &str, value: &str) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::FieldFilter(FieldFilter {
+            field: Some(FieldReference { field_path: field_path.to_string() }),
+            op: FieldOp::Equal as i32,
+            value: Some(string_value(value)),
+        })),
+    }
+}
+
+/// Build a `where_` filter from `(field, value)` equality pairs, AND-composed
+/// via `CompositeFilter` when more than one — mirrors
+/// `security_rules_query_path::common::run_query`'s own filter-building
+/// shape exactly (Slice 02's own reuse discipline extends to the shared test
+/// fixture pattern, not just production code).
+pub fn equality_where_filter(equality_filters: &[(&str, &str)]) -> Option<Filter> {
+    match equality_filters {
+        [] => None,
+        [(field, value)] => Some(equality_filter(field, value)),
+        many => Some(Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: many.iter().map(|(f, v)| equality_filter(f, v)).collect(),
+            })),
+        }),
+    }
+}
+
+/// Real gRPC `RunQuery` call — the oracle Slice 02's own initial-snapshot
+/// tests cross-check Listen's filtered snapshot against ("an identical
+/// filter shape and identical seeded documents must produce an identical
+/// result set" — AC-17-109/110's own design). A LOCAL helper, not a
+/// cross-`#[path]`-tree import of
+/// `security_rules_query_path::common::run_query`: Rust does not
+/// deduplicate types across separate `#[path]` inclusion points, so a
+/// `SecurityRulesFullContext` reached via that OTHER path tree is a
+/// structurally distinct type from this file's own
+/// `security_rules_write_path_common::SecurityRulesFullContext`, even
+/// though both ultimately come from the identical source file. Keeping this
+/// helper local, reusing `equality_where_filter`/`StructuredQuery`/
+/// `CollectionSelector` already defined above, keeps both sides of the
+/// comparison on the SAME type.
+pub async fn run_query(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    equality_filters: &[(&str, &str)],
+    client_identity_token: Option<&str>,
+) -> Result<Vec<Document>, tonic::Status> {
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: collection_id.to_string(),
+            all_descendants: false,
+        }],
+        r#where: equality_where_filter(equality_filters),
+        ..Default::default()
+    };
+
+    let mut request = tonic::Request::new(RunQueryRequest {
+        parent: format!(
+            "projects/{}/databases/(default)/documents",
+            ctx.project_id
+        ),
+        query_type: Some(RunQueryType::StructuredQuery(sq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    let mut stream = client.run_query(request).await?.into_inner();
+    let mut docs = Vec::new();
+    while let Some(item) = stream.next().await {
+        let response = item?;
+        if let Some(document) = response.document {
+            docs.push(document);
+        }
+    }
+    Ok(docs)
 }
 
 /// Open a real `Listen` gRPC stream subscribed to `collection`,
@@ -69,6 +185,18 @@ pub async fn open_listen_stream(
     ctx: &SecurityRulesFullContext,
     collection: &str,
 ) -> tonic::Streaming<ListenResponse> {
+    open_listen_stream_filtered(ctx, collection, None).await
+}
+
+/// Open a real `Listen` gRPC stream subscribed to `collection`, carrying an
+/// OPTIONAL `where_` filter on the initial `AddTarget` (Slice 02, US-02) —
+/// generalizes `open_listen_stream` above, which now delegates here with
+/// `filter: None`.
+pub async fn open_listen_stream_filtered(
+    ctx: &SecurityRulesFullContext,
+    collection: &str,
+    filter: Option<Filter>,
+) -> tonic::Streaming<ListenResponse> {
     let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
         .expect("valid endpoint")
         .connect()
@@ -76,7 +204,11 @@ pub async fn open_listen_stream(
         .expect("connect to gRPC server");
     let mut client = FirestoreClient::new(channel);
 
-    let req_stream = tokio_stream::once(add_target_request(&ctx.project_id, collection));
+    let req_stream = tokio_stream::once(add_target_request_filtered(
+        &ctx.project_id,
+        collection,
+        filter,
+    ));
     let mut request = tonic::Request::new(req_stream);
     request.metadata_mut().insert(
         "authorization",
@@ -88,6 +220,38 @@ pub async fn open_listen_stream(
         .await
         .expect("listen should succeed")
         .into_inner()
+}
+
+/// Collect every `DocumentChange` document name delivered as part of the
+/// INITIAL SNAPSHOT — i.e. everything received up to (not including) the
+/// `TargetChange(CURRENT)` marker. Generalizes `drain_until_current` below
+/// (which discards the snapshot contents) for Slice 02's own "does the
+/// snapshot honor the filter" assertions.
+pub async fn collect_initial_snapshot(stream: &mut tonic::Streaming<ListenResponse>) -> Vec<String> {
+    let mut names = Vec::new();
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("timed out waiting for CURRENT")
+            .expect("stream ended before CURRENT")
+            .expect("stream error before CURRENT");
+        match msg.response_type {
+            Some(listen_response::ResponseType::DocumentChange(dc)) => {
+                if let Some(doc) = dc.document {
+                    names.push(doc.name);
+                }
+            }
+            Some(listen_response::ResponseType::TargetChange(tc)) => {
+                let change_type = TargetChangeType::try_from(tc.target_change_type)
+                    .unwrap_or(TargetChangeType::NoChange);
+                if change_type == TargetChangeType::Current {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 /// Drain a Listen stream until the `TargetChange(CURRENT)` marker arrives —
