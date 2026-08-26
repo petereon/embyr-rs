@@ -7,8 +7,18 @@ jobs:
   - JOB-03  # live-sync
   - JOB-16  # client-identity-verification (added by client-auth DISCUSS, 2026-08-16)
   - JOB-17  # document-access-control (added by security-rules DISCUSS, 2026-08-17)
-updated: "2026-08-25"
+updated: "2026-08-26"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (security-rules-realtime DISCUSS, 2026-08-26): JOB-17 now also
+# covers real-time Listen enforcement AND correctly-scoped real-time
+# delivery via this feature — same job, same persona, not a new job.
+# Investigation found Listen's own delivery mechanism was, independent of
+# authorization, silently ignoring the client's own query filter on the
+# initial snapshot and leaking every collection's live changes to every
+# subscriber project-wide; both fixed as a necessary foundation for
+# collection-scoped enforcement, confirmed in-scope with the orchestrator.
+# See docs/feature/security-rules-realtime/feature-delta.md § Job Discovery
+# Framing Resolution.
 # NOTE (security-rules-collection-group-rules DISCUSS, 2026-08-25): JOB-17
 # now also covers collection-group (collectionGroup()/all_descendants=true)
 # query enforcement via this feature — same job, same persona, not a new

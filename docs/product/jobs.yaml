@@ -696,3 +696,24 @@ jobs:
     # write-path, and non-group RunQuery receive zero code changes. See
     # docs/feature/security-rules-collection-group-rules/feature-delta.md
     # § Job Discovery Framing Resolution and § Scope Assessment.
+    # NOTE (security-rules-realtime DISCUSS, 2026-08-26): this feature is
+    # JOB-17's own real-time-Listen realization — the last of the five
+    # epics deferred by security-rules' own original v1 scope note above —
+    # not a new job. Investigation found Listen's own delivery mechanism
+    # was, independent of any authorization concept, more broken than
+    # merely unprotected: the initial snapshot silently ignored the
+    # client's own query filter, and live delivery was not scoped to the
+    # subscribed collection at all (a project-wide cross-collection leak —
+    # any subscriber received every collection's change events). Both are
+    # locked in-scope for this feature (confirmed with the orchestrator),
+    # as a necessary foundation — collection-scoped authorization cannot be
+    # meaningful without collection-scoped delivery first. Enforcement
+    # itself composes two already-unchanged mechanisms rather than
+    # introducing a new one: `check_query_compliance()` (ADR-031) gates
+    # subscribe-time admission, `evaluate()` (ADR-027/030) re-checks every
+    # individually-delivered event using the document `fetch_event()`
+    # already fetches (no second fetch). `access_rules`, `write_access_rules`,
+    # `group_access_rules`, and GetDocument/write-path/RunQuery (group and
+    # non-group) receive zero code changes. See
+    # docs/feature/security-rules-realtime/feature-delta.md § Job Discovery
+    # Framing Resolution and § Scope Assessment.
