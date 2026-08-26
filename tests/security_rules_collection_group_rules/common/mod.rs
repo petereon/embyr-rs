@@ -210,6 +210,84 @@ pub async fn seed_group_access_rule_full(
     .expect("insert group_access_rules row");
 }
 
+/// AC-17-87 (Slice 03): a filter using an operator OTHER than `==` on the
+/// group rule's referenced field — the equality-only `run_query` helper
+/// above cannot build this shape, so a dedicated builder is needed to prove
+/// a superficially-"right field" `!=` filter does not satisfy an equality
+/// group rule. Mirrors `security_rules_query_path`'s own `not_equal_filter`
+/// (never imported across sibling features, per this module's own header
+/// doc — ancestor-only imports; re-derived here instead).
+pub fn not_equal_filter(field_path: &str, value: &str) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::FieldFilter(FieldFilter {
+            field: Some(FieldReference { field_path: field_path.to_string() }),
+            op: FieldOp::NotEqual as i32,
+            value: Some(string_value(value)),
+        })),
+    }
+}
+
+/// Real gRPC `RunQuery` call taking an already-built raw `Filter` (or
+/// `None`) plus an explicit `all_descendants` flag — Slice 03's AC-17-87
+/// needs a non-equality filter shape the equality-only `run_query` helper
+/// above cannot build. Mirrors `security_rules_query_path`'s own
+/// `run_query_raw`, extended with `all_descendants` (this feature's own
+/// `run_query` above already carries that parameter; `run_query_raw` needed
+/// it too for group-rule coverage).
+pub async fn run_query_raw(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    all_descendants: bool,
+    filter: Option<Filter>,
+    client_identity_token: Option<&str>,
+) -> Result<Vec<Document>, tonic::Status> {
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: collection_id.to_string(),
+            all_descendants,
+        }],
+        r#where: filter,
+        ..Default::default()
+    };
+
+    let mut request = tonic::Request::new(RunQueryRequest {
+        parent: format!(
+            "projects/{}/databases/(default)/documents",
+            ctx.project_id
+        ),
+        query_type: Some(QueryType::StructuredQuery(sq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    let mut stream = client.run_query(request).await?.into_inner();
+    use tokio_stream::StreamExt;
+    let mut docs = Vec::new();
+    while let Some(item) = stream.next().await {
+        let response = item?;
+        if let Some(document) = response.document {
+            docs.push(document);
+        }
+    }
+    Ok(docs)
+}
+
 /// Seed a document at an explicit collection PATH (which may be nested, e.g.
 /// `expeditions/trek-2026/journal_entries`) via the real `UpdateDocument`
 /// driving port — upsert semantics apply when no precondition is supplied
