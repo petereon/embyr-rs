@@ -842,3 +842,340 @@ The remaining 0.05 gap is the two flagged judgment calls (§ Handoff Package fla
 - [D5] Extended JOB-17 rather than minting a new job — this feature is JOB-17's own fifth "make it real" realization, explicitly pre-named by `security-rules`'s own § Out of Scope entry, quoted verbatim as this feature's charter — see § Persona & Job.
 - [D6] Scope Assessment PASS, 0/5 signals fired outright (2 sit exactly at threshold without exceeding, 1 sits near-but-under the effort edge) — this feature's own larger footprint, relative to its 4 predecessors, is fully explained by Findings 2/5's own genuinely new discovery, not silently absorbed or hand-waved — see § Scope Assessment.
 - [D7] Discovered and flagged, explicitly out of scope: two further pre-existing correctness gaps in `Listen`'s own target-type/query-shape fidelity (Finding 1: `TargetType::Documents` unsupported; Finding 3: collection-group Listen unhonored) — see § Open Questions, OQ-SRRT-03/04.
+
+---
+
+## Wave: DESIGN / [REF] Density Resolution
+
+`~/.nwave/global-config.json` was not read this pass either — no Bash tool
+available to this agent invocation, mirroring all 5 prior sibling features'
+own DESIGN-wave precedent for this exact unavailability. Tier-1 [REF] only,
+no Tier-2 expansions rendered by default; the reasoning behind every
+non-obvious decision below (in particular the collection-scoping mechanism,
+the delete-non-leakage fetch mechanism, and the admin-surface reuse-vs-new
+-handler call) is inlined at [REF] density directly, mirroring
+`security-rules-collection-group-rules`'s own DESIGN density choice —
+splitting these into a separate [WHY] expansion would fragment reads that
+are load-bearing for the two judgment calls this DESIGN was asked to
+resolve (Handoff Package flags 3 and 7).
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation (DESIGN)
+
+✓ `docs/feature/security-rules-realtime/feature-delta.md` (full, this file's own DISCUSS sections, 845 lines) — 2 LOCKED Resolutions, 7 Findings, 8 user stories (US-01 through US-08, AC-17-105 through AC-17-137), Handoff Package flags 1-10, 2 genuine judgment calls (flags 3 CONFIRMED in-scope by the orchestrator per this DESIGN dispatch's own task framing, and flag 7 routed to DESIGN and resolved below).
+✓ `docs/feature/security-rules-realtime/slices/slice-01-collection-scoped-fanout.md` and `slice-05-delete-event-non-leakage.md` (full — spot-checked, the two highest-consequence slices) — confirmed no information beyond what § User Stories/§ Handoff Package already capture, mirroring `security-rules-collection-group-rules`'s own DESIGN-pass spot-check discipline (that DESIGN read all 7; this one spot-checks 2 of 8 given the story-level content's own already-high density and the identical zero-new-information finding on both checked slices).
+✓ `docs/product/architecture/brief.md` (targeted: `## Application Architecture — security-rules`, `-write-path`, `-query-path`, `-collection-group-rules` sections, lines 3480-3994) — SSOT to extend, not recreate; confirms the exact "Summary + pointer to feature-delta.md" format every prior epic's own `brief.md` footprint uses, followed below; confirms line 3994 (blank line, end of file) as this addition's own insertion point.
+✓ `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md`, `adr-028-access-rule-storage-and-lifecycle.md`, `adr-029-access-control-composition-and-bounded-context.md`, `adr-030-write-path-grammar-storage-and-composition.md` (full, read across DISCUSS+DESIGN) — the locked grammar/storage/composition/bounded-context precedent this feature extends a sixth time.
+✓ `docs/product/architecture/adr-031-query-shape-compliance-check.md` (full) — confirmed the EXACT current shape of `check_query_compliance()`, `QueryComplianceOutcome`, `UnsatisfiedConjunct`, `query_compliance_rejection()`, and `handle_run_query`'s own composition/ordering (OQ-SRQ-03 resolution) — the machinery this DESIGN reuses unchanged, now at a genuinely new call-site shape (an async streaming handler, not request/response).
+✓ `docs/product/architecture/adr-032-collection-group-rule-storage-and-composition.md` (full) — confirmed the exact precedent for evaluating "new sibling admin handler vs. reuse in place" independently per feature, not by blind analogy — the direct structural precedent § Wave: DESIGN / [REF] Decisions Table's admin-surface decision below evaluates against, and reaches the OPPOSITE conclusion from, with reasoning recorded in ADR-033.
+✓ `crates/embyr-core/src/access_control/mod.rs` (full, 1496 lines) — confirmed `check_query_compliance`/`evaluate`/`QueryComplianceOutcome`/`UnsatisfiedConjunct`/`decompose_decidable`/`filter_binds_field_to_uid` exact current implementation and test coverage; confirms this module requires ZERO new code for this feature — the first feature in this initiative where BC-4 gains no new type, function, or storage at all.
+✓ `crates/embyr-server/src/grpc/handler.rs` (targeted full reads: `handle_run_query` lines 1131-1364 including its `all_descendants` branch from `security-rules-collection-group-rules`, `handle_listen` lines 1366-1462, `attach_client_identity_if_present` lines 358-383, `handle_get_document` lines 506-629, `query_compliance_rejection`/`translate_filter` lines 1600-1719) — confirmed the exact current composition this DESIGN's new call sites are inserted into or mirror, and confirmed `translate_filter`/`query_compliance_rejection` are both currently private `fn` (visibility-widening required, zero behavior change).
+✓ `crates/embyr-server/src/realtime/listen_handler.rs` (full, 251 lines) — confirmed `handle_add_target`'s exact current signature, the exact hardcoded `filter: None`/`all_descendants: false` construction (Finding 2/3), the exact event-consumption loop shape this DESIGN's US-01/04/05 branches are inserted into, and confirmed `handle_add_target`'s current `Result<(), String>` return type (changed to `Result<(), Status>` below).
+✓ `crates/embyr-server/src/realtime/listen_registry.rs` (full, 109 lines) — confirmed `ListenEvent`/`SubscriberEntry`/`ListenRegistry::fan_out()`'s exact current shape; confirmed `fan_out()` and `SubscriberEntry` require ZERO change (the collection-scoping filter is applied on the consuming side, not inside the registry) and confirmed `ListenEvent` already derives `Clone`/`Debug`, so widening `Removed` to a field-carrying struct variant requires no new derive.
+✓ `crates/embyr-server/src/adapters/postgres_notify_listener.rs` (full, 154 lines) — confirmed `fetch_event()`'s exact current SQL (`... AND NOT deleted`) and its "already fetched, before fan-out, shared via `fan_out()`'s existing clone" property (Finding 6) — the load-bearing fact this DESIGN's per-event and delete-non-leakage mechanisms both depend on, confirmed directly rather than merely re-asserted from DISCUSS's own paraphrase.
+✓ `crates/embyr-pg-storage/src/backend_adapter.rs` (targeted, lines 508/826, cross-referenced against DISCUSS's own Finding 7 citation) — confirmed the `documents` table's soft-delete mechanism (`deleted` boolean, `SET deleted = true`, never a hard `DELETE`) — the evidence this DESIGN's delete-non-leakage mechanism (§ Decisions Table, DDD-SRRT-8) depends on.
+✓ `crates/embyr-server/src/adapters/system_db.rs` (targeted, lines 360-380 plus struct definitions ~34-38) — confirmed `AccessRuleRow`/`get_access_rule`'s exact current signature and `Ok(None)` short-circuit contract, reused unchanged at a new call site.
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` (full, 751 lines) — confirmed `simulate_query_compliance`'s exact current request/response contract (`SimulateQueryComplianceBody { condition: String, auth: Option<SimulatedAuth>, query_filters: Vec<SimulatedQueryFilter> }` / `SimulateQueryComplianceResponse { compliant, reasons }`) — confirmed IDENTICAL in shape to what Listen's own subscribe-time gate needs, the direct evidence behind this DESIGN's "reuse unchanged, no new handler" conclusion for US-08 (§ Decisions Table, DDD-SRRT-9), a deliberate, evaluated departure from `security-rules-collection-group-rules`'s own "new sibling handler" precedent for the analogous US-07/US-08 slot.
+✓ `crates/embyr-server/src/admin/router.rs` (targeted, lines 190-247) — confirmed the existing 6 access-control admin routes' registration shape; confirmed no new route is added by this feature (§ Decisions Table, DDD-SRRT-9).
+✓ `migrations/*.sql` (`Glob`, confirmed 0001 through 0024 all present, sequential, no gap) — confirmed this feature requires no new migration (no new table, no schema change of any kind) — the first feature in this initiative with zero migration footprint.
+
+No contradictions found between this DESIGN pass and any DISCUSS-locked decision. This DESIGN implements Resolution 1 (Option C) and Resolution 2 (Option C) exactly as locked — it does not reopen either. Handoff Package flag 3 (Findings 2/5 in-scope) is treated as CONFIRMED for this DESIGN dispatch, per the calling context's own explicit instruction; flag 7 (US-05's exact delete-non-leakage mechanism) is resolved below (§ Decisions Table, DDD-SRRT-8; full reasoning: ADR-033 § Decision — Delete Non-Leakage).
+
+---
+
+## Wave: DESIGN / [REF] Quality Attribute Priorities
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|---------------------|
+| 1 | **No false-allow at subscribe time, and no false-allow at any point during a subscription's lifetime** | US-01 through US-05 — this feature's own North Star KPIs (#1/#2). Resolution 2's own "subscribe-time-only is insufficient" finding is the direct forcing constraint for the per-event re-check's existence at all. |
+| 2 | **The collection-scoping fix is structural, not rule-dependent — this feature's single highest-consequence design risk** | US-01, AC-17-105/106/108. Worse than a false-allow on a ruled collection alone, since it currently affects every collection in every project, ruled or not. Designated mutation-testing surface (per-feature strategy, `CLAUDE.md`), alongside US-04's per-event fail-closed correctness (Handoff Package flag 6). |
+| 3 | **Zero added I/O beyond what `fetch_event()` already performs, confirmed against the real code shape, not merely asserted** | AC-17-121 (Handoff Package flag 2/6). Verified in ADR-033 § Decision — Per-Event Composition: the subscribe-time gate costs exactly ONE new `access_rules` lookup per subscription (not per event); the per-event re-check and the delete-non-leakage fetch each cost ZERO additional Postgres queries. |
+| 4 | **Structural, not conventional, independence from `GetDocument`, writes, and `RunQuery`** | US-06/07, AC-17-126/127/128/129/130/131/132/133. Every new call site lives inside `crates/embyr-server/src/realtime/*` plus two visibility-only changes in `grpc/handler.rs`; none of the five existing handlers is modified. |
+| 5 | **Caller's-own-uid binding property (`filter_binds_field_to_uid`) and fail-closed semantics preserved unchanged** | Inherited from ADR-027/031 — zero new logic, `check_query_compliance`/`evaluate` are reused verbatim. |
+| 6 | **Existence non-leakage extends to delete events without a second query** | US-05, AC-17-122/123/124/125. Drives the widened-predicate mechanism over a per-subscriber re-fetch alternative (ADR-033 § Decision — Delete Non-Leakage). |
+| 7 | **Enforceable delivery-time-filter mechanism, not a channel-topology redesign, for this feature's own scope** | US-01, OQ-SRRT-05. Simplest-solution-first (Principle 8) — evaluated and confirmed sufficient against the real code shape, with the larger redesign explicitly deferred, not silently forgotten. |
+| 8 | **Shared-vocabulary consistency between the gRPC rejection and any future simulation surface** | Mirrors ADR-031/032's own `UnsatisfiedConjunct::reason_code()` discipline — `query_compliance_rejection()` is reused verbatim, not re-implemented for Listen. |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---------------------|------|---------|----------|----------------|
+| `check_query_compliance`/`QueryComplianceOutcome`/`UnsatisfiedConjunct` | `embyr-core/src/access_control/mod.rs:523-744` | Query-shape compliance decision | **EXTEND (reuse completely unchanged)** | Confirmed by full-file read: zero new decidable shape, zero new evaluator branch, zero new type. The subscribe-time gate calls the SAME function `handle_run_query`'s non-group arm already calls, at a new call site inside `handle_add_target`. |
+| `evaluate()` | `embyr-core/src/access_control/mod.rs:404-414` | Document-content compliance decision | **EXTEND (reuse completely unchanged)** | The per-event and delete-non-leakage checks call the SAME function `handle_get_document` already calls, with `request_resource_fields` as an empty map — the SAME empty-map convention ADR-030 already established for reads. |
+| `get_access_rule` | `adapters/system_db.rs:360-380` | Per-`(project_id, collection_path)` rule lookup | **EXTEND (new call site, zero modification)** | Called once per Listen subscription (subscribe time), mirroring `handle_run_query`'s own one-time-per-request call exactly. |
+| `translate_filter` | `grpc/handler.rs:1670-1719` | Proto `Filter` -> domain `QueryFilter` translation | **EXTEND (visibility widened `fn` -> `pub(crate) fn`, zero behavior change)** | US-02's own fix — the SAME function `handle_run_query` already uses, now also called from `realtime::listen_handler`. No second, independently-maintained translation path (AC-17-112). |
+| `query_compliance_rejection()` | `grpc/handler.rs` (private fn, same file as `handle_run_query`) | `QueryComplianceOutcome` -> `Status::permission_denied` rendering | **EXTEND (visibility widened `fn` -> `pub(crate) fn`, reused verbatim)** | Listen's own subscribe-time rejection (AC-17-116) is rendered by the identical existing function — no second rendering path, no new reason-code vocabulary. |
+| `attach_client_identity_if_present` | `grpc/handler.rs:358-383` | Optional client-identity resolution | **EXTEND (new call site in `handle_listen`, function itself unchanged)** | Mirrors `handle_run_query`'s own identical placement — additive-only, never rejects the caller (ADR-026 unchanged). |
+| `PostgresNotifyListener::fetch_event()` | `adapters/postgres_notify_listener.rs:82-153` | Post-NOTIFY document fetch, feeding `ListenRegistry::fan_out()` | **EXTEND (predicate/column-list widened, zero new query)** | US-05's own mechanism (ADR-033 § Decision — Delete Non-Leakage): drops `AND NOT deleted`, adds `deleted` to the SELECT list, branches in Rust — the SAME single query, not a second one. |
+| `ListenEvent` (`Changed`/`Removed` variants) | `realtime/listen_registry.rs:15-20` | Event shape delivered from `fetch_event()` through `fan_out()` to every subscriber | **EXTEND (variant shape change: `Removed(DocumentPath)` -> `Removed { path, fields }`)** | Carries the pre-deletion field snapshot US-05 needs; `fields` is never serialized into the wire-level `DocumentDelete` proto — internal decision input only. `Clone`/`Debug` derives require no change. |
+| `ListenRegistry::fan_out()`/`register()`/`SubscriberEntry` | `realtime/listen_registry.rs:42-108` | Fan-out delivery mechanism | **ZERO CHANGE (not extended, not touched)** | Confirmed by full-file read: the collection-scoping filter (US-01) is applied on the CONSUMING side, inside each subscriber's own `handle_add_target` loop — the registry's own generic, project-scoped contract is unaffected. |
+| `handle_add_target` | `realtime/listen_handler.rs` (full file) | AddTarget session handling: initial snapshot, keepalive, NOTIFY consumption loop | **EXTEND (heavily extended: 2 new parameters, widened query extraction, subscribe-time gate, US-01/04/05 branches in the event loop, `Result<(), String>` -> `Result<(), Status>`)** | The single largest diff in this feature — but every new branch composes EXISTING BC-4 functions or applies an in-memory comparison; no new algorithm is invented (ADR-033, full). |
+| `handle_listen` | `grpc/handler.rs:1366-1462` | Listen RPC entry point: auth, NOTIFY-listener provisioning, spawn | **EXTEND (1 new call — `attach_client_identity_if_present` — plus `Arc::clone(&self.system_db)` threaded into the spawn)** | Mirrors `handle_run_query`'s own identity-attach placement exactly; `FirestoreService.system_db: Arc<SystemDb>` is already trivially cloneable, the identical pattern used throughout `admin::state`/`admin::router`. |
+| `simulate_query_compliance` | `admin/handlers/access_rules.rs:635-677` | Candidate-condition query-compliance simulation | **EXTEND (reused completely UNCHANGED; one-line doc-comment addition only)** | Listen's own subscribe-time gate calls `check_query_compliance()` with an IDENTICAL request-contract shape to `RunQuery`'s non-group arm — unlike `security-rules-collection-group-rules`'s own `group_condition: Option<String>` case, there is no genuinely different contract here to justify a new sibling handler (ADR-033 § Decision — Admin Surface, an evaluated departure from ADR-032's own precedent, not a blind mirror). |
+| `access_rules` table, `write_access_rules`, `group_access_rules`, `handle_get_document`, every write-path handler, `handle_run_query` (group and non-group) | `migrations/0022-0024*.sql`, `adapters/system_db.rs`, `grpc/handler.rs` | Existing rule storage/lookup and enforcement for GetDocument/writes/RunQuery | **ZERO CHANGE (not extended, not touched)** | Confirmed by direct code read: this feature's entire footprint lives inside `crates/embyr-server/src/realtime/*` plus two visibility-only changes in `grpc/handler.rs`'s `handle_listen`/free-function section — none of the five existing handlers is modified. |
+| `write_access_rules`, `group_access_rules` tables | (unchanged) | Write-path and collection-group rule storage | **ZERO CHANGE — never read, never written** | This feature reads `access_rules` only (System Constraints, locked) — Listen's v1 enforcement surface is non-group, query-shaped targets only (Findings 1/3, out of scope). |
+
+**Verdict: 11 EXTEND (7 reuse-verbatim-or-near-verbatim, 2 visibility-only, 2 substantively extended — `handle_add_target`/`handle_listen`), 3 explicit ZERO-CHANGE confirmations, 0 CREATE NEW.** This is the first feature in the initiative with **zero new tables, zero new migrations, zero new admin routes, and zero new types in `embyr_core`** — despite having the largest user-story footprint (8 stories) of any of the 5 epics. The entire net-new surface is: a widened SQL predicate, a widened enum variant, two visibility changes, and new composition logic inside two already-existing functions.
+
+---
+
+## Wave: DESIGN / [REF] Development Paradigm Confirmation
+
+No change to the project-wide paradigm (functional-where-practical Rust,
+`CLAUDE.md`). Confirmed above (§ Reuse Analysis): `embyr_core::
+access_control` needs ZERO new logic for this feature — the pure-core
+surface is **none**, the same finding `security-rules-collection-group-rules`
+reached, now true a second time in a row. Every new line of code this
+feature adds is IO/adapter/composition-level, inside `embyr-server`: a
+widened SQL predicate (`postgres_notify_listener.rs`), a widened enum
+variant (`listen_registry.rs`), new composition branches inside two
+existing async functions (`handler.rs::handle_listen`,
+`realtime/listen_handler.rs::handle_add_target`), and two visibility-only
+changes (`translate_filter`, `query_compliance_rejection`). Stated
+explicitly, per the constraint's own instruction, rather than inventing an
+unnecessary core-layer change to satisfy the paradigm note in form only.
+`CLAUDE.md`'s existing paradigm section requires no update.
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement
+
+No new bounded context. This is the first feature in the initiative where
+**BC-4 Access Control (ADR-029) gains zero new storage, zero new type, and
+zero new pure function** — `check_query_compliance`/`evaluate` are called
+from two new call sites, nothing more. **BC-3 Real-Time Delivery** gains its
+first-ever internal correctness/scoping mechanism in this initiative — the
+collection-scoping filter (US-01) and the widened `fetch_event()` predicate
+(US-05) are both genuinely new BC-3-internal logic, with no analog in any
+prior epic, since none of `GetDocument`/writes/`RunQuery` has a
+fan-out-to-N-subscribers delivery model. `adr-002-bounded-contexts.md`
+requires no further amendment — this feature adds no new context boundary,
+only new internal logic within the two existing contexts it touches.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component | Crate/Module Path | Responsibility | Change Type | Bounded Context |
+|-----------|--------------------|------------------|--------------|------------------|
+| `embyr-server::grpc::handler::handle_listen` (extended) | `crates/embyr-server/src/grpc/handler.rs` | Gains `attach_client_identity_if_present` call + `Arc::clone(&self.system_db)` threaded into the spawned `handle_add_target` task | Extended (existing file) | BC-4 (driving adapter, identity attach) |
+| `embyr-server::grpc::handler` — `translate_filter`/`query_compliance_rejection` (visibility widened) | `crates/embyr-server/src/grpc/handler.rs` | Visibility `fn` -> `pub(crate) fn` only; zero behavior change | Extended (existing file) | BC-4 (shared utility, now cross-module) |
+| `embyr-server::realtime::listen_handler::handle_add_target` (extended) | `crates/embyr-server/src/realtime/listen_handler.rs` | Gains: full `StructuredQuery`/filter extraction (US-02), subscribe-time compliance gate (US-03), collection-scoping check + per-event `evaluate()` recheck for `Changed` (US-01/04) and `Removed` (US-01/05) in the event loop; error type `Result<(), String>` -> `Result<(), Status>` | Extended (existing file) | BC-3 (consumes BC-4's compliance functions; owns the new collection-scoping mechanism) |
+| `embyr-server::realtime::listen_registry::ListenEvent` (extended) | `crates/embyr-server/src/realtime/listen_registry.rs` | `Removed(DocumentPath)` -> `Removed { path, fields }` — carries the pre-deletion field snapshot | Extended (existing file) | BC-3 |
+| `embyr-server::adapters::postgres_notify_listener::fetch_event` (extended) | `crates/embyr-server/src/adapters/postgres_notify_listener.rs` | SQL predicate widened (drops `AND NOT deleted`, adds `deleted` column); branches Changed/Removed-with-fields/Removed-empty in Rust instead of relying on `fetch_optional`'s `None` | Extended (existing file) | BC-3 |
+| `embyr-server::admin::handlers::access_rules::simulate_query_compliance` (doc-comment only) | `crates/embyr-server/src/admin/handlers/access_rules.rs` | One-line doc-comment addition noting Listen subscribe-time applicability; zero code/logic change | Extended (doc-comment only) | BC-4 (driving adapter) |
+
+No change to `embyr-core` (any module), `embyr-pg-storage`'s SQL-building
+layer (`run_query`'s own `all_descendants` branch, untouched — this
+feature's enforcement point is entirely upstream of query execution), or
+`embyr-proto`. `ListenRegistry::fan_out()`/`register()`/`SubscriberEntry`
+receive zero change (§ Reuse Analysis).
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports (Inbound)
+
+| Port | Protocol | Location | New/Extended | What it does |
+|------|----------|----------|---------------|---------------|
+| `FirestoreGrpcPort`/`RestPort` (existing) | gRPC `:8080` / REST `:8081` | `grpc/handler.rs::handle_listen`, `realtime/listen_handler.rs::handle_add_target` | **Extended, additively** | `Listen`'s existing, unchanged call shape now additionally reflects collection-scoped delivery (US-01, unconditional) and rule compliance at subscribe time and per-event (US-02-06, when a rule is defined). No new RPC, no new endpoint. Every other data-plane RPC is unmodified. |
+| `QueryComplianceSimulationPort` (existing, `security-rules-query-path`) | HTTP (admin `:9090`, session sub-router) | `admin/handlers/access_rules.rs::simulate_query_compliance` | **Extended, documentation-only** | US-08: the SAME `POST .../access_rules/simulate_query` route now also documented as modeling a candidate Listen subscription's own initial-snapshot filter shape — zero new route, zero new handler (ADR-033 § Decision — Admin Surface). |
+
+No new network-facing port introduced anywhere in this feature.
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters
+
+No new *driven* (outbound infrastructure) port. `get_access_rule` (new call
+site) executes through the existing, already-probed `SystemDb` connection
+pool. `fetch_event()`'s widened query executes through the existing,
+already-probed customer-Postgres pool `PostgresNotifyListener::start`
+already holds — a predicate/column-list change to an already-proven query
+shape, not a new adapter or a new substrate dependency.
+
+**Earned Trust note (Principle 12 discipline, explicit, not silently
+skipped):** no new Earned Trust probe is required. `check_query_compliance`/
+`evaluate` remain pure, deterministic CPU computation over already-in-memory
+values (unchanged from ADR-031/027). The two Postgres pools this feature's
+new call sites execute through (`SystemDb`, customer-Postgres via
+`PostgresNotifyListener`) are both already-probed substrate — no new
+filesystem, network, subprocess, clock, or vendor-SDK dependency is
+introduced anywhere in this feature's own call graph. Full reasoning:
+`docs/product/architecture/adr-033-listen-compliance-composition-and-collection-scoping.md`
+§ Enforcement.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new workspace dependency. No new language/framework/runtime choice. The
+new call sites use the identical `sqlx`/Postgres/`tokio`/`tonic` stack this
+project already uses throughout `embyr-server`.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table
+
+| ID | Decision | Verdict |
+|----|----------|---------|
+| DDD-SRRT-1 | Collection-scoping mechanism (Finding 5's fix, Handoff flag re: OQ-SRRT-05): a delivery-time filter inside `handle_add_target`'s own event-consumption loop (consuming side), NOT a `ListenRegistry`/`PostgresNotifyListener` per-collection-channel redesign — applied unconditionally, before any rule-dependent branch, to both `Changed` and `Removed` events | Accepted — ADR-033 § Decision — Collection-Scoping |
+| DDD-SRRT-2 | `handle_listen` gains one new call (`attach_client_identity_if_present`, mirrors `handle_run_query`'s placement exactly) plus `Arc::clone(&self.system_db)` threaded into the spawned `handle_add_target` task | Accepted — ADR-033 § Decision — Subscribe-Time Composition |
+| DDD-SRRT-3 | `handle_add_target` extracts the FULL `StructuredQuery` (not just `collection_id`), reusing `translate_filter()` (visibility widened, zero behavior change) for `sq.r#where` — fixes Finding 2 (US-02). `all_descendants` remains hardcoded `false`, deliberately (Finding 3/OQ-SRRT-04 stays out of scope) | Accepted — ADR-033 § Decision — Subscribe-Time Composition |
+| DDD-SRRT-4 | Subscribe-time compliance gate (US-03) is inserted after `domain_query`/`collection` are built, before the existing `adapter.run_query()` initial-snapshot call — mirrors `handle_run_query`'s own non-group arm composition exactly, reusing `check_query_compliance()`/`query_compliance_rejection()` (visibility widened) unchanged | Accepted — ADR-033 § Decision — Subscribe-Time Composition |
+| DDD-SRRT-5 | The parsed `Condition` (when a rule exists) and the built `AuthContext` are retained as loop-lifetime locals, reused unmodified for BOTH the subscribe-time gate AND every subsequent per-event `evaluate()` call — zero re-parsing per event, zero second `get_access_rule` round-trip per event; the concrete mechanism proving AC-17-121 | Accepted — ADR-033 § Decision — Per-Event Composition |
+| DDD-SRRT-6 | `handle_add_target`'s error type changes `Result<(), String>` -> `Result<(), Status>` (mechanical, zero behavior change to existing error paths) so the subscribe-time compliance rejection can surface as `Status::permission_denied` with the SAME `[REASON_CODE]` convention, distinguishable from `Status::internal`/`authenticate()`'s own rejections (AC-17-116) | Accepted — ADR-033 § Decision — Subscribe-Time Composition |
+| DDD-SRRT-7 | Per-event recheck (US-04) inserted in the `Changed` arm, AFTER the US-01 collection-scoping check, calling `evaluate()` unchanged against the already-in-memory `FirestoreDocument.fields`, `request_resource_fields` as an empty map (mirrors `handle_get_document`'s convention); only runs when a rule exists (US-06 unaffected) | Accepted — ADR-033 § Decision — Per-Event Composition |
+| DDD-SRRT-8 | **US-05 delete-non-leakage mechanism (Handoff Package flag 7, resolved)**: `PostgresNotifyListener::fetch_event()`'s EXISTING single query is widened (drops `AND NOT deleted`, adds `deleted` to the SELECT list) — NOT a second query, NOT a per-subscriber re-fetch. `ListenEvent::Removed(DocumentPath)` becomes `Removed { path, fields }`, carrying the pre-deletion field snapshot; `fields` is never serialized into the wire-level `DocumentDelete` proto, used only as `evaluate()`'s own decision input inside each subscriber's loop | Accepted — ADR-033 § Decision — Delete Non-Leakage |
+| DDD-SRRT-9 | **US-08 admin surface (evaluated independently of ADR-032's own precedent)**: `simulate_query_compliance` is reused COMPLETELY UNCHANGED — zero new route, zero new handler, zero new request/response type — because Listen's subscribe-time gate's request-contract shape is IDENTICAL to `RunQuery`'s non-group arm (unlike the collection-group case's genuinely-different `group_condition: Option<String>` contract). AC-17-136 is satisfied structurally (US-06's unchanged "no rule -> unrestricted" default), not via a new live-simulation capability — flagged, not silently absorbed (§ Open Questions below) | Accepted — ADR-033 § Decision — Admin Surface |
+| DDD-SRRT-10 | `embyr_core::access_control` receives ZERO code changes — confirmed, no new decidable shape, no new evaluator branch, no new pure function, no new type. `embyr-pg-storage`'s SQL-building layer (`run_query`'s `all_descendants` branch) receives ZERO code changes — this feature's enforcement point is entirely upstream of query execution | Accepted — this section, § Development Paradigm Confirmation |
+| DDD-SRRT-11 | No new migration, no new table — this feature reads `access_rules` only, confirmed via `Glob` (`migrations/0001` through `0024`, sequential, no gap, no new file needed) | Accepted — § Reuse Analysis |
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context (Mermaid)
+
+No new external system. Adds two new relationship annotations (collection
+-scoped delivery, continuous rule compliance) to the existing `embyr-rs`
+system context all 5 prior epics already established:
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (security-rules-realtime delta)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Defines/redefines read rules (unchanged); simulates candidate Listen subscription filter shapes (US-08, reuses existing simulate_query_compliance)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)", "onSnapshot() subscriber — experiences this feature only through correctly-scoped, continuously rule-compliant real-time delivery")
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK", "Client library. onSnapshot() subscriptions are now additionally: (1) scoped to the subscribed collection only, structurally; (2) gated at subscribe time and continuously re-checked per delivered event against the collection's own read rule, if any.")
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Listen's real-time delivery is now collection-scoped (structural) and rule-compliant (subscribe-time + per-event, when a rule exists) — the fifth and largest realization of JOB-17 in this initiative.")
+    System_Ext(systemDB, "System Postgres", "access_rules (read ONLY, unchanged schema) — no new table.")
+    System_Ext(customerDB, "Customer Postgres (BC-2, per-project)", "documents table, soft-delete (deleted boolean). fetch_event()'s existing NOTIFY-triggered query is widened to also surface pre-deletion field data for the delete-non-leakage check (US-05) — no new query.")
+
+    Rel(sdkDev, embyr, "Simulates a candidate Listen subscription's filter shape (reuses existing simulate_query_compliance)", "Admin API :9090")
+    Rel(endUser, embyr, "onSnapshot() — now collection-scoped and rule-compliant, subscribe-time and continuously", "gRPC :8080 / REST :8081 (UNCHANGED for GetDocument, writes, and RunQuery — group and non-group)")
+    Rel(embyr, systemDB, "Reads access_rules only (never write_access_rules/group_access_rules)", "Postgres SQL")
+    Rel(embyr, customerDB, "Widened NOTIFY-triggered fetch (same query, wider predicate) + unchanged initial-snapshot RunQuery execution", "Postgres SQL, via BackendAdapter / PostgresNotifyListener")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Container Diagram (Mermaid)
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (security-rules-realtime delta)
+
+    Person(sdkDev, "SDK Developer (Alex)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(embyrA, "embyr-rs instance", "Rust binary", "Existing: gRPC :8080, REST :8081, Admin :9090. Extended: handle_listen gains identity-attach; handle_add_target gains subscribe-time gate + collection-scoping + per-event recheck; PostgresNotifyListener::fetch_event's query widened; ListenEvent::Removed carries field data. Zero new route.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "access_rules read ONLY, unchanged schema — no new table, no new migration.")
+        ContainerDb(custDB, "Customer Postgres (BC-2, per-project)", "PostgreSQL", "documents table, unchanged schema. fetch_event()'s query predicate widened (drops AND NOT deleted, adds deleted column) — same query, same round-trip count.")
+    }
+
+    Rel(sdkDev, embyrA, "Simulates a candidate Listen subscription filter shape (existing route, reused unchanged)", "HTTP :9090")
+    Rel(endUser, embyrA, "onSnapshot() — collection-scoped delivery + subscribe-time and per-event rule compliance", "gRPC :8080 / REST :8081")
+    Rel(embyrA, sysDB, "Reads access_rules once per Listen subscription (subscribe time only, never per event)", "Postgres SQL")
+    Rel(embyrA, custDB, "Unchanged initial-snapshot RunQuery execution + widened per-NOTIFY fetch_event query (same round-trip count as before this feature)", "Postgres SQL, via BackendAdapter / PostgresNotifyListener")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Component Diagram (Mermaid) — Listen Subsystem
+
+Warranted, unlike any of the 4 predecessors' own DESIGN passes: this feature
+is the first in the initiative to introduce genuinely new, collaborating
+internal logic across 4 components within one subsystem (BC-3's own Listen
+delivery pipeline) rather than a single new branch in a single existing
+function. Component count (4, all pre-existing files gaining new internal
+logic) plus the genuinely new data flow between them (a per-subscriber
+`Condition`/`AuthContext` retained across the loop's own lifetime, consumed
+by 3 of the 4 components) crosses this codebase's own established "5+
+component" complexity threshold closely enough, combined with this being
+BC-3's first-ever internal mechanism in the initiative, to warrant a
+dedicated diagram — this project's own C4 rule (Component diagrams only for
+complex subsystems) applied honestly, not by rote inclusion.
+
+```mermaid
+C4Component
+    title Component Diagram — Listen Subsystem (security-rules-realtime)
+
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)")
+
+    Container_Boundary(embyrA, "embyr-rs instance") {
+        Component(handleListen, "handle_listen", "grpc::handler::FirestoreService", "Auth, NOTIFY-listener provisioning, spawns handle_add_target. NEW: attach_client_identity_if_present call; Arc::clone(&self.system_db) threaded into spawn.")
+        Component(handleAddTarget, "handle_add_target", "realtime::listen_handler", "AddTarget session: query extraction, initial snapshot, keepalive, NOTIFY consumption loop. NEW: full StructuredQuery/filter extraction (US-02); subscribe-time compliance gate (US-03); collection-scoping + per-event evaluate() recheck (US-01/04/05) in the event loop.")
+        Component(listenRegistry, "ListenRegistry", "realtime::listen_registry", "Per-project subscriber registry + fan_out(). UNCHANGED — the collection-scoping filter lives in handle_add_target, not here.")
+        Component(notifyListener, "PostgresNotifyListener::fetch_event", "adapters::postgres_notify_listener", "Per-project Postgres LISTEN/NOTIFY background task. NEW: widened SQL predicate (drops AND NOT deleted, adds deleted column) — same single query, now also surfaces pre-deletion field data for Removed events.")
+        Component(accessControl, "check_query_compliance / evaluate", "embyr_core::access_control", "UNCHANGED (ADR-027/030/031). Pure, zero-IO. Called from handle_add_target only — no new caller inside this subsystem beyond the 2 new call sites.")
+    }
+
+    ContainerDb_Ext(sysDB, "access_rules", "System Postgres")
+    ContainerDb_Ext(custDB, "documents", "Customer Postgres")
+
+    Rel(endUser, handleListen, "Opens Listen stream (AddTarget)", "gRPC/REST")
+    Rel(handleListen, handleAddTarget, "Spawns with: adapter, system_db (Arc clone, NEW), verified_identity (NEW), tx, registry, channel, resume_token")
+    Rel(handleAddTarget, sysDB, "get_access_rule (ONCE per subscription, NEW call site)", "Postgres SQL")
+    Rel(handleAddTarget, accessControl, "check_query_compliance (subscribe time, NEW call site); evaluate (per event, NEW call site) — Condition/AuthContext retained across the loop's own lifetime")
+    Rel(handleAddTarget, listenRegistry, "register() (unchanged); consumes event_rx, applies US-01 collection-scoping BEFORE any rule-dependent branch (NEW, in-loop)")
+    Rel(notifyListener, custDB, "Widened fetch_event query (same round-trip count, NEW predicate/column)", "Postgres SQL")
+    Rel(notifyListener, listenRegistry, "fan_out(ListenEvent) — UNCHANGED; ListenEvent::Removed now carries fields (NEW variant shape)")
+```
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern. No
+new crate, no new bounded context — BC-3 gains its first-ever internal
+correctness mechanism in this initiative; BC-4 gains two new call sites and
+zero new code.
+
+Rules enforced (existing, applying unchanged):
+- `embyr-core::access_control` retains zero IO imports (`cargo-deny`,
+  `deny.toml`) — this feature adds no code to that module at all.
+- `embyr-core` defines the value-type/function surface; `embyr-server`
+  consumes it — dependency direction inward, unchanged.
+- No new adapter, no new `probe()` required (see § Driven Ports + Adapters,
+  above, and ADR-033 § Enforcement for the explicit Principle 12 reasoning).
+
+---
+
+## Wave: DESIGN / [REF] External Integrations
+
+**None requiring contract tests.** This feature introduces no new outbound
+network dependency: rule storage reuses the existing, already-probed
+`SystemDb` Postgres connection; the widened `fetch_event()` query reuses the
+existing, already-probed customer-Postgres pool; `check_query_compliance`/
+`evaluate` are pure in-process computation, unchanged. No new adapter, no
+new external service, no new consumer-driven-contract surface.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions (DESIGN additions)
+
+| ID | Question | Impact | Resolution owner |
+|----|----------|--------|-------------------|
+| OQ-SRRT-06 | AC-17-136 ("admitted for a candidate collection id with no rule") presumes a `simulate_query_compliance` input shape (a real collection-id reference) that does not exist in the handler's current contract (it takes a candidate `condition` TEXT, never a collection reference, and never reads `access_rules`). This DESIGN resolves the AC structurally (US-06's unchanged "no rule -> unrestricted" default already guarantees the real behavior; there is no candidate rule text to simulate for "no rule") rather than adding a new, collection-id-aware simulation input | Does not block this DESIGN's own gate — flagged for DISTILL's acceptance-scenario wording and for the orchestrator/product owner to confirm this reading, or request a genuinely new capability (collection-id-aware simulation) as a follow-up, not built here | Acceptance-designer (DISTILL) / orchestrator |
+| OQ-SRRT-07 | Whether the ~10-line subscribe-time compliance-evaluation sequence inside `handle_add_target` (parse stored condition, build `AuthContext`, call `check_query_compliance`, map a non-`Admitted` outcome) should be factored into a small private helper shared with `handle_run_query`'s own near-identical sequence, or left duplicated per call site | Left as a crafter-level (HOW) choice, mirroring `security-rules-collection-group-rules`'s own OQ-SRCG-04 precedent for an analogous question — not a DESIGN-blocking decision | software-crafter, DELIVER |
+| OQ-SRRT-05 (carried from DISCUSS, confirmed not required) | Whether `ListenRegistry`/`PostgresNotifyListener` should be redesigned to use per-collection, rather than per-project, NOTIFY channels | Confirmed, against the real code shape, NOT required for this feature's own domain examples — the delivery-time filter (DDD-SRRT-1) is sufficient. Remains a candidate future optimization if real production fan-out volume evidences it | Product Discovery / platform-architect, future evidence |
+| OQ-SRRT-02 (carried from DISCUSS, resolved) | The exact mechanism for US-05's `Removed`-event non-leakage | **RESOLVED** — DDD-SRRT-8 / ADR-033 § Decision — Delete Non-Leakage: widen `fetch_event()`'s existing query predicate, zero new query | Closed |
+| OQ-SRRT-03/04 (carried from DISCUSS, unrelated) | `TargetType::Documents` unsupported (Finding 1); collection-group Listen unhonored (Finding 3) | Confirmed still out of scope for this DESIGN pass — no code touched by this feature is implicated (this feature's own `all_descendants: false` remains deliberately hardcoded) | Solution-architect / troubleshooter, separate track |
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package (to DISTILL)
+
+**To DISTILL (acceptance-designer)**: this `feature-delta.md` (DISCUSS + DESIGN sections), `docs/product/architecture/adr-033-listen-compliance-composition-and-collection-scoping.md`, the updated `## Application Architecture — security-rules-realtime` section in `docs/product/architecture/brief.md`.
+
+**Explicit flags for DISTILL**:
+1. US-01's collection-scoping check and US-04's per-event fail-closed correctness are this feature's designated mutation-testing surfaces (Handoff Package flag 6, carried) — DISTILL should ensure scenario density is highest here, mirroring every prior epic's own designated-surface discipline. In particular: a scenario proving the collection-scoping check applies EVEN WHEN the wrong-collection event's own collection has no rule at all (AC-17-108) — the structural, rule-independent property — deserves its own explicit scenario, not an inference from the ruled-collection cases.
+2. US-03's rejection (AC-17-116) must be distinguishable, at the gRPC status-code AND message-text level, from (a) `authenticate()`'s own rejections, (b) a genuine internal error, and (c) a non-compliant `RunQuery`'s own rejection for the SAME rule — DISTILL's acceptance scenarios should assert on the `[REASON_CODE]` token, mirroring `security-rules-query-path`'s own acceptance-test convention (§ Wave: DESIGN, ADR-033 § Decision — Subscribe-Time Composition, "`handle_add_target`'s error type").
+3. US-04's Domain Example 2 (an `owner_id` reassignment mid-subscription) and US-05's Domain Example 3 (delete AFTER a mid-subscription reassignment) both require test-data setup that mutates a document's rule-referenced field WHILE a Listen stream is open — DISTILL's test harness needs a real, timed concurrent write during an open stream, not merely a pre-seeded static fixture, mirroring the Production-Data Taste Tests already specified in Slices 04/05.
+4. AC-17-136's own resolution (OQ-SRRT-06, above) — DISTILL should treat this AC as satisfied by asserting the STRUCTURAL fact (a Listen subscription to an unruled collection is admitted, unconditionally, exactly as `RunQuery`'s own existing US-06 scenario already proves) rather than requiring a new simulate-endpoint scenario referencing a nonexistent "candidate collection id" input.
+5. `ListenEvent::Removed`'s shape change (`(DocumentPath)` -> `{ path, fields }`) may require updates to any EXISTING test fixture that constructs `ListenEvent::Removed` directly (rather than through `fetch_event()`) — DISTILL/DELIVER should grep for direct `ListenEvent::Removed(` construction sites in the existing test suite before assuming this is a purely additive change at the type level.
+6. This feature's regression baseline (US-07, AC-17-130/131/133) explicitly includes the existing resume-token/keepalive/RESET Listen mechanics — DISTILL should confirm none of those existing fixtures constructs a `ListenEvent::Removed` value directly in a way this feature's variant-shape change would break at compile time, before assuming zero fixture changes are needed.
+
+**To DEVOPS (platform-architect)**: no new deployment surface, no new external integration, no new probe, no new migration. This feature's entire footprint is code changes to an already-deployed binary — mirrors every prior epic's own DEVOPS footprint (none beyond the standard deploy sequence), and is LIGHTER than any predecessor's (zero migration, vs. one new migration for `security-rules-write-path`/`security-rules-collection-group-rules`).

@@ -3991,3 +3991,96 @@ Full alternatives-considered analysis (including the rejected
 handler-optional-field overload for US-07 and the rejected
 convention-only-schema option): `docs/product/architecture/adr-032-collection-group-rule-storage-and-composition.md`.
 
+---
+
+## Application Architecture — security-rules-realtime
+
+> Updated: 2026-08-26
+> Feature: security-rules-realtime (JOB-17 — closes Listen's (`onSnapshot()`)
+> rule-enforcement gap AND a pre-existing, more severe project-wide
+> cross-collection delivery leak in BC-3's own fan-out mechanism; Epic 2d of
+> the access-control initiative)
+> Mode: Propose (autonomous analysis; DISCUSS's two central architectural
+> questions — Resolutions 1 and 2 — were already locked before DESIGN
+> started; two genuine judgment calls, Handoff Package flags 3 and 7, were
+> confirmed in-scope / resolved respectively by this DESIGN pass)
+> ADR: `docs/product/architecture/adr-033-listen-compliance-composition-and-collection-scoping.md`
+> (new — combined collection-scoping/composition/delete-non-leakage/admin
+> -surface decision, mirroring ADR-030/031/032's own smaller-decision
+> -surface precedent). Does not amend `adr-027` through `adr-032` — all six
+> remain accurate as written; this feature extends, never contradicts, them.
+
+Full DESIGN content (Quality Attribute Priorities, Reuse Analysis,
+Bounded-Context Placement, Component Decomposition, Driving/Driven Ports,
+Technology Choices, Decisions Table DDD-SRRT-1..11, C4 System Context/
+Container/Component diagrams, Architecture Enforcement, Open Questions,
+External Integrations, Handoff Package) lives in
+`docs/feature/security-rules-realtime/feature-delta.md` §§ Wave: DESIGN —
+the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**The central decision (locked by DISCUSS, implemented here)**: a composed
+mechanism, not a single reused function — `check_query_compliance()`
+(ADR-031, UNCHANGED) gates the initial snapshot at subscribe time;
+`evaluate()` (ADR-027/030, UNCHANGED) re-checks every individually-delivered
+document-change event; plus a genuinely new, BC-3-internal collection
+-scoping filter with no analog in any prior epic. `embyr_core::
+access_control` gains ZERO new code — the first feature in this initiative
+where BC-4 Access Control grows by nothing at all.
+
+**Collection-scoping mechanism (Finding 5's fix, this feature's single
+highest-consequence risk)**: a delivery-time filter inside
+`handle_add_target`'s own event-consumption loop (the consuming side) — NOT
+a `ListenRegistry`/`PostgresNotifyListener` per-collection-channel redesign.
+Applies unconditionally, before any rule-dependent branch, to both
+`DocumentChange` and `DocumentDelete` delivery — a structural, rule
+-independent guarantee. `ListenRegistry::fan_out()` and `SubscriberEntry`
+receive zero code change.
+
+**Subscribe-time + per-event composition**: `handle_listen` gains one new
+call (`attach_client_identity_if_present`, mirrors `RunQuery`'s own
+placement) and threads `Arc::clone(&self.system_db)` into the spawned
+`handle_add_target` task. `handle_add_target` extracts the FULL
+`StructuredQuery` (fixing Finding 2 — the initial snapshot now honors the
+caller's own filter, reusing `translate_filter()` unchanged) and gains a
+subscribe-time compliance gate mirroring `handle_run_query`'s own non-group
+arm exactly. The parsed `Condition` and built `AuthContext` are retained for
+the ENTIRE lifetime of the subscription's loop — reused unmodified for every
+subsequent per-event `evaluate()` call, so the per-event recheck (US-04)
+costs zero additional Postgres queries beyond what `PostgresNotifyListener::
+fetch_event()` already performs for every NOTIFY (Finding 6).
+
+**Delete-event non-leakage (US-05, a genuine judgment call this DESIGN
+resolved)**: `fetch_event()`'s EXISTING single SQL query is widened (drops
+`AND NOT deleted`, adds the `deleted` column to the SELECT list) rather than
+adding a second query or a per-subscriber re-fetch — the same round-trip
+count as today, now also surfacing the pre-deletion field snapshot
+`evaluate()` needs for content-referencing rules. `ListenEvent::Removed`
+gains a `fields` payload, never serialized into the wire-level
+`DocumentDelete` proto — internal decision input only.
+
+**Admin surface (US-08, an evaluated departure from ADR-032's own
+precedent, in the opposite direction)**: `simulate_query_compliance`
+(`security-rules-query-path`) is reused COMPLETELY UNCHANGED — zero new
+route, zero new handler, zero new type — because Listen's subscribe-time
+gate's request-contract shape is IDENTICAL to `RunQuery`'s non-group arm,
+unlike the collection-group case's genuinely different `group_condition:
+Option<String>` contract that justified a new sibling handler there.
+
+**Bounded context**: no new context. BC-3 Real-Time Delivery gains its
+first-ever internal correctness mechanism in this initiative (the
+collection-scoping filter and the widened `fetch_event()` predicate); BC-4
+gains two new call sites and zero new code.
+
+**No new table, no new migration, no new admin route, no new external
+integration, no new driven port, no new Earned Trust probe** — the smallest
+CREATE-NEW footprint of any of the five epics in this initiative, despite
+the largest user-story footprint (8 stories). All new I/O reuses
+already-probed substrate (`SystemDb` pool, customer-Postgres pool via
+`PostgresNotifyListener`).
+
+Full alternatives-considered analysis (including the rejected per
+-collection-channel redesign and the rejected per-subscriber delete-fetch
+option): `docs/product/architecture/adr-033-listen-compliance-composition-and-collection-scoping.md`.
+
