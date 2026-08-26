@@ -411,6 +411,13 @@ path = "../../tests/security_rules_collection_group_rules/acceptance/reject_nonc
 name = "security_rules_collection_group_rules_other_surfaces_unaffected"
 path = "../../tests/security_rules_collection_group_rules/acceptance/other_surfaces_unaffected.rs"
 
+# security-rules-collection-group-rules acceptance tests (Slice 06, ADR-032)
+# — US-06, untouched collections and the full regression baseline are
+# unaffected (pure regression/consistency-proof slice).
+[[test]]
+name = "security_rules_collection_group_rules_regression_baseline_unaffected"
+path = "../../tests/security_rules_collection_group_rules/acceptance/regression_baseline_unaffected.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -622,6 +622,27 @@ async fn collection_group_query_returns_documents_from_all_matching_subcollectio
     .await
     .expect("seed collection group documents");
 
+    // security-rules-collection-group-rules (ADR-032, Resolution 2): unlike
+    // GetDocument/writes/non-group RunQuery, a collection-group query
+    // (all_descendants=true) against a collection id with NO group rule is
+    // now rejected outright by default — matching real Firestore's own
+    // documented behavior (a regular per-path rule never governs a
+    // collection-group query; an explicit collection-group rule is
+    // required). This walking-skeleton scenario predates that model and
+    // tests pure collection-group SQL-matching mechanics, not
+    // authorization — so it now needs an explicit, permissive group rule to
+    // opt in, exactly as a real Firestore developer would need to add
+    // `match /{path=**}/events/{doc} { allow read; }` to keep this query
+    // working after adopting collection-group rules.
+    sqlx::query(
+        "INSERT INTO group_access_rules (project_id, collection_id, condition_source) \
+         VALUES ($1, 'events', 'true')",
+    )
+    .bind(project_id.as_str())
+    .execute(&env.sys_pool)
+    .await
+    .expect("seed permissive group access rule for events");
+
     let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
 
     // Collection group query: all_descendants=true, collection_id="events"
