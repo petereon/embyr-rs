@@ -2,10 +2,12 @@
 use std::{sync::Arc, time::Duration};
 
 use chrono::{Duration as ChronoDuration, Utc};
-use embyr_core::domain::{
-    document::CollectionPath,
-    project::ProjectId,
-    query::StructuredQuery as DomainQuery,
+use embyr_core::{
+    access_control::{
+        check_query_compliance, parse_condition, AuthContext, Condition, QueryComplianceOutcome,
+    },
+    client_identity::VerifiedEndUserIdentity,
+    domain::{document::CollectionPath, project::ProjectId, query::StructuredQuery as DomainQuery},
 };
 use embyr_proto::firestore::{
     listen_request, listen_response,
@@ -17,8 +19,9 @@ use tonic::Status;
 use tokio::sync::mpsc;
 
 use crate::{
-    adapters::credential_cache::SharedBackendAdapter,
+    adapters::{credential_cache::SharedBackendAdapter, system_db::SystemDb},
     encoding::firestore_proto::document_to_proto,
+    grpc::handler::query_compliance_rejection,
     realtime::{
         listen_registry::{ListenEvent, ListenRegistry},
         resume_token as rt,
@@ -35,16 +38,18 @@ use crate::{
 pub async fn handle_add_target(
     first_msg: &ListenRequest,
     adapter: &SharedBackendAdapter,
+    system_db: &Arc<SystemDb>,
+    verified_identity: Option<VerifiedEndUserIdentity>,
     tx: &mpsc::Sender<Result<ListenResponse, Status>>,
     keepalive: Duration,
     registry: Arc<ListenRegistry>,
     channel: &str,
     resume_token: Option<Vec<u8>>,
-) -> Result<(), String> {
+) -> Result<(), Status> {
     // Extract AddTarget from the first message.
     let add_target = match &first_msg.target_change {
         Some(listen_request::TargetChange::AddTarget(t)) => t,
-        _ => return Err("first message must be AddTarget".into()),
+        _ => return Err(Status::invalid_argument("first message must be AddTarget")),
     };
 
     let target_id = add_target.target_id;
@@ -58,19 +63,59 @@ pub async fn handle_add_target(
     // StructuredQuery specified.
     let (project_id, collection_id, filter) = match &add_target.target_type {
         Some(TargetType::Query(qt)) => {
-            let collection_id = collection_id_from_query_target(qt)?;
-            let project_id = project_id_from_parent(&qt.parent)?;
-            let filter = filter_from_query_target(qt)?;
+            let collection_id = collection_id_from_query_target(qt).map_err(Status::internal)?;
+            let project_id = project_id_from_parent(&qt.parent).map_err(Status::internal)?;
+            let filter = filter_from_query_target(qt).map_err(Status::internal)?;
             (project_id, collection_id, filter)
         }
-        _ => return Err("target must have Query target type".into()),
+        _ => return Err(Status::invalid_argument("target must have Query target type")),
     };
 
-    let pid = ProjectId::new(&project_id).map_err(|e| e.to_string())?;
+    let pid = ProjectId::new(&project_id).map_err(|e| Status::internal(e.to_string()))?;
     let collection = CollectionPath {
         project_id: pid,
         collection_path: collection_id,
     };
+
+    // security-rules-realtime (ADR-033 § Decision — Subscribe-Time
+    // Composition, US-03): the ONE-TIME subscribe-time compliance gate —
+    // the IDENTICAL composition shape `handle_run_query`'s own non-group arm
+    // already uses (ADR-031), applied at a new call site inside an async
+    // streaming handler rather than a request/response one. Runs strictly
+    // BEFORE `registry.register()`/`adapter.run_query()` below — a
+    // non-compliant subscription is rejected outright, before any row is
+    // read for the initial snapshot (AC-17-114).
+    let auth_ctx = verified_identity
+        .as_ref()
+        .map(|v| AuthContext { uid: v.end_user_id.clone() });
+
+    let rule_row = system_db
+        .get_access_rule(&project_id, &collection.collection_path)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+    // `condition` is retained for the REST OF THIS FUNCTION's lifetime — see
+    // ADR-033 § Decision — Per-Event Composition (Slice 04's own extension
+    // point, not consumed here).
+    let condition: Option<Condition> = match rule_row {
+        None => None, // US-06: no rule -> unrestricted, both subscribe-time and per-event.
+        Some(row) => {
+            let condition = parse_condition(&row.condition_source).map_err(|e| {
+                Status::internal(format!("stored access rule failed to re-parse: {e:?}"))
+            })?;
+            match check_query_compliance(&condition, filter.as_ref(), auth_ctx.as_ref()) {
+                QueryComplianceOutcome::Admitted => {}
+                // AC-17-116: SAME query_compliance_rejection() RunQuery
+                // already uses -> Status::permission_denied with the SAME
+                // [REASON_CODE] convention -> distinguishable from
+                // authenticate()'s own Status::unauthenticated and from
+                // Status::internal (genuine server error).
+                outcome => return Err(query_compliance_rejection(&outcome)),
+            }
+            Some(condition)
+        }
+    };
+    let _ = &condition; // Slice 04 consumes this per-event; unused for now.
 
     // Decode resume token: fresh (<=24h) tokens enable delta delivery.
     let since_update_time = resume_token
@@ -107,7 +152,7 @@ pub async fn handle_add_target(
     let docs = adapter
         .run_query(&collection, &domain_query, None)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Status::internal(e.to_string()))?;
 
     // Send one DocumentChange per doc.
     for doc in docs {
@@ -119,7 +164,9 @@ pub async fn handle_add_target(
                 removed_target_ids: vec![],
             })),
         };
-        tx.send(Ok(response)).await.map_err(|_| "channel closed".to_string())?;
+        tx.send(Ok(response))
+            .await
+            .map_err(|_| Status::internal("channel closed"))?;
     }
 
     // Send CURRENT marker.
@@ -130,7 +177,9 @@ pub async fn handle_add_target(
             ..Default::default()
         })),
     };
-    tx.send(Ok(current)).await.map_err(|_| "channel closed".to_string())?;
+    tx.send(Ok(current))
+        .await
+        .map_err(|_| Status::internal("channel closed"))?;
 
     // Send NO_CHANGE with fresh resume token immediately after CURRENT.
     // The token encodes snapshot_ts (= now + 1s at snapshot time), ensuring that
@@ -143,7 +192,9 @@ pub async fn handle_add_target(
             ..Default::default()
         })),
     };
-    tx.send(Ok(no_change_with_token)).await.map_err(|_| "channel closed".to_string())?;
+    tx.send(Ok(no_change_with_token))
+        .await
+        .map_err(|_| Status::internal("channel closed"))?;
 
     // Main loop: keepalive + NOTIFY events + RESET signal.
     loop {

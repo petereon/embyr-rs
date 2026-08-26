@@ -1365,13 +1365,17 @@ impl FirestoreService {
 
     async fn handle_listen(
         &self,
-        request: Request<tonic::Streaming<ListenRequest>>,
+        mut request: Request<tonic::Streaming<ListenRequest>>,
     ) -> Result<Response<tonic::codegen::BoxStream<ListenResponse>>, Status> {
         let api_key = Self::extract_api_key(&request)?;
-        let mut in_stream = request.into_inner();
 
         // Read first message to get the AddTarget + project_id for auth.
-        let first_msg = in_stream
+        // `request` itself is kept alive (not yet consumed via `into_inner()`)
+        // so its metadata is still available below for
+        // `attach_client_identity_if_present` (security-rules-realtime,
+        // ADR-033 § Decision — Subscribe-Time Composition).
+        let first_msg = request
+            .get_mut()
             .next()
             .await
             .ok_or_else(|| Status::invalid_argument("empty listen stream"))?
@@ -1414,6 +1418,27 @@ impl FirestoreService {
             }
         }
 
+        // security-rules-realtime (ADR-033 § Decision — Subscribe-Time
+        // Composition, US-03): identical call shape to `handle_run_query`'s
+        // own `attach_client_identity_if_present` placement — the function
+        // itself is unchanged, this is a new consumer of its existing
+        // return value, so `request.auth` is available to
+        // `handle_add_target`'s own subscribe-time compliance gate.
+        //
+        // `attach_client_identity_if_present<T>` only ever reads
+        // `request.metadata()` — it never touches the streaming body. A
+        // `Request<Streaming<ListenRequest>>` itself is not `Sync` (its
+        // body is a `dyn Decoder` trait object), so holding `&request`
+        // across this `.await` would make the enclosing future non-`Send`
+        // (required by tonic's boxed handler future). A metadata-only
+        // `Request<()>` carries the identical headers without that
+        // constraint.
+        let mut metadata_only_request = Request::new(());
+        *metadata_only_request.metadata_mut() = request.metadata().clone();
+        let verified_identity = self
+            .attach_client_identity_if_present(&metadata_only_request, &project_id)
+            .await;
+
         // Extract resume token from AddTarget if present.
         let resume_token: Option<Vec<u8>> = match &first_msg.target_change {
             Some(embyr_proto::firestore::listen_request::TargetChange::AddTarget(t)) => {
@@ -1434,11 +1459,19 @@ impl FirestoreService {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ListenResponse, Status>>(64);
         let keepalive = self.keepalive_interval;
         let registry = Arc::clone(&self.listen_registry);
+        let system_db = Arc::clone(&self.system_db);
+
+        // `request`'s metadata is no longer needed beyond this point —
+        // consume it into the owned `Streaming` body now, immediately
+        // before the spawn that moves it in.
+        let mut in_stream = request.into_inner();
 
         tokio::spawn(async move {
-            if let Err(e) = crate::realtime::listen_handler::handle_add_target(
+            if let Err(status) = crate::realtime::listen_handler::handle_add_target(
                 &first_msg,
                 &adapter,
+                &system_db,
+                verified_identity,
                 &tx,
                 keepalive,
                 registry,
@@ -1447,7 +1480,7 @@ impl FirestoreService {
             )
             .await
             {
-                let _ = tx.send(Err(Status::internal(e))).await;
+                let _ = tx.send(Err(status)).await;
             }
             // Drain remaining client messages (RemoveTarget etc.) for future steps.
             while (in_stream.next().await).is_some() {}
@@ -1615,7 +1648,7 @@ fn extract_project_id_from_listen_request(msg: &ListenRequest) -> Result<String,
 /// composite-index check's `Status::failed_precondition` was already true
 /// by status code alone; this only strengthens distinguishability WITHIN
 /// the `PermissionDenied` family itself.
-fn query_compliance_rejection(
+pub(crate) fn query_compliance_rejection(
     outcome: &embyr_core::access_control::QueryComplianceOutcome,
 ) -> Status {
     use embyr_core::access_control::{QueryComplianceOutcome, UnsatisfiedConjunct};

@@ -28,10 +28,13 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
-    create_document, delete_document, drain_until_current, open_listen_stream, try_recv_live_event,
-    CapturedEvent, SecurityRulesFullContext,
+    create_document, delete_document, drain_until_current, equality_where_filter,
+    mint_client_identity_token, now_unix, open_listen_stream, open_listen_stream_filtered_as,
+    try_recv_live_event, CapturedEvent, SecurityRulesFullContext,
 };
 use std::{collections::HashMap, time::Duration};
+use ed25519_dalek::SigningKey;
+use rand_core::OsRng;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AC-17-105: a subscriber to collection A never receives a DocumentChange
@@ -219,7 +222,29 @@ async fn collection_scoping_holds_regardless_of_which_collection_has_a_rule() {
         ctx.seed_access_rule(ruled_collection, "request.auth.uid == resource.data.owner_id")
             .await;
 
-        let mut stream = open_listen_stream(&ctx, subscribed).await;
+        // security-rules-realtime (ADR-033, US-03): once the SUBSCRIBED
+        // collection itself carries a rule, the subscribe-time compliance
+        // gate now applies (AC-17-113/114) — an unfiltered, unauthenticated
+        // subscription to it would be correctly REJECTED, which is a
+        // different concern from THIS test's own (collection-scoping,
+        // AC-17-108). Mint a compliant identity/filter only in that case so
+        // the subscription is admitted and AC-17-108's own assertion
+        // (scoping holds regardless of rule presence) is actually exercised.
+        let mut stream = if ruled_is_subscribed {
+            let signing_key = SigningKey::generate(&mut OsRng);
+            ctx.seed_client_identity_credential(&signing_key.verifying_key().to_bytes())
+                .await;
+            let marias_token = mint_client_identity_token(
+                &signing_key,
+                "maria-santos",
+                &ctx.project_id,
+                now_unix() + 3600,
+            );
+            let filter = equality_where_filter(&[("owner_id", "maria-santos")]);
+            open_listen_stream_filtered_as(&ctx, subscribed, filter, Some(&marias_token)).await
+        } else {
+            open_listen_stream(&ctx, subscribed).await
+        };
         drain_until_current(&mut stream).await;
 
         create_document(&ctx, other, "leak-check-doc", HashMap::new(), None)

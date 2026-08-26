@@ -440,6 +440,14 @@ path = "../../tests/security_rules_realtime/acceptance/collection_scoped_fanout.
 name = "security_rules_realtime_initial_snapshot_honors_filter"
 path = "../../tests/security_rules_realtime/acceptance/initial_snapshot_honors_filter.rs"
 
+# security-rules-realtime acceptance tests (Slice 03, ADR-033) — US-03: a
+# Listen subscription against a rule-protected collection is admitted only
+# if the initial snapshot's filter is compliant, reusing
+# check_query_compliance() (ADR-031) unchanged.
+[[test]]
+name = "security_rules_realtime_subscribe_time_compliance_check"
+path = "../../tests/security_rules_realtime/acceptance/subscribe_time_compliance_check.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

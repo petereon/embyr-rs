@@ -22,7 +22,8 @@
 #[path = "../../security_rules_write_path/common/mod.rs"]
 mod security_rules_write_path_common;
 pub use security_rules_write_path_common::{
-    create_document, delete_document, string_field, SecurityRulesFullContext,
+    create_document, delete_document, mint_client_identity_token, now_unix, string_field,
+    SecurityRulesFullContext,
 };
 
 use std::time::Duration;
@@ -214,6 +215,52 @@ pub async fn open_listen_stream_filtered(
         "authorization",
         format!("Bearer {}", ctx.api_key).parse().unwrap(),
     );
+
+    client
+        .listen(request)
+        .await
+        .expect("listen should succeed")
+        .into_inner()
+}
+
+/// Open a real `Listen` gRPC stream subscribed to `collection`, carrying an
+/// OPTIONAL `where_` filter AND an OPTIONAL `x-embyr-client-identity` token
+/// (Slice 03, US-03) — generalizes `open_listen_stream_filtered` above,
+/// which now delegates here with `client_identity_token: None`. Needed
+/// because `check_query_compliance()`'s subscribe-time gate (ADR-033 §
+/// Decision — Subscribe-Time Composition) reads `request.auth` via
+/// `attach_client_identity_if_present`, mirroring
+/// `security_rules_query_path::common::run_query`'s own identical
+/// identity-header wiring.
+pub async fn open_listen_stream_filtered_as(
+    ctx: &SecurityRulesFullContext,
+    collection: &str,
+    filter: Option<Filter>,
+    client_identity_token: Option<&str>,
+) -> tonic::Streaming<ListenResponse> {
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let req_stream = tokio_stream::once(add_target_request_filtered(
+        &ctx.project_id,
+        collection,
+        filter,
+    ));
+    let mut request = tonic::Request::new(req_stream);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
 
     client
         .listen(request)
