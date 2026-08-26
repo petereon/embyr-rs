@@ -483,6 +483,15 @@ path = "../../tests/security_rules_realtime/acceptance/other_surfaces_unaffected
 name = "security_rules_realtime_regression_baseline_unaffected"
 path = "../../tests/security_rules_realtime/acceptance/regression_baseline_unaffected.rs"
 
+# security-rules-realtime acceptance tests (Slice 08, LAST slice, ADR-033 §
+# Decision — Admin Surface) — US-08: simulate_query_compliance
+# (security-rules-query-path, unchanged) also models a candidate Listen
+# subscription's own subscribe-time compliance gate. Zero new
+# route/handler/response type.
+[[test]]
+name = "security_rules_realtime_listen_subscription_simulation"
+path = "../../tests/security_rules_realtime/acceptance/listen_subscription_simulation.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -632,6 +632,13 @@ pub async fn simulate_access_rule(
 /// -maintained shape-compliance implementation. Read-only by construction:
 /// never calls `upsert_access_rule`/`upsert_write_access_rule`, never
 /// touches a live document, never issues a real `RunQuery`.
+///
+/// security-rules-realtime (ADR-033 § Decision — Admin Surface, US-08): this
+/// handler also models a candidate `Listen` subscription's own subscribe
+/// -time compliance gate, unmodified — `realtime::listen_handler::
+/// handle_add_target` calls `check_query_compliance()` with the IDENTICAL
+/// `(condition, filter, auth)` input shape `handle_run_query` uses, so no
+/// new route/handler/response type is needed for Listen simulation.
 pub async fn simulate_query_compliance(
     Path(project_id): Path<String>,
     State(state): State<UserAdminState>,

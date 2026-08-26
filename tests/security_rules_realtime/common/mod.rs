@@ -23,7 +23,8 @@
 mod security_rules_write_path_common;
 pub use security_rules_write_path_common::{
     create_document, delete_document, mint_client_identity_token, now_unix,
-    seed_write_access_rule_full, string_field, update_document, SecurityRulesFullContext,
+    seed_write_access_rule_full, string_field, update_document, SecurityRulesAdminContext,
+    SecurityRulesFullContext,
 };
 
 use std::time::Duration;
