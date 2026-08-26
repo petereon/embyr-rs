@@ -38,9 +38,13 @@ use super::handlers::client_identity::{
 // collection-group rule define/redefine — a NEW, distinct route/handler,
 // mirroring define_write_access_rule's shape (ADR-032 § Decision — Admin
 // Surface, rejected alternative: not a branch on any existing route).
+// security-rules-collection-group-rules (US-07, LAST slice, ADR-032):
+// simulate a candidate collection-group query before shipping — a NEW
+// sibling handler/route to simulate_query_compliance, not an extension of
+// it in place (ADR-032 § simulate_group_query_compliance).
 use super::handlers::access_rules::{
     define_access_rule, define_group_access_rule, define_write_access_rule,
-    simulate_access_rule, simulate_query_compliance,
+    simulate_access_rule, simulate_group_query_compliance, simulate_query_compliance,
 };
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
@@ -233,6 +237,14 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/group_access_rules",
             post(define_group_access_rule),
+        )
+        // security-rules-collection-group-rules (US-07, LAST slice, ADR-032):
+        // simulate a candidate collection-group query before shipping (any
+        // role, read-only, gated in-handler) — a NEW, DISTINCT sibling
+        // route to simulate_query, not a branch on it.
+        .route(
+            "/admin/v1/projects/:project_id/access_rules/simulate_group_query",
+            post(simulate_group_query_compliance),
         )
         .route(
             "/admin/v1/projects/:project_id/metrics",

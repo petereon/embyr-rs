@@ -31,6 +31,18 @@
 //!   define/redefine if the candidate condition itself fails to parse.
 //!   Implemented (DELIVER, step 06-01; extended step 07-01, US-07).
 //!
+//! simulate_group_query_compliance (POST /admin/v1/projects/:project_id/access_rules/simulate_group_query):
+//!   Session auth, ANY role (US-07, ADR-032, read-only — mirrors
+//!   simulate_query_compliance's identical any-role precedent). A NEW,
+//!   sibling handler/route, not an extension of simulate_query_compliance's
+//!   own body — `group_condition: Option<String>` is genuinely different
+//!   from that handler's REQUIRED `condition` (US-04's "no group rule"
+//!   default is a first-class candidate scenario here). Calls the IDENTICAL
+//!   `check_query_compliance` real group-query enforcement uses. Reuses
+//!   `SimulateQueryComplianceResponse` verbatim. Implemented (DELIVER,
+//!   security-rules-collection-group-rules, step 07-01, US-07 — LAST slice
+//!   of this feature).
+//!
 //! Both handlers implemented (DELIVER steps 01-01 through 06-01) — mirrors
 //! `client_identity.rs`'s own doc-comment convention of marking each handler
 //! "Implemented" once its RED scaffolds (`embyr_core::access_control::
@@ -215,6 +227,22 @@ pub struct SimulateQueryComplianceResponse {
     pub compliant: bool,
     #[serde(default)]
     pub reasons: Vec<&'static str>,
+}
+
+/// Body for POST /admin/v1/projects/:project_id/access_rules/simulate_group_query
+/// (security-rules-collection-group-rules, US-07, ADR-032). A NEW, sibling
+/// request type to `SimulateQueryComplianceBody` — NOT a reuse of that type
+/// with an overloaded field, since `None`/absent has a genuinely different,
+/// load-bearing meaning here: `group_condition: None` simulates the US-04
+/// "no collection-group rule defined" default DIRECTLY, a first-class
+/// candidate scenario (AC-17-103), never an error. Reuses
+/// `SimulatedAuth`/`SimulatedQueryFilter` verbatim (unchanged).
+#[derive(Deserialize)]
+pub struct SimulateGroupQueryComplianceBody {
+    pub group_condition: Option<String>,
+    pub auth: Option<SimulatedAuth>,
+    #[serde(default)]
+    pub query_filters: Vec<SimulatedQueryFilter>,
 }
 
 /// Distinguishable rejection-reason body for a condition that fails to
@@ -630,6 +658,79 @@ pub async fn simulate_query_compliance(
     // indistinguishable to the caller, defeating the whole point of
     // reporting reasons. Mirrors handler.rs::query_compliance_rejection's
     // own "UNSUPPORTED_RULE_SHAPE" vocabulary for the undecidable case.
+    let (compliant, reasons): (bool, Vec<&'static str>) = match outcome {
+        QueryComplianceOutcome::Admitted => (true, Vec::new()),
+        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts } => (
+            false,
+            unsatisfied_conjuncts.iter().map(|c| c.reason_code()).collect(),
+        ),
+        QueryComplianceOutcome::RejectedUnsupportedRuleShape => {
+            (false, vec!["UNSUPPORTED_RULE_SHAPE"])
+        }
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(SimulateQueryComplianceResponse { compliant, reasons }),
+    )
+        .into_response())
+}
+
+/// POST /admin/v1/projects/:project_id/access_rules/simulate_group_query
+/// (security-rules-collection-group-rules, US-07, ADR-032 §
+/// `simulate_group_query_compliance` — a genuine, evaluated departure from
+/// both DISCUSS's own Technical Note and ADR-031's own precedent).
+///
+/// Any role (mirrors `simulate_query_compliance`'s identical any-role,
+/// read-only precedent — no role gate). A NEW, DISTINCT sibling
+/// handler/route — never a branch bolted onto `simulate_query_compliance`'s
+/// own body, since the two request contracts genuinely differ (`condition`
+/// REQUIRED there vs. `group_condition` OPTIONAL here, load-bearing per
+/// US-04). The RESPONSE contract is identical and reused VERBATIM —
+/// `SimulateQueryComplianceResponse`, no new response type. Read-only by
+/// construction: never calls `upsert_group_access_rule`, never issues a real
+/// `RunQuery`, and for the `group_condition: None` arm, never even reads
+/// `group_access_rules` (zero storage read, matching US-04's real default
+/// and `simulate_query_compliance`'s own "never reads or writes
+/// access_rules for the candidate case" discipline).
+pub async fn simulate_group_query_compliance(
+    Path(project_id): Path<String>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+    Json(body): Json<SimulateGroupQueryComplianceBody>,
+) -> Result<Response, StatusCode> {
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    // AC-17-103: `group_condition: None` (or omitted from the JSON body)
+    // simulates US-04's real "no collection-group rule defined" default
+    // DIRECTLY -- without ever touching group_access_rules, matching the
+    // real handle_run_query arm's own zero-storage-read discipline for this
+    // exact case.
+    let Some(group_condition) = body.group_condition else {
+        return Ok((
+            StatusCode::OK,
+            Json(SimulateQueryComplianceResponse {
+                compliant: false,
+                reasons: vec!["GROUP_RULE_NOT_DEFINED"],
+            }),
+        )
+            .into_response());
+    };
+
+    let condition = match parse_condition(&group_condition) {
+        Ok(c) => c,
+        Err(e) => return Ok(condition_parse_error_response(e)),
+    };
+
+    let auth_ctx = body.auth.map(|a| AuthContext { uid: a.uid });
+    let filter = translate_query_filters(&body.query_filters);
+
+    // SAME check_query_compliance() real, group-query enforcement uses
+    // (handle_run_query's all_descendants=true arm) -- no second,
+    // independently-maintained shape-compliance implementation.
+    let outcome = check_query_compliance(&condition, filter.as_ref(), auth_ctx.as_ref());
+
     let (compliant, reasons): (bool, Vec<&'static str>) = match outcome {
         QueryComplianceOutcome::Admitted => (true, Vec::new()),
         QueryComplianceOutcome::Rejected { unsatisfied_conjuncts } => (

@@ -418,6 +418,14 @@ path = "../../tests/security_rules_collection_group_rules/acceptance/other_surfa
 name = "security_rules_collection_group_rules_regression_baseline_unaffected"
 path = "../../tests/security_rules_collection_group_rules/acceptance/regression_baseline_unaffected.rs"
 
+# security-rules-collection-group-rules acceptance tests (Slice 07, ADR-032)
+# — US-07, LAST slice of this feature: Alex can pre-check whether a
+# candidate collection-group query would be accepted, via a NEW sibling
+# handler/route to simulate_query_compliance.
+[[test]]
+name = "security_rules_collection_group_rules_simulate_group_query_before_shipping"
+path = "../../tests/security_rules_collection_group_rules/acceptance/simulate_group_query_before_shipping.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
