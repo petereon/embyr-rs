@@ -404,6 +404,13 @@ path = "../../tests/security_rules_collection_group_rules/acceptance/admit_compl
 name = "security_rules_collection_group_rules_reject_noncompliant_group_query"
 path = "../../tests/security_rules_collection_group_rules/acceptance/reject_noncompliant_group_query.rs"
 
+# security-rules-collection-group-rules acceptance tests (Slice 05, ADR-032)
+# — US-05, GetDocument/writes/non-group RunQuery remain structurally
+# unaffected by group rules (pure regression-proof slice).
+[[test]]
+name = "security_rules_collection_group_rules_other_surfaces_unaffected"
+path = "../../tests/security_rules_collection_group_rules/acceptance/other_surfaces_unaffected.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -21,9 +21,9 @@
 #[path = "../../security_rules_write_path/common/mod.rs"]
 mod security_rules_write_path_common;
 pub use security_rules_write_path_common::{
-    assert_state_delta, mint_client_identity_token, now_unix, seed_write_access_rule, set_to,
-    string_field, unchanged, update_document, write_access_rule_condition_source,
-    SecurityRulesAdminContext, SecurityRulesFullContext,
+    assert_state_delta, create_document, delete_document, mint_client_identity_token, now_unix,
+    seed_write_access_rule, set_to, string_field, unchanged, update_document,
+    write_access_rule_condition_source, SecurityRulesAdminContext, SecurityRulesFullContext,
 };
 
 use embyr_proto::firestore::{
