@@ -22,8 +22,8 @@
 #[path = "../../security_rules_write_path/common/mod.rs"]
 mod security_rules_write_path_common;
 pub use security_rules_write_path_common::{
-    create_document, delete_document, mint_client_identity_token, now_unix, string_field,
-    update_document, SecurityRulesFullContext,
+    create_document, delete_document, mint_client_identity_token, now_unix,
+    seed_write_access_rule_full, string_field, update_document, SecurityRulesFullContext,
 };
 
 use std::time::Duration;
@@ -132,6 +132,31 @@ pub async fn run_query(
     equality_filters: &[(&str, &str)],
     client_identity_token: Option<&str>,
 ) -> Result<Vec<Document>, tonic::Status> {
+    run_query_raw(
+        ctx,
+        collection_id,
+        false,
+        equality_where_filter(equality_filters),
+        client_identity_token,
+    )
+    .await
+}
+
+/// Real gRPC `RunQuery` call with an explicit `all_descendants` flag —
+/// Slice 06 (US-06)'s own AC-17-128 needs to prove BOTH the non-group
+/// (`access_rules`) and group (`group_access_rules`) `RunQuery` arms are
+/// unaffected by this feature, mirroring
+/// `security_rules_collection_group_rules::common::run_query_raw` exactly,
+/// kept LOCAL for the same reason `run_query` above is local (no type-safe
+/// cross-`#[path]`-tree reuse of `SecurityRulesFullContext`). `run_query`
+/// above now delegates here with `all_descendants: false`.
+pub async fn run_query_raw(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    all_descendants: bool,
+    filter: Option<Filter>,
+    client_identity_token: Option<&str>,
+) -> Result<Vec<Document>, tonic::Status> {
     let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
         .expect("valid endpoint")
         .connect()
@@ -142,9 +167,9 @@ pub async fn run_query(
     let sq = StructuredQuery {
         from: vec![CollectionSelector {
             collection_id: collection_id.to_string(),
-            all_descendants: false,
+            all_descendants,
         }],
-        r#where: equality_where_filter(equality_filters),
+        r#where: filter,
         ..Default::default()
     };
 
@@ -176,6 +201,31 @@ pub async fn run_query(
         }
     }
     Ok(docs)
+}
+
+/// Directly seed a `group_access_rules` row against a
+/// `SecurityRulesFullContext` — Slice 06 (US-06)'s own AC-17-128 needs a
+/// group rule active to prove `RunQuery`'s group arm is unaffected by this
+/// feature. Mirrors
+/// `security_rules_collection_group_rules::common::seed_group_access_rule_full`
+/// exactly, kept LOCAL for the same type-identity reason `run_query_raw`
+/// above is local — this feature's own common module never imports across
+/// the `security_rules_collection_group_rules` path tree.
+pub async fn seed_group_access_rule_full(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    condition_source: &str,
+) {
+    sqlx::query(
+        "INSERT INTO group_access_rules (project_id, collection_id, condition_source) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(&ctx.project_id)
+    .bind(collection_id)
+    .bind(condition_source)
+    .execute(&ctx.sys_pool)
+    .await
+    .expect("insert group_access_rules row");
 }
 
 /// Open a real `Listen` gRPC stream subscribed to `collection`,

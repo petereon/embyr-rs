@@ -464,6 +464,15 @@ path = "../../tests/security_rules_realtime/acceptance/per_event_compliance_rech
 name = "security_rules_realtime_delete_event_non_leakage"
 path = "../../tests/security_rules_realtime/acceptance/delete_event_non_leakage.rs"
 
+# security-rules-realtime acceptance tests (Slice 06, ADR-033) — US-06: a
+# pure regression/independence-proof slice — GetDocument/writes/RunQuery
+# (group and non-group) remain byte-for-byte unaffected by this feature, and
+# an unruled collection's Listen subscription content stays fully
+# unrestricted. No new production logic.
+[[test]]
+name = "security_rules_realtime_other_surfaces_unaffected"
+path = "../../tests/security_rules_realtime/acceptance/other_surfaces_unaffected.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
