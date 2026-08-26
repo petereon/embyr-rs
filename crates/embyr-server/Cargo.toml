@@ -448,6 +448,14 @@ path = "../../tests/security_rules_realtime/acceptance/initial_snapshot_honors_f
 name = "security_rules_realtime_subscribe_time_compliance_check"
 path = "../../tests/security_rules_realtime/acceptance/subscribe_time_compliance_check.rs"
 
+# security-rules-realtime acceptance tests (Slice 04, ADR-033) — US-04: each
+# individually-delivered live change event is re-checked against the rule
+# using the already-fetched document, reusing evaluate() (ADR-027/030)
+# unchanged.
+[[test]]
+name = "security_rules_realtime_per_event_compliance_recheck"
+path = "../../tests/security_rules_realtime/acceptance/per_event_compliance_recheck.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

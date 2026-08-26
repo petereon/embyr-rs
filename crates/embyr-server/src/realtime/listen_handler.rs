@@ -1,13 +1,17 @@
 /// Handle an AddTarget Listen session: initial snapshot + keep-alive + NOTIFY fan-out.
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use embyr_core::{
     access_control::{
-        check_query_compliance, parse_condition, AuthContext, Condition, QueryComplianceOutcome,
+        check_query_compliance, evaluate, parse_condition, AuthContext, Condition,
+        EvaluationOutcome, QueryComplianceOutcome,
     },
     client_identity::VerifiedEndUserIdentity,
-    domain::{document::CollectionPath, project::ProjectId, query::StructuredQuery as DomainQuery},
+    domain::{
+        document::CollectionPath, field_value::FieldValue, project::ProjectId,
+        query::StructuredQuery as DomainQuery,
+    },
 };
 use embyr_proto::firestore::{
     listen_request, listen_response,
@@ -35,6 +39,11 @@ use crate::{
 /// Slow consumer detection: if fan_out detects the subscriber channel is full,
 /// it fires `reset_notify`. The handler responds by sending `TargetChange(RESET)`
 /// and closing the stream.
+///
+/// security-rules-realtime (ADR-033 § Decision — Per-Event Composition,
+/// US-04): every live `Changed` event is re-checked against `condition` (the
+/// loop-lifetime local built once below, at subscribe time) via `evaluate()`
+/// — reused completely unmodified from `embyr_core::access_control`.
 pub async fn handle_add_target(
     first_msg: &ListenRequest,
     adapter: &SharedBackendAdapter,
@@ -115,7 +124,6 @@ pub async fn handle_add_target(
             Some(condition)
         }
     };
-    let _ = &condition; // Slice 04 consumes this per-event; unused for now.
 
     // Decode resume token: fresh (<=24h) tokens enable delta delivery.
     let since_update_time = resume_token
@@ -224,6 +232,26 @@ pub async fn handle_add_target(
                         // US-01 (Finding 5 fix) — FIRST, unconditional, rule-independent.
                         if doc.path.collection_path != collection.collection_path {
                             continue;
+                        }
+                        // security-rules-realtime (ADR-033 § Decision —
+                        // Per-Event Composition, US-04): re-check the
+                        // ALREADY-in-memory `doc.fields` against the
+                        // subscription's own rule, reusing `evaluate()`
+                        // (ADR-027/030) completely unmodified — zero
+                        // additional I/O (AC-17-121). `condition`/`auth_ctx`
+                        // are the SAME loop-lifetime locals built once at
+                        // subscribe time (Slice 03), never re-parsed or
+                        // re-fetched per event.
+                        if let Some(condition) = &condition {
+                            let empty_fields: BTreeMap<String, FieldValue> = BTreeMap::new();
+                            // ADR-030's own empty-map convention: Listen has
+                            // no "proposed new document" concept, mirrors
+                            // handle_get_document exactly (AC-17-120).
+                            if evaluate(condition, auth_ctx.as_ref(), &doc.fields, &empty_fields)
+                                == EvaluationOutcome::Deny
+                            {
+                                continue; // US-04: withheld, never sent, never a crash (AC-17-118/119).
+                            }
                         }
                         let proto_doc = document_to_proto(doc);
                         let response = ListenResponse {
