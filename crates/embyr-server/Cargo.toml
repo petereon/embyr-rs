@@ -390,6 +390,13 @@ path = "../../tests/security_rules_collection_group_rules/acceptance/define_grou
 name = "security_rules_collection_group_rules_reject_ungoverned_group_query"
 path = "../../tests/security_rules_collection_group_rules/acceptance/reject_ungoverned_group_query.rs"
 
+# security-rules-collection-group-rules acceptance tests (Slice 02, ADR-032)
+# — US-02, a compliant collection-group query is admitted, spanning every
+# nesting depth the collection id occurs at.
+[[test]]
+name = "security_rules_collection_group_rules_admit_compliant_group_query"
+path = "../../tests/security_rules_collection_group_rules/acceptance/admit_compliant_group_query.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

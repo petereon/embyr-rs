@@ -22,8 +22,8 @@
 mod security_rules_write_path_common;
 pub use security_rules_write_path_common::{
     assert_state_delta, mint_client_identity_token, now_unix, seed_write_access_rule, set_to,
-    unchanged, write_access_rule_condition_source, SecurityRulesAdminContext,
-    SecurityRulesFullContext,
+    string_field, unchanged, update_document, write_access_rule_condition_source,
+    SecurityRulesAdminContext, SecurityRulesFullContext,
 };
 
 use embyr_proto::firestore::{
@@ -166,4 +166,68 @@ pub async fn group_access_rule_condition_source(
     .fetch_optional(&ctx.pool)
     .await
     .unwrap_or(None)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 02 (US-02, ADR-032) — real `RunQuery(all_descendants = true)`
+// coverage against `SecurityRulesFullContext`. Needs a group-rule seed
+// helper against THAT context's `sys_pool`/`project_id` (distinct from
+// `seed_group_access_rule` above, which targets `SecurityRulesAdminContext`
+// alone), mirroring `seed_write_access_rule_full`'s identical "_full" naming
+// precedent for the same context-type distinction. Also needs a way to seed
+// documents at an explicit, possibly NESTED collection path (e.g.
+// `expeditions/trek-2026/journal_entries`) — no reusable helper for this
+// exists in `security_rules_query_path`'s own common module (checked before
+// adding this): its `run_query`/`run_query_raw` helpers only ever issue
+// queries, never seed documents. `write_access_rules`'s own `create_document`
+// helper can't be reused either — `handle_create_document` sets
+// `collection_path` from `req.collection_id` alone, never combined with
+// `req.parent`, so it can only ever create TOP-LEVEL collection documents.
+// `update_document` (imported above) upserts by the document's own full
+// resource name, whose `collection_path` `parse_document_path` derives from
+// every segment between `/documents/` and the trailing id — the correct,
+// already-existing mechanism for a nested seed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Directly seed a `group_access_rules` row against a `SecurityRulesFullContext`
+/// (real gRPC + admin composition root) — this slice tests group-rule
+/// EVALUATION at query-time, not definition (that is Slice 01's own job),
+/// mirroring `seed_write_access_rule_full`'s identical shape.
+pub async fn seed_group_access_rule_full(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    condition_source: &str,
+) {
+    sqlx::query(
+        "INSERT INTO group_access_rules (project_id, collection_id, condition_source) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(&ctx.project_id)
+    .bind(collection_id)
+    .bind(condition_source)
+    .execute(&ctx.sys_pool)
+    .await
+    .expect("insert group_access_rules row");
+}
+
+/// Seed a document at an explicit collection PATH (which may be nested, e.g.
+/// `expeditions/trek-2026/journal_entries`) via the real `UpdateDocument`
+/// driving port — upsert semantics apply when no precondition is supplied
+/// (`adapter::update_document`'s `None` arm), so this both creates the
+/// document and is idempotent if called twice. Bypasses no security check of
+/// its own: `journal_entries`'s write-path rule state is irrelevant to this
+/// feature (US-05's own independence guarantee), and none is seeded here.
+pub async fn seed_document_at_path(
+    ctx: &SecurityRulesFullContext,
+    collection_path: &str,
+    document_id: &str,
+    fields: std::collections::HashMap<String, embyr_proto::firestore::Value>,
+) {
+    let resource_name = format!(
+        "projects/{}/databases/(default)/documents/{}/{}",
+        ctx.project_id, collection_path, document_id
+    );
+    update_document(ctx, &resource_name, fields, None)
+        .await
+        .expect("seed document at collection path");
 }
