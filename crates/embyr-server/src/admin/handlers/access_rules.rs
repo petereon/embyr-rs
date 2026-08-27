@@ -143,6 +143,29 @@ pub struct WriteAccessRuleResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// One entry in a collection's WRITE-rule history (security-rules-operations,
+/// Slice 04, ADR-035 § Decision — Admin Surface) — mirrors
+/// `AccessRuleHistoryEntry` exactly.
+#[derive(Serialize)]
+pub struct WriteAccessRuleHistoryEntry {
+    pub id: i64,
+    pub condition: String,
+    pub actor_account_id: uuid::Uuid,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response for GET
+/// /admin/v1/projects/:project_id/write_access_rules/:collection_path/history
+/// — 200, `history` newest first, empty (never an error) when the
+/// collection has never had a write rule defined. Mirrors
+/// `AccessRuleHistoryResponse` exactly.
+#[derive(Serialize)]
+pub struct WriteAccessRuleHistoryResponse {
+    pub project_id: String,
+    pub collection_path: String,
+    pub history: Vec<WriteAccessRuleHistoryEntry>,
+}
+
 /// Body for POST /admin/v1/projects/:project_id/group_access_rules
 /// (security-rules-collection-group-rules, US-01, ADR-032). `collection_id`
 /// is a BARE collection-group identifier — never a path (validated by
@@ -560,7 +583,12 @@ pub async fn define_write_access_rule(
 
     match state
         .system_db
-        .upsert_write_access_rule(&project_id, &body.collection_path, &body.condition)
+        .upsert_write_access_rule(
+            &project_id,
+            &body.collection_path,
+            &body.condition,
+            session.account_id,
+        )
         .await
     {
         // AC-17-20/AC-17-21: the SAME response shape whether this was a
@@ -581,6 +609,50 @@ pub async fn define_write_access_rule(
             .into_response()),
         Err(e) => {
             tracing::error!("define_write_access_rule upsert error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// GET /admin/v1/projects/:project_id/write_access_rules/:collection_path/history
+/// (security-rules-operations, Slice 04, ADR-035 § Decision — Admin
+/// Surface). Mirrors `get_access_rule_history`'s exact shape — any role,
+/// read-only (`verify_project_ownership` only, no role gate), 401 on
+/// missing/invalid session via `SessionContext`'s existing rejection, empty
+/// `history` (never an error) when the collection has never had a write
+/// rule defined.
+pub async fn get_write_access_rule_history(
+    Path((project_id, collection_path)): Path<(String, String)>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+) -> Result<Response, StatusCode> {
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    match state
+        .system_db
+        .get_write_access_rule_history(&project_id, &collection_path)
+        .await
+    {
+        Ok(rows) => Ok((
+            StatusCode::OK,
+            Json(WriteAccessRuleHistoryResponse {
+                project_id,
+                collection_path,
+                history: rows
+                    .into_iter()
+                    .map(|r| WriteAccessRuleHistoryEntry {
+                        id: r.id,
+                        condition: r.condition_source,
+                        actor_account_id: r.actor_account_id,
+                        captured_at: r.captured_at,
+                    })
+                    .collect(),
+            }),
+        )
+            .into_response()),
+        Err(e) => {
+            tracing::error!("get_write_access_rule_history error: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

@@ -60,6 +60,18 @@ pub struct WriteAccessRuleRow {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// security-rules-operations (ADR-035, Slice 04): one
+/// `write_access_rule_history` row — mirrors `AccessRuleHistoryRow` exactly,
+/// against the independent write-rule history table (AC-17-169's
+/// structural-independence guarantee).
+#[derive(Debug, Clone)]
+pub struct WriteAccessRuleHistoryRow {
+    pub id: i64,
+    pub condition_source: String,
+    pub actor_account_id: uuid::Uuid,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// security-rules-collection-group-rules (ADR-032): a project's per-
 /// collection-id COLLECTION-GROUP access-control rule, as stored in
 /// `group_access_rules` — a table structurally independent of both
@@ -487,12 +499,25 @@ impl SystemDb {
     /// `write_access_rules` EXCLUSIVELY — no `access_rules` in this
     /// statement's FROM/INTO clause at all, the structural mechanism behind
     /// AC-17-43/AC-17-22's independence guarantee.
+    ///
+    /// security-rules-operations (ADR-035, Slice 04): history capture is
+    /// FUSED into this SAME method, in the SAME transaction as the existing
+    /// upsert — mirrors `upsert_access_rule`'s exact Slice-01 shape, applied
+    /// to `write_access_rule_history`. `actor_account_id` is a
+    /// compiler-enforced required parameter, identical discipline.
     pub async fn upsert_write_access_rule(
         &self,
         project_id: &str,
         collection_path: &str,
         condition_source: &str,
+        actor_account_id: uuid::Uuid,
     ) -> Result<(), CoreError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx begin failed: {e}")))?;
+
         sqlx::query(
             "INSERT INTO write_access_rules (project_id, collection_path, condition_source) \
              VALUES ($1, $2, $3) \
@@ -502,11 +527,30 @@ impl SystemDb {
         .bind(project_id)
         .bind(collection_path)
         .bind(condition_source)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             CoreError::BackendUnavailable(format!("upsert_write_access_rule failed: {e}"))
         })?;
+
+        sqlx::query(
+            "INSERT INTO write_access_rule_history \
+             (project_id, collection_path, condition_source, actor_account_id) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(project_id)
+        .bind(collection_path)
+        .bind(condition_source)
+        .bind(actor_account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("write_access_rule_history insert failed: {e}"))
+        })?;
+
+        tx.commit()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx commit failed: {e}")))?;
         Ok(())
     }
 
@@ -547,6 +591,50 @@ impl SystemDb {
                 .try_get("updated_at")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
+    }
+
+    /// Retrieve `(project_id, collection_path)`'s complete WRITE-rule
+    /// history, newest first (security-rules-operations, Slice 04, ADR-035)
+    /// — mirrors `get_access_rule_history` exactly, against
+    /// `write_access_rule_history` EXCLUSIVELY (AC-17-169's
+    /// structural-independence guarantee: no `access_rule_history` in this
+    /// statement's FROM clause at all).
+    pub async fn get_write_access_rule_history(
+        &self,
+        project_id: &str,
+        collection_path: &str,
+    ) -> Result<Vec<WriteAccessRuleHistoryRow>, CoreError> {
+        let rows = sqlx::query(
+            "SELECT id, condition_source, actor_account_id, captured_at \
+             FROM write_access_rule_history WHERE project_id = $1 AND collection_path = $2 \
+             ORDER BY id DESC",
+        )
+        .bind(project_id)
+        .bind(collection_path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("get_write_access_rule_history failed: {e}"))
+        })?;
+
+        rows.into_iter()
+            .map(|r| {
+                Ok(WriteAccessRuleHistoryRow {
+                    id: r
+                        .try_get("id")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    condition_source: r
+                        .try_get("condition_source")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    actor_account_id: r
+                        .try_get("actor_account_id")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    captured_at: r
+                        .try_get("captured_at")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                })
+            })
+            .collect()
     }
 
     // -----------------------------------------------------------------------
