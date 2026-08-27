@@ -492,6 +492,12 @@ path = "../../tests/security_rules_realtime/acceptance/regression_baseline_unaff
 name = "security_rules_realtime_listen_subscription_simulation"
 path = "../../tests/security_rules_realtime/acceptance/listen_subscription_simulation.rs"
 
+# custom-claims acceptance tests (Slice 02, ADR-034) — boolean-claim rule
+# gates a GetDocument read.
+[[test]]
+name = "custom_claims_boolean_claim_gates_getdocument"
+path = "../../tests/custom_claims/acceptance/boolean_claim_gates_getdocument.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

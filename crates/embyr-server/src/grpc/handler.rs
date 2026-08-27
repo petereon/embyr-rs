@@ -581,7 +581,13 @@ impl FirestoreService {
                     })?;
                 let auth_ctx = verified_identity
                     .as_ref()
-                    .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+                    .map(|v| embyr_core::access_control::AuthContext {
+                        uid: v.end_user_id.clone(),
+                        // custom-claims (US-02, ADR-034): the ONE call site
+                        // in this slice's own scope — real claims propagate
+                        // from the verified identity into the evaluator.
+                        claims: v.claims.clone(),
+                    });
                 // AC-17-10 (existence non-leakage): a non-existent document
                 // evaluates against an EMPTY field map — the same
                 // fail-closed mechanism AC-17-09 already uses for a single
@@ -702,7 +708,14 @@ impl FirestoreService {
                     })?;
             let auth_ctx = verified_identity
                 .as_ref()
-                .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+                .map(|v| embyr_core::access_control::AuthContext {
+                    uid: v.end_user_id.clone(),
+                    // custom-claims (ADR-034): out of THIS slice's scope
+                    // (write-path/RunQuery wiring is US-03/US-05's own job)
+                    // — empty map keeps this call site compiling against
+                    // AuthContext's new field with zero behavior change.
+                    claims: std::collections::BTreeMap::new(),
+                });
 
             // Create: `resource_fields` is empty (no document exists yet —
             // AC-17-28's fail-closed mechanism reuse); `request_resource_fields`
@@ -801,7 +814,14 @@ impl FirestoreService {
                     })?;
             let auth_ctx = verified_identity
                 .as_ref()
-                .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+                .map(|v| embyr_core::access_control::AuthContext {
+                    uid: v.end_user_id.clone(),
+                    // custom-claims (ADR-034): out of THIS slice's scope
+                    // (write-path/RunQuery wiring is US-03/US-05's own job)
+                    // — empty map keeps this call site compiling against
+                    // AuthContext's new field with zero behavior change.
+                    claims: std::collections::BTreeMap::new(),
+                });
 
             // Pre-write state (DIFFERENT from Create): reuses the existing,
             // already-probed `BackendAdapter::get_document` — no new port.
@@ -912,7 +932,14 @@ impl FirestoreService {
                     })?;
             let auth_ctx = verified_identity
                 .as_ref()
-                .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+                .map(|v| embyr_core::access_control::AuthContext {
+                    uid: v.end_user_id.clone(),
+                    // custom-claims (ADR-034): out of THIS slice's scope
+                    // (write-path/RunQuery wiring is US-03/US-05's own job)
+                    // — empty map keeps this call site compiling against
+                    // AuthContext's new field with zero behavior change.
+                    claims: std::collections::BTreeMap::new(),
+                });
 
             // Pre-write state: reuses the existing, already-probed
             // `BackendAdapter::get_document` — no new port. Paid only when a
@@ -1264,7 +1291,14 @@ impl FirestoreService {
                     })?;
             let auth_ctx = verified_identity
                 .as_ref()
-                .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+                .map(|v| embyr_core::access_control::AuthContext {
+                    uid: v.end_user_id.clone(),
+                    // custom-claims (ADR-034): out of THIS slice's scope
+                    // (write-path/RunQuery wiring is US-03/US-05's own job)
+                    // — empty map keeps this call site compiling against
+                    // AuthContext's new field with zero behavior change.
+                    claims: std::collections::BTreeMap::new(),
+                });
 
             // SAME check_query_compliance()/query_compliance_rejection()
             // real, non-group enforcement uses (ADR-031) — never a second,
@@ -1300,7 +1334,14 @@ impl FirestoreService {
                         })?;
                 let auth_ctx = verified_identity
                     .as_ref()
-                    .map(|v| embyr_core::access_control::AuthContext { uid: v.end_user_id.clone() });
+                    .map(|v| embyr_core::access_control::AuthContext {
+                    uid: v.end_user_id.clone(),
+                    // custom-claims (ADR-034): out of THIS slice's scope
+                    // (write-path/RunQuery wiring is US-03/US-05's own job)
+                    // — empty map keeps this call site compiling against
+                    // AuthContext's new field with zero behavior change.
+                    claims: std::collections::BTreeMap::new(),
+                });
 
                 // ADR-031 § OQ-SRQ-03 Resolution: compliance-checking runs
                 // strictly BEFORE the composite-index check below — a

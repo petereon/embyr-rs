@@ -96,7 +96,13 @@ pub async fn handle_add_target(
     // read for the initial snapshot (AC-17-114).
     let auth_ctx = verified_identity
         .as_ref()
-        .map(|v| AuthContext { uid: v.end_user_id.clone() });
+        .map(|v| AuthContext {
+            uid: v.end_user_id.clone(),
+            // custom-claims (ADR-034): out of THIS slice's scope (Listen
+            // wiring is a later, named follow-up) — empty map keeps this
+            // call site compiling against AuthContext's new field.
+            claims: std::collections::BTreeMap::new(),
+        });
 
     let rule_row = system_db
         .get_access_rule(&project_id, &collection.collection_path)

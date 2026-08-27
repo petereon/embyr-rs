@@ -575,7 +575,13 @@ pub async fn simulate_access_rule(
     // identical in shape to real evaluation's `Option<AuthContext>`
     // (ADR-029 § Identity reuse) — no separate "anonymous simulation" code
     // path.
-    let auth_ctx = body.auth.map(|a| AuthContext { uid: a.uid });
+    let auth_ctx = body.auth.map(|a| AuthContext {
+        uid: a.uid,
+        // custom-claims (ADR-034): out of THIS slice's scope (simulation
+        // claims support is US-07's own job) — empty map keeps this call
+        // site compiling against AuthContext's new field.
+        claims: std::collections::BTreeMap::new(),
+    });
     let resource_fields: BTreeMap<String, FieldValue> = body
         .resource
         .iter()
@@ -653,7 +659,13 @@ pub async fn simulate_query_compliance(
         Err(e) => return Ok(condition_parse_error_response(e)),
     };
 
-    let auth_ctx = body.auth.map(|a| AuthContext { uid: a.uid });
+    let auth_ctx = body.auth.map(|a| AuthContext {
+        uid: a.uid,
+        // custom-claims (ADR-034): out of THIS slice's scope (simulation
+        // claims support is US-07's own job) — empty map keeps this call
+        // site compiling against AuthContext's new field.
+        claims: std::collections::BTreeMap::new(),
+    });
     let filter = translate_query_filters(&body.query_filters);
 
     let outcome = check_query_compliance(&condition, filter.as_ref(), auth_ctx.as_ref());
@@ -730,7 +742,13 @@ pub async fn simulate_group_query_compliance(
         Err(e) => return Ok(condition_parse_error_response(e)),
     };
 
-    let auth_ctx = body.auth.map(|a| AuthContext { uid: a.uid });
+    let auth_ctx = body.auth.map(|a| AuthContext {
+        uid: a.uid,
+        // custom-claims (ADR-034): out of THIS slice's scope (simulation
+        // claims support is US-07's own job) — empty map keeps this call
+        // site compiling against AuthContext's new field.
+        claims: std::collections::BTreeMap::new(),
+    });
     let filter = translate_query_filters(&body.query_filters);
 
     // SAME check_query_compliance() real, group-query enforcement uses

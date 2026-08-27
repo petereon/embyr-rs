@@ -15,13 +15,18 @@
 //! primary     := comparison | 'true' | 'false' | '(' condition ')'
 //! comparison  := operand ( '==' | '!=' ) operand
 //! operand     := 'request.auth.uid' | 'request.auth' | 'null' | 'resource.data.' IDENT
+//!              | 'request.auth.token.' IDENT
 //! ```
 //!
-//! Explicitly out of v1 scope (ADR-027): cross-document reads (`get()`/
-//! `exists()`), custom functions, wildcard/recursive path matching, custom
-//! claims, string/number literals (OQ-SR-04 — booleans only, confirmed by
-//! DISTILL, see `feature-delta.md` § Wave: DISTILL / Open Question
-//! Resolutions).
+//! `request.auth.token.<claim>` (custom-claims US-02, ADR-034) resolves
+//! against `AuthContext.claims`, reusing the identical `Operand`-addition
+//! playbook `RequestResourceField` already established (ADR-030).
+//!
+//! Explicitly out of v1 scope (ADR-027, narrowed by ADR-034): cross-document
+//! reads (`get()`/`exists()`), custom functions, wildcard/recursive path
+//! matching, string/number literals (OQ-SR-04 — booleans only; string
+//! literals land in custom-claims Release 2/US-06, see
+//! `feature-delta.md` § Wave: DISTILL / Open Question Resolutions).
 //!
 //! `evaluate()` is infallible and total by construction (no `Result`, no
 //! panic) — AC-17-09's "never crashes on a missing field" claim is a
@@ -72,6 +77,11 @@ pub enum Operand {
     /// `ResourceField` (pre-write state) — non-overlapping token prefixes,
     /// no ordering risk (ADR-030 § Decision — Grammar Extension).
     RequestResourceField(String),
+    /// A custom claim referenced via `request.auth.token.<claim>` (custom-claims
+    /// US-02, ADR-034 § Decision — Grammar Extension). Resolved against
+    /// `AuthContext.claims`, reusing the identical `FieldMissing` fail-closed
+    /// mechanism `ResourceField`/`RequestResourceField` already use.
+    AuthTokenClaim(String),
     BoolLiteral(bool),
     NullLiteral,
 }
@@ -87,9 +97,14 @@ pub enum CompareOp {
 /// the `handle_get_document` call site (ADR-029 § Identity reuse) — this
 /// module never constructs its own identity, it only consumes an
 /// already-verified one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AuthContext {
     pub uid: String,
+    /// Custom claims Trailmark's own backend embedded at mint time (custom-claims
+    /// US-01, ADR-034), 1:1 with `VerifiedEndUserIdentity.claims`. Empty for any
+    /// caller whose token carried no extra claims — zero behavior change for
+    /// every rule that doesn't reference `request.auth.token.<claim>`.
+    pub claims: BTreeMap<String, FieldValue>,
 }
 
 /// `evaluate()`'s return type. No third state — the function is total.
@@ -277,6 +292,23 @@ fn word_to_operand(word: &str) -> Result<Operand, ConditionParseError> {
         "request.auth.uid" => Ok(Operand::AuthUid),
         "request.auth" => Ok(Operand::AuthNullSentinel),
         "null" => Ok(Operand::NullLiteral),
+        // custom-claims (ADR-034 § Finding — latent grammar gap): required,
+        // bundled fix — `word_to_operand()` had NO "true"/"false" arm before
+        // this feature, so `<operand> == true`/`!= false` (comparison
+        // position) was a guaranteed syntax error, independent of
+        // `AuthTokenClaim`. `parse_primary`'s own bare-literal peek (a
+        // WHOLE-condition `"true"`/`"false"`) is checked before
+        // `parse_comparison` is ever reached and is unmodified by this fix —
+        // strictly additive, zero regression (ADR-034 verified trace).
+        "true" => Ok(Operand::BoolLiteral(true)),
+        "false" => Ok(Operand::BoolLiteral(false)),
+        w if w.starts_with("request.auth.token.") => {
+            let claim = &w["request.auth.token.".len()..];
+            if claim.is_empty() {
+                return Err(syntax_error("'request.auth.token.' requires a claim name"));
+            }
+            Ok(Operand::AuthTokenClaim(claim.to_string()))
+        }
         w if w.starts_with("request.resource.data.") => {
             let field = &w["request.resource.data.".len()..];
             if field.is_empty() {
@@ -389,13 +421,18 @@ impl<'a> Parser<'a> {
 ///
 /// Fail-closed semantics (AC-17-09, ADR-027 § Fail-Closed Semantics on
 /// Missing Field; AC-17-28, ADR-030 — the identical mechanism reused
-/// verbatim): a `resource.data.<field>` reference absent from
-/// `resource_fields`, OR a `request.resource.data.<field>` reference absent
-/// from `request_resource_fields`, is a TOP-LEVEL evaluation short-circuit
-/// to `Deny` — the first `FieldMissing` encountered anywhere in the
-/// condition tree collapses the entire evaluation to `Deny`, regardless of
-/// `&&`/`||`/`!` structure. There is no `Result::Err` branch to forget to
-/// handle, because there is no `Result` in this function's return type.
+/// verbatim; AC-17-146/147, ADR-034 — the identical mechanism reused for
+/// `request.auth.token.<claim>`): a `resource.data.<field>` reference absent
+/// from `resource_fields`, a `request.resource.data.<field>` reference
+/// absent from `request_resource_fields`, OR a `request.auth.token.<claim>`
+/// reference absent from `AuthContext.claims` (or no verified caller at
+/// all), is a `FieldMissing` — which collapses the WHOLE evaluation to
+/// `Deny` for `&&`/`!`/a bare `Compare`, UNLESS it occurs inside an `||`
+/// whose OTHER side is definitively `true` (AC-17-142, ADR-034 — `||`
+/// mirrors real Firestore's own semantics: a proven-true side wins
+/// regardless of the other side's error). There is no `Result::Err` branch
+/// to forget to handle, because there is no `Result` in this function's
+/// return type.
 ///
 /// `request_resource_fields` is the proposed new document (Create/Update) —
 /// empty for Read (`handle_get_document`, ADR-030: no "proposed new
@@ -437,8 +474,33 @@ fn eval_bool(
         }
         Condition::And(left, right) => Ok(eval_bool(left, auth, resource_fields, request_resource_fields)?
             && eval_bool(right, auth, resource_fields, request_resource_fields)?),
-        Condition::Or(left, right) => Ok(eval_bool(left, auth, resource_fields, request_resource_fields)?
-            || eval_bool(right, auth, resource_fields, request_resource_fields)?),
+        Condition::Or(left, right) => {
+            // custom-claims (US-02, ADR-034, AC-17-142): a claim reference is
+            // legitimately absent for many callers (unlike resource fields,
+            // usually populated) — a bare `?`-propagation here would let ONE
+            // missing-claim branch collapse an otherwise-satisfied `||` to
+            // Deny, contradicting AC-17-142's own locked domain example (a
+            // moderator-OR-owner rule must admit the owner even though her
+            // token carries no `is_moderator` claim at all). Mirrors real
+            // Firestore's own `||` semantics: a definite `true` on either
+            // side wins regardless of the other side's error; only "neither
+            // side is definitively true" fails closed. Verified zero
+            // regression: no pre-existing condition anywhere in the 136+
+            // -scenario suite reaches this arm with a `FieldMissing` on
+            // either side (direct grep — `||` never previously appeared in
+            // an evaluated, as opposed to parsed-only or
+            // compliance-checked, condition).
+            let left_result = eval_bool(left, auth, resource_fields, request_resource_fields);
+            if let Ok(true) = left_result {
+                return Ok(true);
+            }
+            let right_result = eval_bool(right, auth, resource_fields, request_resource_fields);
+            match (left_result, right_result) {
+                (_, Ok(true)) => Ok(true),
+                (Ok(false), Ok(false)) => Ok(false),
+                _ => Err(FieldMissing),
+            }
+        }
         Condition::Compare(left, op, right) => {
             let equal = compare_operands(left, right, auth, resource_fields, request_resource_fields)?;
             Ok(match op {
@@ -510,6 +572,15 @@ fn resolve_field_value(
         }
         Operand::BoolLiteral(value) => Ok(FieldValue::Boolean(*value)),
         Operand::NullLiteral => Ok(FieldValue::Null),
+        // custom-claims (ADR-034 § Decision — resolve_field_value): fail-closed
+        // in exactly two cases — no verified caller at all (AC-17-147), then a
+        // verified caller whose claims map lacks this key (AC-17-146) — both
+        // collapse to the existing top-level `FieldMissing` short-circuit, no
+        // new error class.
+        Operand::AuthTokenClaim(key) => {
+            let auth = auth.ok_or(FieldMissing)?;
+            auth.claims.get(key).cloned().ok_or(FieldMissing)
+        }
         Operand::AuthUid | Operand::AuthNullSentinel => {
             auth.map(|a| FieldValue::String(a.uid.clone())).ok_or(FieldMissing)
         }
@@ -868,6 +939,63 @@ mod tests {
         }
     }
 
+    // ── parse_condition: request.auth.token.<claim> (custom-claims US-02, ADR-034) ──
+
+    #[test]
+    fn auth_token_claim_condition_parses_into_a_compare_ast() {
+        // US-02 walking-skeleton domain example: `request.auth.token.is_moderator
+        // == true`. Exercises BOTH new arms bundled into this fix: the
+        // `AuthTokenClaim` prefix branch (LHS) and the "true"/"false" arms
+        // (RHS) — without the latter, this exact input was a guaranteed
+        // syntax error before this feature (ADR-034 § Finding).
+        let result = parse_condition("request.auth.token.is_moderator == true");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::AuthTokenClaim("is_moderator".to_string()),
+                CompareOp::Eq,
+                Operand::BoolLiteral(true),
+            ))
+        );
+    }
+
+    #[test]
+    fn empty_claim_name_after_the_token_prefix_is_a_syntax_error() {
+        let result = parse_condition("request.auth.token. == true");
+        match result {
+            Err(ConditionParseError::SyntaxError { .. }) => {}
+            other => panic!("expected SyntaxError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bool_literal_now_parses_in_comparison_position_general_bugfix() {
+        // ADR-034 § Finding: the "true"/"false" bugfix is general, not
+        // AuthTokenClaim-specific — proven here against the PRE-EXISTING
+        // `resource.data.<field>` operand (mirrors US-06's own "prove the
+        // fix is general" domain-example discipline). Before this feature,
+        // `word_to_operand("true")` inside a comparison hit the catch-all
+        // `Err(syntax_error(...))` unconditionally.
+        let allow = parse_condition("resource.data.is_public == true");
+        assert_eq!(
+            allow,
+            Ok(Condition::Compare(
+                Operand::ResourceField("is_public".to_string()),
+                CompareOp::Eq,
+                Operand::BoolLiteral(true),
+            ))
+        );
+        let deny = parse_condition("resource.data.is_public != false");
+        assert_eq!(
+            deny,
+            Ok(Condition::Compare(
+                Operand::ResourceField("is_public".to_string()),
+                CompareOp::Ne,
+                Operand::BoolLiteral(false),
+            ))
+        );
+    }
+
     // ── evaluate: the four-way truth table DISCUSS's domain examples exercise ──
 
     #[test]
@@ -877,7 +1005,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Allow);
@@ -890,7 +1018,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "dana-kim".to_string() };
+        let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
@@ -903,7 +1031,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new(); // owner_id absent
 
         assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
@@ -922,7 +1050,7 @@ mod tests {
             CompareOp::Eq,
             Operand::AuthUid,
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
@@ -942,7 +1070,7 @@ mod tests {
             CompareOp::Eq,
             Operand::AuthUid,
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
 
         assert_eq!(
             evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields()),
@@ -962,7 +1090,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
@@ -993,6 +1121,152 @@ mod tests {
         );
     }
 
+    // ── evaluate: request.auth.token.<claim> (custom-claims US-02, ADR-034) ──
+
+    fn claims_with(key: &str, value: FieldValue) -> BTreeMap<String, FieldValue> {
+        let mut map = BTreeMap::new();
+        map.insert(key.to_string(), value);
+        map
+    }
+
+    fn is_moderator_condition() -> Condition {
+        Condition::Compare(
+            Operand::AuthTokenClaim("is_moderator".to_string()),
+            CompareOp::Eq,
+            Operand::BoolLiteral(true),
+        )
+    }
+
+    #[test]
+    fn claim_matching_bool_literal_allows_ac_17_141() {
+        // US-02 Domain Example 1: Priya Nair (`is_moderator: true`) on
+        // `flagged_content`.
+        let auth = AuthContext {
+            uid: "priya-nair".to_string(),
+            claims: claims_with("is_moderator", FieldValue::Boolean(true)),
+        };
+        let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
+
+        assert_eq!(
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields()),
+            EvaluationOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn claim_present_but_not_matching_bool_literal_denies_ac_17_141() {
+        let auth = AuthContext {
+            uid: "jordan-lee".to_string(),
+            claims: claims_with("is_moderator", FieldValue::Boolean(false)),
+        };
+        let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
+
+        assert_eq!(
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields()),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn missing_claim_key_denies_never_panics_fail_closed_ac_17_141() {
+        // US-02 Domain Example 3 / AC-17-141: Dana Kim holds a verified
+        // identity with NO `is_moderator` claim at all — the SAME
+        // `FieldMissing` short-circuit AC-17-09 already proves for a missing
+        // resource field, now exercised against the claims map.
+        let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
+
+        assert_eq!(
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields()),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn anonymous_caller_denies_when_rule_references_a_claim_ac_17_141() {
+        let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
+
+        assert_eq!(
+            evaluate(&is_moderator_condition(), None, &resource, &empty_fields()),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn claim_check_composed_with_ownership_via_or_admits_moderator_or_owner_ac_17_142() {
+        // AC-17-142: `request.auth.token.is_moderator == true ||
+        // request.auth.uid == resource.data.owner_id`.
+        let condition = Condition::Or(
+            Box::new(is_moderator_condition()),
+            Box::new(Condition::Compare(
+                Operand::AuthUid,
+                CompareOp::Eq,
+                Operand::ResourceField("owner_id".to_string()),
+            )),
+        );
+        let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
+
+        // Priya: satisfies the claim disjunct, not the ownership one.
+        let priya = AuthContext {
+            uid: "priya-nair".to_string(),
+            claims: claims_with("is_moderator", FieldValue::Boolean(true)),
+        };
+        assert_eq!(
+            evaluate(&condition, Some(&priya), &resource, &empty_fields()),
+            EvaluationOutcome::Allow,
+            "a moderator must be admitted via the claim disjunct"
+        );
+
+        // Maria: satisfies the ownership disjunct, has no moderator claim.
+        let maria = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        assert_eq!(
+            evaluate(&condition, Some(&maria), &resource, &empty_fields()),
+            EvaluationOutcome::Allow,
+            "the document owner must be admitted via the ownership disjunct"
+        );
+
+        // Dana: satisfies neither disjunct.
+        let dana = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        assert_eq!(
+            evaluate(&condition, Some(&dana), &resource, &empty_fields()),
+            EvaluationOutcome::Deny,
+            "neither a moderator nor the owner — must deny"
+        );
+    }
+
+    #[test]
+    fn claim_to_resource_field_equality_allows_when_equal_denies_when_different_ac_17_143() {
+        // AC-17-143: `request.auth.token.department == resource.data.department`
+        // — Jordan Lee (`department: "billing"`) against `support_tickets`.
+        // Falls through to the existing `FieldValue::PartialEq` catch-all in
+        // `compare_operands` — zero new comparison logic (ADR-034 § Decision).
+        let condition = Condition::Compare(
+            Operand::AuthTokenClaim("department".to_string()),
+            CompareOp::Eq,
+            Operand::ResourceField("department".to_string()),
+        );
+        let jordan = AuthContext {
+            uid: "jordan-lee".to_string(),
+            claims: claims_with("department", FieldValue::String("billing".to_string())),
+        };
+
+        let matching_ticket =
+            resource_with("department", FieldValue::String("billing".to_string()));
+        assert_eq!(
+            evaluate(&condition, Some(&jordan), &matching_ticket, &empty_fields()),
+            EvaluationOutcome::Allow,
+            "AC-17-143: matching department claim/field must allow"
+        );
+
+        let other_ticket =
+            resource_with("department", FieldValue::String("engineering".to_string()));
+        assert_eq!(
+            evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields()),
+            EvaluationOutcome::Deny,
+            "AC-17-143: mismatched department claim/field must deny"
+        );
+    }
+
     // ── PBT full (Mandate 9, layer 1) — quantified over the resource-field input space ──
 
     proptest! {
@@ -1013,7 +1287,7 @@ mod tests {
                 CompareOp::Eq,
                 Operand::ResourceField(field_name),
             );
-            let auth = AuthContext { uid };
+            let auth = AuthContext { uid, claims: BTreeMap::new() };
             let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
             prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
@@ -1036,7 +1310,7 @@ mod tests {
                 CompareOp::Eq,
                 Operand::ResourceField("owner_id".to_string()),
             );
-            let auth = AuthContext { uid: auth_uid };
+            let auth = AuthContext { uid: auth_uid, claims: BTreeMap::new() };
             let mut resource = resource_with("owner_id", FieldValue::String(owner_uid));
             resource.insert("title".to_string(), FieldValue::String(unrelated_value));
 
@@ -1070,7 +1344,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -1089,7 +1363,7 @@ mod tests {
             CompareOp::Eq,
             Operand::AuthUid,
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -1108,7 +1382,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = QueryFilter::Composite(vec![
             owner_id_field_equals("maria-santos"),
             QueryFilter::Field(FieldFilter {
@@ -1137,7 +1411,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let dana = AuthContext { uid: "dana-kim".to_string() };
+        let dana = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
         let filter_naming_someone_elses_uid = owner_id_field_equals("maria-santos");
 
         let outcome =
@@ -1164,7 +1438,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = QueryFilter::Field(FieldFilter {
             field_path: "Owner_Id".to_string(),
             op: FilterOp::Equal,
@@ -1209,7 +1483,7 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
 
         assert_eq!(
             check_query_compliance(&condition, None, Some(&auth)),
@@ -1232,7 +1506,7 @@ mod tests {
         // — so this pinned example uses `Not` instead, which stays
         // undecidable.)
         let condition = Condition::Not(Box::new(Condition::Literal(true)));
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -1252,7 +1526,7 @@ mod tests {
 
     #[test]
     fn bare_true_rule_admits_regardless_of_filter_or_auth_ac_17_59() {
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -1269,7 +1543,7 @@ mod tests {
 
     #[test]
     fn bare_false_rule_denies_unconditionally_regardless_of_filter_or_auth() {
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -1291,7 +1565,7 @@ mod tests {
     fn auth_required_rule_admits_a_signed_in_caller_with_or_without_a_filter_ac_17_57() {
         let condition =
             Condition::Compare(Operand::AuthNullSentinel, CompareOp::Ne, Operand::NullLiteral);
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -1364,7 +1638,7 @@ mod tests {
             Box::new(auth_required_condition()),
             Box::new(ownership_condition("curator_id")),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = curator_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -1381,7 +1655,7 @@ mod tests {
             Box::new(auth_required_condition()),
             Box::new(ownership_condition("curator_id")),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
 
         assert_eq!(
             check_query_compliance(&condition, None, Some(&auth)),
@@ -1447,7 +1721,7 @@ mod tests {
             Box::new(Condition::Literal(false)),
             Box::new(ownership_condition("curator_id")),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string() };
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let filter = curator_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -1479,7 +1753,7 @@ mod tests {
                 CompareOp::Eq,
                 Operand::ResourceField(field_name.clone()),
             );
-            let auth = AuthContext { uid: caller_uid };
+            let auth = AuthContext { uid: caller_uid, claims: BTreeMap::new() };
             let filter = QueryFilter::Field(FieldFilter {
                 field_path: field_name,
                 op: FilterOp::Equal,
