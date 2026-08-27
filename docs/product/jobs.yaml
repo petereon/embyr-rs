@@ -556,6 +556,21 @@ jobs:
     # based per-user data protection) is JOB-17's, not a new identity goal.
     # See docs/feature/custom-claims/feature-delta.md § Job Discovery Framing
     # Resolution, Resolution 1.
+    # NOTE (security-rules-operations DISCUSS, 2026-08-27): JOB-17 now also
+    # covers rule history, versioning, rollback, and change attribution
+    # (across all 3 rule tables: access_rules, write_access_rules,
+    # group_access_rules) via this feature — same job, same persona (P1
+    # Alex), not a new job and not a new auditor/compliance persona (none
+    # exists anywhere in this codebase; investigated directly, found
+    # unevidenced). Mirrors client-auth's own Release-2 operational-maturity
+    # pattern (US-03 rotation, US-04 debug-verify) — closing the epic
+    # (candidate id `security-rules-operations`, "Epic 2e") security-rules'
+    # own Out-of-Scope section named from the start. "Richer condition
+    # grammar" (the other item named alongside history/audit in that
+    # original deferral) was re-investigated and found to have NO firing
+    # trigger across all 6 subsequent epics of evidence — explicitly dropped,
+    # not built. See docs/feature/security-rules-operations/feature-delta.md
+    # § Job Discovery Framing Resolution.
 
   - id: JOB-17
     name: document-access-control

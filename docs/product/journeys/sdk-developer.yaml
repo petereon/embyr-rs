@@ -7,8 +7,19 @@ jobs:
   - JOB-03  # live-sync
   - JOB-16  # client-identity-verification (added by client-auth DISCUSS, 2026-08-16)
   - JOB-17  # document-access-control (added by security-rules DISCUSS, 2026-08-17)
-updated: "2026-08-26"
+updated: "2026-08-27"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (security-rules-operations DISCUSS, 2026-08-27): JOB-17 now also
+# covers rule history, versioning, rollback, and change attribution across
+# all 3 rule tables (access_rules, write_access_rules, group_access_rules)
+# via this feature — same job, same persona, not a new job. No new
+# Alex-facing mental model beyond "the existing define/redefine action now
+# also remembers every value a rule has ever held, attributed to whoever set
+# it" — Decision 3 (UX Research Depth) = Lightweight; no separate
+# journey-*.yaml artifact. This feature also confirmed, by exhaustive
+# evidence across all 6 prior epics, that "richer condition grammar" has no
+# firing trigger and remains out of scope, unbuilt. See
+# docs/feature/security-rules-operations/feature-delta.md § Journey.
 # NOTE (custom-claims DISCUSS, 2026-08-26): JOB-17 now also covers
 # role/attribute-based (custom-claims) condition grammar via this feature —
 # same job, same persona, not a new job. Genuinely cross-cutting: this
