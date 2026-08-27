@@ -4084,3 +4084,97 @@ Full alternatives-considered analysis (including the rejected per
 -collection-channel redesign and the rejected per-subscriber delete-fetch
 option): `docs/product/architecture/adr-033-listen-compliance-composition-and-collection-scoping.md`.
 
+---
+
+## Application Architecture — custom-claims
+
+> Updated: 2026-08-27
+> Feature: custom-claims (JOB-17, 6th realization — closes `security-rules`'
+> own Out-of-Scope deferral: rules can now reference `request.auth.token.<claim>`,
+> not just bare `uid`; genuinely cross-bounded-context, spanning BC-1 Tenant
+> Management's token contract AND BC-4 Access Control's grammar)
+> Mode: Propose (autonomous analysis; DISCUSS's own central architectural
+> question — Resolution 1, claims are mint-time-embedded — was already locked
+> HIGH-confidence before DESIGN started; the one genuine judgment call,
+> Handoff Package flag 2 (US-06 string-literal scope), arrived confirmed
+> in-scope, not re-opened by this DESIGN pass)
+> ADR: `docs/product/architecture/adr-034-custom-claims-representation-and-grammar-extension.md`
+> (new — combined claims-representation/grammar-extension/query-path-safety/
+> write-path-falsifiability/simulation-extension decision, mirroring
+> ADR-030/031's own smaller-decision-surface precedent). Amends
+> `adr-024` (claims representation) and `adr-027`/`adr-029` (grammar/
+> composition) via appended `§ Changed Assumptions` sections — the first
+> feature in this initiative to amend an ADR outside the `security-rules*`
+> series. Does not amend `adr-025`/`adr-026`/`adr-028`/`adr-030`/`adr-031`/
+> `adr-032`/`adr-033` — all seven remain accurate as written.
+
+Full DESIGN content (Quality Attribute Priorities, Reuse Analysis,
+Bounded-Context Placement, Component Decomposition, Driving/Driven Ports,
+Technology Choices, Decisions Table DDD-CC-1..12, C4 System Context/Container
+diagrams, Architecture Enforcement, Open Questions, External Integrations,
+Handoff Package) lives in `docs/feature/custom-claims/feature-delta.md` §§
+Wave: DESIGN — the single narrative file per the lean output convention.
+Summary below.
+
+### Summary
+
+**The central decision (locked by DISCUSS, implemented here)**: claims are
+mint-time-embedded in the SAME signed JWT payload `client-auth` already
+verifies — zero new admin API, zero new System DB table, zero new I/O.
+`ClientIdentityClaims` gains `#[serde(flatten)] extra: BTreeMap<String,
+serde_json::Value>`; `VerifiedEndUserIdentity` gains `claims: BTreeMap<String,
+FieldValue>`, translated via a new `FieldValue::from_json_value` (promoted
+from a private helper in `embyr-server`'s admin handlers — the first
+cross-crate reuse of that translation, eliminating a would-be duplicate).
+
+**Grammar extension (mirrors `RequestResourceField`'s own ADR-030 precedent
+exactly)**: `Operand::AuthTokenClaim(String)`, parsed via a new
+`"request.auth.token."`-prefix branch, zero tokenizer change required.
+`AuthContext` gains `claims: BTreeMap<String, FieldValue>`. `resolve_field_value`
+gains one new arm; `compare_operands` gains ZERO — claim comparisons fall
+through to the existing generic `FieldValue::PartialEq` arm, confirmed
+structurally.
+
+**A DESIGN-discovered finding, not silently folded in**: direct code
+verification found `word_to_operand()` had no `"true"`/`"false"` arm —
+`Operand::BoolLiteral` was NOT reachable from comparisons, despite ADR-027's
+own text claiming otherwise. Without a fix, US-02's own literal
+walking-skeleton domain example (`request.auth.token.is_moderator == true`)
+could not parse. Fixed with 2 new arms, verified zero-regression (additive
+only — every previously-parseable input is unaffected).
+
+**Query-path safety (US-05) and write-path falsifiability (US-03), both
+verified structurally, not assumed**: `check_query_compliance()`/
+`decompose_decidable()` receive ZERO code changes — the existing wildcard
+`_ => Err(Undecidable)` catch-all rejects any `Compare` involving the 2 new
+`Operand` variants by Rust's own exhaustive-match guarantee, including inside
+an `And`. `evaluate()`'s shared dispatch across all call sites (GetDocument,
+all 3 write operations, Listen per-event, simulation) confirms write-path
+claim support requires zero production code beyond US-02's own change —
+Resolution 4's central hypothesis holds in practice, not just in theory.
+
+**Release 2 (US-06/US-07)**: `Operand::StringLiteral(String)` requires a
+genuinely new `tokenize()` quote-handling branch PLUS a required companion fix
+— `detect_unsupported_construct` must become quote-aware, or a legitimate
+string-literal value containing `**`/`{`/a call-shaped substring would be
+misclassified as `UnsupportedConstruct`. US-07 extends `simulate_access_rule`'s
+existing `SimulatedAuth` with a `claims` field — not a new sibling handler,
+since (unlike `simulate_group_query_compliance`'s own precedent) the request
+contract is not genuinely different.
+
+**Bounded context**: no new context. BC-1 (`client_identity`) and BC-4
+(`access_control`) both extended — the first feature in this initiative to
+touch two contexts' own core types in the same change. BC-4's read-only,
+indirect dependency on BC-1 is unchanged in shape.
+
+**No new table, no new migration, no new admin route, no new external
+integration, no new driven port, no new Earned Trust probe.** One new
+build-time consideration: `serde_json` promoted to a direct (non-dev)
+dependency of `embyr-core`, confirmed non-IO against `deny.toml`'s ban list —
+the smallest CREATE-NEW footprint of any epic in this initiative (9 Reuse
+Analysis rows, 8 EXTEND, 0 CREATE NEW).
+
+Full alternatives-considered analysis (including the rejected explicit-typed
+-struct and raw-`Value` claims representations, and the rejected new-sibling
+-handler for US-07): `docs/product/architecture/adr-034-custom-claims-representation-and-grammar-extension.md`.
+

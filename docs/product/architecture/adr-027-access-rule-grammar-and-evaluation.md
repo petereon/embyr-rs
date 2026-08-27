@@ -241,3 +241,60 @@ Earned Trust reasoning (no new substrate dependency is introduced by this ADR).
 - `crates/embyr-core/src/client_identity/mod.rs` — direct structural precedent.
 - `crates/embyr-core/src/domain/field_value.rs` — `FieldValue` type reused
   unchanged as the resource-field value representation.
+
+## Changed Assumptions (appended by feature `custom-claims`, DESIGN wave, 2026-08-27)
+
+**Original assumption #1, quoted verbatim (Context, above):**
+
+> Explicitly excluded: cross-document reads (`get()`/`exists()`), custom
+> functions, wildcard/recursive path matching, custom claims.
+
+**Original assumption #2, quoted verbatim (§ Grammar Gap Flagged for DISTILL,
+above):**
+
+> The locked grammar (Resolution 1, Option C) admits only `true`/`false` as
+> literal operands — **not** arbitrary string/number literals... This is
+> flagged as **OQ-SR-04**... DISTILL should confirm this reading matches its
+> acceptance-scenario expectations before DELIVER locks the parser's
+> literal-operand support to booleans only.
+
+**Original assumption #3, quoted verbatim (§ Comparison Semantics, above) —
+CORRECTED, not merely extended, by this amendment:**
+
+> `ResourceField(_) == BoolLiteral(_)` / `!=` — for rules that gate on a
+> boolean document field (not in DISCUSS's concrete examples, but
+> syntactically reachable within the locked grammar and semantically
+> unambiguous).
+
+**Why this is being appended, not reopened:** custom claims were explicitly out
+of this ADR's own locked scope (assumption #1) — `security-rules`' own
+Out-of-Scope deferral named this exact gap as a future, cross-epic concern, not
+a defect in this ADR. OQ-SR-04 (assumption #2) was deliberately flagged, not
+silently resolved either direction — this amendment is the resolution DISCUSS's
+own flag anticipated. Assumption #3, however, was **not accurate as written**:
+direct code verification during `custom-claims`' own DESIGN pass found
+`word_to_operand()` has no `"true"`/`"false"` match arm at all — `BoolLiteral`
+was NOT, in fact, syntactically reachable from `parse_comparison` before this
+feature's own fix. This amendment corrects that claim rather than perpetuating
+it.
+
+**New assumptions**:
+1. `Operand` gains `AuthTokenClaim(String)` (parsed via a new
+   `"request.auth.token."`-prefix branch in `word_to_operand()`, mirroring
+   `RequestResourceField`'s own precedent, ADR-030) and `StringLiteral(String)`
+   (Release 2, US-06 — requires a genuinely new tokenizer branch, the first
+   quote-character handling this tokenizer has had).
+2. `AuthContext` gains `claims: BTreeMap<String, FieldValue>`.
+3. `word_to_operand()` gains `"true" => Ok(Operand::BoolLiteral(true))` /
+   `"false" => Ok(Operand::BoolLiteral(false))` — a zero-regression fix making
+   `BoolLiteral` genuinely reachable as a comparison operand for the first
+   time, required for `custom-claims`' own `request.auth.token.is_moderator ==
+   true` walking-skeleton domain example to parse at all.
+
+Full decision, verified-zero-regression argument, and the corresponding
+`client-auth`-side claims-representation extension:
+`docs/product/architecture/adr-034-custom-claims-representation-and-grammar-extension.md`
+§ Decision — Grammar Extension.
+
+**Reference**: `docs/feature/custom-claims/feature-delta.md` § Job Discovery
+Framing Resolution (Resolutions 2–3).

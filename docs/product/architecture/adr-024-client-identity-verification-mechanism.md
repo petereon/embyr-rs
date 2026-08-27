@@ -183,3 +183,35 @@ See Options A and B above (evaluated inline per MADR-style convention for this A
 - `crates/embyr-server/src/admin/handlers/auth.rs::oidc_callback` (reference pattern, not
   reused directly)
 - RFC 8037 (EdDSA for JOSE), RFC 8725 (JWT Best Current Practices — algorithm confusion)
+
+## Changed Assumptions (appended by feature `custom-claims`, DESIGN wave, 2026-08-27)
+
+**Original assumption, quoted verbatim (§ Decision, above):**
+
+> **Claims** (minimum required):
+> - `sub` — the end-user identifier (Maria Santos's app-level ID). Becomes
+>   `VerifiedEndUserIdentity.end_user_id`.
+> - `aud` — the embyr `project_id` this token is minted for. Checked against the
+>   project_id in the verification request; mismatch is the `ProjectMismatch` rejection
+>   reason (US-02 AC-16-07).
+> - `exp` — standard JWT expiry claim. Drives the `Expired` rejection reason.
+
+**Why this is being appended, not reopened:** `sub`/`aud`/`exp` remain the
+minimum required claim set, unchanged — this amendment does not walk back
+anything about the required-claims contract, the algorithm-pinning defense, the
+verification order, or the rejection taxonomy. It records a *new*, additive
+capability layered on top: the token payload may ALSO carry arbitrary extra
+claims Trailmark's own backend chooses to embed, which embyr now parses instead
+of silently discarding.
+
+**New assumption**: `ClientIdentityClaims` gains `#[serde(flatten)] extra:
+BTreeMap<String, serde_json::Value>`, and `VerifiedEndUserIdentity` gains
+`claims: BTreeMap<String, FieldValue>` (translated from `extra` via
+`FieldValue::from_json_value`). A token minted with no extra claims produces an
+empty `claims` map — zero behavior change for every token minted before this
+feature shipped. Full decision, alternatives considered, and the corresponding
+`security-rules`-side grammar extension: `docs/product/architecture/adr-034-custom-claims-representation-and-grammar-extension.md`
+§ Decision — Claims Representation.
+
+**Reference**: `docs/feature/custom-claims/feature-delta.md` § Job Discovery
+Framing Resolution (Resolution 1, mint-time-embedded, HIGH confidence).

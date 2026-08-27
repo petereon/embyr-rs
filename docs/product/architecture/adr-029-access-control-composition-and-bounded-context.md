@@ -365,3 +365,29 @@ that can lie to a pure function operating on values already in memory.
   `:358-383` (`attach_client_identity_if_present`) — read in full during DESIGN;
   exact current shape of `_verified_identity` confirmed discarded prior to this
   ADR.
+
+## Changed Assumptions (appended by feature `custom-claims`, DESIGN wave, 2026-08-27)
+
+**Original assumption, quoted verbatim (§ Decision — Composition, Identity
+reuse, above):**
+
+> `Option<VerifiedEndUserIdentity>` maps to `Option<AuthContext>` via
+> `verified_identity.as_ref().map(|v| AuthContext { uid: v.end_user_id.clone() })` —
+> a pure, local translation at the call site.
+
+**Why this is being appended, not reopened:** the translation remains a pure,
+local, call-site-only mapping — `embyr_core::access_control` still never
+constructs its own identity. Nothing about identity reuse, call-site count (this
+feature touches zero NEW RPC handlers), or the structural no-rule-defined
+guardrail changes.
+
+**New assumption**: the one-line closure at all 7 production call sites (this
+ADR's original 5 plus the 2 `security-rules-query-path`/`security-rules-realtime`
+sites added since) becomes `AuthContext { uid: v.end_user_id.clone(), claims:
+v.claims.clone() }`, a mechanical, textually-identical edit at every site —
+verified directly by `Grep`, not assumed. Full call-site enumeration and
+verification: `docs/product/architecture/adr-034-custom-claims-representation-and-grammar-extension.md`
+§ Decision — Call-Site Propagation.
+
+**Reference**: `docs/feature/custom-claims/feature-delta.md` § Job Discovery
+Framing Resolution (Resolution 4), § Handoff Package flag 5.
