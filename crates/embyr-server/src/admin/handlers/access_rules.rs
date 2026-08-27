@@ -151,9 +151,37 @@ pub struct GroupAccessRuleResponse {
 /// A synthetic identity for simulation (US-05). `None`/absent represents
 /// the anonymous case (AC-17-19) — matches real evaluation's
 /// `Option<AuthContext>` exactly (ADR-029 § Identity reuse).
+///
+/// `claims` (custom-claims, US-07, ADR-034): a synthetic claims map,
+/// `#[serde(default)]` empty when omitted — an omitted/empty map exercises
+/// the identical fail-closed path a real caller with no minted claim hits
+/// (AC-17-155, US-04's real behavior). Shared verbatim across all 3
+/// simulation handlers below (ADR-034 § Call-Site Propagation) — inert for
+/// `simulate_query_compliance`/`simulate_group_query_compliance` (their own
+/// `check_query_compliance` catch-all rejects any claim-referencing rule
+/// regardless of what `claims` carries), observable only through
+/// `simulate_access_rule` (US-07's own scope).
 #[derive(Deserialize)]
 pub struct SimulatedAuth {
     pub uid: String,
+    #[serde(default)]
+    pub claims: BTreeMap<String, serde_json::Value>,
+}
+
+/// Translate a `SimulatedAuth`'s synthetic claims map into `AuthContext.claims`
+/// via the shared `FieldValue::from_json_value` (embyr-core, Slice 01) —
+/// the IDENTICAL conversion real enforcement's own `VerifiedEndUserIdentity.claims`
+/// -> `AuthContext.claims` propagation uses (ADR-034 § Call-Site Propagation),
+/// never a second, independently-maintained translation.
+fn simulated_auth_to_context(auth: SimulatedAuth) -> AuthContext {
+    AuthContext {
+        uid: auth.uid,
+        claims: auth
+            .claims
+            .iter()
+            .map(|(k, v)| (k.clone(), FieldValue::from_json_value(v)))
+            .collect(),
+    }
 }
 
 /// Body for POST /admin/v1/projects/:project_id/access_rules/simulate.
@@ -574,14 +602,11 @@ pub async fn simulate_access_rule(
     // AC-17-19: `body.auth` absent represents the anonymous caller,
     // identical in shape to real evaluation's `Option<AuthContext>`
     // (ADR-029 § Identity reuse) — no separate "anonymous simulation" code
-    // path.
-    let auth_ctx = body.auth.map(|a| AuthContext {
-        uid: a.uid,
-        // custom-claims (ADR-034): out of THIS slice's scope (simulation
-        // claims support is US-07's own job) — empty map keeps this call
-        // site compiling against AuthContext's new field.
-        claims: std::collections::BTreeMap::new(),
-    });
+    // path. custom-claims (US-07, ADR-034): `body.auth`'s synthetic
+    // `claims` map now translates into `AuthContext.claims` via
+    // `simulated_auth_to_context`, giving this handler's own claim-
+    // referencing simulations (AC-17-154/155) real effect.
+    let auth_ctx = body.auth.map(simulated_auth_to_context);
     let resource_fields: BTreeMap<String, FieldValue> = body
         .resource
         .iter()
@@ -659,13 +684,13 @@ pub async fn simulate_query_compliance(
         Err(e) => return Ok(condition_parse_error_response(e)),
     };
 
-    let auth_ctx = body.auth.map(|a| AuthContext {
-        uid: a.uid,
-        // custom-claims (ADR-034): out of THIS slice's scope (simulation
-        // claims support is US-07's own job) — empty map keeps this call
-        // site compiling against AuthContext's new field.
-        claims: std::collections::BTreeMap::new(),
-    });
+    // custom-claims (US-07, ADR-034): `claims` is inert here — any
+    // claim-referencing rule is rejected by `check_query_compliance`'s
+    // unchanged catch-all regardless of what this map carries (§ Decision —
+    // Query-Path Safety) — translated anyway since `SimulatedAuth` is one
+    // shared type across all 3 simulation handlers (ADR-034 § Call-Site
+    // Propagation).
+    let auth_ctx = body.auth.map(simulated_auth_to_context);
     let filter = translate_query_filters(&body.query_filters);
 
     let outcome = check_query_compliance(&condition, filter.as_ref(), auth_ctx.as_ref());
@@ -742,13 +767,13 @@ pub async fn simulate_group_query_compliance(
         Err(e) => return Ok(condition_parse_error_response(e)),
     };
 
-    let auth_ctx = body.auth.map(|a| AuthContext {
-        uid: a.uid,
-        // custom-claims (ADR-034): out of THIS slice's scope (simulation
-        // claims support is US-07's own job) — empty map keeps this call
-        // site compiling against AuthContext's new field.
-        claims: std::collections::BTreeMap::new(),
-    });
+    // custom-claims (US-07, ADR-034): `claims` is inert here — any
+    // claim-referencing rule is rejected by `check_query_compliance`'s
+    // unchanged catch-all regardless of what this map carries (§ Decision —
+    // Query-Path Safety) — translated anyway since `SimulatedAuth` is one
+    // shared type across all 3 simulation handlers (ADR-034 § Call-Site
+    // Propagation).
+    let auth_ctx = body.auth.map(simulated_auth_to_context);
     let filter = translate_query_filters(&body.query_filters);
 
     // SAME check_query_compliance() real, group-query enforcement uses

@@ -528,6 +528,15 @@ path = "../../tests/custom_claims/acceptance/query_path_safe_rejection.rs"
 name = "custom_claims_string_literal_claim_comparison"
 path = "../../tests/custom_claims/acceptance/string_literal_claim_comparison.rs"
 
+# custom-claims acceptance tests (Slice 07, ADR-034, LAST slice) — Alex
+# simulates a claims-based rule before publishing (US-07): synthetic claims
+# map wired into simulate_access_rule's existing SimulatedAuth/AuthContext
+# construction, sharing the identical evaluate() routine real enforcement
+# uses (no new admin route/handler).
+[[test]]
+name = "custom_claims_simulate_claims_based_rule"
+path = "../../tests/custom_claims/acceptance/simulate_claims_based_rule.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
