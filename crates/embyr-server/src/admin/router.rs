@@ -42,9 +42,13 @@ use super::handlers::client_identity::{
 // simulate a candidate collection-group query before shipping — a NEW
 // sibling handler/route to simulate_query_compliance, not an extension of
 // it in place (ADR-032 § simulate_group_query_compliance).
+// security-rules-operations (US-02, ADR-035): retrieve a collection's
+// access-rule history — a NEW any-role, read-only route, mirroring
+// simulate_access_rule's identical shape.
 use super::handlers::access_rules::{
     define_access_rule, define_group_access_rule, define_write_access_rule,
-    simulate_access_rule, simulate_group_query_compliance, simulate_query_compliance,
+    get_access_rule_history, simulate_access_rule, simulate_group_query_compliance,
+    simulate_query_compliance,
 };
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
@@ -213,6 +217,14 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/access_rules/simulate",
             post(simulate_access_rule),
+        )
+        // security-rules-operations (US-02, ADR-035): retrieve a collection's
+        // complete, correctly-ordered access-rule history (any role,
+        // read-only, gated in-handler) — a NEW, DISTINCT sibling route, not
+        // a branch on the define/simulate routes above.
+        .route(
+            "/admin/v1/projects/:project_id/access_rules/:collection_path/history",
+            get(get_access_rule_history),
         )
         // security-rules-query-path (US-07, LAST slice, ADR-031): simulate
         // a candidate query filter shape against a candidate/published rule

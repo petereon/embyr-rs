@@ -96,6 +96,26 @@ pub struct AccessRuleResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// One entry in a collection's access-rule history (security-rules-operations,
+/// US-02, ADR-035 § Decision — Admin Surface).
+#[derive(Serialize)]
+pub struct AccessRuleHistoryEntry {
+    pub id: i64,
+    pub condition: String,
+    pub actor_account_id: uuid::Uuid,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response for GET /admin/v1/projects/:project_id/access_rules/:collection_path/history
+/// — 200, `history` newest first, empty (never an error) when the
+/// collection has never had a rule defined (AC-17-161).
+#[derive(Serialize)]
+pub struct AccessRuleHistoryResponse {
+    pub project_id: String,
+    pub collection_path: String,
+    pub history: Vec<AccessRuleHistoryEntry>,
+}
+
 /// Body for POST /admin/v1/projects/:project_id/write_access_rules
 /// (security-rules-write-path, US-01, ADR-030). Same shape as
 /// `DefineAccessRuleBody` — a distinct type, not a shared struct, since the
@@ -455,6 +475,53 @@ pub async fn define_access_rule(
             .into_response()),
         Err(e) => {
             tracing::error!("define_access_rule upsert error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// GET /admin/v1/projects/:project_id/access_rules/:collection_path/history
+/// (security-rules-operations, US-02, ADR-035 § Decision — Admin Surface).
+///
+/// Any role (AC-17-162 — mirrors `simulate_access_rule`'s identical any-role,
+/// read-only shape: `verify_project_ownership` only, no role gate). Missing/
+/// invalid session is rejected 401 automatically via `SessionContext`'s
+/// existing `FromRequestParts` rejection (AC-17-163) — no in-handler code
+/// for that case. A collection with no rule ever defined returns 200 with
+/// an empty `history` list, never an error (AC-17-161) — a natural
+/// consequence of `get_access_rule_history` returning zero matching rows.
+pub async fn get_access_rule_history(
+    Path((project_id, collection_path)): Path<(String, String)>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+) -> Result<Response, StatusCode> {
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    match state
+        .system_db
+        .get_access_rule_history(&project_id, &collection_path)
+        .await
+    {
+        Ok(rows) => Ok((
+            StatusCode::OK,
+            Json(AccessRuleHistoryResponse {
+                project_id,
+                collection_path,
+                history: rows
+                    .into_iter()
+                    .map(|r| AccessRuleHistoryEntry {
+                        id: r.id,
+                        condition: r.condition_source,
+                        actor_account_id: r.actor_account_id,
+                        captured_at: r.captured_at,
+                    })
+                    .collect(),
+            }),
+        )
+            .into_response()),
+        Err(e) => {
+            tracing::error!("get_access_rule_history error: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

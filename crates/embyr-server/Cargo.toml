@@ -312,6 +312,11 @@ path = "../../tests/security_rules/acceptance/sr05_simulate_rule_before_publish.
 name = "security_rules_operations_history_captured_on_redefine"
 path = "../../tests/security_rules_operations/acceptance/history_captured_on_redefine.rs"
 
+# security-rules-operations acceptance tests (Slice 02, US-02, ADR-035).
+[[test]]
+name = "security_rules_operations_history_retrieved_by_alex"
+path = "../../tests/security_rules_operations/acceptance/history_retrieved_by_alex.rs"
+
 # security-rules-write-path acceptance tests (Slice 01, ADR-030) — mirrors
 # the security_rules_srNN registration convention.
 [[test]]

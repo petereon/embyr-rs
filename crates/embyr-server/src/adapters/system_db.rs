@@ -37,6 +37,16 @@ pub struct AccessRuleRow {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// security-rules-operations (ADR-035): one `access_rule_history` row —
+/// the condition a rule held at some point, who set it, and when.
+#[derive(Debug, Clone)]
+pub struct AccessRuleHistoryRow {
+    pub id: i64,
+    pub condition_source: String,
+    pub actor_account_id: uuid::Uuid,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// security-rules-write-path (ADR-030): a project's per-collection WRITE
 /// rule row, as stored in `write_access_rules` — a table entirely
 /// independent of `access_rules` (ADR-030 § Decision — Storage Shape).
@@ -422,6 +432,49 @@ impl SystemDb {
                 .try_get("updated_at")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
+    }
+
+    /// Retrieve `(project_id, collection_path)`'s complete history, newest
+    /// first (security-rules-operations, US-02, ADR-035). Ordered by `id
+    /// DESC` — the authoritative monotonic ordering key (ADR-035 § Decision
+    /// — Schema, "not `captured_at` alone"), served by
+    /// `idx_access_rule_history_lookup`, no scan. A collection with no rule
+    /// ever defined yields an empty `Vec`, never an error (AC-17-161) — a
+    /// natural consequence of zero matching rows, not a special case.
+    pub async fn get_access_rule_history(
+        &self,
+        project_id: &str,
+        collection_path: &str,
+    ) -> Result<Vec<AccessRuleHistoryRow>, CoreError> {
+        let rows = sqlx::query(
+            "SELECT id, condition_source, actor_account_id, captured_at \
+             FROM access_rule_history WHERE project_id = $1 AND collection_path = $2 \
+             ORDER BY id DESC",
+        )
+        .bind(project_id)
+        .bind(collection_path)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(format!("get_access_rule_history failed: {e}")))?;
+
+        rows.into_iter()
+            .map(|r| {
+                Ok(AccessRuleHistoryRow {
+                    id: r
+                        .try_get("id")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    condition_source: r
+                        .try_get("condition_source")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    actor_account_id: r
+                        .try_get("actor_account_id")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    captured_at: r
+                        .try_get("captured_at")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                })
+            })
+            .collect()
     }
 
     // -----------------------------------------------------------------------
