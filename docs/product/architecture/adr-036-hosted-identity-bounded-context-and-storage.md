@@ -374,6 +374,34 @@ live `projects` row, never a cached decision) cannot reach Customer DB writes
 for hosted identity — refused at both the admin action and, independently, at
 every subsequent data-plane call.
 
+**Gap found and closed during pre-DELIVER review (2026-08-27)**: Decision
+2's `private_key_enc` scheme requires the project's raw `api_key` to derive
+the ECIES recipient pubkey (`ecies::derive_public_key`). Decision 2's own
+text observes every *use* site (signup/signin/reset-confirm) already carries
+`?key=<api_key>` for an unrelated reason, so *decryption* costs nothing new
+— but it does not address *encryption*, which happens once, here, at
+enablement. `enable_hosted_identity` is a session-authenticated action
+(Alex's admin cookie); the raw `api_key` is never on this request by
+default, is never persisted after `provision`'s own one-time response
+(only `api_key_hash_current`, a non-invertible Argon2id hash, survives),
+and cannot be recovered from the hash. Confirmed directly against
+`admin/handlers/provision.rs`: `ecies::derive_public_key(api_key.as_bytes())`
+is called exactly once, at generation time, with the freshly-minted raw key
+in hand — there is no other point in this codebase where a project's raw
+`api_key` becomes available again.
+
+**Resolution**: `enable_hosted_identity`'s request body requires one
+additional field, `api_key: String` — the project's own current API key,
+which Alex (the project owner) already possesses. The handler verifies it
+against `api_key_hash_current` via `embyr_core::auth::argon2::verify_api_key`
+(the identical primitive `resolve_customer_db_adapter` uses at every
+data-plane call site, Decision 7) before using it to derive the ECIES
+pubkey — a wrong/stale key is rejected as `401 { "reason":
+"INVALID_API_KEY" }`, not silently accepted into an unusable ciphertext.
+This is the minimal fix: no new key-management surface, no new persisted
+material, reuses an existing verification primitive at a call site that
+simply didn't carry the key by default.
+
 ## Decision 6 — Driving Port: REST `:8081`, `?key=<api_key>` Query Param (extends ADR-026)
 
 Maria's (not Alex's) actions — signup, signin, reset-request, reset-confirm —

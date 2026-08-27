@@ -28,10 +28,12 @@ A project owner can opt a project into embyr-hosted email/password identity via 
 
 ## Acceptance Criteria
 
-- [ ] AC-18-01: Valid enablement returns 201; hosted identity becomes active; no signing material in the response.
-- [ ] AC-18-02: A second enablement for an already-enabled project succeeds idempotently — no error, no duplicate key.
-- [ ] AC-18-03: Missing/invalid admin Bearer credential returns 401.
+- [ ] AC-18-01: Valid enablement (session auth + correct `api_key` in body, per ADR-036 § Decision 5 "Gap found and closed") returns 201; hosted identity becomes active; no signing material of any kind in the response.
+- [ ] AC-18-02: A second enablement for an already-enabled project succeeds idempotently — no error, no duplicate key, no re-encryption.
+- [ ] AC-18-03: Missing/invalid admin session cookie returns 401.
 - [ ] AC-18-04: Enablement for a non-existent/deleted project returns 404.
+- [ ] AC-18-05: Correct session, but wrong/stale `api_key` in the body, returns 401 `{"reason": "INVALID_API_KEY"}` — never silently accepted.
+- [ ] AC-18-06: `backend_mode=agent` project returns 403 `{"reason": "HOSTED_IDENTITY_UNAVAILABLE_FOR_BACKEND_MODE"}` (ADR-036 § Decision 5).
 
 ## Dependencies
 
