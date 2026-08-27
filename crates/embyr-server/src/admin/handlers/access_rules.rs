@@ -430,7 +430,12 @@ pub async fn define_access_rule(
 
     match state
         .system_db
-        .upsert_access_rule(&project_id, &body.collection_path, &body.condition)
+        .upsert_access_rule(
+            &project_id,
+            &body.collection_path,
+            &body.condition,
+            session.account_id,
+        )
         .await
     {
         // Resolution 3 / AC-17-01/AC-17-02: the SAME response shape whether

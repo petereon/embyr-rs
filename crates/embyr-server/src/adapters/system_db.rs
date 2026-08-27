@@ -330,12 +330,28 @@ impl SystemDb {
     /// pair, unlike `insert_client_identity_credential`/
     /// `rotate_client_identity_credential` above — see ADR-028 § Decision,
     /// "Adapter methods" for why that asymmetry is intentional.
+    ///
+    /// security-rules-operations (ADR-035 § Decision — Capture Mechanism
+    /// Placement): history capture is FUSED into this SAME method, in the
+    /// SAME transaction as the existing upsert — not a second adapter call.
+    /// The existing upsert statement text above remains byte-for-byte
+    /// unchanged; the history `INSERT` is additive, in the identical
+    /// transaction, so the rule change and its history entry succeed or
+    /// fail together. `actor_account_id` is a compiler-enforced required
+    /// parameter — every caller (present and future) must supply it.
     pub async fn upsert_access_rule(
         &self,
         project_id: &str,
         collection_path: &str,
         condition_source: &str,
+        actor_account_id: uuid::Uuid,
     ) -> Result<(), CoreError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx begin failed: {e}")))?;
+
         sqlx::query(
             "INSERT INTO access_rules (project_id, collection_path, condition_source) \
              VALUES ($1, $2, $3) \
@@ -345,9 +361,28 @@ impl SystemDb {
         .bind(project_id)
         .bind(collection_path)
         .bind(condition_source)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| CoreError::BackendUnavailable(format!("upsert_access_rule failed: {e}")))?;
+
+        sqlx::query(
+            "INSERT INTO access_rule_history \
+             (project_id, collection_path, condition_source, actor_account_id) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(project_id)
+        .bind(collection_path)
+        .bind(condition_source)
+        .bind(actor_account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("access_rule_history insert failed: {e}"))
+        })?;
+
+        tx.commit()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx commit failed: {e}")))?;
         Ok(())
     }
 
