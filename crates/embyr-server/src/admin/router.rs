@@ -47,8 +47,8 @@ use super::handlers::client_identity::{
 // simulate_access_rule's identical shape.
 use super::handlers::access_rules::{
     define_access_rule, define_group_access_rule, define_write_access_rule,
-    get_access_rule_history, get_write_access_rule_history, simulate_access_rule,
-    simulate_group_query_compliance, simulate_query_compliance,
+    get_access_rule_history, get_group_access_rule_history, get_write_access_rule_history,
+    simulate_access_rule, simulate_group_query_compliance, simulate_query_compliance,
 };
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::projects::{list_projects, patch_project};
@@ -258,6 +258,16 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/group_access_rules",
             post(define_group_access_rule),
+        )
+        // security-rules-operations (Slice 05, ADR-035, LAST slice of this
+        // feature): retrieve a collection-group rule's complete,
+        // correctly-ordered history (any role, read-only, gated in-handler)
+        // — a NEW, DISTINCT sibling route, mirroring
+        // get_write_access_rule_history's identical shape, structurally
+        // independent of it (AC-17-172).
+        .route(
+            "/admin/v1/projects/:project_id/group_access_rules/:collection_id/history",
+            get(get_group_access_rule_history),
         )
         // security-rules-collection-group-rules (US-07, LAST slice, ADR-032):
         // simulate a candidate collection-group query before shipping (any

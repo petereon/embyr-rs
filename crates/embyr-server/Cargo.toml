@@ -327,6 +327,11 @@ path = "../../tests/security_rules_operations/acceptance/alex_restores_prior_sta
 name = "security_rules_operations_history_protects_write_rules"
 path = "../../tests/security_rules_operations/acceptance/history_protects_write_rules.rs"
 
+# security-rules-operations acceptance tests (Slice 05, US-05, ADR-035).
+[[test]]
+name = "security_rules_operations_history_protects_group_rules"
+path = "../../tests/security_rules_operations/acceptance/history_protects_group_rules.rs"
+
 # security-rules-write-path acceptance tests (Slice 01, ADR-030) — mirrors
 # the security_rules_srNN registration convention.
 [[test]]

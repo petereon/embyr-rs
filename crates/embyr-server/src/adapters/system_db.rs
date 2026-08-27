@@ -86,6 +86,18 @@ pub struct GroupAccessRuleRow {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// security-rules-operations (ADR-035, Slice 05): one
+/// `group_access_rule_history` row — mirrors `WriteAccessRuleHistoryRow`
+/// exactly, against the independent group-rule history table (AC-17-172's
+/// structural-independence guarantee).
+#[derive(Debug, Clone)]
+pub struct GroupAccessRuleHistoryRow {
+    pub id: i64,
+    pub condition_source: String,
+    pub actor_account_id: uuid::Uuid,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Project row returned for credential verification.
 #[derive(Debug)]
 pub struct ProjectAuthRow {
@@ -648,12 +660,25 @@ impl SystemDb {
     /// `group_access_rules` EXCLUSIVELY — no `access_rules`/
     /// `write_access_rules` in this statement's FROM/INTO clause at all, the
     /// structural mechanism behind AC-17-79's independence guarantee.
+    ///
+    /// security-rules-operations (ADR-035, Slice 05): history capture is
+    /// FUSED into this SAME method, in the SAME transaction as the existing
+    /// upsert — mirrors `upsert_write_access_rule`'s exact Slice-04 shape,
+    /// applied to `group_access_rule_history`. `actor_account_id` is a
+    /// compiler-enforced required parameter, identical discipline.
     pub async fn upsert_group_access_rule(
         &self,
         project_id: &str,
         collection_id: &str,
         condition_source: &str,
+        actor_account_id: uuid::Uuid,
     ) -> Result<(), CoreError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx begin failed: {e}")))?;
+
         sqlx::query(
             "INSERT INTO group_access_rules (project_id, collection_id, condition_source) \
              VALUES ($1, $2, $3) \
@@ -663,12 +688,75 @@ impl SystemDb {
         .bind(project_id)
         .bind(collection_id)
         .bind(condition_source)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             CoreError::BackendUnavailable(format!("upsert_group_access_rule failed: {e}"))
         })?;
+
+        sqlx::query(
+            "INSERT INTO group_access_rule_history \
+             (project_id, collection_id, condition_source, actor_account_id) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(project_id)
+        .bind(collection_id)
+        .bind(condition_source)
+        .bind(actor_account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("group_access_rule_history insert failed: {e}"))
+        })?;
+
+        tx.commit()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx commit failed: {e}")))?;
         Ok(())
+    }
+
+    /// Retrieve `(project_id, collection_id)`'s complete GROUP-rule history,
+    /// newest first (security-rules-operations, Slice 05, ADR-035) —
+    /// mirrors `get_write_access_rule_history` exactly, against
+    /// `group_access_rule_history` EXCLUSIVELY (AC-17-172's
+    /// structural-independence guarantee: no `access_rule_history`/
+    /// `write_access_rule_history` in this statement's FROM clause at all).
+    pub async fn get_group_access_rule_history(
+        &self,
+        project_id: &str,
+        collection_id: &str,
+    ) -> Result<Vec<GroupAccessRuleHistoryRow>, CoreError> {
+        let rows = sqlx::query(
+            "SELECT id, condition_source, actor_account_id, captured_at \
+             FROM group_access_rule_history WHERE project_id = $1 AND collection_id = $2 \
+             ORDER BY id DESC",
+        )
+        .bind(project_id)
+        .bind(collection_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("get_group_access_rule_history failed: {e}"))
+        })?;
+
+        rows.into_iter()
+            .map(|r| {
+                Ok(GroupAccessRuleHistoryRow {
+                    id: r
+                        .try_get("id")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    condition_source: r
+                        .try_get("condition_source")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    actor_account_id: r
+                        .try_get("actor_account_id")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    captured_at: r
+                        .try_get("captured_at")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                })
+            })
+            .collect()
     }
 
     /// Look up the collection-group rule for `(project_id, collection_id)`.
@@ -821,6 +909,7 @@ mod tests {
             "proj-1",
             "journal_entries",
             "request.auth.uid == resource.data.owner_id",
+            account_id,
         )
         .await
         .unwrap();
@@ -835,7 +924,7 @@ mod tests {
         );
 
         // Redefine: full replace, no merge.
-        db.upsert_group_access_rule("proj-1", "journal_entries", "true")
+        db.upsert_group_access_rule("proj-1", "journal_entries", "true", account_id)
             .await
             .unwrap();
         let row = db

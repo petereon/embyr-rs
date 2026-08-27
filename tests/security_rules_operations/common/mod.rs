@@ -131,6 +131,152 @@ pub fn string_field(value: &str) -> embyr_proto::firestore::Value {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 05 (US-05, ADR-035) — the identical history mechanism, applied to
+// `group_access_rules`. `group_access_rule_history` is a wholly separate
+// table (AC-17-172's structural-independence guarantee) — mirrors
+// `WriteAccessRuleHistoryRow`/`write_access_rule_history_rows` above
+// exactly, keyed on `collection_id` (never `collection_path`, per ADR-035's
+// own confirmed mirror of `group_access_rules`' ADR-032 idiosyncrasy).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One `group_access_rule_history` row, read directly via SQL — the
+/// port-exposed observable surface for AC-17-171/172.
+#[derive(Debug, Clone)]
+pub struct GroupAccessRuleHistoryRow {
+    pub id: i64,
+    pub condition_source: String,
+    pub actor_account_id: uuid::Uuid,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Read every `group_access_rule_history` row for `(project_id,
+/// collection_id)`, ordered `id ASC` (oldest first) — mirrors
+/// `write_access_rule_history_rows` exactly, against the independent group
+/// table.
+pub async fn group_access_rule_history_rows(
+    ctx: &SecurityRulesAdminContext,
+    project_id: &str,
+    collection_id: &str,
+) -> Vec<GroupAccessRuleHistoryRow> {
+    let rows: Vec<(i64, String, uuid::Uuid, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, condition_source, actor_account_id, captured_at \
+         FROM group_access_rule_history WHERE project_id = $1 AND collection_id = $2 \
+         ORDER BY id ASC",
+    )
+    .bind(project_id)
+    .bind(collection_id)
+    .fetch_all(&ctx.pool)
+    .await
+    .expect("query group_access_rule_history");
+
+    rows.into_iter()
+        .map(
+            |(id, condition_source, actor_account_id, captured_at)| GroupAccessRuleHistoryRow {
+                id,
+                condition_source,
+                actor_account_id,
+                captured_at,
+            },
+        )
+        .collect()
+}
+
+/// Real gRPC `RunQuery` call, explicit `all_descendants` — driving port
+/// entry (Pillar 3) for AC-17-173's real evaluated-behavior restore proof.
+/// A local copy of
+/// `security_rules_collection_group_rules::common::run_query` rather than a
+/// cross-module import: that module's own `#[path]` chain includes
+/// `security_rules_write_path/common/mod.rs`, which itself re-includes
+/// `security_rules/common/mod.rs` — compiling the same ancestor file twice
+/// into this binary and producing a second, non-unifying
+/// `SecurityRulesFullContext` type, the exact duplicate-`#[path]`-inclusion
+/// problem `string_field`/`create_document` above already document and
+/// avoid (Slice 04's own precedent, now applied a second time).
+pub async fn run_query(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    all_descendants: bool,
+    equality_filters: &[(&str, &str)],
+    client_identity_token: Option<&str>,
+) -> Result<Vec<embyr_proto::firestore::Document>, tonic::Status> {
+    use embyr_proto::firestore::{
+        firestore_client::FirestoreClient,
+        run_query_request::QueryType,
+        structured_query::{
+            composite_filter::Operator as CompositeOp, field_filter::Operator as FieldOp,
+            filter::FilterType, CollectionSelector, CompositeFilter, FieldFilter, FieldReference,
+            Filter,
+        },
+        RunQueryRequest, StructuredQuery,
+    };
+
+    let equality_filter = |field_path: &str, value: &str| Filter {
+        filter_type: Some(FilterType::FieldFilter(FieldFilter {
+            field: Some(FieldReference { field_path: field_path.to_string() }),
+            op: FieldOp::Equal as i32,
+            value: Some(string_field(value)),
+        })),
+    };
+
+    let where_filter = match equality_filters {
+        [] => None,
+        [(field, value)] => Some(equality_filter(field, value)),
+        many => Some(Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: many.iter().map(|(f, v)| equality_filter(f, v)).collect(),
+            })),
+        }),
+    };
+
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: collection_id.to_string(),
+            all_descendants,
+        }],
+        r#where: where_filter,
+        ..Default::default()
+    };
+
+    let mut request = tonic::Request::new(RunQueryRequest {
+        parent: format!(
+            "projects/{}/databases/(default)/documents",
+            ctx.project_id
+        ),
+        query_type: Some(QueryType::StructuredQuery(sq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    let mut stream = client.run_query(request).await?.into_inner();
+    use tokio_stream::StreamExt;
+    let mut docs = Vec::new();
+    while let Some(item) = stream.next().await {
+        let response = item?;
+        if let Some(document) = response.document {
+            docs.push(document);
+        }
+    }
+    Ok(docs)
+}
+
 /// Real gRPC `CreateDocument` call — driving port entry (Pillar 3), mirroring
 /// `security_rules_write_path::common::create_document` exactly, against
 /// THIS module's own `SecurityRulesFullContext` (see `string_field` doc

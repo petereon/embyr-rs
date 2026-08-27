@@ -191,6 +191,29 @@ pub struct GroupAccessRuleResponse {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// One entry in a collection-group rule's history (security-rules-operations,
+/// Slice 05, ADR-035 § Decision — Admin Surface) — mirrors
+/// `WriteAccessRuleHistoryEntry` exactly.
+#[derive(Serialize)]
+pub struct GroupAccessRuleHistoryEntry {
+    pub id: i64,
+    pub condition: String,
+    pub actor_account_id: uuid::Uuid,
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response for GET
+/// /admin/v1/projects/:project_id/group_access_rules/:collection_id/history
+/// — 200, `history` newest first, empty (never an error) when the
+/// collection-group id has never had a rule defined. Mirrors
+/// `WriteAccessRuleHistoryResponse` exactly.
+#[derive(Serialize)]
+pub struct GroupAccessRuleHistoryResponse {
+    pub project_id: String,
+    pub collection_id: String,
+    pub history: Vec<GroupAccessRuleHistoryEntry>,
+}
+
 /// A synthetic identity for simulation (US-05). `None`/absent represents
 /// the anonymous case (AC-17-19) — matches real evaluation's
 /// `Option<AuthContext>` exactly (ADR-029 § Identity reuse).
@@ -699,7 +722,12 @@ pub async fn define_group_access_rule(
 
     match state
         .system_db
-        .upsert_group_access_rule(&project_id, &body.collection_id, &body.condition)
+        .upsert_group_access_rule(
+            &project_id,
+            &body.collection_id,
+            &body.condition,
+            session.account_id,
+        )
         .await
     {
         // AC-17-77/78: the SAME response shape whether this was a
@@ -720,6 +748,50 @@ pub async fn define_group_access_rule(
             .into_response()),
         Err(e) => {
             tracing::error!("define_group_access_rule upsert error: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// GET /admin/v1/projects/:project_id/group_access_rules/:collection_id/history
+/// (security-rules-operations, Slice 05, ADR-035 § Decision — Admin
+/// Surface). Mirrors `get_write_access_rule_history`'s exact shape — any
+/// role, read-only (`verify_project_ownership` only, no role gate), 401 on
+/// missing/invalid session via `SessionContext`'s existing rejection, empty
+/// `history` (never an error) when the collection-group id has never had a
+/// rule defined.
+pub async fn get_group_access_rule_history(
+    Path((project_id, collection_id)): Path<(String, String)>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+) -> Result<Response, StatusCode> {
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    match state
+        .system_db
+        .get_group_access_rule_history(&project_id, &collection_id)
+        .await
+    {
+        Ok(rows) => Ok((
+            StatusCode::OK,
+            Json(GroupAccessRuleHistoryResponse {
+                project_id,
+                collection_id,
+                history: rows
+                    .into_iter()
+                    .map(|r| GroupAccessRuleHistoryEntry {
+                        id: r.id,
+                        condition: r.condition_source,
+                        actor_account_id: r.actor_account_id,
+                        captured_at: r.captured_at,
+                    })
+                    .collect(),
+            }),
+        )
+            .into_response()),
+        Err(e) => {
+            tracing::error!("get_group_access_rule_history error: {e}");
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
