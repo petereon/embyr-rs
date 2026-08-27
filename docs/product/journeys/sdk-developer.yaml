@@ -7,8 +7,26 @@ jobs:
   - JOB-03  # live-sync
   - JOB-16  # client-identity-verification (added by client-auth DISCUSS, 2026-08-16)
   - JOB-17  # document-access-control (added by security-rules DISCUSS, 2026-08-17)
+  - JOB-18  # embyr-hosted-identity (added by client-auth-hosted-identity DISCUSS, 2026-08-27)
 updated: "2026-08-27"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (client-auth-hosted-identity DISCUSS, 2026-08-27): JOB-18 is a new,
+# distinct job for embyr-hosted email/password identity (same persona, P1
+# Alex; goal differs from JOB-16's custom-token-verification focus — Alex's
+# end users create an account DIRECTLY with embyr, no backend of Trailmark's
+# own in the loop). Decision 3 (UX Research Depth) = Comprehensive for this
+# feature — unlike every prior Authorization epic's Lightweight system-flow
+# journey, Maria's own signup/signin/reset emotional arc was mapped in full
+# (anxious about another account → relieved it was simple; frustrated/locked
+# out → relieved on reset completion) — but per this codebase's established
+# convention (mirrors security-rules' own precedent for Comprehensive depth),
+# it still lives inline in
+# docs/feature/client-auth-hosted-identity/feature-delta.md § Journey, not as
+# a separate journey-*.yaml artifact. Two judgment calls remain genuinely
+# unresolved and explicitly escalated, not decided here: hosted-identity
+# credential storage location / VPC-egress fit for JOB-04 (Riley)-class
+# customers, and exact bounded-context placement for the new hosted
+# end-user Account entity.
 # NOTE (security-rules-operations DISCUSS, 2026-08-27): JOB-17 now also
 # covers rule history, versioning, rollback, and change attribution across
 # all 3 rule tables (access_rules, write_access_rules, group_access_rules)

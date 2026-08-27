@@ -571,6 +571,24 @@ jobs:
     # trigger across all 6 subsequent epics of evidence — explicitly dropped,
     # not built. See docs/feature/security-rules-operations/feature-delta.md
     # § Job Discovery Framing Resolution.
+    # NOTE (client-auth-hosted-identity DISCUSS, 2026-08-27): this job's own
+    # verification mechanism (ADR-024, custom-token-only — Trailmark's own
+    # backend mints, embyr only verifies) is now joined by a SIBLING job,
+    # JOB-18 (embyr-hosted-identity), for the customer segment with NO
+    # backend of its own to mint a token from. JOB-18 is a NEW job, not an
+    # amendment to this one — same persona (P1 Alex), but a materially
+    # different mental model (Trailmark's end users create an account
+    # DIRECTLY with embyr; no Trailmark backend is in the authentication
+    # loop at all), mirroring this job's own precedent for "same persona,
+    # different goal ⇒ new job" relative to JOB-01. Both jobs resolve to the
+    # identical `VerifiedEndUserIdentity` domain type; the two
+    # identity-establishment paths are disjoint end-user account namespaces
+    # per project with no linking/migration mechanism between them. This
+    # reverses (by explicit orchestrator commission, not silently) the
+    # "embyr-hosted email/password... identity provider" line this job's own
+    # NOTE above named as a candidate follow-up, not silently ruled out. See
+    # docs/feature/client-auth-hosted-identity/feature-delta.md § Job
+    # Discovery Framing Resolution.
 
   - id: JOB-17
     name: document-access-control
@@ -769,3 +787,81 @@ jobs:
     # the orchestrator to confirm, not a silent decision. See
     # docs/feature/custom-claims/feature-delta.md § Job Discovery Framing
     # Resolution and § Scope Assessment.
+
+  - id: JOB-18
+    name: embyr-hosted-identity
+    persona: P1
+    feature: client-auth-hosted-identity
+    job_story: >
+      When my app's end users have no existing account with any backend I operate — no
+      backend of my own to mint a custom token from — I want them to create and sign in
+      to an account directly with embyr using email and password, so my end users get
+      the same self-service signup Firebase's built-in email/password provider gave
+      them, without me having to build and operate my own identity backend just to
+      unblock migration.
+    dimensions:
+      functional: >
+        Maria signs up/signs in directly with embyr via the SDK's existing
+        createUserWithEmailAndPassword()/signInWithEmailAndPassword() calls; her
+        session resolves to the identical VerifiedEndUserIdentity type client-auth's
+        custom-token path already produces; she can reset a forgotten password
+        without contacting Alex
+      emotional: >
+        Alex feels he doesn't have to become his own end-user-identity operator just
+        to finish migrating; Maria feels signing up, signing in, and resetting a
+        password is as simple and trustworthy as any other app she has used
+      social: >
+        Alex can tell his own team "we didn't have to stand up a whole auth backend
+        just to migrate off Firebase"; Trailmark's end users never notice anything
+        different about creating an account
+    four_forces:
+      push: >
+        Trailmark (and any embyr customer with no existing backend user database of
+        its own) cannot adopt client-auth's custom-token path at all — there is no
+        backend to mint a token from — so JOB-16 alone leaves this segment fully
+        blocked from migrating
+      pull: >
+        embyr-hosted signup/signin/reset, wire-compatible with the SDK's existing
+        Auth methods, gives this segment the same zero-backend-required experience
+        Firebase's built-in provider already gave them
+      anxiety: >
+        "If embyr becomes my end users' identity provider, embyr now sees and stores
+        something about my users I used to control entirely myself" — partly
+        mitigated by oracle-protected responses and Argon2id-parameter reuse, but the
+        deeper anxiety (does hosting my users' passwords change my own VPC-isolation
+        security posture) is NOT fully resolved by this feature — see Job Discovery
+        Framing Resolution, Resolution 2
+      habit: >
+        Real Firebase apps commonly use the built-in email/password provider as
+        their PRIMARY identity mechanism — more common in the wild than custom
+        tokens, per client-auth's own Framing Resolution — so Alex expects
+        createUserWithEmailAndPassword()/signInWithEmailAndPassword() to just work,
+        not to require a bespoke bridge
+    opportunity_score: 13
+    priority: high
+    # NOTE (client-auth-hosted-identity DISCUSS, 2026-08-27): new job, not a
+    # JOB-16 amendment — same persona (P1 Alex), materially different mental
+    # model (Trailmark's end users create an account DIRECTLY with embyr; no
+    # Trailmark backend is ever in the authentication loop), mirroring this
+    # project's own "same persona, different goal ⇒ new job" precedent
+    # (JOB-11/JOB-06, JOB-14/JOB-10, JOB-17/JOB-16 itself). Reverses, by
+    # explicit orchestrator commission, the "embyr-hosted email/password...
+    # identity provider" line client-auth's own § Out of Scope named as a
+    # candidate follow-up, not silently ruled out — see
+    # docs/feature/client-auth/feature-delta.md § Job Discovery Framing
+    # Resolution and its DESIGN-wave OQ-CA-03. Two genuinely unresolved,
+    # security-consequential judgment calls are explicitly escalated, not
+    # silently decided: (1) whether hosted-identity credential storage
+    # (System DB vs. Customer DB) preserves or regresses JOB-04
+    # (Riley)/JOB-09's "zero credential egress" claim for backend_mode=agent
+    # deployments — it structurally cannot be fully preserved regardless of
+    # storage choice, since plaintext passwords must transit embyr's own
+    # SaaS servers for Argon2id verification; (2) exact bounded-context
+    # placement for the new hosted end-user Account entity, which passes
+    # ADR-002's own Option-D three-part test the same way BC-4 Access
+    # Control did. Both jobs (JOB-16, JOB-18) resolve to the identical
+    # VerifiedEndUserIdentity domain type via a structurally disjoint
+    # signing-key entity (never colocated with client_identity_credentials,
+    # ADR-024/025) — a hard, non-negotiable constraint, not a preference.
+    # See docs/feature/client-auth-hosted-identity/feature-delta.md § Job
+    # Discovery Framing Resolution and § Scope Assessment.
