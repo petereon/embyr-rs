@@ -10,6 +10,11 @@ license.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+# custom-claims (ADR-034 § Decision — Claims Representation): first non-dev
+# consumer of serde_json in embyr-core. Pure serialization/data-model crate,
+# no filesystem/network/async-runtime surface — deny.toml's IO-prohibition
+# ban list does not include it (verified against deny.toml directly).
+serde_json.workspace = true
 chrono.workspace = true
 argon2 = { workspace = true, features = ["password-hash"] }
 blake3.workspace = true
@@ -32,5 +37,4 @@ proptest.workspace = true
 # own backend (an external actor), not a mock of any embyr-owned port.
 ed25519-dalek = { workspace = true }
 base64.workspace = true
-serde_json.workspace = true
 hmac.workspace = true

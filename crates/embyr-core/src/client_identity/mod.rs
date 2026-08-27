@@ -42,12 +42,17 @@ pub struct ClientIdentityCredential {
 /// The resolved identity of a customer's end user, once their client-identity
 /// token has verified successfully (ADR-024 claims: `sub` -> `end_user_id`,
 /// `aud` -> `project_id`, `exp` -> `expires_at_unix`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedEndUserIdentity {
     pub end_user_id: String,
     pub project_id: String,
     /// Unix timestamp (seconds) the token expires at — the `exp` claim.
     pub expires_at_unix: i64,
+    /// Custom claims Trailmark's own backend embedded at mint time, beyond
+    /// `sub`/`aud`/`exp` (custom-claims US-01, ADR-034). Empty for a token
+    /// minted with no extra claims — zero behavior change for every token
+    /// minted before this feature shipped.
+    pub claims: std::collections::BTreeMap<String, crate::domain::field_value::FieldValue>,
 }
 
 /// Rejection taxonomy — AC-16-07's four distinguishable reasons.
@@ -137,11 +142,18 @@ pub fn verify_client_identity_token(
 
 /// Claims shape minted by a customer's own backend per ADR-024 § Token
 /// format: `sub` -> end user id, `aud` -> project id, `exp` -> unix seconds.
+/// `extra` captures every other top-level JSON key (custom-claims US-01,
+/// ADR-034 § Decision — Claims Representation) via `#[serde(flatten)]` —
+/// deliberately never combined with `#[serde(deny_unknown_fields)]` (the two
+/// are mutually incompatible at the derive-macro level, structurally
+/// foreclosing that combination rather than relying on convention).
 #[derive(serde::Deserialize)]
 struct ClientIdentityClaims {
     sub: String,
     aud: String,
     exp: i64,
+    #[serde(flatten)]
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl From<ClientIdentityClaims> for VerifiedEndUserIdentity {
@@ -150,6 +162,16 @@ impl From<ClientIdentityClaims> for VerifiedEndUserIdentity {
             end_user_id: claims.sub,
             project_id: claims.aud,
             expires_at_unix: claims.exp,
+            claims: claims
+                .extra
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        crate::domain::field_value::FieldValue::from_json_value(v),
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -198,6 +220,7 @@ mod tests {
     //! the outer (acceptance) loop, not this inner loop.
 
     use super::*;
+    use crate::domain::field_value::FieldValue;
     use ed25519_dalek::{Signer, SigningKey};
     use proptest::prelude::*;
     use rand_core::OsRng;
@@ -207,11 +230,31 @@ mod tests {
     /// Mirrors the "customer's own backend" role — Trailmark, not embyr —
     /// real Ed25519 signing, not a mock of any embyr-owned port.
     fn mint_token(signing_key: &SigningKey, sub: &str, aud: &str, exp_unix: i64) -> String {
+        mint_token_with_claims(signing_key, sub, aud, exp_unix, serde_json::json!({}))
+    }
+
+    /// Mint a client-identity token carrying arbitrary extra claims
+    /// (custom-claims US-01) alongside the required `sub`/`aud`/`exp` —
+    /// mirrors Trailmark's own backend embedding e.g. `is_moderator: true`
+    /// at mint time (ADR-034 § Decision — Claims Representation).
+    fn mint_token_with_claims(
+        signing_key: &SigningKey,
+        sub: &str,
+        aud: &str,
+        exp_unix: i64,
+        extra_claims: serde_json::Value,
+    ) -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(
-            serde_json::json!({"sub": sub, "aud": aud, "exp": exp_unix}).to_string(),
-        );
+        let mut payload_obj = serde_json::json!({"sub": sub, "aud": aud, "exp": exp_unix});
+        if let (Some(payload_map), Some(extra_map)) =
+            (payload_obj.as_object_mut(), extra_claims.as_object())
+        {
+            for (k, v) in extra_map {
+                payload_map.insert(k.clone(), v.clone());
+            }
+        }
+        let payload = URL_SAFE_NO_PAD.encode(payload_obj.to_string());
         let signing_input = format!("{header}.{payload}");
         let signature = signing_key.sign(signing_input.as_bytes());
         let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
@@ -262,7 +305,57 @@ mod tests {
                 end_user_id: "maria-santos".to_string(),
                 project_id: "trailmark-prod".to_string(),
                 expires_at_unix: now_unix() + 3600,
+                claims: std::collections::BTreeMap::new(),
             })
+        );
+    }
+
+    // ── custom-claims (US-01, ADR-034): claim survival mint -> verified identity ──
+
+    #[test]
+    fn custom_claims_survive_from_mint_to_verified_identity_with_exact_json_types_preserved() {
+        // AC-17-137/AC-17-139: Priya Nair's token carries two distinct JSON
+        // value types (bool, string) — both must be present, unmodified, on
+        // the verified identity's claims map, with no silent coercion.
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let credential = credential_for(&signing_key);
+        let token = mint_token_with_claims(
+            &signing_key,
+            "priya-nair",
+            "trailmark-prod",
+            now_unix() + 3600,
+            serde_json::json!({"is_moderator": true, "department": "community"}),
+        );
+
+        let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
+
+        let identity = result.expect("valid token must verify");
+        assert_eq!(
+            identity.claims.get("is_moderator"),
+            Some(&FieldValue::Boolean(true)),
+            "boolean claim must round-trip as FieldValue::Boolean, never coerced"
+        );
+        assert_eq!(
+            identity.claims.get("department"),
+            Some(&FieldValue::String("community".to_string())),
+            "string claim must round-trip as FieldValue::String, never coerced"
+        );
+    }
+
+    #[test]
+    fn token_minted_with_no_extra_claims_verifies_with_an_empty_claims_map() {
+        // AC-17-138: zero regression — a token minted exactly as every
+        // pre-existing test token already is produces an empty claims map.
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let credential = credential_for(&signing_key);
+        let token = mint_token(&signing_key, "maria-santos", "trailmark-prod", now_unix() + 3600);
+
+        let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
+
+        let identity = result.expect("valid token must verify");
+        assert!(
+            identity.claims.is_empty(),
+            "a token minted with no extra claims must produce an empty claims map"
         );
     }
 
@@ -414,6 +507,7 @@ mod tests {
                     end_user_id: sub,
                     project_id: "trailmark-prod".to_string(),
                     expires_at_unix: exp,
+                    claims: std::collections::BTreeMap::new(),
                 })
             );
         }
