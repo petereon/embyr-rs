@@ -21,7 +21,8 @@
 #[path = "../../security_rules_write_path/common/mod.rs"]
 mod security_rules_write_path_common;
 pub use security_rules_write_path_common::{
-    create_document, mint_client_identity_token, now_unix, string_field, SecurityRulesFullContext,
+    create_document, mint_client_identity_token, now_unix, seed_write_access_rule_full,
+    string_field, update_document, SecurityRulesFullContext,
 };
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};

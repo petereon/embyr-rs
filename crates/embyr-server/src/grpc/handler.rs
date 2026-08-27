@@ -710,11 +710,11 @@ impl FirestoreService {
                 .as_ref()
                 .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    // custom-claims (ADR-034): out of THIS slice's scope
-                    // (write-path/RunQuery wiring is US-03/US-05's own job)
-                    // — empty map keeps this call site compiling against
-                    // AuthContext's new field with zero behavior change.
-                    claims: std::collections::BTreeMap::new(),
+                    // custom-claims (US-03, ADR-034): real claims propagate
+                    // from the verified identity into the evaluator,
+                    // mirroring `handle_get_document`'s own Slice 02 wiring
+                    // exactly — the write-path reuse proof.
+                    claims: v.claims.clone(),
                 });
 
             // Create: `resource_fields` is empty (no document exists yet —
@@ -816,11 +816,11 @@ impl FirestoreService {
                 .as_ref()
                 .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    // custom-claims (ADR-034): out of THIS slice's scope
-                    // (write-path/RunQuery wiring is US-03/US-05's own job)
-                    // — empty map keeps this call site compiling against
-                    // AuthContext's new field with zero behavior change.
-                    claims: std::collections::BTreeMap::new(),
+                    // custom-claims (US-03, ADR-034): real claims propagate
+                    // from the verified identity into the evaluator,
+                    // mirroring `handle_get_document`'s own Slice 02 wiring
+                    // exactly — the write-path reuse proof.
+                    claims: v.claims.clone(),
                 });
 
             // Pre-write state (DIFFERENT from Create): reuses the existing,
@@ -934,11 +934,11 @@ impl FirestoreService {
                 .as_ref()
                 .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    // custom-claims (ADR-034): out of THIS slice's scope
-                    // (write-path/RunQuery wiring is US-03/US-05's own job)
-                    // — empty map keeps this call site compiling against
-                    // AuthContext's new field with zero behavior change.
-                    claims: std::collections::BTreeMap::new(),
+                    // custom-claims (US-03, ADR-034): real claims propagate
+                    // from the verified identity into the evaluator,
+                    // mirroring `handle_get_document`'s own Slice 02 wiring
+                    // exactly — the write-path reuse proof.
+                    claims: v.claims.clone(),
                 });
 
             // Pre-write state: reuses the existing, already-probed

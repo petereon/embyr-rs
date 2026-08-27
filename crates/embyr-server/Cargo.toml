@@ -498,6 +498,12 @@ path = "../../tests/security_rules_realtime/acceptance/listen_subscription_simul
 name = "custom_claims_boolean_claim_gates_getdocument"
 path = "../../tests/custom_claims/acceptance/boolean_claim_gates_getdocument.rs"
 
+# custom-claims acceptance tests (Slice 03, ADR-034) — the identical
+# mechanism gates writes, for free (US-03, the write-path reuse proof).
+[[test]]
+name = "custom_claims_write_path_reuse_proof"
+path = "../../tests/custom_claims/acceptance/write_path_reuse_proof.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
