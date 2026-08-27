@@ -504,6 +504,13 @@ path = "../../tests/custom_claims/acceptance/boolean_claim_gates_getdocument.rs"
 name = "custom_claims_write_path_reuse_proof"
 path = "../../tests/custom_claims/acceptance/write_path_reuse_proof.rs"
 
+# custom-claims acceptance tests (Slice 04, ADR-034) — a missing claim
+# fails closed (US-04): real caller with no such claim, anonymous caller,
+# and a type-mismatched claim value.
+[[test]]
+name = "custom_claims_missing_claim_fails_closed"
+path = "../../tests/custom_claims/acceptance/missing_claim_fails_closed.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
