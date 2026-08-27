@@ -74,7 +74,7 @@ pub async fn enable_hosted_identity(
 
     // AC-18-04: 404 on a non-existent/deleted project, or a project owned by
     // a different account (folded into one query, ADR-036 Decision 5).
-    // AC-18-06: `backend_mode=agent` projects are refused enablement
+    // AC-18-20: `backend_mode=agent` projects are refused enablement
     // outright — a hard rejection at the enablement action itself.
     let backend_row = state
         .system_db
@@ -96,7 +96,7 @@ pub async fn enable_hosted_identity(
             .into_response());
     }
 
-    // AC-18-05: the raw api_key is never on this session-authenticated
+    // AC-18-19: the raw api_key is never on this session-authenticated
     // request by default — Alex supplies it in the body, Argon2id-verified
     // against `api_key_hash_current` (the identical primitive
     // `resolve_customer_db_adapter` uses at every data-plane call site)

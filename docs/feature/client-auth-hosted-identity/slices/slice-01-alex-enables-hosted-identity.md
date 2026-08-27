@@ -32,8 +32,8 @@ A project owner can opt a project into embyr-hosted email/password identity via 
 - [ ] AC-18-02: A second enablement for an already-enabled project succeeds idempotently — no error, no duplicate key, no re-encryption.
 - [ ] AC-18-03: Missing/invalid admin session cookie returns 401.
 - [ ] AC-18-04: Enablement for a non-existent/deleted project returns 404.
-- [ ] AC-18-05: Correct session, but wrong/stale `api_key` in the body, returns 401 `{"reason": "INVALID_API_KEY"}` — never silently accepted.
-- [ ] AC-18-06: `backend_mode=agent` project returns 403 `{"reason": "HOSTED_IDENTITY_UNAVAILABLE_FOR_BACKEND_MODE"}` (ADR-036 § Decision 5).
+- [ ] AC-18-19: Correct session, but wrong/stale `api_key` in the body, returns 401 `{"reason": "INVALID_API_KEY"}` — never silently accepted. (Renumbered from a first-draft AC-18-05 that collided with Slice 02's own AC-18-05 — Slices 02-04 already claim AC-18-05 through AC-18-18; see feature-delta.md.)
+- [ ] AC-18-20: `backend_mode=agent` project returns 403 `{"reason": "HOSTED_IDENTITY_UNAVAILABLE_FOR_BACKEND_MODE"}` (ADR-036 § Decision 5). (Renumbered from a first-draft AC-18-06 for the same reason.)
 
 ## Dependencies
 

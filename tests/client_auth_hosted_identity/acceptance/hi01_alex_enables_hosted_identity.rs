@@ -9,9 +9,9 @@
 //!             regeneration, no re-encryption).
 //!   AC-18-03: missing/invalid admin session -> 401.
 //!   AC-18-04: enablement for a non-existent/deleted project -> 404.
-//!   AC-18-05: correct session, wrong/stale api_key -> 401
+//!   AC-18-19: correct session, wrong/stale api_key -> 401
 //!             {"reason": "INVALID_API_KEY"}.
-//!   AC-18-06: backend_mode=agent project -> 403
+//!   AC-18-20: backend_mode=agent project -> 403
 //!             {"reason": "HOSTED_IDENTITY_UNAVAILABLE_FOR_BACKEND_MODE"}.
 //!
 //! Plus a Viewer-role boundary scenario (403), mirroring
@@ -20,7 +20,7 @@
 //! Driving port: Admin HTTP :9090 (`HostedIdentityAdminContext`, real
 //! `build_admin_router` composition root).
 //!
-//! Error ratio: 5 error/edge (AC-18-03/04/05/06 + Viewer) out of 7 scenarios
+//! Error ratio: 5 error/edge (AC-18-03/04/19/20 + Viewer) out of 7 scenarios
 //! = 71%.
 
 #![allow(unused_imports)]
@@ -234,12 +234,12 @@ async fn enablement_against_a_non_existent_project_is_rejected_as_not_found() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AC-18-05: wrong/stale api_key in the body (error/edge)
+// AC-18-19: wrong/stale api_key in the body (error/edge)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// AC-18-05
+/// AC-18-19
 ///
-/// @error @driving_port @real-io @US-01 @AC-18-05
+/// @error @driving_port @real-io @US-01 @AC-18-19
 #[tokio::test]
 async fn enablement_with_a_wrong_api_key_is_rejected_and_never_silently_accepted() {
     let ctx = HostedIdentityAdminContext::new().await;
@@ -259,23 +259,23 @@ async fn enablement_with_a_wrong_api_key_is_rejected_and_never_silently_accepted
     assert_eq!(
         resp.status().as_u16(),
         401,
-        "AC-18-05: wrong api_key must return 401"
+        "AC-18-19: wrong api_key must return 401"
     );
     let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
     assert_eq!(body["reason"], "INVALID_API_KEY");
     assert!(
         !ctx.signing_key_row_exists("trailmark-prod").await,
-        "AC-18-05: a wrong api_key must never result in a stored signing key"
+        "AC-18-19: a wrong api_key must never result in a stored signing key"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AC-18-06: backend_mode=agent project is structurally refused (error/edge)
+// AC-18-20: backend_mode=agent project is structurally refused (error/edge)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// AC-18-06
+/// AC-18-20
 ///
-/// @error @driving_port @real-io @US-01 @AC-18-06
+/// @error @driving_port @real-io @US-01 @AC-18-20
 #[tokio::test]
 async fn enablement_for_an_agent_backend_project_is_refused_outright() {
     let ctx = HostedIdentityAdminContext::new().await;
@@ -295,7 +295,7 @@ async fn enablement_for_an_agent_backend_project_is_refused_outright() {
     assert_eq!(
         resp.status().as_u16(),
         403,
-        "AC-18-06: backend_mode=agent must return 403"
+        "AC-18-20: backend_mode=agent must return 403"
     );
     let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
     assert_eq!(
@@ -304,7 +304,7 @@ async fn enablement_for_an_agent_backend_project_is_refused_outright() {
     );
     assert!(
         !ctx.signing_key_row_exists("trailmark-agent-proj").await,
-        "AC-18-06: an agent-backend project must never get a stored signing key"
+        "AC-18-20: an agent-backend project must never get a stored signing key"
     );
 }
 
