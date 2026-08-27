@@ -15,18 +15,21 @@
 //! primary     := comparison | 'true' | 'false' | '(' condition ')'
 //! comparison  := operand ( '==' | '!=' ) operand
 //! operand     := 'request.auth.uid' | 'request.auth' | 'null' | 'resource.data.' IDENT
-//!              | 'request.auth.token.' IDENT
+//!              | 'request.auth.token.' IDENT | STRING_LITERAL
 //! ```
 //!
 //! `request.auth.token.<claim>` (custom-claims US-02, ADR-034) resolves
 //! against `AuthContext.claims`, reusing the identical `Operand`-addition
 //! playbook `RequestResourceField` already established (ADR-030).
 //!
+//! `STRING_LITERAL` (custom-claims US-06, Release 2, ADR-034 § StringLiteral
+//! and the tokenizer) is a double-quoted string, e.g. `"billing"` — resolves
+//! OQ-SR-04 for the whole grammar, scoped narrowly to strings only (no
+//! escape-sequence support, no numeric literals).
+//!
 //! Explicitly out of v1 scope (ADR-027, narrowed by ADR-034): cross-document
 //! reads (`get()`/`exists()`), custom functions, wildcard/recursive path
-//! matching, string/number literals (OQ-SR-04 — booleans only; string
-//! literals land in custom-claims Release 2/US-06, see
-//! `feature-delta.md` § Wave: DISTILL / Open Question Resolutions).
+//! matching, numeric literals, string-literal escape sequences.
 //!
 //! `evaluate()` is infallible and total by construction (no `Result`, no
 //! panic) — AC-17-09's "never crashes on a missing field" claim is a
@@ -84,6 +87,11 @@ pub enum Operand {
     AuthTokenClaim(String),
     BoolLiteral(bool),
     NullLiteral,
+    /// A double-quoted string literal (custom-claims US-06, Release 2,
+    /// ADR-034 § StringLiteral and the tokenizer) — e.g. `"billing"`.
+    /// Resolves OQ-SR-04 for the whole grammar, scoped narrowly to strings
+    /// only (no escape-sequence support in v1).
+    StringLiteral(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,8 +182,40 @@ fn syntax_error(detail: impl Into<String>) -> ConditionParseError {
 /// in the locked grammar's token set at all and would otherwise surface as
 /// an undifferentiated `SyntaxError` (violating AC-17-03's distinguishability
 /// requirement).
+/// custom-claims (US-06, ADR-034 § required companion fix): this scan is
+/// QUOTE-AWARE — the entire span between a `"` and its closing `"` (or
+/// end-of-input, for the unterminated case, left for `tokenize()`'s own
+/// dedicated error per AC-17-153) is skipped (masked, below) before the
+/// `**`/`{`/call-syntax scan runs. Without this, a legitimate string-literal
+/// VALUE containing `**`, `{`, or a `word(`-looking substring (e.g. `"a**b"`
+/// or `"get(weird)"`) would be misclassified as `UnsupportedConstruct`
+/// before tokenization ever gets the chance to treat it as opaque string
+/// content — a correctness bug introduced BY string-literal support, not a
+/// pre-existing one (pre-US-06, any `"` was already rejected by
+/// `tokenize()`'s catch-all, so this scan never had to be quote-aware
+/// before).
 fn detect_unsupported_construct(source: &str) -> Option<ConditionParseError> {
-    if source.contains("**") || source.contains('{') {
+    // Blank out every character inside a quoted span (opening/closing `"`
+    // included) so BOTH scans below see quoted content as inert whitespace
+    // — preserves the original whole-string-`**`/`{`-before-call-syntax
+    // priority ordering exactly, just quote-aware.
+    let masked: String = {
+        let mut out = String::with_capacity(source.len());
+        let mut in_quotes = false;
+        for c in source.chars() {
+            if c == '"' {
+                in_quotes = !in_quotes;
+                out.push(' ');
+            } else if in_quotes {
+                out.push(' ');
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    };
+
+    if masked.contains("**") || masked.contains('{') {
         return Some(ConditionParseError::UnsupportedConstruct {
             construct: UnsupportedConstruct::WildcardPath,
             detail: "wildcard/recursive path matching is not supported in v1".to_string(),
@@ -185,7 +225,7 @@ fn detect_unsupported_construct(source: &str) -> Option<ConditionParseError> {
     // Call-shaped syntax: an identifier immediately followed by '('. Never
     // reachable from valid grammar (the grammar's own '(' is only used for
     // grouping, never directly preceded by an identifier character).
-    let chars: Vec<char> = source.chars().collect();
+    let chars: Vec<char> = masked.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
@@ -227,6 +267,10 @@ enum Token {
     Eq,
     Ne,
     Word(String),
+    /// A double-quoted string literal's CONTENT, quotes stripped
+    /// (custom-claims US-06, ADR-034). No escape-sequence support (v1's own
+    /// narrow scoping, reapplied).
+    StringLiteral(String),
 }
 
 fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
@@ -276,6 +320,27 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
                     i += 1;
                 }
                 tokens.push(Token::Word(chars[start..i].iter().collect()));
+            }
+            // custom-claims (US-06, ADR-034 § StringLiteral and the
+            // tokenizer): the first quote-character handling this tokenizer
+            // has ever had. Deliberately no escape-sequence support (v1's
+            // own narrow scoping, reapplied) — no domain example requires a
+            // claim/field value containing a literal `"`.
+            '"' => {
+                let start = i;
+                i += 1;
+                let content_start = i;
+                while i < chars.len() && chars[i] != '"' {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return Err(syntax_error(format!(
+                        "unterminated string literal starting at position {start}"
+                    )));
+                }
+                let content: String = chars[content_start..i].iter().collect();
+                i += 1;
+                tokens.push(Token::StringLiteral(content));
             }
             other => {
                 return Err(syntax_error(format!(
@@ -400,6 +465,11 @@ impl<'a> Parser<'a> {
     fn parse_comparison(&mut self) -> Result<Condition, ConditionParseError> {
         let left = match self.advance() {
             Some(Token::Word(w)) => word_to_operand(w)?,
+            // custom-claims (US-06, ADR-034): a string literal is a second
+            // operand SOURCE, alongside `word_to_operand` — never itself
+            // dispatched through `word_to_operand` (it carries no dotted
+            // prefix to match against).
+            Some(Token::StringLiteral(s)) => Operand::StringLiteral(s.clone()),
             _ => return Err(syntax_error("expected an operand")),
         };
         let op = match self.advance() {
@@ -409,6 +479,7 @@ impl<'a> Parser<'a> {
         };
         let right = match self.advance() {
             Some(Token::Word(w)) => word_to_operand(w)?,
+            Some(Token::StringLiteral(s)) => Operand::StringLiteral(s.clone()),
             _ => return Err(syntax_error("expected an operand")),
         };
         Ok(Condition::Compare(left, op, right))
@@ -572,6 +643,12 @@ fn resolve_field_value(
         }
         Operand::BoolLiteral(value) => Ok(FieldValue::Boolean(*value)),
         Operand::NullLiteral => Ok(FieldValue::Null),
+        // custom-claims (US-06, ADR-034 § StringLiteral and the tokenizer):
+        // no new `compare_operands` arm needed — every pairing involving
+        // `StringLiteral` falls through to the generic `_` arm, which
+        // resolves both sides via this function and compares by
+        // `FieldValue::PartialEq`.
+        Operand::StringLiteral(value) => Ok(FieldValue::String(value.clone())),
         // custom-claims (ADR-034 § Decision — resolve_field_value): fail-closed
         // in exactly two cases — no verified caller at all (AC-17-147), then a
         // verified caller whose claims map lacks this key (AC-17-146) — both
@@ -939,6 +1016,73 @@ mod tests {
         }
     }
 
+    // ── parse_condition: StringLiteral (custom-claims US-06, ADR-034) ──
+
+    #[test]
+    fn string_literal_condition_parses_into_a_compare_ast_ac_17_151() {
+        // US-06 Happy Path: `request.auth.token.department == "billing"`.
+        let result = parse_condition("request.auth.token.department == \"billing\"");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::AuthTokenClaim("department".to_string()),
+                CompareOp::Eq,
+                Operand::StringLiteral("billing".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn string_literal_against_resource_field_parses_general_bugfix_ac_17_152() {
+        // AC-17-152: the SAME grammar fix proven against a PRE-EXISTING
+        // `resource.data.<field>` operand — general, not claims-specific,
+        // mirroring `bool_literal_now_parses_in_comparison_position_general_bugfix`'s
+        // own discipline.
+        let result = parse_condition("resource.data.status == \"published\"");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::ResourceField("status".to_string()),
+                CompareOp::Eq,
+                Operand::StringLiteral("published".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn unterminated_string_literal_is_a_syntax_error_distinguishable_from_unsupported_ac_17_153() {
+        // AC-17-153: no closing '"' — a plain SyntaxError from tokenize()'s
+        // own dedicated branch, never UnsupportedConstruct.
+        let result = parse_condition("request.auth.token.department == \"billing");
+        match result {
+            Err(ConditionParseError::SyntaxError { .. }) => {}
+            other => panic!("expected SyntaxError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_literal_content_resembling_wildcard_or_call_syntax_is_not_misclassified_ac_17_153() {
+        // AC-17-153 / required companion fix: `detect_unsupported_construct`
+        // must skip the ENTIRE quoted span before its `**`/`{`/call-syntax
+        // scan — a string VALUE containing `**` or a `word(`-shaped
+        // substring is opaque content, not a grammar construct. Two input
+        // variations of the SAME behavior (quote-awareness), parametrized
+        // via one loop (Mandate 5), not two test functions.
+        for suspicious_value in ["a**b", "get(weird)", "x{y}"] {
+            let source = format!("request.auth.token.label == \"{suspicious_value}\"");
+            let result = parse_condition(&source);
+            assert_eq!(
+                result,
+                Ok(Condition::Compare(
+                    Operand::AuthTokenClaim("label".to_string()),
+                    CompareOp::Eq,
+                    Operand::StringLiteral(suspicious_value.to_string()),
+                )),
+                "'{suspicious_value}' must parse as opaque string content, got {result:?}"
+            );
+        }
+    }
+
     // ── parse_condition: request.auth.token.<claim> (custom-claims US-02, ADR-034) ──
 
     #[test]
@@ -1264,6 +1408,63 @@ mod tests {
             evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields()),
             EvaluationOutcome::Deny,
             "AC-17-143: mismatched department claim/field must deny"
+        );
+    }
+
+    // ── evaluate: StringLiteral (custom-claims US-06, ADR-034) ──
+
+    #[test]
+    fn claim_matching_string_literal_allows_mismatch_denies_ac_17_151() {
+        // AC-17-151: `request.auth.token.department == "billing"` — Jordan
+        // Lee (`department: "billing"`) on `support_tickets`, matching and
+        // non-matching claim values (mirrors
+        // `claim_to_resource_field_equality_...`'s own single-test,
+        // allow-then-deny shape). Falls through to `compare_operands`'s
+        // generic `FieldValue::PartialEq` arm — zero new comparison logic.
+        let condition = Condition::Compare(
+            Operand::AuthTokenClaim("department".to_string()),
+            CompareOp::Eq,
+            Operand::StringLiteral("billing".to_string()),
+        );
+        let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
+
+        let jordan = AuthContext {
+            uid: "jordan-lee".to_string(),
+            claims: claims_with("department", FieldValue::String("billing".to_string())),
+        };
+        assert_eq!(
+            evaluate(&condition, Some(&jordan), &resource, &empty_fields()),
+            EvaluationOutcome::Allow,
+            "AC-17-151: a matching department claim/string-literal must allow"
+        );
+
+        let sam = AuthContext {
+            uid: "sam-osei".to_string(),
+            claims: claims_with("department", FieldValue::String("engineering".to_string())),
+        };
+        assert_eq!(
+            evaluate(&condition, Some(&sam), &resource, &empty_fields()),
+            EvaluationOutcome::Deny,
+            "AC-17-151: a mismatched department claim/string-literal must deny"
+        );
+    }
+
+    #[test]
+    fn resource_field_matching_string_literal_allows_ac_17_152() {
+        // AC-17-152: `resource.data.status == "published"` — no claim
+        // involved at all, proving the fix is general.
+        let condition = Condition::Compare(
+            Operand::ResourceField("status".to_string()),
+            CompareOp::Eq,
+            Operand::StringLiteral("published".to_string()),
+        );
+        let resource = resource_with("status", FieldValue::String("published".to_string()));
+
+        assert_eq!(
+            evaluate(&condition, None, &resource, &empty_fields()),
+            EvaluationOutcome::Allow,
+            "AC-17-152: a matching resource-field/string-literal comparison must allow, \
+             independent of any claim or verified caller"
         );
     }
 

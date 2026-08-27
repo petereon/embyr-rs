@@ -520,6 +520,14 @@ path = "../../tests/custom_claims/acceptance/missing_claim_fails_closed.rs"
 name = "custom_claims_query_path_safe_rejection"
 path = "../../tests/custom_claims/acceptance/query_path_safe_rejection.rs"
 
+# custom-claims acceptance tests (Slice 06, ADR-034) — a claim (or resource
+# field) compared to a string literal (US-06): grammar-widening tokenizer
+# fix, plus the required detect_unsupported_construct quote-awareness
+# companion fix.
+[[test]]
+name = "custom_claims_string_literal_claim_comparison"
+path = "../../tests/custom_claims/acceptance/string_literal_claim_comparison.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
