@@ -714,3 +714,398 @@ Peer review: not invoked per-wave (default skip per SKILL Phase 3 step 6 — the
 - `docs/product/jobs.yaml` — added JOB-18 (`embyr-hosted-identity`, P1 Alex). JOB-16 receives a cross-reference note (not a rewrite), mirroring the project's established cross-reference pattern.
 - `docs/product/journeys/sdk-developer.yaml` — extended with JOB-18 in its `jobs` list (same persona, P1 Alex, new goal). No separate visual/YAML journey artifact produced — Decision 3 (UX Research Depth) = Comprehensive, but per this codebase's established convention (mirrors `security-rules`'s own precedent), the full emotional-arc journey work stays inline in this file, not as a separate `journey-*.yaml`.
 - No new persona file — Trailmark's end users (Maria Santos, Dana Kim) remain domain-example data within Alex's stories, not a formal persona, unchanged from `client-auth`'s own precedent.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Agent**: Morgan (nw-solution-architect) | **Mode**: Propose (per Decision 1, passed from orchestrator) | **Date**: 2026-08-27
+
+✓ `docs/feature/client-auth-hosted-identity/feature-delta.md` (this file, full — the DISCUSS wave being extended)
+✓ `docs/feature/client-auth-hosted-identity/slices/slice-01-alex-enables-hosted-identity.md` through `slice-04-maria-resets-forgotten-password.md` (all 4, full)
+✓ `docs/product/architecture/brief.md` (SSOT — extended, not recreated; see `## Application Architecture — client-auth-hosted-identity`)
+✓ `docs/product/architecture/adr-002-bounded-contexts.md` (full, including the `security-rules` `Changed Assumptions` amendment) — Option D's three-part test applied fresh below, not cited-and-skipped
+✓ `docs/product/architecture/adr-024-client-identity-verification-mechanism.md`, `adr-025-client-identity-credential-storage-rotation.md`, `adr-026-client-identity-composition-with-api-key-auth.md` (all full) — the existing custom-token mechanism this feature coexists with
+✓ `docs/product/architecture/adr-011-email-sender-port.md` (full) — the `IEmailSender` port US-04 reuses unchanged
+✓ `crates/embyr-core/src/client_identity/mod.rs` (full, 571 lines) — confirmed `verify_client_identity_token()` needs zero changes; its `ClientIdentityClaims`/JWT-encoding shape is the reuse target for minting (Decision 3)
+✓ `crates/embyr-server/src/admin/handlers/auth.rs` (full, 643 lines) — confirmed the Argon2id parameters and `invalid_credentials()`'s oracle-protection pattern are directly reusable (mechanism decided: shared thin wrapper for Argon2id, pattern-only reuse for oracle protection — see Decisions 8 and the oracle-protection row below)
+✓ `crates/embyr-server/src/adapters/email.rs` + `crates/embyr-core/src/admin/email.rs` (both full) — `IEmailSender` port contract confirmed reusable unchanged
+✓ `crates/embyr-server/src/adapters/system_db.rs` (full, 977 lines) — confirmed the "one struct, many bounded per-concern inherent methods sharing one pool" convention (`client_identity_credentials`/`access_rules`/`write_access_rules`/`group_access_rules` all live as inherent methods on `SystemDb`) — directly informs Decision 5's `SystemDb::get_project_backend_mode` placement
+✓ `crates/embyr-core/src/auth/argon2.rs` (full) — confirmed `hash_api_key`/`verify_api_key` share one private `argon2_instance()`; this is the actual reusable unit (Decision 8), not `admin/handlers/auth.rs`'s own inline Argon2id call
+✓ `crates/embyr-core/src/auth/ecies.rs` (full) — confirmed `derive_public_key`/`encrypt`/`decrypt`'s exact signatures; directly reused for the embyr-owned signing key's at-rest encryption (Decision 2)
+✓ `crates/embyr-pg-storage/src/backend_adapter.rs` (targeted, `PostgresBackendAdapter` + the single static `MIGRATOR`) and `docs/product/architecture/adr-022-customer-db-prep-crate-and-migration-consolidation.md` (full) — confirmed `migrations/customer/` is an EXISTING, already-single-sourced mechanism; this feature adds files to it, introduces no new mechanism (Decision 10)
+✓ `crates/embyr-server/src/admin/handlers/{client_identity,provision,shared}.rs`, `crates/embyr-server/src/rest/sign_in.rs`, `crates/embyr-server/src/grpc/handler.rs` (targeted, `authenticate`/adapter-resolution branches) — confirmed the exact backend-mode branching, ECIES-decrypt-DSN, and credential-cache shapes reused by Decisions 5–7
+✓ `migrations/0021_client_identity_credentials.sql`, `migrations/customer/0001_documents.sql` (both full) — confirmed exact column/PK conventions mirrored by the new migrations
+
+No contradictions found between DESIGN's conclusions and DISCUSS's locked resolutions. Flags 2 and 3 (Resolutions 2/3) are treated as hard, non-negotiable inputs throughout — not reopened. Flag 6 (bounded-context placement) and flag 5 (`OQ-CHI-01`) are resolved below as the genuine DESIGN-owned decisions DISCUSS routed to this wave.
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| `client_identity_credentials`-style adapter CRUD (`insert_*`/`get_*`/`rotate_*`) | `adapters/system_db.rs:169-354` | CRUD pattern for project-scoped, System-DB-resident credential state | **EXTEND (pattern reuse; new table)** | The new `hosted_identity_signing_keys` table follows the identical typed-row-struct + `try_get` + `CoreError::BackendUnavailable` shape, added as new `SystemDb` inherent methods — the SAME established "one struct, many bounded concerns" convention this file already uses 4 times (`client_identity_credentials`, `access_rules`, `write_access_rules`, `group_access_rules`). |
+| `verify_project_ownership` (shared helper) | `admin/handlers/shared.rs` | Project-ownership-by-account_id check | **EXTEND (composed, not modified)** | US-01's new handler calls a NEW, narrow `SystemDb::get_project_backend_mode` that folds ownership + `backend_mode` into one query (Decision 5) — `verify_project_ownership` itself is unchanged; not modifying a helper 6 other handlers already depend on. |
+| Admin handler shape (Owner/Admin gate, no-raw-material-in-response, JSON error body) | `admin/handlers/client_identity.rs` | Handler structure for project-scoped, session-authenticated, mutating admin actions | **EXTEND (pattern reuse)** | The new `enable_hosted_identity` handler (`admin/handlers/hosted_identity.rs`, new file) follows the identical shape: `Role::Admin` gate, `verify_project_ownership`-adjacent check, idempotent-success response, zero signing material in the response body (mirrors AC-16-01's own discipline, applied to embyr's own generated key this time). |
+| `client_identity/mod.rs`'s pure, zero-IO module shape + `ClientIdentityClaims`/JWT-encoding | `client_identity/mod.rs` | Client-identity token claims shape and wire format | **EXTEND** | `mint_client_identity_token()` is added to this SAME module (not a new one) — the mirror operation of the existing `verify_client_identity_token()`, same claims shape, same `jsonwebtoken`/`ed25519-dalek` dependencies already imported by this module's own test helpers. Zero changes to `verify_client_identity_token()` itself (Resolution 3, locked). |
+| ADR-026 step 4 (`x-embyr-client-identity` verification branch) | `grpc/handler.rs:358-383`-adjacent | Ordinary-data-plane-call credential verification | **EXTEND, additively** | Widened to try `client_identity_credentials` then `hosted_identity_signing_keys` — see ADR-026 § Changed Assumptions. The existing, ORIGINAL branch for `client_identity_credentials` is untouched code, executed first. |
+| `argon2::hash_api_key`/`verify_api_key` + private `argon2_instance()` | `auth/argon2.rs` | Argon2id parameter single-source-of-truth | **EXTEND** | 2 new thin wrapper functions (`hash_password`/`verify_password`) call the SAME private `argon2_instance()` — zero parameter duplication, named for call-site clarity (Decision 8; rejected: calling `hash_api_key(password.as_bytes())` directly — misleading name at the call site). |
+| `embyr_core::auth::ecies::{derive_public_key, encrypt, decrypt}` | `auth/ecies.rs` | ECIES encrypt-with-key-derived-from-`api_key` | **EXTEND (reuse unchanged)** | The embyr-owned signing key's `private_key_enc` column uses this EXACT primitive and pattern, applied to a second secret (Decision 2) — zero new cryptographic code. |
+| `PostgresBackendAdapter` + `migrations/customer/` single-embed mechanism (ADR-022) | `crates/embyr-pg-storage/src/backend_adapter.rs` | Customer DB connection + migration mechanism | **EXTEND** | 2 new migration files added to the EXISTING `migrations/customer/` directory (Decision 10); new hosted-identity Account/ResetToken CRUD added as new inherent methods on `PostgresBackendAdapter`, mirroring `SystemDb`'s own "one struct, many concerns" convention. Zero new migration embed point, zero new connection-resolution mechanism. |
+| `rest::sign_in::SignInState` (minimal per-route state, not `UserAdminState`) | `rest/sign_in.rs` | Driving-port state-struct minimality discipline | **EXTEND (pattern reuse)** | The new `HostedIdentityState` follows the identical discipline — only the fields the 4 new routes actually need, not the full admin-session state. |
+| `admin/handlers/auth.rs::invalid_credentials()` | `admin/handlers/auth.rs` | Oracle-protected rejection response, one shared constructor per rejection class | **EXTEND (pattern reuse, not code reuse)** | A new, analogous constructor is added inside the hosted-identity REST module — different response shape (JSON `reason` enum, not a cookie-session `message` string), different module, so literal code sharing is not applicable; the DISCIPLINE (one constructor, both branches call it, structurally preventing drift) is reused exactly. |
+| `grpc/handler.rs::authenticate` (Argon2id verify, status check, ECIES-decrypt-DSN, backend-mode branch) | `grpc/handler.rs:168-330` | Project-authenticated Customer DB adapter resolution | **EXTEND (primitives reused; new composing function)** | `resolve_customer_db_adapter` (new, `adapters/project_auth.rs`) composes exclusively PRE-EXISTING, independently-callable primitives (`SystemDb::get_project_for_auth`, `argon2::verify_api_key`, `ecies::decrypt`, `PostgresBackendAdapter::new`, `CredentialCache`) in the identical order/discipline `authenticate()` already established. `authenticate()` itself has ZERO lines changed (Decision 7) — refactoring it to share code across a `tonic::Status` world and an `axum::http::StatusCode` world was evaluated and rejected as costing more indirection than it saves (mirrors ADR-025's own Alternative-1 rejection reasoning). |
+| Hosted-identity `Account`/`ResetToken` entities, password-strength validation, signing-key mint/verify orchestration, 5 new admin/REST handlers, 4 new tables | — | New end-user-authentication capability | **CREATE NEW** | Confirmed by DISCUSS's own Walking Skeleton Evaluation: no existing driving-port mechanism performs end-user password authentication anywhere in this codebase; the admin-console password path authenticates a human OPERATOR into a browser session, a different persona/credential table/response contract entirely. |
+
+**Verdict: 11 EXTEND (2 of them composing pre-existing primitives into new,
+narrow functions — the honest cost of a genuinely new capability, not
+hidden), 1 CREATE NEW (extensively justified — no existing mechanism performs
+end-user password authentication, confirmed by DISCUSS's own Walking
+Skeleton Evaluation), 0 unjustified CREATE NEW.** Despite the favorable
+EXTEND ratio, this feature genuinely needs more new components (2 new
+tables in Customer DB, 1 new table in System DB, 5 new handlers, 3 new
+adapter files/modules) than `security-rules`' own precedent —
+and this table reports that honestly rather than force-fitting a
+"mostly EXTEND" narrative onto a feature DISCUSS itself flagged as needing
+"more new components per slice than `client-auth`'s own precedent" (§
+Elephant Carpaccio Slices taste-test note).
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement
+
+**BC-5: Hosted Identity** is added — see
+`docs/product/architecture/adr-036-hosted-identity-bounded-context-and-storage.md`
+§ Decision 1 for the full application of ADR-002's own Option-D three-part
+test (entity with identity, lifecycle, invariants — all three pass, the
+identical pattern BC-4 Access Control passed) and
+`docs/product/architecture/adr-002-bounded-contexts.md` § Changed
+Assumptions (second appendix) for the formal amendment.
+
+BC-5 is the first bounded context in this system whose storage boundary is
+**split** across both databases: `Account`/`ResetToken` in Customer DB
+(Resolution 2, PII isolation), the embyr-owned signing key in System DB
+(a control-plane secret, not project data — see ADR-036 § Decision 2 for the
+full security rationale on why this split, not a single database, is
+correct). This is named explicitly as a new fact about this system's
+architecture, not glossed over.
+
+At the mechanism level (not the bounded-context-relationship level), BC-5's
+Customer DB dependency introduces **no new kind of database access** — it
+reuses BC-2's existing `PostgresBackendAdapter` + `migrations/customer/`
+mechanism (ADR-022) as a second consumer. This directly de-risks the
+DISCUSS-flagged concern that "a new subsystem writing into Customer DB is a
+genuinely new kind of inter-context relationship" at the code level, while
+still being honest that at the bounded-context level, BC-5 IS the first
+context besides BC-2 to depend on Customer DB directly — a real, new
+relationship, documented in ADR-002's amended Context Map, not the same kind
+BC-4's read-only BC-2 dependency already was.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component | Crate/Module Path | Responsibility | New/Extended | Bounded Context |
+|---|---|---|---|---|
+| `embyr-core::hosted_identity` | `crates/embyr-core/src/hosted_identity/mod.rs` (new) | `validate_password_strength()` — pure, total, NIST-800-63B-length-based rule (Decision 9). Zero IO. | New | BC-5 |
+| `embyr-core::client_identity` (extended) | `crates/embyr-core/src/client_identity/mod.rs` | Adds `mint_client_identity_token()` — pure, mirrors the existing `verify_client_identity_token()`'s claims shape/wire format (Decision 3). Zero changes to `verify_client_identity_token()` itself. | Extended (existing file) | BC-5 (mint), BC-1 (verify, unchanged) |
+| `embyr-core::auth::argon2` (extended) | `crates/embyr-core/src/auth/argon2.rs` | Adds `hash_password()`/`verify_password()` — thin wrappers over the existing `argon2_instance()` (Decision 8). | Extended (existing file) | BC-5 |
+| `embyr-server::admin::handlers::hosted_identity` | `crates/embyr-server/src/admin/handlers/hosted_identity.rs` (new) | `enable_hosted_identity` (US-01) — session-auth Axum handler, mirroring `client_identity.rs`'s shape; `backend_mode=agent` hard rejection (Decision 5). | New | BC-5 (driving adapter, Alex's admin action) |
+| `embyr-server::rest::hosted_identity` | `crates/embyr-server/src/rest/hosted_identity.rs` (new) | `sign_up`, `sign_in_with_password`, `send_reset_code`, `reset_password` (US-02/03/04) — no admin-session auth, `?key=<api_key>`-authenticated (Decision 6). Oracle-protected rejection constructor (US-03/04). | New | BC-5 (driving adapter, Maria's end-user actions) |
+| `embyr-server::adapters::project_auth` | `crates/embyr-server/src/adapters/project_auth.rs` (new) | `resolve_customer_db_adapter()` — composes pre-existing Argon2id/ECIES/`CredentialCache` primitives into a `PostgresBackendAdapter` resolver that structurally cannot resolve `backend_mode=agent` (Decision 7). | New | BC-5 (driven adapter resolution) |
+| `embyr-server::adapters::system_db` (extended) | `crates/embyr-server/src/adapters/system_db.rs` | Adds `HostedIdentitySigningKeyRow`, `insert_hosted_identity_signing_key()` (idempotent `ON CONFLICT DO NOTHING`, Decision 5), `get_hosted_identity_signing_key()`, `get_project_backend_mode()`. | Extended (existing file) | BC-5 (driven adapter, System DB side) |
+| `embyr-server::adapters::postgres_backend` (extended, `PostgresBackendAdapter`) | `crates/embyr-pg-storage/src/backend_adapter.rs` | Adds `HostedIdentityAccountRow`/`HostedIdentityResetTokenRow` and CRUD (`insert_account`, `get_account_by_email`, `update_password_hash`, `insert_reset_token`, `consume_reset_token`) as new inherent methods on the SAME struct BC-2 already uses. | Extended (existing file) | BC-5 (driven adapter, Customer DB side) |
+| `embyr-server::grpc::handler` (extended, ADR-026 step 4) | `crates/embyr-server/src/grpc/handler.rs` | Widens the `x-embyr-client-identity` verification branch to try `hosted_identity_signing_keys` after `client_identity_credentials` (Decision 4). Zero change to any other `handle_*` method or to step 1-3. | Extended (existing file) | BC-5 (consumes), BC-1 (unchanged) |
+| `hosted_identity_signing_keys` (System DB table) | `migrations/0028_hosted_identity_signing_keys.sql` (new) | Embyr-owned, project-scoped, ECIES-encrypted-at-rest Ed25519 signing key (Decision 2). | New table | BC-5 |
+| `hosted_identity_accounts` (Customer DB table) | `migrations/customer/0003_hosted_identity_accounts.sql` (new) | Hosted-identity Account: email, Argon2id password hash, `end_user_id` (Decision 2). | New table | BC-5 |
+| `hosted_identity_reset_tokens` (Customer DB table) | `migrations/customer/0004_hosted_identity_reset_tokens.sql` (new) | Single-use, time-bounded password-reset token (Decision 2). | New table | BC-5 |
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports (Inbound)
+
+| Port | Protocol | Location | New/Extended | What it does |
+|---|---|---|---|---|
+| `HostedIdentityEnablementPort` | HTTP (admin `:9090`, session sub-router) | `admin/handlers/hosted_identity.rs` | New | `POST /admin/v1/projects/:project_id/hosted_identity` (US-01). Session auth, Owner/Admin only, mirrors `client_identity.rs::register_client_identity_credential`. 201 first enablement / 200 idempotent re-enablement / 403 `backend_mode=agent` (named reason) / 404 no such project. |
+| `HostedIdentitySignupPort` | HTTP (`:8081`) | `rest/hosted_identity.rs` | New | `POST /v1/projects/:project_id/accounts:signUp?key=<api_key>` (US-02). No admin session — `?key=` authenticates and resolves the Customer DB adapter (Decision 6/7). |
+| `HostedIdentitySigninPort` | HTTP (`:8081`) | `rest/hosted_identity.rs` | New | `POST /v1/projects/:project_id/accounts:signInWithPassword?key=<api_key>` (US-03). Oracle-protected rejection (AC-18-11). |
+| `HostedIdentityResetRequestPort` | HTTP (`:8081`) | `rest/hosted_identity.rs` | New | `POST /v1/projects/:project_id/accounts:sendOobCode?key=<api_key>` (US-04). Always the identical generic response (AC-18-14). |
+| `HostedIdentityResetConfirmPort` | HTTP (`:8081`) | `rest/hosted_identity.rs` | New | `POST /v1/projects/:project_id/accounts:resetPassword?key=<api_key>` (US-04). Single-use token consumption. |
+| `FirestoreGrpcPort` / `RestPort` (existing) | gRPC `:8080` / REST `:8081` | `grpc/handler.rs` step 4 | **Extended, additively** | Ordinary Firestore calls now additionally resolve a `VerifiedEndUserIdentity` from a hosted-identity-minted token, alongside the existing `client-auth` path (Decision 4). No new RPC. Every other RPC unmodified. |
+
+No new network-facing port/listener. Exact endpoint shapes above are DESIGN's
+best-evidence proposal per `OQ-CHI-01` (see § Open Questions).
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters (Outbound)
+
+| Driven Port / Adapter | New/Extended | Substrate | Earned Trust / Probe |
+|---|---|---|---|
+| `SystemDb::{insert_hosted_identity_signing_key, get_hosted_identity_signing_key, get_project_backend_mode}` | Extended (`system_db.rs`) | System DB (existing, already-probed `SystemDb::probe()` connection pool) | No new probe — reuses the identical, already-probed pool every other `SystemDb` method already uses. |
+| `PostgresBackendAdapter::{insert_account, get_account_by_email, update_password_hash, insert_reset_token, consume_reset_token}` | Extended (`crates/embyr-pg-storage/src/backend_adapter.rs`) | Customer DB (existing, per-request-resolved pool; migrations applied via the existing single-sourced `MIGRATOR`) | No new probe — Customer DB reachability is already verified at connection-resolution time by `resolve_customer_db_adapter`'s reuse of the existing `PostgresBackendAdapter::new`/`probe_customer_db`-style connect step; no new substrate class introduced. |
+| `resolve_customer_db_adapter` (`adapters/project_auth.rs`) | New | Composes System DB read + Argon2id (CPU) + ECIES decrypt (CPU) + Customer DB connect — zero new I/O substrate; every substrate it touches is already probed/connected by an existing, reused primitive. | No new probe required — see § Earned Trust note below. |
+| `IEmailSender` (ADR-011) | Unchanged | Reused exactly as-is for reset "send" (US-04) — `NoopEmailSender` V1. | Unchanged — `NoopEmailSender.probe()` already trivially `Ok(())` per ADR-011; `SmtpEmailSender` V2's real probe is a cross-feature dependency this feature does not build. |
+
+**Earned Trust note (Principle 12 discipline, explicit, not silently
+skipped):** no new Earned Trust probe is introduced by this feature. Every
+new I/O path (`resolve_customer_db_adapter`, the new `SystemDb`/
+`PostgresBackendAdapter` methods) is a NEW COMPOSITION of substrates that are
+each ALREADY independently probed/verified by existing mechanisms:
+`SystemDb`'s own connection pool is probed at startup (`SystemDb::probe()`,
+unchanged); a Customer DB connection resolved via `PostgresBackendAdapter::new`
+fails loudly (connection error) at resolution time if unreachable — the
+identical fault-surface `authenticate()`'s own existing `direct_pg`/
+`aws_secret`/`gcp_secret` branches already expose, reused unchanged, not
+newly introduced. ECIES decryption of the embyr-owned signing key either
+succeeds (correct `api_key`, matching ciphertext) or fails with an
+AES-GCM authentication error — the identical "no partial-trust / no
+substrate-lie scenario" a pure decrypt-or-fail cryptographic operation
+already has for `ecies_encrypted_dsn` today, unchanged by this feature. No
+new external service, no new network dependency, no new environment capable
+of lying to this feature's code that isn't already accounted for by an
+existing probe.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+| Layer | Choice | Version | License | Rationale |
+|---|---|---|---|---|
+| Token format / signing | `jsonwebtoken` + `ed25519-dalek` (both existing workspace dependencies) | Unchanged from ADR-024 | MIT (both) | Zero new dependency — `mint_client_identity_token()` reuses the exact crates `verify_client_identity_token()` already depends on. |
+| Password hashing | `argon2` crate (existing workspace dependency) | Unchanged | Apache-2.0/MIT | Zero new dependency — 2 new thin wrapper functions over the existing `argon2_instance()`. |
+| At-rest encryption of the embyr-owned signing key | `embyr_core::auth::ecies` (existing, in-crate module — `x25519-dalek`/`hkdf`/`aes-gcm`, all existing dependencies) | Unchanged | MIT (all) | Zero new dependency — reuses the exact primitive `ecies_encrypted_dsn` already uses. |
+| Reset-token hashing | `blake3` (existing workspace dependency) | Unchanged | CC0-1.0/Apache-2.0 | Zero new dependency — reuses the exact primitive `sessions.token_hash`/`mfa_recovery_codes.code_hash` already use. |
+| Password-strength policy | Hand-written pure function, no crate | N/A | N/A | Minimum-length rule (NIST SP 800-63B) needs no library; a dependency for an 8-character length check would be resume-driven, not evidence-driven. |
+
+No new workspace dependency is added by this feature.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table
+
+| ID | Decision | Verdict |
+|---|---|---|
+| DDD-CHI-1 | Bounded-context placement: new BC-5 Hosted Identity, not folded into BC-1 or BC-2 (Option-D three-part test, applied fresh) | Accepted — ADR-036 Decision 1, amends ADR-002 |
+| DDD-CHI-2 | Storage split: `Account`/`ResetToken` in Customer DB (Resolution 2, locked); embyr-owned signing key in System DB (DESIGN's own call, justified by custody-boundary risk to a `direct_pg` customer's own DBA) | Accepted — ADR-036 Decision 2 |
+| DDD-CHI-3 | Embyr-owned signing key encrypted at rest via ECIES, key derived from the project's own `api_key` — identical pattern to `ecies_encrypted_dsn` | Accepted — ADR-036 Decision 2 |
+| DDD-CHI-4 | Token minting: `mint_client_identity_token()` added to the EXISTING `embyr_core::client_identity` module, not a new module; zero changes to `verify_client_identity_token()` | Accepted — ADR-036 Decision 3 |
+| DDD-CHI-5 | Verification-time credential routing: ADR-026 step 4 tries `client_identity_credentials` then `hosted_identity_signing_keys`, both via the unchanged `verify_client_identity_token()` | Accepted — ADR-036 Decision 4, amends ADR-026 |
+| DDD-CHI-6 | `backend_mode=agent` refused twice, independently: US-01 enablement (structural 403) and every signup/signin/reset call (`resolve_customer_db_adapter` cannot construct an agent adapter) | Accepted — ADR-036 Decisions 5/7 |
+| DDD-CHI-7 | Driving port: REST `:8081`, `?key=<api_key>` query param on all 4 new end-user endpoints (genuine difference from `signInWithCustomToken()`'s credential-only shape, since Customer DB access is required) | Accepted — ADR-036 Decision 6 |
+| DDD-CHI-8 | Customer DB adapter resolution: new, narrow `resolve_customer_db_adapter()` composing pre-existing primitives; zero changes to `grpc/handler.rs::authenticate` | Accepted — ADR-036 Decision 7 |
+| DDD-CHI-9 | Argon2id reuse mechanism: 2 new thin named wrapper functions sharing the existing `argon2_instance()` — not `hash_api_key(password.as_bytes())` directly | Accepted — ADR-036 Decision 8 |
+| DDD-CHI-10 | Password-strength rule: minimum 8 characters, no composition rules (NIST SP 800-63B) | Accepted — ADR-036 Decision 9 |
+| DDD-CHI-11 | Customer DB migration mechanism: zero new mechanism — 2 new files added to the existing, already-single-sourced `migrations/customer/` (ADR-022) | Accepted — ADR-036 Decision 10 |
+| DDD-CHI-12 | Reset-token expiry: 1 hour, single-use enforced by an atomic `UPDATE ... WHERE used_at IS NULL` | Accepted — ADR-036 Decision 2 |
+| DDD-CHI-13 | `end_user_id` minted into the `sub` claim is an opaque UUID, never the raw email | Accepted — ADR-036 Decision 2 |
+| DDD-CHI-14 | Session-invalidation-on-password-reset policy: left genuinely undecided per DISCUSS's own Out-of-Scope framing — an emergent consequence of the stateless-verification model (Decision Driver 3/ADR-026 Option B), not a new mechanism this feature must build | Deferred — no new decision forced |
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context (Mermaid)
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (client-auth-hosted-identity delta)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Enables hosted identity for a project he owns (US-01)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)", "Signs up, signs in, and resets a forgotten password directly with embyr — no Trailmark backend involved")
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK", "createUserWithEmailAndPassword() / signInWithEmailAndPassword() / sendPasswordResetEmail() / confirmPasswordReset(), now backed by embyr")
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Now also hosts a full email/password identity provider, coexisting with the existing custom-token path.")
+    System_Ext(systemDB, "System Postgres", "Adds hosted_identity_signing_keys (embyr's own, ECIES-encrypted-at-rest signing key).")
+    System_Ext(customerDB, "Customer Postgres (per-project)", "Adds hosted_identity_accounts, hosted_identity_reset_tokens — the SAME database BC-2 already writes documents into.")
+
+    Rel(sdkDev, embyr, "Enables hosted identity for a project (refused for backend_mode=agent)", "Admin API :9090")
+    Rel(endUser, firebaseSDK, "Signs up / signs in / requests+completes a password reset")
+    Rel(firebaseSDK, embyr, "accounts:signUp / signInWithPassword / sendOobCode / resetPassword", "REST :8081, ?key=<api_key>")
+    Rel(embyr, systemDB, "Reads/writes hosted_identity_signing_keys", "Postgres SQL")
+    Rel(embyr, customerDB, "Reads/writes hosted_identity_accounts, hosted_identity_reset_tokens", "Postgres SQL")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Container Diagram (Mermaid)
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (client-auth-hosted-identity delta)
+
+    Person(sdkDev, "SDK Developer (Alex)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(embyrA, "embyr-rs instance", "Rust binary", "Existing: gRPC :8080, REST :8081, Admin :9090. New: 1 admin route (enable), 4 REST routes (signup/signin/reset-request/reset-confirm). Extended: ADR-026 step 4 tries a second credential source.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "Existing projects/client_identity_credentials/access_rules tables. New: hosted_identity_signing_keys (1 row per enabled project, ECIES-encrypted private key).")
+        ContainerDb(custDB, "Customer Postgres (BC-2/BC-5, per-project)", "PostgreSQL", "Existing documents/transactions tables (BC-2). New: hosted_identity_accounts, hosted_identity_reset_tokens (BC-5) — same database, same PostgresBackendAdapter, same migrations/customer/ mechanism.")
+    }
+
+    Rel(sdkDev, embyrA, "Enables hosted identity (admin session auth); refused for backend_mode=agent", "HTTP :9090")
+    Rel(endUser, embyrA, "signUp / signInWithPassword / sendOobCode / resetPassword (?key=<api_key>)", "REST :8081")
+    Rel(endUser, embyrA, "getDoc() etc. — carries the resulting VerifiedEndUserIdentity exactly as the custom-token path already does", "gRPC :8080 / REST :8081")
+    Rel(embyrA, sysDB, "CRUD hosted_identity_signing_keys; unchanged project/credential reads", "Postgres SQL")
+    Rel(embyrA, custDB, "CRUD hosted_identity_accounts/reset_tokens via the SAME PostgresBackendAdapter BC-2 already resolves per request", "Postgres SQL")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Component Diagram — BC-5 Hosted Identity (Mermaid)
+
+Warranted per the SKILL's "5+ components, complex subsystem" threshold: the
+password validator, mint/verify extension, two new adapters (System DB and
+Customer DB sides), the new Customer-DB-resolution function, and 5 new
+handlers are more than five separable pieces, and this feature's own
+highest-risk property (the `backend_mode=agent` structural double-refusal)
+is exactly the kind of call-graph fact this diagram makes visible.
+
+```mermaid
+C4Component
+    title Component Diagram — BC-5 Hosted Identity
+
+    Container_Boundary(core, "embyr-core (pure, zero IO)") {
+        Component(pwval, "hosted_identity::validate_password_strength()", "Rust fn", "Minimum 8 chars, no composition rules (NIST 800-63B). New module.")
+        Component(mint, "client_identity::mint_client_identity_token()", "Rust fn", "New, added to the EXISTING module. Mirrors verify_client_identity_token()'s claims shape.")
+        Component(verify, "client_identity::verify_client_identity_token()", "Rust fn", "UNCHANGED (Resolution 3, locked).")
+    }
+
+    Container_Boundary(server, "embyr-server (adapters + composition)") {
+        Component(sysAdapter, "SystemDb::{insert_get}_hosted_identity_signing_key, get_project_backend_mode", "sqlx adapter", "New methods on the existing SystemDb struct.")
+        Component(custAdapter, "PostgresBackendAdapter::{account, reset_token}_CRUD", "sqlx adapter", "New methods on the existing PostgresBackendAdapter struct (BC-2's own).")
+        Component(resolver, "adapters::project_auth::resolve_customer_db_adapter()", "Rust fn", "New. Composes SystemDb + argon2 + ecies + PostgresBackendAdapter + CredentialCache. Cannot construct an agent adapter (type-level guarantee).")
+        Component(enableHandler, "admin::handlers::hosted_identity::enable_hosted_identity", "Axum handler", "US-01. Session auth, Owner/Admin. backend_mode=agent -> 403.")
+        Component(restHandlers, "rest::hosted_identity::{sign_up, sign_in_with_password, send_reset_code, reset_password}", "Axum handlers", "US-02/03/04. ?key=<api_key> authenticated, no admin session.")
+        Component(step4, "grpc::handler step 4 (extended)", "Tonic/Axum handler logic", "Tries client_identity_credentials then hosted_identity_signing_keys.")
+    }
+
+    Rel(enableHandler, sysAdapter, "backend_mode check; idempotent insert of a new signing key")
+    Rel(restHandlers, resolver, "resolves the project's Customer DB adapter (?key=<api_key>)")
+    Rel(restHandlers, pwval, "validates candidate password")
+    Rel(restHandlers, custAdapter, "account/reset-token CRUD, via the adapter resolver returned")
+    Rel(restHandlers, sysAdapter, "reads the project's signing key to mint (decrypts via ecies) / checks enablement")
+    Rel(restHandlers, mint, "mints a token for a newly-created or newly-verified session")
+    Rel(step4, sysAdapter, "reads hosted_identity_signing_keys (public_key only, no decrypt)")
+    Rel(step4, verify, "SAME function real hosted-identity signup/signin never calls directly -- verification-only, second credential source")
+```
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern. BC-5
+is a new inner hexagon within the existing Cargo-workspace enforcement
+mechanism (AD-01/AD-06) — no new crate, no new tooling.
+
+Rules enforced (existing, applying unchanged to the new module):
+- `embyr-core::hosted_identity` and the extended `embyr-core::client_identity`
+  have zero IO imports (`cargo-deny`, `deny.toml`, already covers all of
+  `embyr-core` — no `deny.toml` change needed).
+- `embyr-core` defines the value-type/function surface; `embyr-server`
+  consumes it — dependency direction inward, matching AD-02's existing rule.
+- `resolve_customer_db_adapter`'s `Ok` type is `Arc<PostgresBackendAdapter>`
+  (a concrete struct), not a trait object — a compile-time-visible guarantee
+  that it can never resolve `backend_mode=agent` into a usable adapter (no
+  `AgentBackendAdapter` variant exists in its return type at all).
+- New migration files follow the existing single-sourced embed points
+  unchanged: `migrations/0028_*.sql` via `SystemDb::migrate()`
+  (`sqlx::migrate!("../../migrations")`), `migrations/customer/000{3,4}_*.sql`
+  via `PostgresBackendAdapter::migrate()`
+  (`sqlx::migrate!("../../migrations/customer")`, ADR-022's sole embed point
+  — no new `sqlx::migrate!` invocation anywhere in this feature).
+
+---
+
+## Wave: DESIGN / [REF] Development Paradigm Confirmation
+
+No change to the project-wide paradigm. New `embyr-core` additions
+(`hosted_identity::validate_password_strength`,
+`client_identity::mint_client_identity_token`) follow the existing
+"functional-where-practical Rust" discipline: pure, total functions,
+explicit `Result`/plain-value returns, zero IO, zero shared mutable state.
+`CLAUDE.md`'s existing paradigm section requires no update.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions
+
+| ID | Question | Impact | Resolution owner |
+|---|---|---|---|
+| `OQ-CHI-01` (carried from DISCUSS, mirrors `OQ-CA-01`) | Whether the Firebase JS SDK's `createUserWithEmailAndPassword()`/`signInWithEmailAndPassword()`/`sendPasswordResetEmail()`/`confirmPasswordReset()`, pointed at a non-Google backend, POST to URLs embyr controls the shape of (this ADR's `?key=`-query-param, `accounts:*`-named proposal) or fixed Identity-Toolkit-specific paths embyr must replicate exactly | Not blocking DESIGN's logical contract (fully specified above regardless of outcome); required pre-DELIVER empirical spike, likely MORE confidently guessable than `OQ-CA-01` since the real Identity Toolkit REST surface (`accounts:signUp` etc.) is well-known and this ADR's proposal deliberately mirrors it | DISTILL/DELIVER, empirical spike before the sign-up/sign-in transport is considered final — mirrors exactly how `client-auth`'s own `OQ-CA-01` was handled: DESIGN proceeds on best-evidence assumption, DELIVER validates before implementation commits |
+| `OQ-CHI-02` (new) | Reset-token expiry window (this DESIGN defaults to 1 hour) — is this the right value for this product's actual risk tolerance, or should it be configurable per-deployment? | Does not block v1 implementation (a constant is a trivial follow-up change to a config value); no evidence in any job story of a specific required window | Product Discovery, if real usage data ever shows 1 hour is wrong in either direction |
+| `OQ-CHI-03` (new) | Should `hosted_identity_signing_keys`' signing key ever need rotation (mirroring ADR-025's dual-generation window for the CUSTOMER's own registered credential)? | Out of this feature's locked v1 scope (no story requires it); ADR-025's exact shape is the documented upgrade path if a future feature needs it | Product Discovery, triggered by evidenced need, not built speculatively (Principle 8) |
+| `OQ-CHI-04` (carried from DISCUSS) | Session-invalidation-on-password-reset policy | Genuinely undecided; the stateless per-request verification model (ADR-026 Option B, reused unchanged) means an already-issued token remains valid until its own `exp` regardless of a subsequent password reset — this is an emergent property of the existing model, not a gap this feature introduces or is required to close | Product Discovery, if evidence ever shows this needs an explicit revocation mechanism |
+
+---
+
+## Wave: DESIGN / [REF] External Integrations
+
+**None requiring contract tests.** This feature introduces no new outbound
+network dependency: `hosted_identity_signing_keys` reuses the existing,
+already-probed `SystemDb` connection; `hosted_identity_accounts`/
+`hosted_identity_reset_tokens` reuse the existing, already-resolved Customer
+DB connection (BC-2's own); password-reset "send" reuses the existing
+`IEmailSender` port with its existing `NoopEmailSender` V1 adapter (no real
+SMTP delivery is built by this feature — that is `SmtpEmailSender` V2, a
+named, tracked, cross-feature dependency per ADR-011, unchanged by this
+feature). The only genuinely external-facing uncertainty (`OQ-CHI-01`) is
+about the *shape* of embyr's own already-existing REST surface as consumed
+by the Firebase JS SDK, not a new third-party service integration — no
+consumer-driven contract test is warranted for it.
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package
+
+**To DISTILL (acceptance-designer)**: this `feature-delta.md` (DISCUSS +
+DESIGN sections), the 4 slice briefs, `adr-036-hosted-identity-bounded-context-and-storage.md`,
+the amended `adr-002-bounded-contexts.md` and `adr-026-client-identity-composition-with-api-key-auth.md`.
+
+**To DEVOPS (platform-architect)**: the 3 new migration files (`migrations/0028_*.sql`,
+`migrations/customer/0003_*.sql`, `migrations/customer/0004_*.sql`) — no new
+migration MECHANISM (ADR-022 already single-sources Customer DB migrations);
+no new external integration requiring contract tests (see § External
+Integrations above); § Outcome KPIs (DISCUSS) for instrumentation planning.
+
+**Explicit flags carried forward / newly raised**:
+1. Resolutions 2 and 3 (storage location, disjoint-entity constraint) remain
+   LOCKED, as DISCUSS specified — this DESIGN did not reopen either; it
+   resolved the schema/placement details DISCUSS explicitly deferred.
+2. `OQ-CHI-01` (SDK wire-format empirical uncertainty) is NOT resolved by
+   this DESIGN pass — required pre-DELIVER spike, exactly as `OQ-CA-01` was
+   handled for `client-auth`. DISTILL should treat the exact endpoint paths/
+   query-param placement above as provisional, the *logical* contract
+   (fields, status codes, rejection taxonomy) as implementation-ready.
+3. Bounded-context placement (flag 6) is RESOLVED by this DESIGN pass: BC-5
+   Hosted Identity, per ADR-036 § Decision 1 and the ADR-002 amendment.
+4. New Earned Trust surface: none (see § Driven Ports + Adapters' explicit
+   Earned Trust note) — every new I/O path composes already-probed
+   substrates; no new `probe()` is required or added.
+5. This feature amends `adr-002` and `adr-026` (both additive `Changed
+   Assumptions` appendices, neither rewritten) — DISTILL/DEVOPS should read
+   both amendments alongside their original text, mirroring how
+   `custom-claims`'s amendment to `adr-024` was already handled.
+6. Observability architecture for the 4 new REST endpoints (signup, signin,
+   reset-request, reset-confirm) — RESOLVED per peer review, see ADR-036 §
+   Decision 11: structured `tracing` logs only for v1 (matching this
+   codebase's existing REST-wide silence, per direct confirmation that
+   `rest/sign_in.rs` itself carries zero instrumentation today); a
+   REST-equivalent of `obs_helpers`'s gRPC metrics family is named as an
+   explicit, deferred, cross-cutting follow-up, not this feature's scope.
+7. `backend_mode=agent` dual-independent refusal (ADR-036 § Decision 4/8) —
+   whichever slice implements US-01 must include a test asserting the
+   TYPE-LEVEL guarantee, not just the runtime behavior: confirm
+   `resolve_customer_db_adapter` has no code path that can construct
+   anything other than `Arc<PostgresBackendAdapter>` (e.g. by exhaustive
+   match over `BackendMode` with no `agent` arm returning an agent adapter),
+   in addition to the existing admin-enablement 403 test.
+
+Peer review: invoked per-wave (trigger: security boundary change —
+signing-key placement + zero-credential-egress tension). `nw-solution-
+architect-reviewer` returned **CONDITIONALLY APPROVED** (0 critical, 1 HIGH,
+3 MEDIUM). Disposition: HIGH (observability gap) resolved via flag 6 above;
+MEDIUM #1 (password-reset v1 delivery gap) foregrounded in ADR-036 §
+Consequences / Negative; MEDIUM #2 (Argon2id latency KPI) accepted as
+inherent cost, no action — Argon2id parameters are fixed by reuse of
+`signin`'s existing tuning, not a new tunable; MEDIUM #3 (type-guarantee
+test plan) resolved via flag 7 above. Mandatory consolidated review still
+fires at end of DISTILL covering all 4 waves in parallel.

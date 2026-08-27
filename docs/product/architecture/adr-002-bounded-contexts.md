@@ -188,3 +188,44 @@ BC-4 Access Control
 
 This context map entry does not modify BC-1, BC-2, or BC-3's own existing map
 entries above — it is purely additive.
+
+---
+
+## Changed Assumptions (appended by feature `client-auth-hosted-identity`, DESIGN wave, 2026-08-27)
+
+**Why this is being appended, not reopened:** the `security-rules` amendment
+above (BC-4) and Option D's original rejection (credential resolution) both
+stand unchanged — nothing about either is walked back. This amendment
+records a *second* new subsystem, evaluated fresh against the identical
+Option-D three-part test, that also reaches the "new context" conclusion —
+confirming the test is being applied per-case, not by inertia, a second time.
+
+**New assumption:** `client-auth-hosted-identity` (JOB-18) introduces a
+hosted-identity `Account` entity that has an identity of its own
+(`(project_id, email)`), a lifecycle of its own (create → reset →
+[deferred: disable/delete]), and invariants of its own (email uniqueness per
+project, password-strength rules, single-use/expiring reset tokens) — it
+passes all three of Option D's tests, exactly as `AccessRule` did for BC-4.
+
+**Decision:** a fifth bounded context, **BC-5: Hosted Identity**, is added.
+Full alternatives analysis and the storage-boundary split this context
+introduces (the first bounded context in this system with storage split
+across both System DB and Customer DB) are recorded in
+`docs/product/architecture/adr-036-hosted-identity-bounded-context-and-storage.md`
+§ Decision 1 — Bounded-Context Placement.
+
+**Context Map addition** (additive to § Context Map Summary and to the BC-4
+addition above, not a rewrite of either):
+
+```
+BC-5 Hosted Identity
+    → BC-1 Tenant Management  [read-only: Project.backend_mode gate; reads and
+                                decrypts its own System-DB-resident signing key]
+    → BC-2 Document Storage   [shares BC-2's existing PostgresBackendAdapter +
+                                migrations/customer/ mechanism — a new CONSUMER
+                                of an already-established mechanism, not a new
+                                mechanism]
+```
+
+This entry does not modify BC-1, BC-2, BC-3, or BC-4's own existing map
+entries above — it is purely additive.

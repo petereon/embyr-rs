@@ -221,3 +221,36 @@ second header.
 - `crates/embyr-server/src/grpc/handler.rs::authenticate`
 - `docs/product/architecture/brief.md` § Open Questions (OQ-02, OQ-03 — same class of
   SDK-fidelity uncertainty)
+
+## Changed Assumptions (appended by feature `client-auth-hosted-identity`, DESIGN wave, 2026-08-27)
+
+**Original assumption, quoted verbatim (§ Decision — Wire Composition, above):**
+
+> `[4] NEW, additive: is `x-embyr-client-identity` present on this request?
+>       absent → proceed with no VerifiedEndUserIdentity attached (UNCHANGED BEHAVIOR)
+>       present → verify_client_identity_token() (ADR-024/025)
+>                  success → attach VerifiedEndUserIdentity to request context
+>                  failure → attach nothing; DOES NOT reject the request`
+
+**Why this is being appended, not reopened:** step 4's structure — additive,
+gated on the header's presence, never rejects an ordinary data-plane call —
+is unchanged. The original text assumed exactly one credential source
+(`client_identity_credentials`). This amendment records that a project may
+now have a *second*, independent credential source (an embyr-minted hosted
+-identity signing key) and widens step 4's inner branch to try both, without
+changing its outer shape.
+
+**New assumption:** step 4's "present" branch first attempts
+`verify_client_identity_token()` against `client_identity_credentials` (the
+ORIGINAL, unchanged code path — 100% backward-compatible for every
+`client-auth`-only project, which never even reaches the second lookup on a
+successful first attempt). Only on absence or failure does it also attempt
+`hosted_identity_signing_keys` (feature `client-auth-hosted-identity`, JOB-18)
+via the identical, unchanged `verify_client_identity_token()` function. A
+project with neither table populated (today's default) sees both lookups
+return `None`/absent and step 4 reduces exactly to its pre-`client-auth`
+behavior — the "physically unreachable, not merely unexercised" regression
+guardrail this ADR already established is extended, not weakened.
+
+**Reference**: `docs/product/architecture/adr-036-hosted-identity-bounded-context-and-storage.md`
+§ Decision 4 — Verification-Time Credential Routing.

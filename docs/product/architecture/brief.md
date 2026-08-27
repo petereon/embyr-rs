@@ -4285,3 +4285,90 @@ Full alternatives-considered analysis (including the rejected shared
 placement, and the rejected FK-to-`accounts` actor-attribution option):
 `docs/product/architecture/adr-035-access-rule-history-storage-and-capture-mechanism.md`.
 
+---
+
+## Application Architecture — client-auth-hosted-identity
+
+> Updated: 2026-08-27
+> Feature: client-auth-hosted-identity (JOB-18 — strategic scope reversal of
+> `client-auth`'s own locked-but-flagged-reversible exclusion; embyr-hosted
+> email/password signup, signin, and password reset for end users whose
+> app has no backend of its own to mint a custom token from)
+> Mode: Propose (autonomous analysis per Decision 1)
+> ADR: `docs/product/architecture/adr-036-hosted-identity-bounded-context-and-storage.md`
+> (new — combined bounded-context-placement/storage-split/composition
+> decision, mirroring ADR-025/026/029/035's own bundled-decision precedent).
+> Amends `adr-002-bounded-contexts.md` (§ Changed Assumptions, appended) and
+> `adr-026-client-identity-composition-with-api-key-auth.md` (step 4
+> verification-time credential routing, additive). Does not amend
+> `adr-024`/`adr-025`/`adr-011` — all three remain accurate as written and
+> are reused unchanged.
+
+Full DESIGN content (Reuse Analysis, Bounded-Context Placement, Component
+Decomposition, Driving/Driven Ports, Technology Choices, Decisions Table
+DDD-CHI-1..10, C4 System Context/Container/Component diagrams, Architecture
+Enforcement, Open Questions, External Integrations) lives in
+`docs/feature/client-auth-hosted-identity/feature-delta.md` §§ Wave: DESIGN —
+the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: a fifth bounded context, **BC-5 Hosted Identity**, is
+added — the hosted-identity `Account` passes ADR-002's own Option-D
+three-part test (identity, lifecycle, invariants) the same way BC-4 Access
+Control did; folding it into BC-1 or BC-2 would repeat the exact reasoning
+gap ADR-002's `Changed Assumptions` already corrected once. BC-5 is the
+first bounded context in this codebase with a storage boundary genuinely
+split across both databases.
+
+**Storage split (the central decision)**: `hosted_identity_accounts` and
+`hosted_identity_reset_tokens` live in **Customer DB** (Resolution 2, locked
+— PII isolation, project scope), reusing BC-2's own `PostgresBackendAdapter`
++ `migrations/customer/` mechanism unchanged (ADR-022 already single-sourced
+it — zero new migration mechanism). The embyr-owned Ed25519 signing key
+(structurally disjoint from `client_identity_credentials`, Resolution 3,
+locked) lives in **System DB** instead — a deliberate split, not an
+oversight: it is embyr's own control-plane secret, and a `direct_pg`
+customer's own DBA administers their Customer DB directly, so putting
+embyr's private signing key there would hand that DBA a silent,
+audit-trail-free identity-forgery capability Resolution 2 never accepted.
+The private key is ECIES-encrypted at rest with the identical
+key-derived-from-`api_key` pattern `ecies_encrypted_dsn` already uses — zero
+new cryptographic primitive.
+
+**Composition**: `verify_client_identity_token()` (ADR-024) has ZERO code
+changes (Resolution 3, locked). ADR-026 step 4 is widened, additively, to
+try `client_identity_credentials` first (100% unchanged code path for
+`client-auth`-only projects) and `hosted_identity_signing_keys` second —
+the identical "try current, then previous" pattern ADR-025 already
+established, one level up. `backend_mode=agent` is refused twice,
+independently: once at US-01's enablement action (structural 403, not a
+warning), and again at every signup/signin/reset call, because the new
+Customer-DB-adapter resolver (`resolve_customer_db_adapter`, new, composes
+only pre-existing primitives — Argon2id, ECIES, `PostgresBackendAdapter`,
+`CredentialCache`) never constructs an agent adapter at all — a type-level
+guarantee, not a runtime check.
+
+**Driving port**: REST `:8081`, no new listener. Unlike
+`signInWithCustomToken()`'s credential-only shape, hosted identity's 4 new
+endpoints (`accounts:signUp`, `accounts:signInWithPassword`,
+`accounts:sendOobCode`, `accounts:resetPassword`) require the project's
+`api_key` as a `?key=` query parameter — a genuine, evidenced difference
+(Customer DB access requires it), which also happens to mirror real
+Firebase's own Identity Toolkit REST surface.
+
+**Reuse**: Argon2id parameters reused via 2 new thin named wrapper functions
+sharing the existing `argon2_instance()` constant (not
+`hash_api_key(password.as_bytes())` directly — rejected as misleading at the
+call site). `IEmailSender` (ADR-011) reused completely unchanged for
+password-reset "send" — `NoopEmailSender` V1, honest V1 delivery gap
+unchanged. Oracle protection (sign-in, reset-request) follows
+`invalid_credentials()`'s discipline (one shared response constructor per
+rejection class) as a pattern, not shared code (different response shape,
+different module).
+
+Full alternatives-considered analysis, exact schemas, and the full C4
+diagram set: `docs/product/architecture/adr-036-hosted-identity-bounded-context-and-storage.md`
+and `docs/feature/client-auth-hosted-identity/feature-delta.md` §§ Wave:
+DESIGN.
+
