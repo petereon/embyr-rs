@@ -670,3 +670,488 @@ Peer review: not invoked per-wave (default skip per SKILL Phase 3 step 6 — thi
 - `docs/product/jobs.yaml` — JOB-17 receives a new NOTE (7th realization, this feature, 2026-08-27), prepended above the `custom-claims` NOTE per the established reverse-chronological convention.
 - `docs/product/journeys/sdk-developer.yaml` — receives a new NOTE (this feature, 2026-08-27), prepended above the `custom-claims` NOTE, same convention. No separate `journey-*.yaml` artifact — per Decision 3 (Lightweight), journey detail lives inline in this file.
 - No new persona file — Nora Fischer remains domain-example data within Alex's/JOB-17's own stories, not a formal persona, consistent with every prior sibling's precedent for Trailmark's other domain-example people (Maria Santos, Dana Kim, Priya Nair, Jordan Lee).
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ `docs/feature/security-rules-operations/feature-delta.md` (full, this file's
+own DISCUSS sections, above) — all 5 user stories, all 4 Resolutions, §
+System Constraints, § Out of Scope, § Handoff Package's 6 explicit flags
+(flag 1 — Resolution 1's own 3-table recommendation — arrives as a strong
+recommendation, not a lock, per its own explicit text; flags 2-6 arrive
+LOCKED and are not reopened).
+✓ `docs/feature/security-rules-operations/slices/slice-01-*.md` through
+`slice-05-*.md` (all 5, full) — condensed IN/OUT-scope restatements of the
+corresponding user stories; no content beyond what `feature-delta.md`'s own
+US-01–US-05 sections already carry.
+✓ `docs/product/architecture/brief.md` (targeted — confirmed the per-feature
+`## Application Architecture — {feature}` section convention, most recently
+`custom-claims`' own lean-summary-plus-pointer shape, mirrored below).
+✓ `docs/product/architecture/adr-028-access-rule-storage-and-lifecycle.md`,
+`adr-030-write-path-grammar-storage-and-composition.md`,
+`adr-032-collection-group-rule-storage-and-composition.md` (all full,
+re-read for this DESIGN pass, not merely recalled from DISCUSS's own
+Reading Confirmation) — each independently confirmed to defer history to
+this epic in near-identical language (quoted directly in ADR-035 § Context).
+Their exact current schemas (`access_rules`/`write_access_rules`/
+`group_access_rules`, all 3: `condition_source TEXT NOT NULL`, composite
+`PRIMARY KEY`, `created_at`/`updated_at`, no `active`/`previous`/`version`
+column) and exact current adapter-method shapes (`upsert_*`/`get_*`,
+`INSERT ... ON CONFLICT ... DO UPDATE`) confirmed directly — the precise
+column-naming divergence between `access_rules`/`write_access_rules`
+(`collection_path`) and `group_access_rules` (`collection_id` + `CHECK`)
+is the direct evidence behind this DESIGN's own independent re-verification
+of Resolution 1 (§ Decisions Table DDD-SRO-1, ADR-035 § Decision — Schema
+Shape).
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` (full, 801 lines)
+— **confirms directly**: `define_access_rule`/`define_write_access_rule`/
+`define_group_access_rule` each call their own `upsert_*` unconditionally,
+with no history side effect on the success path, exactly as DISCUSS's own
+Reading Confirmation asserted. Confirms `session: SessionContext` is already
+a parameter of all 3 handlers, `session.account_id` already used (for
+`verify_project_ownership`) at every one of the 3 call sites — zero new
+extraction logic needed. Confirms `simulate_access_rule`/
+`simulate_query_compliance`/`simulate_group_query_compliance`'s own any-role
+(`verify_project_ownership` only, no role check) shape — the direct
+structural precedent for this feature's own 3 new retrieval handlers.
+✓ `crates/embyr-server/src/admin/extractors/session_context.rs` (full) —
+**verified structurally, not trusted**: `SessionContext { session_id: Uuid,
+user_id: Uuid, account_id: Uuid, role: Role }` — `account_id` is a plain
+`Uuid` field, directly accessible, confirming DISCUSS's own Resolution 2
+assumption is structurally true, not merely asserted.
+✓ `crates/embyr-server/src/adapters/system_db.rs` (full, 712 lines) — exact
+current `AccessRuleRow`/`WriteAccessRuleRow`/`GroupAccessRuleRow` and
+`upsert_access_rule`/`upsert_write_access_rule`/`upsert_group_access_rule`/
+`get_access_rule`/`get_write_access_rule`/`get_group_access_rule` shapes,
+the direct structural precedent — and, for the 3 `upsert_*` methods, the
+exact signature this DESIGN pass extends (§ Decisions Table DDD-SRO-3,
+ADR-035 § Decision — Capture Mechanism Placement).
+✓ `crates/embyr-server/src/admin/router.rs` (targeted, route-registration
+block, full) — exact current route list and registration shape/ordering,
+the direct precedent for this feature's own 3 new `GET .../history` routes.
+✓ `migrations/0014_admin_query_logs.sql` (full) — re-investigated directly
+for THIS wave's own two genuine judgment calls (ordering-column and
+actor-attribution-FK precedent), not merely recalled from DISCUSS's own
+"rejected as a reuse candidate" finding — confirmed `id UUID DEFAULT
+gen_random_uuid()`, `account_id UUID NOT NULL` with no FK, ordering by
+`created_at` range only, no monotonic sequence column anywhere. This is the
+direct evidence behind ADR-035's own ordering-mechanism and
+actor-attribution decisions (§ Decisions Table DDD-SRO-2/DDD-SRO-4).
+✓ `migrations/0008_admin_accounts.sql` (full) — confirms `accounts(id)
+UUID PRIMARY KEY`'s exact shape, investigated as a candidate FK target for
+`actor_account_id` and deliberately not referenced (ADR-035 § Decision —
+Actor Attribution).
+✓ Migration directory listing (`migrations/*.sql`, 24 files) — confirms
+`0024_group_access_rules.sql` is the highest existing migration; this
+feature's own 3 new tables are `0025`/`0026`/`0027`. Confirms ZERO existing
+migration anywhere in this codebase uses `SERIAL`/`BIGSERIAL`/`GENERATED
+ALWAYS AS IDENTITY` — the direct evidence that this feature's own
+monotonic-identity-column choice (ADR-035 § Decision — Schema) is a genuine,
+justified departure from this codebase's own prior practice, not a blind
+default.
+✓ ADR directory listing (`docs/product/architecture/adr-*.md`, 33 files) —
+confirms `adr-034` is the highest existing ADR; this feature's own is
+`adr-035`.
+
+No contradiction found between DISCUSS's locked Resolutions/Constraints and
+the actual code. One DISCUSS item required this DESIGN's own independent
+judgment, not a rubber stamp, per the task's own explicit instruction:
+Resolution 1's "3 independently-stored, schema-identical history tables"
+recommendation is RE-VERIFIED (not merely inherited) against the actual
+schema this DESIGN pass produces — see § Decisions Table DDD-SRO-1 and
+ADR-035 § Decision — Schema Shape for the independent re-derivation, which
+confirms the recommendation but for a reason (the `collection_path`/
+`collection_id`+`CHECK` divergence between the 2 exact-path tables and the
+group table) that only becomes visible once the real schema is designed,
+not assumed from DISCUSS's own text alone.
+
+---
+
+## Wave: DESIGN / [REF] Interaction Mode
+
+**Propose** (per `/nw-design` Decision 1, passed in; Design Scope:
+Application/components). This feature's 3 hard-locked constraints
+(Resolution 2 — audit fields on the history row; Resolution 3 — grammar
+untouched; the append-only invariant) are not reopened. What remains for
+DESIGN is genuinely technical and is resolved with alternatives-considered
+in ADR-035, not a user-facing option menu: the exact history-table schema
+and whether Resolution 1's own 3-table recommendation independently holds
+once that schema is designed (it does, for a reason DISCUSS itself did not
+have visibility into — see above); the ordering mechanism under rapid
+successive redefinition; where the capture side effect is structurally
+anchored; and the admin-surface shape for retrieval and restore.
+
+---
+
+## Wave: DESIGN / [REF] Quality Attribute Priorities — security-rules-operations
+
+| Rank | Attribute | Forcing Constraint |
+|------|-----------|---------------------|
+| 1 | **History capture must be structurally, not conventionally, impossible to skip** | North Star KPI #1 (100% of redefine events produce a retrievable, correctly-attributed history entry). Enforced by fusing the capture `INSERT` into the same adapter method and the same DB transaction as the existing upsert, with a compiler-enforced new parameter (ADR-035 § Decision — Capture Mechanism Placement). |
+| 2 | **Structural independence between the 3 rule types' own histories** | DISCUSS System Constraints ("3 independently-stored history tables, not 1 shared table with a discriminator"); re-verified independently against the actual schema (§ Decisions Table DDD-SRO-1). |
+| 3 | **Zero regression to any of the 3 rule tables' existing write/read paths** | Guardrail KPI #3. The existing `upsert_*` SQL statement TEXT remains byte-for-byte unchanged; `access_rules`/`write_access_rules`/`group_access_rules`' own read paths (`get_access_rule` et al., `handle_get_document`, write handlers, `handle_run_query`) receive zero code changes. |
+| 4 | **Correctly-ordered retrieval under rapid successive redefinition (AC-17-158)** | A monotonic `GENERATED ALWAYS AS IDENTITY` primary key, not timestamp-only ordering — a structural, not probabilistic, guarantee (ADR-035 § Decision — Schema, ordering mechanism). |
+| 5 | **Append-only — no `UPDATE`/`DELETE`, ever, on any history table** | DISCUSS System Constraints, locked. Enforced by omission: no adapter method in this feature issues either statement against any history table. |
+| 6 | **Read access (any role) vs. restore access (Owner/Admin, inherited) fidelity** | Handoff Package flag 6, locked observable behavior — retrieval handlers call only `verify_project_ownership`; restore reuses the existing `define_*` role gate automatically, no new check. |
+| 7 | **No new I/O substrate / Earned Trust** | All new statements execute through the already-probed `SystemDb` pool — no new driven port, no new probe (ADR-035 § Enforcement). |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis — security-rules-operations (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---------------------|------|---------|----------|----------------|
+| `upsert_access_rule` / `upsert_write_access_rule` / `upsert_group_access_rule` | `crates/embyr-server/src/adapters/system_db.rs` | The exact write path a redefine must go through | **EXTEND** | Signature gains 1 parameter (`actor_account_id: Uuid`); body wraps the EXISTING, byte-unchanged upsert statement plus a NEW history `INSERT` in one DB transaction. Mirrors `evaluate()`'s own signature-extension precedent (ADR-030 Decision Driver 3) — a compile-time-enforced, structural coupling, not a second, independently-callable method. |
+| `AccessRuleRow` / `WriteAccessRuleRow` / `GroupAccessRuleRow`, `get_access_rule` / `get_write_access_rule` / `get_group_access_rule` | `crates/embyr-server/src/adapters/system_db.rs` | Current-state rule read | **NO CHANGE (verified, not asserted)** | This feature adds history retrieval alongside these, never modifies them — the current-state read path `handle_get_document`/write handlers/`handle_run_query` all depend on remains byte-identical, confirmed by direct read. |
+| `define_access_rule` / `define_write_access_rule` / `define_group_access_rule` | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Handler that must supply the actor identity to the new capture mechanism | **EXTEND** | One-line change per handler: pass `session.account_id` (already in scope, already `Uuid`) to the now-signature-extended `upsert_*` call. Zero change to role gate, validation order, or response shape (AC-17-159/168/171). |
+| `simulate_access_rule` / `simulate_query_compliance` / `simulate_group_query_compliance` (any-role, read-only handler shape) | `crates/embyr-server/src/admin/handlers/access_rules.rs` | The direct structural precedent for a new any-role, read-only admin handler | **EXTEND (pattern reuse, new handlers)** | The 3 new `get_*_history` handlers mirror this shape exactly (`verify_project_ownership` only, no role gate) — no new authorization pattern invented. |
+| `SessionContext` | `crates/embyr-server/src/admin/extractors/session_context.rs` | Actor identity source | **NO CHANGE (verified, not asserted)** | `account_id: Uuid` already directly accessible at every relevant call site — confirmed by direct read, per Resolution 2's own evidence, re-verified here rather than trusted. |
+| `verify_project_ownership` | `crates/embyr-server/src/admin/handlers/shared.rs` | Project-scope authorization for the new retrieval handlers | **EXTEND (reuse, no change)** | Called unchanged by all 3 new retrieval handlers, mirroring every existing handler in this file. |
+| `ConditionRejectionResponse` / `condition_parse_error_response` | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Condition-validation error taxonomy | **NOT REUSED (no overlap)** | Retrieval handlers never parse a condition — nothing to validate. Restore reuses this taxonomy automatically because it calls the EXISTING `define_*` handler unchanged (AC-17-167), not because this feature adds a new call site to it. |
+| `admin/router.rs` route-registration block | `crates/embyr-server/src/admin/router.rs` | Route table | **EXTEND** | 3 new `GET .../history` routes registered alongside the existing 6, same sub-router, same session-auth middleware. |
+| `SystemDb` / Postgres connection pool | `crates/embyr-server/src/adapters/system_db.rs` | Substrate for all new I/O | **EXTEND (reuse, already-probed)** | New transaction and new `SELECT`s execute through the SAME pool every other System DB operation already uses — no new substrate, no new probe. |
+| `query_logs` (migration 0014) | `migrations/0014_admin_query_logs.sql` | Existing append-only, actor-attributed log table | **INVESTIGATED, NOT REUSED (structurally different concept, per DISCUSS's own finding) — 2 of its OWN schema choices independently investigated as precedent for this feature's schema** | Re-confirmed structurally different (SDK data-plane metering, not admin resource-definition history) — DISCUSS's own rejection stands. Independently, its `account_id`-with-no-FK choice IS adopted for `actor_account_id` (ADR-035 § Decision — Actor Attribution); its `id UUID` + timestamp-range-only ordering is investigated and NOT adopted, for a reasoned, evidenced departure (ADR-035 § Decision — Schema, ordering mechanism). |
+| Prometheus metrics (ADR-016) | `docs/product/architecture/adr-016-prometheus-metrics.md` | Candidate observability mechanism | **NOT REUSED** | DISCUSS's own finding re-confirmed, not re-litigated: counts/aggregates, no per-resource historical state, no actor attribution. |
+| DT-07 tracing-only precedent (admin-api-v2) | `docs/feature/admin-api-v2/distill/wave-decisions.md` | Candidate audit mechanism | **NOT REUSED, for this feature specifically** | DISCUSS's own Resolution 2 reasoning re-confirmed: a co-located versioning requirement DT-07's own admin operations did not have distinguishes this case; DT-07's own decision for its own scope (member invites, key changes) is unchanged and not reopened. |
+
+**Verdict: 6 EXTEND (1 of which is signature-extension-plus-transaction, the
+single most load-bearing row; 2 of which are explicit "confirmed unchanged,
+verified" rows), 3 CREATE NEW (below), 2 investigated-and-rejected (1 of
+which contributes 2 independently-adopted/rejected schema precedents), 0
+unjustified.**
+
+**CREATE NEW, each justified by "no existing alternative":**
+
+| New Component | Justification |
+|---|---|
+| 3 new history tables (`access_rule_history`, `write_access_rule_history`, `group_access_rule_history`) | No existing table can hold a per-redefine chronological log without conflating rule-kind concepts (re-verified, § Decisions Table DDD-SRO-1) or overloading a schema designed for a different concept (`query_logs`, investigated and rejected above). |
+| 3 new adapter Row structs + 3 new `get_*_history` methods | No existing method returns an ordered `Vec` of historical rows — genuinely new read query, not a variant of an existing one. |
+| 3 new admin handlers + 3 new response types + 3 new routes | No existing handler retrieves historical rule state — genuinely new capability, mirroring an existing PATTERN (`simulate_*`'s any-role shape) but not an existing CALLABLE. |
+
+---
+
+## Wave: DESIGN / [REF] Development Paradigm Confirmation — security-rules-operations
+
+No change to the project-wide paradigm (`functional-where-practical Rust`,
+CLAUDE.md). The 3 signature-extended `upsert_*` methods and 3 new
+`get_*_history` methods remain ordinary `async fn ... -> Result<T,
+CoreError>` — `Result` used as the existing control-flow idiom, unchanged.
+This feature is entirely `embyr-server` adapter/handler work; **`embyr-core`
+requires zero changes** (Resolution 3 locks the grammar/evaluation surface
+untouched, and this feature's own scope — storage and admin-surface only —
+never approaches it).
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement — security-rules-operations
+
+No new bounded context. BC-4 Access Control (ADR-029) is extended with 3
+new append-only CHILD records of its existing `AccessRule`/`WriteAccessRule`/
+`GroupAccessRule` aggregates — a history table is not a new aggregate, it is
+an aggregate's own event log. No re-evaluation of ADR-002's decision drivers
+is needed: no new consistency requirement crosses a context boundary, no new
+aggregate root, no new storage OUTSIDE BC-4's existing Postgres (System DB).
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition — security-rules-operations
+
+| Component | Crate/Module Path | Responsibility | Bounded Context |
+|-----------|--------------------|------------------|------------------|
+| `embyr-server::adapters::system_db` (extended) | `crates/embyr-server/src/adapters/system_db.rs` | `upsert_access_rule`/`upsert_write_access_rule`/`upsert_group_access_rule` signature-extended + transactional history capture; +3 new `get_*_history` methods; +3 new `*HistoryRow` structs | BC-4 |
+| `embyr-server::admin::handlers::access_rules` (extended) | `crates/embyr-server/src/admin/handlers/access_rules.rs` | `define_*` handlers pass `session.account_id`; +3 new `get_*_history` handlers + response types | BC-4 (driving adapter) |
+| `embyr-server::admin::router` (extended) | `crates/embyr-server/src/admin/router.rs` | +3 new `GET .../history` routes registered alongside the existing 6 | BC-4 (driving adapter) |
+| Migrations (new) | `migrations/0025_access_rule_history.sql`, `0026_write_access_rule_history.sql`, `0027_group_access_rule_history.sql` | 3 new append-only history tables | BC-4 storage |
+
+No new file beyond the 3 migrations — all Rust changes extend existing
+files in place, mirroring `security-rules-write-path`/
+`security-rules-collection-group-rules`' own precedent of adding sibling
+handlers/methods to the SAME files rather than new modules.
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports (Inbound) — security-rules-operations additions
+
+| Port | Protocol | Location | New/Extended | What it does |
+|------|----------|----------|---------------|---------------|
+| `AccessRuleAdminPort` (existing) | HTTP (admin `:9090`) | `admin/handlers/access_rules.rs`, `admin/router.rs` | **Extended, additively** | `define_access_rule`/`define_write_access_rule`/`define_group_access_rule` now additionally capture history on every successful call — request/response shape unchanged (AC-17-159/168/171). +3 new `GET .../history` routes (any authenticated role). |
+
+No new gRPC/REST RPC. No change to the data-plane driving port
+(`FirestoreGrpcPort`/`RestPort`) at all — this feature never touches
+`GetDocument`/writes/`RunQuery`/`Listen`.
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters — security-rules-operations additions
+
+**No new driven port, no new adapter, no new `probe()`.** Every new
+statement (the transactional history `INSERT`, the 3 new `get_*_history`
+`SELECT`s) executes through the existing, already-probed `SystemDb`
+connection pool — the identical "no environment can lie to a query the
+existing pool already knows how to run" reasoning ADR-028/030/032 §
+Enforcement already established applies unmodified. Full reasoning: ADR-035
+§ Enforcement.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices — security-rules-operations additions
+
+**No new workspace dependency.** `sqlx::Pool::begin()`/`Transaction` (used
+for the fused upsert-plus-history-capture) and `GENERATED ALWAYS AS
+IDENTITY` (a native Postgres 10+ column-generation clause, not a `sqlx`
+feature) are both already available through this codebase's existing `sqlx`
+usage and Postgres version (confirmed: integration tests already run
+against `postgres:15-alpine`). `Uuid` binding for `actor_account_id` mirrors
+`verify_project_ownership`'s own already-working `Uuid` bind (confirmed by
+direct read, `admin/handlers/shared.rs:19`) — the `sqlx` `uuid` feature is
+already enabled.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table — security-rules-operations
+
+| ID | Decision | Verdict |
+|----|----------|---------|
+| DDD-SRO-1 | 3 independently-stored, schema-identical history tables (`access_rule_history`, `write_access_rule_history`, `group_access_rule_history`), never a shared table with a `rule_type` discriminator — INDEPENDENTLY RE-VERIFIED against the actual schema (not inherited from DISCUSS's recommendation unexamined): the `collection_path` vs. `collection_id`+`CHECK` divergence between the 2 exact-path tables and the group table means a discriminated single table would have to weaken or conditionally-branch the `CHECK` constraint, reintroducing the exact `rule_type`-branching risk ADR-030 DDD-SRW-6 already rejected once, one layer down | Accepted — ADR-035 § Decision — Schema Shape |
+| DDD-SRO-2 | Ordering key is `id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY` (structurally monotonic), not `captured_at` alone — a deliberate, evidenced departure from `query_logs`' own UUID+timestamp-range-only precedent (migration 0014), justified by AC-17-158's own explicit correct-ordering requirement, which `query_logs` carries no equivalent of | Accepted — ADR-035 § Decision — Schema, ordering mechanism |
+| DDD-SRO-3 | History capture is fused into the SAME `upsert_*` adapter method as the existing upsert, executed in one DB transaction; method signature extended with `actor_account_id: Uuid` — a deliberate, evidenced departure from DISCUSS's own (non-binding) Technical Notes phrasing of 2 separate calls, chosen because it is the only option making history loss structurally, not conventionally, impossible | Accepted — ADR-035 § Decision — Capture Mechanism Placement |
+| DDD-SRO-4 | `actor_account_id` carries no FK to `accounts(id)`, mirroring `query_logs.account_id`'s own precedent (migration 0014) exactly, rather than inventing a new referential-integrity policy DISCUSS never locked | Accepted — ADR-035 § Decision — Actor Attribution |
+| DDD-SRO-5 | 3 new `GET .../history` routes, any authenticated role (no role gate beyond authentication), mirroring `simulate_*`'s existing any-role precedent — locked observable behavior (Handoff flag 6), not reweighed | Accepted — ADR-035 § Decision — Admin Surface |
+| DDD-SRO-6 | Restore (US-03) requires zero new endpoint, zero new mechanism — CONFIRMED, not merely assumed: calling the existing `define_*` handler with a condition value read from the new history-retrieval response IS the restore action; no-op restore (AC-17-166) and invalid-condition rejection (AC-17-167) both hold structurally with zero special-casing | Confirmed — ADR-035 § Decision — Admin Surface, Restore |
+| DDD-SRO-7 | US-04/US-05 confirmed to require zero table-specific complication beyond mirroring each parent table's own existing schema idiosyncrasy (`write_access_rules`: none beyond a different parent table; `group_access_rules`: `collection_id`+`CHECK`, already mirrored) into its history table | Confirmed — ADR-035 § Decision — Generalization to Write and Group Rules |
+| DDD-SRO-8 | A dedicated `POST .../history/:id/restore` convenience endpoint is NOT built in v1 (Principle 8, simplest solution first) — `id` is exposed in the retrieval response specifically so this remains a pure additive future change if real usage shows the 2-step retrieve-then-redefine flow is friction | Rejected for v1 — ADR-035 § Decision — Admin Surface, Restore; OQ-SRO-02 |
+| DDD-SRO-9 | `embyr-core` requires zero changes — this feature's entire scope is `embyr-server` adapter/handler work plus migrations, confirmed by Resolution 3's own locked grammar-untouched scope | Confirmed — § Development Paradigm Confirmation, above |
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context (Mermaid) — security-rules-operations
+
+No new external system, no new actor. Alex (and Nora, as a second Trailmark
+admin account) remain the same SDK-developer actor already diagrammed in
+every prior sibling.
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (security-rules-operations delta)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Now also retrieves a rule's complete history and restores it to a prior state, for all 3 rule types")
+    Person(teammate, "Trailmark teammate (Nora Fischer)", "Redefines rules on the same project; every redefinition is now captured, attributed, and retrievable")
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Now captures an append-only, attributed history entry on every successful rule define/redefine, across all 3 rule tables, and exposes it for retrieval.")
+    System_Ext(systemDB, "System Postgres", "access_rules/write_access_rules/group_access_rules — UNCHANGED schema. +3 new append-only history tables.")
+
+    Rel(sdkDev, embyr, "Defines/redefines a rule (unchanged action); retrieves a rule's history (NEW); restores a rule using a prior history entry's exact text (NEW use of the existing define action)", "Admin API :9090")
+    Rel(teammate, embyr, "Defines/redefines a rule (unchanged action) — now captured, attributed to her own account_id", "Admin API :9090")
+    Rel(embyr, systemDB, "Writes a rule's new state AND a history entry in one transaction; reads a rule's complete history, newest first", "Postgres SQL")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Container Diagram (Mermaid) — security-rules-operations
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (security-rules-operations delta)
+
+    Person(sdkDev, "SDK Developer (Alex)")
+    Person(teammate, "Trailmark teammate (Nora Fischer)")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(embyrA, "embyr-rs instance", "Rust binary", "Existing: gRPC :8080, REST :8081, Admin :9090 — UNCHANGED. Extended: admin::handlers::access_rules gains 3 new GET .../history handlers (any role); adapters::system_db's 3 upsert_* methods now fuse a history INSERT into the same DB transaction as the existing upsert, keyed to a new actor_account_id parameter.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "access_rules/write_access_rules/group_access_rules — UNCHANGED schema, UNCHANGED SQL statement text. +3 new tables: access_rule_history, write_access_rule_history, group_access_rule_history — append-only, never UPDATEd or DELETEd.")
+        ContainerDb(custDB, "Customer Postgres (BC-2, per-project)", "PostgreSQL", "UNCHANGED. This feature never touches document content.")
+    }
+
+    Rel(sdkDev, embyrA, "Defines/redefines/retrieves history/restores a rule", "HTTP :9090")
+    Rel(teammate, embyrA, "Defines/redefines a rule", "HTTP :9090")
+    Rel(embyrA, sysDB, "Transactional upsert + history INSERT (new); SELECT ... ORDER BY id DESC for history retrieval (new)", "Postgres SQL, via SystemDb pool (already-probed)")
+    Rel(embyrA, custDB, "UNCHANGED — no call from this feature", "Postgres SQL, via BackendAdapter")
+```
+
+No C4 Component diagram: this feature adds 3 schema-identical tables and a
+symmetric, 1-pattern-mirrored-3-times set of adapter/handler/route changes
+— no single container gains 5+ genuinely distinct internal components (the
+3 history-table capture/retrieve pairs are 3 applications of ONE pattern,
+mirroring `custom-claims`' own "no Component diagram" reasoning).
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement — security-rules-operations
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern. No
+new crate, no new bounded context, no new tooling.
+
+Rules enforced (existing, applying unchanged to the extended modules):
+- `embyr-core` retains zero IO imports (`cargo-deny`, `deny.toml`) — this
+  feature adds no code to `embyr-core` at all.
+- `embyr-core` defines the value-type/function surface; `embyr-server`
+  consumes it — dependency direction inward, unchanged (trivially true here
+  since `embyr-core` is untouched).
+- No new adapter, no new `probe()` required (§ Driven Ports + Adapters,
+  above; ADR-035 § Enforcement).
+- `access_rules`/`write_access_rules`/`group_access_rules`' own SQL
+  statement text, `get_access_rule`/`get_write_access_rule`/
+  `get_group_access_rule`, `handle_get_document`, every write-path handler,
+  and `handle_run_query` (both arms) receive ZERO source changes —
+  verifiable by diff at DELIVER time, mirroring ADR-030/032's identical
+  discipline.
+- Append-only invariant enforced by omission: no adapter method introduced
+  by this feature issues `UPDATE` or `DELETE` against any of the 3 new
+  history tables — verifiable by `Grep` at DELIVER time.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions — security-rules-operations
+
+| ID | Question | Impact | Resolution owner |
+|----|----------|--------|-------------------|
+| OQ-SRO-01 (carried from DISCUSS § Out of Scope) | History pagination, retention limits, or export | Not required for v1 — no evidenced need at this feature's own scale (a rule redefined dozens of times during iterative authoring produces a small, bounded row count) | Product Discovery, only if evidence of unbounded growth ever emerges |
+| OQ-SRO-02 (new, DESIGN-identified) | Should a dedicated `POST .../history/:id/restore` convenience endpoint be built later? | Not required for v1 (Principle 8) — the 2-step retrieve-then-redefine flow is what DISCUSS's own Journey narrative already describes Alex performing; `id` is exposed in the retrieval response specifically to keep this a pure additive future change | Product Discovery/DISTILL, only if real usage shows the 2-step flow is friction |
+| OQ-SRO-03 (new, DESIGN-identified) | Should `actor_account_id` eventually gain an FK to `accounts(id)` if a future feature needs referential-integrity guarantees stronger than `query_logs`' own precedent provides? | Not required for v1 — no account-deletion path exists anywhere in this codebase today | Product Discovery/DESIGN, only if a future feature introduces account deletion |
+
+---
+
+## Wave: DESIGN / [REF] External Integrations — security-rules-operations
+
+**None requiring contract tests.** This feature adds no new outbound network
+dependency, no new third-party API, no new webhook, no new wire-format
+contract — every new statement executes against the existing System Postgres
+through the already-probed `SystemDb` pool.
+
+---
+
+## Wave: DESIGN / [REF] SSOT Updates
+
+- `docs/product/architecture/brief.md` — new `## Application Architecture —
+  security-rules-operations` section appended (lean summary + pointer to
+  this file's own DESIGN sections, mirroring `custom-claims`' own
+  precedent).
+- `docs/product/architecture/adr-035-access-rule-history-storage-and-capture-mechanism.md`
+  — new, combined ADR (schema shape + ordering mechanism + capture-mechanism
+  placement + actor attribution + admin surface + generalization decision),
+  mirroring ADR-030/032/034's own smaller-decision-surface precedent.
+- `docs/product/architecture/adr-028-access-rule-storage-and-lifecycle.md`,
+  `adr-030-write-path-grammar-storage-and-composition.md`,
+  `adr-032-collection-group-rule-storage-and-composition.md` § Changed
+  Assumptions — each appended with a short pointer noting their own
+  "deferred to Epic 2e" item is now resolved by ADR-035, closing the loop
+  each ADR's own text explicitly opened.
+- `migrations/0025_access_rule_history.sql`,
+  `migrations/0026_write_access_rule_history.sql`,
+  `migrations/0027_group_access_rule_history.sql` — new.
+- No update to `adr-024`/`adr-025`/`adr-026`/`adr-027`/`adr-029`/`adr-031`/
+  `adr-033`/`adr-034` — none of their own decisions are touched by this
+  feature.
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package — to DISTILL (acceptance-designer)
+
+- This `feature-delta.md` (DISCUSS + DESIGN sections combined).
+- `docs/product/architecture/adr-035-access-rule-history-storage-and-capture-mechanism.md`.
+- `docs/product/architecture/adr-028-access-rule-storage-and-lifecycle.md`,
+  `adr-030-write-path-grammar-storage-and-composition.md`,
+  `adr-032-collection-group-rule-storage-and-composition.md` (their appended
+  § Changed Assumptions sections).
+- `docs/product/architecture/brief.md` § Application Architecture —
+  security-rules-operations.
+- `migrations/0025_access_rule_history.sql`,
+  `migrations/0026_write_access_rule_history.sql`,
+  `migrations/0027_group_access_rule_history.sql`.
+
+**Explicit flags for DISTILL**:
+
+1. **DDD-SRO-3 is this feature's single highest-consequence structural
+   claim.** Acceptance scenarios should independently assert that a
+   redefine which succeeds ALWAYS has a matching history row (not merely
+   test the happy path) — including, if feasible at the acceptance level, a
+   scenario proving the fused-transaction property (history capture and the
+   rule change succeed or fail together), mirroring this feature's own
+   North Star KPI.
+2. **AC-17-158's ordering guarantee (DDD-SRO-2) is the designated
+   mutation-testing surface for this feature** — acceptance scenarios
+   should include at least one genuinely rapid (sub-second, scripted, not
+   merely "two separate manual calls") successive-redefinition case to
+   exercise the monotonic-identity-column guarantee under real timing
+   pressure, not just a "two calls minutes apart" case that any ordering
+   mechanism would pass trivially.
+3. **DDD-SRO-6's restore falsifiability was confirmed TRUE by DESIGN, via
+   direct design trace** (mirrors `custom-claims`' own DDD-CC-10 precedent)
+   — DISTILL's acceptance scenarios should still include an explicit
+   assertion that zero new production code beyond US-01/US-02's own history
+   capture-and-retrieval mechanism exists in the restore path, keeping the
+   falsifiability claim observable at DELIVER time.
+4. **US-04/US-05 (DDD-SRO-7)**: acceptance scenarios should independently
+   prove non-interference for BOTH generalization steps (a collection's
+   read-rule history vs. write-rule history, AC-17-169; a collection-group
+   rule's history vs. any same-named exact-path rule's history, AC-17-172)
+   — not assume the first proof generalizes to the second without its own
+   scenario, mirroring ADR-032's own AC-17-93/94/95/96 non-interference
+   discipline this feature's own AC directly cites.
+5. **Existing test call sites to `upsert_access_rule`/`upsert_write_access_rule`/
+   `upsert_group_access_rule` require mechanical updates** (the new
+   `actor_account_id` parameter) — this is a compile-time-visible, not a
+   runtime, change; DISTILL/DELIVER should treat any compile failure at
+   these call sites as expected, not a regression to investigate.
+
+**To DEVOPS (platform-architect)**: no new external integration, no new
+deployed container, no new probe. 3 new migrations, 0 new admin routes'
+worth of role-gate complexity (all 3 new routes reuse the existing any-role
+pattern). § Outcome KPIs (DISCUSS) — 4 KPIs (1 North Star, 2 Leading, 1
+Guardrail) — unchanged by this DESIGN pass; KPI #1 and #4 are now directly
+measurable once DELIVER ships (history-view usage logs, per KPI #4's own
+measurement plan).
+
+Peer review: not invoked per-wave (default skip). Rationale, checked against
+the SKILL's own trigger list: no contested ADR (Resolution 2/3/4 and the
+append-only invariant were locked HIGH-confidence by DISCUSS; Resolution 1's
+own recommendation was independently re-verified, not contested, by this
+DESIGN pass); no novel pattern beyond ADR-028/030/032's own already-accepted
+structural-independence and signature-extension precedents; no unverified
+performance budget (rule authoring is an infrequent admin action, not a hot
+data-plane path — no NFR at risk); a security/correctness boundary IS being
+touched (an append-only audit trail), but the structural-impossibility
+mechanism (DDD-SRO-3) and the ordering guarantee (DDD-SRO-2) are both
+written down precisely and verified structurally in this document and
+ADR-035, giving DISTILL's acceptance scenarios — not an additional
+architecture review — the correct next checkpoint, per the SKILL's own
+"mandatory consolidated review fires at end of DISTILL" default.
+
+---
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] 3 independently-stored, schema-identical history tables — independently re-verified against the actual schema (`collection_path` vs. `collection_id`+`CHECK` divergence), not inherited from DISCUSS's recommendation unexamined. See ADR-035 § Decision — Schema Shape.
+- [D2] Ordering key is a monotonic `GENERATED ALWAYS AS IDENTITY` column, a deliberate departure from `query_logs`' own timestamp-only precedent, justified by AC-17-158's own correct-ordering requirement. See ADR-035 § Decision — Schema.
+- [D3] History capture is fused into the same `upsert_*` adapter method via a DB transaction and a signature-extended `actor_account_id` parameter — a deliberate, evidenced departure from DISCUSS's own non-binding Technical Notes phrasing, chosen for structural (not conventional) impossibility of history loss. See ADR-035 § Decision — Capture Mechanism Placement.
+- [D4] `actor_account_id` carries no FK, mirroring `query_logs.account_id`'s own precedent. See ADR-035 § Decision — Actor Attribution.
+- [D5] Restore (US-03) confirmed to require zero new endpoint/mechanism — the existing `define_*` handler, called with a condition value read from the new retrieval response, IS the restore action. See ADR-035 § Decision — Admin Surface, Restore.
+- [D6] No dedicated restore-by-id convenience endpoint built in v1 (Principle 8); `id` exposed in the retrieval response to keep this additive later. See OQ-SRO-02.
+- [D7] `embyr-core` requires zero changes — this feature is entirely `embyr-server` adapter/handler work plus 3 migrations.
+- [D8] 1 combined ADR (035), amending ADR-028/030/032 via appended § Changed Assumptions pointers, mirroring ADR-030/032/034's own bounded-decision-surface precedent — not a 3-ADR split (one per rule table).
+
+### Architecture Summary
+- Pattern: Hexagonal (ports-and-adapters), unchanged — no new bounded context. BC-4 (`access_control`) extended with 3 new append-only child tables of its existing 3 aggregates.
+- Paradigm: functional-where-practical Rust, unchanged.
+- Key components: `embyr-server::adapters::system_db` (extended: 3 signature-extended `upsert_*`, +3 `get_*_history`), `embyr-server::admin::handlers::access_rules` (extended: 3 mechanical edits, +3 new handlers), `embyr-server::admin::router` (extended: +3 routes), 3 new migrations.
+
+### Reuse Analysis
+See § Wave: DESIGN / [REF] Reuse Analysis — security-rules-operations above — 11 rows total (6 EXTEND including 2 explicit "confirmed unchanged, verified" rows, 3 CREATE NEW each independently justified, 2 investigated-and-rejected candidates, 0 unjustified).
+
+### Technology Stack
+- No new workspace dependency. `sqlx::Transaction` and Postgres `GENERATED ALWAYS AS IDENTITY` both already available through this codebase's existing `sqlx`/Postgres 15 usage.
+
+### Constraints Established
+- History loss is structurally impossible (compiler-enforced parameter + DB transaction), not conventionally unlikely.
+- Chronological ordering is a structural guarantee (monotonic sequence), not a probabilistic property of timestamp resolution.
+- `access_rules`/`write_access_rules`/`group_access_rules`' own SQL statement text, response shapes, and role gates remain byte-for-byte/observably unchanged (re-verified, per Reuse Analysis).
+
+### Upstream Changes
+- None to DISCUSS's own locked Resolutions/Constraints. Resolution 1's own recommendation is independently re-verified (confirmed, with a reason DISCUSS itself did not have visibility into), not reversed.
+
+**Explicit flags for DESIGN** (self-addressed, resolved in this same pass — retained per this project's own `custom-claims` precedent of surfacing them explicitly rather than silently resolving):
+
+1. **Resolution 1's own recommendation required independent re-verification, not a rubber stamp** — completed; see DDD-SRO-1 and the Prior Wave Consultation note above for the specific evidence (`collection_path` vs. `collection_id`+`CHECK` divergence) that only became visible once the real schema was designed.
+2. **The capture-mechanism placement question (Task item 3) required a genuine, evidenced departure from DISCUSS's own descriptive Technical Notes** — completed; DDD-SRO-3's fused-transaction design is the direct answer to "pick the option that makes it IMPOSSIBLE, not just conventionally likely."
+3. **The ordering-mechanism question required investigating this codebase's own `query_logs` precedent for real, not assuming timestamp-only ordering is safe by default** — completed; DDD-SRO-2's monotonic-identity-column choice is a reasoned departure, not a default.

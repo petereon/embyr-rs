@@ -462,3 +462,21 @@ module unchanged.
   `crates/embyr-server/src/admin/router.rs:190-201` — exact current admin handler
   and route-registration shape, the direct precedent for `define_write_access_rule`
   and its route.
+
+## Changed Assumptions
+
+**Original assumption** (§ Decision — Schema, above): "No `active`/
+`previous`/`version` columns, no shared columns with `access_rules` — same
+'no history/versioning machinery' discipline ADR-028 Decision Driver 5
+already established, applied fresh."
+
+**Resolved by**: `security-rules-operations` (Epic 2e),
+`docs/product/architecture/adr-035-access-rule-history-storage-and-capture-mechanism.md`.
+A new, independently-stored `write_access_rule_history` table now captures
+every condition `write_access_rules` has ever held, via a history `INSERT`
+fused into the SAME `upsert_write_access_rule` transaction — this ADR's own
+`write_access_rules` schema (still no `active`/`previous`/`version` column
+on the table itself), its `INSERT ... ON CONFLICT ... DO UPDATE` statement
+text, and its structural independence from `access_rules` (Decision Driver
+1/§ Decision — Storage Shape) are all unchanged by that feature; the
+deferred gap is now closed, not this ADR's own decision revised.

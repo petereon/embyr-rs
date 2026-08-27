@@ -603,3 +603,24 @@ verbatim):**
   — the exact schema precedent `migrations/0024_group_access_rules.sql`
   mirrors, with the two deliberate departures documented in § Decision —
   Schema.
+
+## Changed Assumptions
+
+**Original assumption** (§ Consequences — Negative / Trade-offs, above): "A
+third table with the identical idempotent-upsert, no-history shape as
+`access_rules`/`write_access_rules` means Alex has no way to audit when a
+group rule was previously different — unchanged, deliberate scope boundary
+carried from ADR-028 (`security-rules-operations`, Epic 2e, remains the
+deferred home for rule history/versioning)."
+
+**Resolved by**: `security-rules-operations` (Epic 2e),
+`docs/product/architecture/adr-035-access-rule-history-storage-and-capture-mechanism.md`.
+A new, independently-stored `group_access_rule_history` table — mirroring
+this ADR's own `collection_id`+`CHECK (collection_id NOT LIKE '%/%')`
+departure exactly — now captures every condition `group_access_rules` has
+ever held, via a history `INSERT` fused into the SAME
+`upsert_group_access_rule` transaction. This ADR's own `group_access_rules`
+schema, `CHECK` constraint, `handle_run_query` composition, and structural
+independence from `access_rules`/`write_access_rules` are all unchanged by
+that feature; the deferred gap named above is now closed, not this ADR's own
+decision revised.

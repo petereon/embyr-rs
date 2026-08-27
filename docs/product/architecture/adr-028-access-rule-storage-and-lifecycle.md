@@ -182,3 +182,20 @@ is reused (see ADR-029 for the explicit "no new probe needed" reasoning).
   precedent for the adapter method shape.
 - `crates/embyr-server/migrations/0021_client_identity_credentials.sql` — direct
   migration-numbering and schema-shape precedent.
+
+## Changed Assumptions
+
+**Original assumption** (§ Consequences — Negative / Trade-offs, above):
+"No audit trail of who changed a rule or when the previous condition was —
+explicitly deferred to Epic 2e, not a gap in this ADR's own scope."
+
+**Resolved by**: `security-rules-operations` (Epic 2e),
+`docs/product/architecture/adr-035-access-rule-history-storage-and-capture-mechanism.md`.
+A new, independently-stored `access_rule_history` table now captures every
+condition `access_rules` has ever held, attributed to the acting admin
+account and timestamped, via a history `INSERT` fused into the SAME
+`upsert_access_rule` transaction — this ADR's own `access_rules` schema,
+its single `INSERT ... ON CONFLICT ... DO UPDATE` statement text, and its
+single-row-per-collection semantics (Decision Driver 1) are all unchanged
+by that feature; the deferred gap named above is now closed, not this ADR's
+own decision revised.

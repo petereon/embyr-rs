@@ -4178,3 +4178,110 @@ Full alternatives-considered analysis (including the rejected explicit-typed
 -struct and raw-`Value` claims representations, and the rejected new-sibling
 -handler for US-07): `docs/product/architecture/adr-034-custom-claims-representation-and-grammar-extension.md`.
 
+---
+
+## Application Architecture — security-rules-operations
+
+> Updated: 2026-08-27
+> Feature: security-rules-operations (JOB-17, 7th realization — Epic 2e, the
+> last named epic in the 6-epic Authorization initiative; gives Alex a
+> complete, attributable, restorable history of every rule he's ever
+> defined, closing the "no history/versioning" gap ADR-028/030/032 each
+> independently deferred to this epic by name)
+> Mode: Propose (autonomous analysis; DISCUSS's 3 central architectural
+> questions — Resolutions 2, 3, and the append-only invariant — were already
+> locked before DESIGN started; Resolution 1's own 3-table recommendation
+> was independently re-verified, not rubber-stamped, by this DESIGN pass)
+> ADR: `docs/product/architecture/adr-035-access-rule-history-storage-and-capture-mechanism.md`
+> (new — combined schema-shape/ordering-mechanism/capture-placement/actor
+> -attribution/admin-surface/generalization decision, mirroring
+> ADR-030/032/034's own smaller-decision-surface precedent). Amends
+> `adr-028`, `adr-030`, and `adr-032` via appended § Changed Assumptions
+> pointers — each closes the "deferred to Epic 2e" item its own text named
+> explicitly. Does not amend `adr-024`/`adr-025`/`adr-026`/`adr-027`/
+> `adr-029`/`adr-031`/`adr-033`/`adr-034` — all eight remain accurate as
+> written.
+
+Full DESIGN content (Quality Attribute Priorities, Reuse Analysis,
+Bounded-Context Placement, Component Decomposition, Driving/Driven Ports,
+Technology Choices, Decisions Table DDD-SRO-1..9, C4 System Context/
+Container diagrams, Architecture Enforcement, Open Questions, External
+Integrations, Handoff Package) lives in
+`docs/feature/security-rules-operations/feature-delta.md` §§ Wave: DESIGN —
+the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**The central decision (DISCUSS's own recommendation, independently
+re-verified here, not rubber-stamped)**: 3 independently-stored,
+schema-identical history tables — `access_rule_history`,
+`write_access_rule_history`, `group_access_rule_history` — never a single
+shared table with a `rule_type` discriminator. Re-derivation, not
+inheritance: `access_rules`/`write_access_rules` key on `collection_path`
+while `group_access_rules` keys on `collection_id` with its own `CHECK`
+constraint (ADR-032) — a discriminated single table would have to weaken or
+conditionally branch that `CHECK`, reintroducing the exact `rule_type`
+-branching risk ADR-030 DDD-SRW-6 already rejected once, one layer down.
+
+**Schema**: each history table carries `condition_source`,
+`actor_account_id` (no FK — mirrors `query_logs.account_id`'s own
+precedent, migration 0014), `captured_at`, and an `id BIGINT GENERATED
+ALWAYS AS IDENTITY PRIMARY KEY` — the AUTHORITATIVE "newest first" ordering
+key, not `captured_at`. This is a deliberate departure from `query_logs`'
+own timestamp-range-only ordering (this codebase's only prior append-only,
+actor-attributed log table, and the only one investigated as precedent):
+`query_logs` carries no per-row strict-ordering correctness requirement,
+while this feature's own AC-17-158 explicitly requires correctly-ordered
+retrieval of rapid successive redefinitions — a bar a monotonic sequence
+meets structurally and timestamp precision alone meets only probabilistically.
+
+**Capture mechanism — the single most load-bearing decision**: history
+capture is fused into the SAME adapter method as each rule table's existing
+`upsert_*` call, executed inside one DB transaction, with the method
+signature extended to require the acting `actor_account_id: Uuid`. This is
+a deliberate, evidenced departure from DISCUSS's own (non-binding) Technical
+Notes phrasing of "two separate calls" — chosen because it is the only
+option making history loss structurally, not conventionally, impossible:
+the compiler enforces the new parameter at every call site, and the
+transaction guarantees the rule change and its history entry succeed or
+fail together. The existing upsert SQL statement TEXT (`INSERT ... ON
+CONFLICT ... DO UPDATE`) remains byte-for-byte unchanged, satisfying
+DISCUSS's own "never a rewrite of the existing statement" constraint.
+
+**Admin surface**: 3 new `GET .../history` routes (any authenticated role,
+mirrors `simulate_*`'s existing any-role precedent — Handoff Package flag 6,
+locked). Restore (US-03) needs zero new endpoint and zero new mechanism,
+confirmed by design: Alex retrieves history, reads a prior entry's
+`condition` field, and calls the SAME existing `define_*` endpoint with that
+text — the restoration is captured as a new history entry automatically via
+the fused mechanism above, with no special-casing for a no-op restore
+(AC-17-166). A dedicated restore-by-id convenience endpoint is deliberately
+NOT built in v1 (Principle 8) — each history entry's `id` is exposed in the
+retrieval response specifically to keep that endpoint a pure additive future
+change if real usage ever shows the 2-step flow is friction.
+
+**Generalization (US-04/US-05)**: confirmed, not merely assumed, that no
+table-specific complication exists beyond mirroring each parent table's own
+existing schema idiosyncrasy (`group_access_rules`' `collection_id`+`CHECK`)
+into its history table — the identical pattern applied a second and third
+time.
+
+**Bounded context**: no new context. BC-4 Access Control (ADR-029) is
+extended with 3 new append-only CHILD tables of its existing `AccessRule`/
+`WriteAccessRule`/`GroupAccessRule` aggregates — not a new aggregate.
+`embyr-core` requires ZERO changes (Resolution 3, locked — no touch to
+`Operand`/`Condition`/the tokenizer/evaluation logic anywhere in this
+feature), the first feature since `security-rules-collection-group-rules`
+to leave `embyr_core::access_control` completely untouched.
+
+**No new external integration, no new driven port, no new Earned Trust
+probe** — all new I/O (the transactional capture, the 3 new retrieval
+queries) reuses the already-probed `SystemDb` pool. 3 new migrations
+(`0025`-`0027`), 0 new admin route role-gate complexity (all reuse the
+existing any-role pattern), 0 new workspace dependency.
+
+Full alternatives-considered analysis (including the rejected shared
+-table-with-discriminator option, the rejected two-separate-calls capture
+placement, and the rejected FK-to-`accounts` actor-attribution option):
+`docs/product/architecture/adr-035-access-rule-history-storage-and-capture-mechanism.md`.
+
