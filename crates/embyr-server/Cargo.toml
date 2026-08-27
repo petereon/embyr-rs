@@ -511,6 +511,15 @@ path = "../../tests/custom_claims/acceptance/write_path_reuse_proof.rs"
 name = "custom_claims_missing_claim_fails_closed"
 path = "../../tests/custom_claims/acceptance/missing_claim_fails_closed.rs"
 
+# custom-claims acceptance tests (Slice 05, ADR-034) — a claim-referencing
+# rule fails safely, not silently, against query-path surfaces (US-05):
+# RunQuery (non-group + group) and Listen subscribe-time are rejected
+# outright via check_query_compliance()'s pre-existing catch-all, while
+# GetDocument/writes remain fully functional against the identical rule.
+[[test]]
+name = "custom_claims_query_path_safe_rejection"
+path = "../../tests/custom_claims/acceptance/query_path_safe_rejection.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
