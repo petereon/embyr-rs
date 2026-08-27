@@ -29,6 +29,8 @@ use super::handlers::client_identity::{
     register_client_identity_credential, rotate_client_identity_credential,
     verify_client_identity_credential,
 };
+// client-auth-hosted-identity (US-01, ADR-036): admin enablement action.
+use super::handlers::hosted_identity::enable_hosted_identity;
 // security-rules (US-01/US-05, ADR-029): access-rule define/redefine + simulate.
 // security-rules-write-path (US-01, ADR-030): independent write-rule define/redefine.
 // security-rules-query-path (US-07, ADR-031): simulate a candidate query
@@ -205,6 +207,14 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/client_identity_credential/verify",
             post(verify_client_identity_credential),
+        )
+        // client-auth-hosted-identity (US-01, ADR-036): enable embyr-hosted
+        // email/password identity for a project (Owner/Admin, gated
+        // in-handler) — mirrors client_identity_credential's identical
+        // in-handler-gate shape.
+        .route(
+            "/admin/v1/projects/:project_id/hosted_identity/enable",
+            post(enable_hosted_identity),
         )
         // security-rules (US-01/US-05, ADR-029): define/redefine an access
         // rule (Owner/Admin, gated in-handler) + simulate a candidate rule

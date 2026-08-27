@@ -1,5 +1,6 @@
 use embyr_core::error::CoreError;
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use uuid::Uuid;
 
 /// client-auth (ADR-025): a project's registered client-identity verification
 /// credential row, as stored in `client_identity_credentials`. Raw key bytes
@@ -23,6 +24,30 @@ pub struct ClientIdentityCredentialRotationRow {
     pub algorithm: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// client-auth-hosted-identity (ADR-036 Decision 5): the result of folding
+/// project-ownership verification and `backend_mode` into one query
+/// (mirrors `verify_project_ownership`'s WHERE-clause shape, extended with
+/// one column) — used by the session-authenticated `enable_hosted_identity`
+/// admin action, which `get_project_for_auth`/`verify_project_ownership`
+/// cannot serve alone (former has no ownership check, latter does not
+/// surface `backend_mode`).
+#[derive(Debug, Clone)]
+pub struct ProjectBackendModeRow {
+    pub backend_mode: String,
+}
+
+/// client-auth-hosted-identity (ADR-036 Decision 2): a project's embyr-owned
+/// hosted-identity signing key, as stored in `hosted_identity_signing_keys`
+/// (System DB — structurally disjoint from `client_identity_credentials`,
+/// Resolution 3). `private_key_enc` is ECIES ciphertext, never plaintext.
+#[derive(Debug, Clone)]
+pub struct HostedIdentitySigningKeyRow {
+    pub public_key: Vec<u8>,
+    pub private_key_enc: Vec<u8>,
+    pub algorithm: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// security-rules (ADR-028): a project's per-collection access-control rule
@@ -351,6 +376,103 @@ impl SystemDb {
                 .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("rotated_at")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
+    }
+
+    // -----------------------------------------------------------------------
+    // client-auth-hosted-identity (ADR-036) — hosted_identity_signing_keys.
+    // -----------------------------------------------------------------------
+
+    /// Fold project-ownership verification and `backend_mode` into one query
+    /// (US-01, ADR-036 Decision 5) for the session-authenticated
+    /// `enable_hosted_identity` admin action. `Ok(None)` means the project
+    /// does not exist, is deleted, or belongs to a different account —
+    /// caller maps this to 404 (mirrors `verify_project_ownership`'s own
+    /// "no matching row" -> 404 convention).
+    pub async fn get_project_backend_mode(
+        &self,
+        project_id: &str,
+        account_id: Uuid,
+    ) -> Result<Option<ProjectBackendModeRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT backend_mode FROM projects \
+             WHERE id = $1 AND account_id = $2 AND status != 'deleted'",
+        )
+        .bind(project_id)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(ProjectBackendModeRow {
+            backend_mode: r
+                .try_get("backend_mode")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
+    }
+
+    /// Enable hosted identity for a project (US-01): stores the
+    /// server-generated, ECIES-encrypted signing key. Idempotent UPSERT
+    /// (AC-18-02) — `INSERT ... ON CONFLICT (project_id) DO NOTHING
+    /// RETURNING` returns zero rows on conflict; the fallback `SELECT` then
+    /// reads back the EXISTING row untouched, so a second enablement call
+    /// returns byte-identical `public_key`/`private_key_enc` — no
+    /// regeneration, no re-encryption.
+    pub async fn enable_hosted_identity(
+        &self,
+        project_id: &str,
+        public_key: &[u8; 32],
+        private_key_enc: &[u8],
+    ) -> Result<HostedIdentitySigningKeyRow, CoreError> {
+        let row_opt = sqlx::query(
+            "INSERT INTO hosted_identity_signing_keys \
+             (project_id, public_key, private_key_enc, algorithm) \
+             VALUES ($1, $2, $3, 'EdDSA') \
+             ON CONFLICT (project_id) DO NOTHING \
+             RETURNING public_key, private_key_enc, algorithm, created_at",
+        )
+        .bind(project_id)
+        .bind(&public_key[..])
+        .bind(private_key_enc)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("enable_hosted_identity insert failed: {e}"))
+        })?;
+
+        let row = match row_opt {
+            Some(r) => r,
+            None => sqlx::query(
+                "SELECT public_key, private_key_enc, algorithm, created_at \
+                 FROM hosted_identity_signing_keys WHERE project_id = $1",
+            )
+            .bind(project_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| {
+                CoreError::BackendUnavailable(format!(
+                    "enable_hosted_identity fallback select failed: {e}"
+                ))
+            })?,
+        };
+
+        Ok(HostedIdentitySigningKeyRow {
+            public_key: row
+                .try_get("public_key")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            private_key_enc: row
+                .try_get("private_key_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            algorithm: row
+                .try_get("algorithm")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        })
     }
 
     // -----------------------------------------------------------------------
