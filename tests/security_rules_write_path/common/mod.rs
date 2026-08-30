@@ -264,3 +264,104 @@ pub async fn delete_document(
 
     client.delete_document(request).await
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bug fix (2026-08-30) — `handle_commit` never evaluated write-path security
+// rules before applying batch writes. Real gRPC `Commit` calls, mirroring
+// `update_document`/`delete_document`'s own shape but carrying a BATCH of
+// `Write` messages, since Commit's own driving-port contract is
+// all-or-nothing over a batch (unlike the single-document handlers above).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Real gRPC `BeginTransaction` call — `handle_commit`'s adapter always
+/// requires a real (16-byte) transaction ID (`uuid_from_bytes` in
+/// `embyr-pg-storage`'s `commit_transaction` rejects anything else with
+/// `InvalidArgument`), so every `commit_writes` call in this file must be
+/// preceded by a real `BeginTransaction` round-trip — there is no
+/// standalone/auto-begin Commit path in this codebase today.
+pub async fn begin_transaction(ctx: &SecurityRulesFullContext) -> Vec<u8> {
+    use embyr_proto::firestore::{firestore_client::FirestoreClient, BeginTransactionRequest};
+
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let mut request = tonic::Request::new(BeginTransactionRequest {
+        database: format!("projects/{}/databases/(default)", ctx.project_id),
+        options: None,
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+
+    client
+        .begin_transaction(request)
+        .await
+        .expect("BeginTransaction must succeed")
+        .into_inner()
+        .transaction
+}
+
+/// Build a single `Write { Operation::Update }` proto message for a Commit
+/// batch — the exact shape `handle_commit`'s translation loop consumes.
+pub fn update_write(
+    resource_name: &str,
+    fields: std::collections::HashMap<String, embyr_proto::firestore::Value>,
+) -> embyr_proto::firestore::Write {
+    embyr_proto::firestore::Write {
+        update_mask: None,
+        update_transforms: vec![],
+        current_document: None,
+        operation: Some(embyr_proto::firestore::write::Operation::Update(
+            embyr_proto::firestore::Document {
+                name: resource_name.to_string(),
+                fields,
+                ..Default::default()
+            },
+        )),
+    }
+}
+
+/// Real gRPC `Commit` call — driving port entry (Pillar 3), mirroring
+/// `update_document`'s own shape (real `FirestoreClient`, real
+/// `authorization` + optional `x-embyr-client-identity` metadata). Takes a
+/// batch of `Write` messages (built via `update_write` above) since this is
+/// the ONE handler in this feature whose driving-port contract is a batch,
+/// not a single document.
+pub async fn commit_writes(
+    ctx: &SecurityRulesFullContext,
+    writes: Vec<embyr_proto::firestore::Write>,
+    transaction: Vec<u8>,
+    client_identity_token: Option<&str>,
+) -> Result<tonic::Response<embyr_proto::firestore::CommitResponse>, tonic::Status> {
+    use embyr_proto::firestore::{firestore_client::FirestoreClient, CommitRequest};
+
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let mut request = tonic::Request::new(CommitRequest {
+        database: format!("projects/{}/databases/(default)", ctx.project_id),
+        writes,
+        transaction,
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    client.commit(request).await
+}

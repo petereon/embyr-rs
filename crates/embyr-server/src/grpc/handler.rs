@@ -593,6 +593,61 @@ impl FirestoreService {
             update_time: Some(Timestamp { seconds: update_time.0, nanos: update_time.1 }),
         }
     }
+
+    /// Evaluate one write's write-path security rule, shared by
+    /// `handle_commit`'s per-write batch loop. Mirrors
+    /// `handle_create_document`/`handle_update_document`/`handle_delete_document`'s
+    /// own identical 5-step sequence exactly: lookup -> (no rule -> Allow
+    /// short-circuit, unchanged behavior) -> pre-write fetch for
+    /// `resource_fields` -> `evaluate()` -> `Deny` -> `PermissionDenied`.
+    ///
+    /// `request_resource_fields`: `Some(fields)` for Update (the proposed
+    /// new document); `None` for Delete/Transform, meaning "mirror
+    /// `resource_fields`" — Delete has no proposed document (same
+    /// fail-closed-via-empty-map choice `handle_delete_document` already
+    /// makes), and Transform's real proposed fields are not modeled in this
+    /// codebase yet (`field_transforms` is discarded elsewhere, a
+    /// separately-tracked gap) — mirroring the CURRENT document against
+    /// itself is the closest defensible approximation to "no proposed
+    /// change is known", the same choice an Update with unchanged fields
+    /// would produce.
+    async fn evaluate_write_rule_for_commit(
+        system_db: &SystemDb,
+        adapter: &SharedBackendAdapter,
+        project_id_str: &str,
+        path: &embyr_core::domain::document::DocumentPath,
+        verified_identity: Option<&embyr_core::client_identity::VerifiedEndUserIdentity>,
+        request_resource_fields: Option<&std::collections::BTreeMap<String, FieldValue>>,
+    ) -> Result<(), Status> {
+        let write_rule_row = system_db
+            .get_write_access_rule(project_id_str, &path.collection_path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let Some(write_rule_row) = write_rule_row else {
+            return Ok(());
+        };
+
+        let condition = embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
+            .map_err(|e| Status::internal(format!("stored write rule failed to re-parse: {e:?}")))?;
+        let auth_ctx = verified_identity.map(|v| embyr_core::access_control::AuthContext {
+            uid: v.end_user_id.clone(),
+            claims: v.claims.clone(),
+        });
+
+        let doc_opt = adapter.get_document(path).await.map_err(core_error_to_status)?;
+        let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+            std::collections::BTreeMap::new();
+        let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+        let request_fields = request_resource_fields.unwrap_or(resource_fields);
+
+        match embyr_core::access_control::evaluate(&condition, auth_ctx.as_ref(), resource_fields, request_fields) {
+            embyr_core::access_control::EvaluationOutcome::Deny => {
+                Err(Status::permission_denied("access denied by write rule"))
+            }
+            embyr_core::access_control::EvaluationOutcome::Allow => Ok(()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1315,6 +1370,19 @@ impl FirestoreService {
 
         let txn_id = embyr_core::domain::transaction::TransactionId(req.transaction.clone());
 
+        // security-rules-write-path bug fix (2026-08-30): `Commit` batches
+        // writes across possibly-many collections/documents in one call.
+        // Every write's own collection write rule is evaluated HERE, before
+        // any write is translated for `commit_transaction`. If ANY write in
+        // the batch is denied, the whole `Commit` is rejected before
+        // `commit_transaction` is ever called — mirroring `Commit`'s own
+        // pre-existing all-or-nothing atomicity contract, and reusing the
+        // exact evaluation shape `handle_create_document`/
+        // `handle_update_document`/`handle_delete_document` already use.
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
         // Translate proto writes to domain writes
         let mut domain_writes = Vec::with_capacity(req.writes.len());
         for proto_write in &req.writes {
@@ -1324,6 +1392,17 @@ impl FirestoreService {
                     let path = Self::parse_document_path(&doc.name)?;
                     let fields = proto_fields_to_domain(&doc.fields)
                         .ok_or_else(|| Status::invalid_argument("invalid field value in write"))?;
+
+                    Self::evaluate_write_rule_for_commit(
+                        &self.system_db,
+                        &adapter,
+                        &project_id_str,
+                        &path,
+                        verified_identity.as_ref(),
+                        Some(&fields),
+                    )
+                    .await?;
+
                     domain_writes.push(DomainWrite::Update {
                         path,
                         fields,
@@ -1333,6 +1412,22 @@ impl FirestoreService {
                 }
                 Some(embyr_proto::firestore::write::Operation::Delete(doc_name)) => {
                     let path = Self::parse_document_path(doc_name)?;
+
+                    // Delete has no proposed new document (mirrors
+                    // `handle_delete_document`'s own always-empty
+                    // `request_resource_fields`).
+                    let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                        std::collections::BTreeMap::new();
+                    Self::evaluate_write_rule_for_commit(
+                        &self.system_db,
+                        &adapter,
+                        &project_id_str,
+                        &path,
+                        verified_identity.as_ref(),
+                        Some(&empty_fields),
+                    )
+                    .await?;
+
                     domain_writes.push(DomainWrite::Delete {
                         path,
                         version: None,
@@ -1341,6 +1436,26 @@ impl FirestoreService {
                 }
                 Some(embyr_proto::firestore::write::Operation::Transform(dt)) => {
                     let path = Self::parse_document_path(&dt.document)?;
+
+                    // `field_transforms` are discarded elsewhere in this
+                    // codebase (pre-existing, separately-tracked gap — out
+                    // of scope for this fix). No proposed-fields shape is
+                    // modeled for a transform, so `request_resource_fields`
+                    // mirrors the CURRENT document (`None` — see
+                    // `evaluate_write_rule_for_commit`'s own doc comment).
+                    // This still evaluates the write rule for the
+                    // transform's own document path/collection rather than
+                    // silently skipping it.
+                    Self::evaluate_write_rule_for_commit(
+                        &self.system_db,
+                        &adapter,
+                        &project_id_str,
+                        &path,
+                        verified_identity.as_ref(),
+                        None,
+                    )
+                    .await?;
+
                     domain_writes.push(DomainWrite::Transform {
                         path,
                         transforms: vec![],

@@ -405,6 +405,10 @@ path = "../../tests/security_rules_write_path/acceptance/read_write_independence
 name = "security_rules_write_path_simulate_write_rule"
 path = "../../tests/security_rules_write_path/acceptance/simulate_write_rule.rs"
 
+[[test]]
+name = "security_rules_write_path_commit_gated_by_write_rule"
+path = "../../tests/security_rules_write_path/acceptance/commit_gated_by_write_rule.rs"
+
 # security-rules-query-path acceptance tests (Slice 01, ADR-031) — mirrors
 # the security_rules_srNN / security_rules_write_path_* registration
 # convention.
