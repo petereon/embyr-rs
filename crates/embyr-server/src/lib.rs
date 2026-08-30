@@ -111,6 +111,28 @@ async fn accounts_bridge_dispatch(
             )
             .await
         }
+        // client-auth-hosted-identity (US-03, ADR-036): shares the SAME
+        // `HostedIdentityState` field as `signUp` above — one Customer DB
+        // resolution surface for the whole hosted-identity accounts:<verb>
+        // family, no new state field needed.
+        "signInWithPassword" => {
+            let body: rest::sign_in_with_password::SignInWithPasswordBody =
+                serde_json::from_slice(&body_bytes).unwrap_or(
+                    rest::sign_in_with_password::SignInWithPasswordBody {
+                        email: None,
+                        password: None,
+                    },
+                );
+            rest::sign_in_with_password::sign_in_with_password(
+                axum::extract::Path(params),
+                axum::extract::State(state.hosted_identity),
+                axum::extract::Query(rest::sign_up::SignUpQuery {
+                    key: query.get("key").cloned(),
+                }),
+                axum::extract::Json(body),
+            )
+            .await
+        }
         _ => axum::http::StatusCode::NOT_FOUND.into_response(),
     }
 }

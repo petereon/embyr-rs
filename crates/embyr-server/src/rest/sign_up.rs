@@ -60,8 +60,10 @@ use crate::adapters::{
 };
 
 /// Hosted-identity-minted token lifetime (v1: fixed, no configurability —
-/// no story in this feature's locked scope requires it).
-const TOKEN_TTL_SECS: i64 = 3600;
+/// no story in this feature's locked scope requires it). `pub(crate)`: Slice
+/// 03's `sign_in_with_password` mints a token with the identical TTL — one
+/// source of truth, not a second hand-copied constant.
+pub(crate) const TOKEN_TTL_SECS: i64 = 3600;
 
 /// State for hosted-identity's own data-plane REST routes (signup here;
 /// signin/reset-request/reset-confirm are later slices' own additions to
@@ -110,11 +112,16 @@ fn failure(status: StatusCode, reason: &'static str) -> Response {
     (status, Json(SignUpFailureResponse { reason })).into_response()
 }
 
-fn invalid_api_key() -> Response {
+/// `pub(crate)`: Slice 03's `sign_in_with_password` reuses this exact
+/// response shape (same failure taxonomy, same route family) rather than
+/// hand-rolling a second `{"reason": "INVALID_API_KEY"}` constructor.
+pub(crate) fn invalid_api_key() -> Response {
     failure(StatusCode::UNAUTHORIZED, "INVALID_API_KEY")
 }
 
-fn hosted_identity_not_enabled() -> Response {
+/// `pub(crate)`: see `invalid_api_key` — reused by `sign_in_with_password`
+/// for AC-18-12.
+pub(crate) fn hosted_identity_not_enabled() -> Response {
     failure(StatusCode::BAD_REQUEST, "HOSTED_IDENTITY_NOT_ENABLED")
 }
 
