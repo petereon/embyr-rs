@@ -69,6 +69,42 @@ pub fn handshake_request(project_id: &str) -> WriteRequest {
     }
 }
 
+/// Build a `Write { Operation::Update }` proto message carrying a stale
+/// `current_document.update_time` OCC precondition (a fixed, deliberately
+/// wrong past timestamp — guaranteed never to match a just-written
+/// document's own real `update_time`) — used to deterministically trigger a
+/// genuine apply error (`CoreError::TransactionAborted` ->
+/// `Status::aborted`, `commit_transaction`'s own OCC check,
+/// `backend_adapter.rs:895-932`) for Slice 04's own AC-04-03.
+///
+/// NOTE: `commit_transaction` only enforces the `UpdateTime` precondition
+/// variant (OCC) — `Exists`-based preconditions (`MustExist`/`MustNotExist`)
+/// are silently ignored by this same code path (confirmed empirically: a
+/// `current_document.exists = false` write against an already-existing
+/// document was NOT rejected). This is a pre-existing gap in
+/// `handle_commit`'s own reuse target, inherited identically by `Write`
+/// (feature-delta.md § System Constraints' "inherited, not introduced" gap
+/// family) — out of this slice's own scope to fix, so `UpdateTime` is used
+/// here instead, since it IS correctly enforced by this same code path.
+pub fn write_requiring_stale_update_time(
+    resource_name: &str,
+    fields: std::collections::HashMap<String, embyr_proto::firestore::Value>,
+) -> embyr_proto::firestore::Write {
+    embyr_proto::firestore::Write {
+        current_document: Some(embyr_proto::firestore::Precondition {
+            condition_type: Some(
+                embyr_proto::firestore::precondition::ConditionType::UpdateTime(
+                    prost_types::Timestamp {
+                        seconds: 1,
+                        nanos: 0,
+                    },
+                ),
+            ),
+        }),
+        ..update_write(resource_name, fields)
+    }
+}
+
 /// A single-write `WriteRequest` presenting the given `stream_id`/`stream_token`
 /// (Slice 01's own shape: exactly one write per batch).
 pub fn single_write_request(
