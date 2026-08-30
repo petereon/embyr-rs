@@ -48,8 +48,19 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      # toolchain: pinned explicitly to match rust-toolchain.toml's own
+      # "1.95.0" pin exactly — without this, the action installs whatever
+      # "stable" currently resolves to, and rustup tracks that as a
+      # SEPARATE toolchain install from "1.95.0". Any targets/components
+      # requested here land on "stable"; the moment any cargo/rustc/trunk
+      # command actually runs from inside the repo, rust-toolchain.toml's
+      # own override silently switches to "1.95.0", which never received
+      # them. (Keep the action ref itself at @stable — that pins the
+      # ACTION's own code version, unrelated to which Rust channel it
+      # installs; the `toolchain:` input below controls that.)
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.95.0"
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
@@ -79,8 +90,11 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      # toolchain: pinned to match rust-toolchain.toml exactly — see the
+      # comment on the equivalent step in the `test` job above for why.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.95.0"
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
