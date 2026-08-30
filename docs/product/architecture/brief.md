@@ -4372,3 +4372,92 @@ diagram set: `docs/product/architecture/adr-036-hosted-identity-bounded-context-
 and `docs/feature/client-auth-hosted-identity/feature-delta.md` §§ Wave:
 DESIGN.
 
+## Application Architecture — oauth-providers
+
+> Updated: 2026-08-30
+> Feature: oauth-providers (JOB-19 — Google sign-in via ID-token verification,
+> the third Identity-track mechanism, joining `client-auth`'s customer-minted
+> custom tokens and `client-auth-hosted-identity`'s hosted email/password)
+> Mode: Propose (autonomous analysis per Decision 1)
+> ADR: `docs/product/architecture/adr-037-oauth-providers-signing-key-and-verification-composition.md`
+> (new — bundles bounded-context confirmation, signing-key custody,
+> verification mechanism, and a third widening of verification-time
+> credential routing, mirroring ADR-036's own bundled-decision precedent).
+> Amends `adr-002-bounded-contexts.md` (§ Changed Assumptions, appended — a
+> confirming note, not a new bounded context). Does not amend
+> `adr-024`/`adr-025`/`adr-026`/`adr-036` — all remain accurate as written
+> and are reused unchanged (`verify_client_identity_token`,
+> `mint_client_identity_token`, `EMBYR_ENCRYPTION_KEY`/`decrypt_with_rotation`
+> all have ZERO code changes).
+
+Full DESIGN content (Reuse Analysis, Bounded-Context Placement, Component
+Decomposition, Driving/Driven Ports, Technology Choices, Decisions Table
+DDD-OAP-1..8, C4 System Context extension, Architecture Enforcement, Open
+Questions, External Integrations) lives in
+`docs/feature/oauth-providers/feature-delta.md` §§ Wave: DESIGN — the single
+narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: applying ADR-002's Option-D three-part test to the one
+candidate entity this feature introduces (`OAuthProviderCredential`)
+confirms DISCUSS's own Resolution 5 — **extends BC-1 Tenant Management, no
+new BC-6**. The identical shape `client_identity_credentials` already has
+(project-scoped, System-DB-resident, no-confidentiality-property auth
+material). The third application of Option D in this codebase's history, and
+the first to NOT produce a new context — direct evidence the test is applied
+per-case, not by pattern-matching the two most recent precedents (BC-4, BC-5).
+
+**Central finding (corrects a DISCUSS-level assumption)**: Slice 01's own
+brief assumed "embyr generates nothing here" — tracing
+`mint_client_identity_token`'s exact signature shows this cannot hold;
+minting always needs an embyr-owned Ed25519 seed. A NEW, disjoint
+`oauth_signing_keys` table is generated at Slice 01 registration time —
+**not** a reuse of `hosted_identity_signing_keys` (would silently couple
+Google sign-in to hosted identity being separately enabled — contradicts
+"coexists with, does not replace") and **not** encrypted via ECIES/`api_key`
+like `hosted_identity_signing_keys` (Slice 02 has no Customer DB dependency
+to justify it). Instead it reuses the already-workspace-resident
+AES-256-GCM-under-`EMBYR_ENCRYPTION_KEY` pattern (`decrypt_with_rotation` +
+2 existing inline-encrypt call sites, ADR-018) — a genuinely better-fitting
+credential-custody shape for an embyr-owned secret that needs no
+per-project `api_key` scoping. Positive consequence: Slice 01 needs no
+`api_key` field at all, avoiding the exact "gap found and closed" class of
+defect `client-auth-hosted-identity`'s own DESIGN had to patch reactively
+(ADR-036 Decision 5).
+
+**Composition**: `verify_client_identity_token()` and
+`mint_client_identity_token()` (ADR-024/ADR-036) have ZERO code changes.
+`attach_client_identity_if_present` (`grpc/handler.rs`) is widened a THIRD
+time — `client_identity_credentials` → `hosted_identity_signing_keys` →
+`oauth_signing_keys` — the identical "try source A, then B, then C" pattern
+ADR-036 Decision 4 already normalized one level up from ADR-025's own
+current/previous-key retry, required for a Google-signed-in end user's
+subsequent Firestore calls to carry her identity (AC-19-05/AC-19-10).
+
+**Driving ports**: Slice 01 — admin `:9090`, `POST
+.../oauth_providers/google` (provider in the URL path, not a body field,
+structurally foreclosing silent GitHub expansion; no `api_key` needed).
+Slice 02 — REST `:8081`, `POST .../accounts:signInWithIdp`, no `?key=`
+query parameter at all — the simplest, most stateless of the three
+Identity-track sign-in shapes, since this feature has no Customer DB
+dependency.
+
+**New pure module**: `embyr_core::oauth_identity` (Google ID-token
+verification — RS256/JWKS, structurally distinct from `client_identity`'s
+EdDSA/single-key scheme; reuses `oidc_callback`'s own RS256/JWKS primitives
+as a pattern, not as shared code, mirroring DISCUSS's own confirmed finding
+that only the primitives, not the flow, are reusable).
+
+**Reuse**: 13 EXTEND vs. 5 CREATE NEW in the Reuse Analysis table — zero new
+crate dependencies (`jsonwebtoken`, `reqwest`, `aes-gcm`, `ed25519-dalek` all
+already workspace-resident).
+
+**External integration**: Google's JWKS endpoint is flagged for contract
+testing (Pact or a scheduled schema-shape smoke test) — the sole
+cryptographic trust anchor for this feature's entire security property.
+
+Full alternatives-considered analysis, exact schemas, and the C4 System
+Context extension: `docs/product/architecture/adr-037-oauth-providers-signing-key-and-verification-composition.md`
+and `docs/feature/oauth-providers/feature-delta.md` §§ Wave: DESIGN.
+

@@ -530,3 +530,411 @@ No new network-facing port introduced. Exact endpoint/RPC shapes are DESIGN's ca
 - `docs/product/jobs.yaml` — added JOB-19 (`oauth-provider-identity`, P1 Alex). JOB-16 and JOB-18 each receive a cross-reference note (not a rewrite), mirroring the project's established cross-reference pattern.
 - `docs/product/journeys/sdk-developer.yaml` — extended with JOB-19 in its `jobs` list (same persona, P1 Alex, new goal). No separate visual/YAML journey artifact produced — Decision 3 (UX Research Depth) = Comprehensive, but per this codebase's established convention, the full emotional-arc journey work stays inline in this file, not as a separate `journey-*.yaml`.
 - No new persona file — Trailmark's end users (Maria Santos, Dana Kim) remain domain-example data within Alex's stories, not a formal persona, unchanged from both prior Identity-track features' own precedent.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ `docs/feature/oauth-providers/feature-delta.md` (full, DISCUSS) — Resolutions
+1-5, all seven Handoff Package flags, two orchestrator-confirmed locks
+(Resolution 2: no `backend_mode=agent` gating; Resolution 5: extends BC-1, no
+new BC-6) treated as settled, not re-litigated below.
+✓ `docs/feature/oauth-providers/slices/slice-01-alex-registers-google-oauth-client.md`,
+`slice-02-maria-signs-in-with-google.md` (full) — filled in below; Slice 01's
+own Reference Class assumption ("no signing-key generation... embyr generates
+nothing here") is corrected by evidence, see § Changed Assumptions.
+✓ `docs/product/architecture/adr-036-hosted-identity-bounded-context-and-storage.md`
+(full, re-read) — direct structural precedent for storage split, verification-time
+routing widening (Decision 4), and the `enable_hosted_identity`
+idempotent-UPSERT shape, all reused below.
+✓ `crates/embyr-server/src/admin/handlers/auth.rs::oidc_callback` (full,
+re-confirmed) — RS256/JWKS primitives cited precisely: `jsonwebtoken::decode_header`
+(kid extraction), `DecodingKey::from_jwk`, `Validation::new(Algorithm::RS256)`,
+`reqwest::get` (JWKS fetch, unbounded timeout — a gap this feature does not
+inherit, see ADR-037 § Decision 7). Confirms, a second time, this function's
+own flow (browser-session-shaped, per-account, implicit-flow) is not directly
+reusable — only the primitives are.
+✓ `crates/embyr-server/src/admin/handlers/hosted_identity.rs`,
+`crates/embyr-server/src/rest/sign_up.rs`, `sign_in_with_password.rs`,
+`crates/embyr-server/src/adapters/project_auth.rs` (full) — direct structural
+precedent for the admin registration handler shape, the `accounts:<verb>`
+REST-bridge shape, and (not reused here — see ADR-037 § Decision 2)
+`resolve_customer_db_adapter`'s own Customer-DB-resolution shape, correctly
+NOT needed by this feature's stateless Slice 02.
+✓ `crates/embyr-core/src/client_identity/mod.rs` (full) — confirms
+`mint_client_identity_token(signing_key_seed: &[u8; 32], end_user_id: &str,
+project_id: &str, expires_at_unix: i64) -> String` (line 206) is the direct,
+zero-change reuse target; confirms `verify_client_identity_token`'s own
+signature-before-claims discipline, mirrored by the new `oauth_identity`
+module (ADR-037 § Decision 5).
+✓ `crates/embyr-server/src/adapters/encryption.rs`,
+`admin/handlers/oidc_providers.rs` (lines 111-150), `admin/handlers/projects.rs`
+(line 153) — confirms the AES-256-GCM-under-`EMBYR_ENCRYPTION_KEY` pattern
+(`decrypt_with_rotation` + two existing inline-encrypt call sites) is already
+workspace-resident and directly reusable — the evidence base for ADR-037 §
+Decision 2's central finding.
+✓ `crates/embyr-server/src/grpc/handler.rs::attach_client_identity_if_present`
+(full, lines 372-423) — confirms the exact two-source fallback chain ADR-036
+Decision 4 already built, and confirms it must be widened a third time (ADR-037
+§ Decision 8) for AC-19-05/AC-19-10 to hold.
+✓ `crates/embyr-server/src/lib.rs::accounts_bridge_dispatch` /
+`AccountsBridgeState` (full) — confirms the exact `matchit`-conflict reasoning
+and the 4-verb dispatch shape a fifth (`signInWithIdp`) arm extends.
+✓ `crates/embyr-server/src/admin/router.rs`, `admin/handlers/client_identity.rs`
+(lines 130-210), `admin/handlers/shared.rs::verify_project_ownership` — confirms
+`register_client_identity_credential`'s exact in-handler role-gate shape and
+`verify_project_ownership`'s exact 404/403 split, both reused unchanged.
+✓ `docs/product/architecture/brief.md`, `adr-002-bounded-contexts.md` (targeted:
+§ Application Architecture — client-auth-hosted-identity, § Changed Assumptions)
+— confirms the exact summary/pointer convention this wave's own SSOT update
+follows.
+✓ Migration/ADR numbering: highest existing System DB migration is
+`migrations/0028_hosted_identity_signing_keys.sql`; highest existing ADR is
+`adr-036-*.md` — this wave adds `migrations/0029_oauth_provider_credentials.sql`,
+`migrations/0030_oauth_signing_keys.sql`, `adr-037-*.md`.
+
+No contradictions found between DISCUSS's locked scope and this wave's
+findings. One genuine correction to a DISCUSS-level assumption was found and
+resolved (not escalated) — see § Changed Assumptions immediately below.
+
+---
+
+## Wave: DESIGN / [REF] Changed Assumptions (corrects Slice 01's own Reference Class assumption)
+
+**Original assumption**, quoted verbatim,
+`docs/feature/oauth-providers/slices/slice-01-alex-registers-google-oauth-client.md`
+§ Reference Class: *"simpler than both: no signing-key generation (unlike
+hosted identity, embyr generates nothing here)."*
+
+**New assumption**: this does not hold. Tracing `mint_client_identity_token`'s
+exact signature shows minting always requires a 32-byte embyr-owned Ed25519
+seed; Slice 02 cannot mint a `VerifiedEndUserIdentity` for a
+Google-authenticated end user without one existing. Slice 01's own
+registration handler DOES generate a signing key — a NEW, disjoint
+`oauth_signing_keys` row, created idempotently alongside the Client-ID
+registration, encrypted under `EMBYR_ENCRYPTION_KEY` (not ECIES/`api_key`,
+and not a reuse of `hosted_identity_signing_keys`). Full reasoning, rejected
+alternatives (reuse `hosted_identity_signing_keys`; a single global key), and
+the encryption-mechanism choice: `docs/product/architecture/adr-037-oauth-providers-signing-key-and-verification-composition.md`
+§ Decision 2.
+
+**Why resolved here, not escalated to the orchestrator**: unlike Resolutions
+2 and 5 (genuine two-sided business/security trade-offs DISCUSS itself could
+not resolve from evidence alone), this is a structural necessity with exactly
+one architecturally sound answer once `mint_client_identity_token`'s own
+signature is traced — mirrors `client-auth-hosted-identity`'s own "gap found
+and closed during pre-DELIVER review" precedent (ADR-036 Decision 5), which
+was likewise resolved within DESIGN, not escalated. Flagged prominently in
+this wave's own final report per this session's standing practice, so the
+orchestrator can override if this classification is judged wrong.
+
+---
+
+## Wave: DESIGN / [REF] Quality Attribute Priorities
+
+| Attribute | Priority | Driver |
+|---|---|---|
+| Security (non-impersonation, forged-token rejection) | Highest | KPI #3 (0 forged/mismatched-token acceptances); this feature verifies a third-party-issued credential and mints a project-scoped identity from it — the highest-risk boundary class this codebase's own methodology names |
+| Testability | High | Team size and existing convention (every verification/minting primitive in this codebase is a pure, unit-tested function; `oauth_identity` follows the identical discipline) |
+| Time-to-market | High | Elephant Carpaccio gate passed 0/5 (DISCUSS); 3-day estimate; near-total reuse (see § Reuse Analysis) keeps this true at DESIGN too |
+| Availability (of Google sign-in specifically, not the whole server) | Medium | AC-19-11 — Google's own JWKS being unreachable must degrade gracefully, scoped to Slice 02's own endpoint only; must not affect any other capability's uptime |
+| Auditability | Low (v1) | No admin-visibility story in locked v1 scope (§ Out of Scope); structured logging only, mirrors ADR-036 Decision 11's own precedent and rationale (no REST handler in this codebase has metrics instrumentation yet — not a gap this feature introduces) |
+
+**Constraints**: team size/timeline unchanged from both prior Identity-track
+features (same team, same session); no new regulatory driver; operational
+maturity unchanged (same CI, same migration mechanism, zero new
+infrastructure). Conway's Law: no team-boundary implication — this extends
+the same BC-1-adjacent admin surface and the same `x-embyr-client-identity`
+composition path both prior Identity-track features already extended, built
+by the same team.
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| `verify_project_ownership` | `admin/handlers/shared.rs` | 404/403 project-ownership check | **EXTEND** (reused unchanged) | Identical need to `register_client_identity_credential`'s own precondition — zero new code |
+| Owner/Admin in-handler role gate | `admin/handlers/client_identity.rs::register_client_identity_credential` (shape) | Session-role gate before a registration write | **EXTEND** (pattern reused, new handler) | Identical shape, new handler file — mirrors `enable_hosted_identity`'s own reuse of the same pattern |
+| Idempotent UPSERT (`INSERT ... ON CONFLICT DO NOTHING RETURNING` + fallback SELECT) | `adapters/system_db.rs::enable_hosted_identity` (shape) | "Register → redefine, no regeneration on redefine" lifecycle | **EXTEND** (pattern reused) | Identical shape needed for both `oauth_provider_credentials` (upsert-with-update) and `oauth_signing_keys` (upsert-with-no-op) |
+| `mint_client_identity_token()` | `crates/embyr-core/src/client_identity/mod.rs` | Mint a `VerifiedEndUserIdentity` from an embyr-owned seed | **EXTEND** (reused unchanged, zero code changes) | Exact reuse target named by DISCUSS; confirmed unchanged signature |
+| `verify_client_identity_token()` | `crates/embyr-core/src/client_identity/mod.rs` | Verify a minted token on ordinary Firestore calls | **EXTEND** (reused unchanged, zero code changes) | Called a third time by the widened `attach_client_identity_if_present` — same function, new caller |
+| `attach_client_identity_if_present` | `grpc/handler.rs` | Verification-time credential-source routing | **EXTEND** (structural change: third fallback arm) | Mirrors ADR-036 Decision 4's own widening one level deeper — see ADR-037 § Decision 8 |
+| `accounts_bridge_dispatch` / `AccountsBridgeState` | `lib.rs` | Single-capture-name REST dispatch for `accounts:<verb>` | **EXTEND** (new match arm + new state field) | Same `matchit`-conflict constraint every prior `accounts:<verb>` addition already solved this way |
+| RS256/JWKS primitives (`decode_header`, `DecodingKey::from_jwk`, `Validation::new(Algorithm::RS256)`) | `admin/handlers/auth.rs::oidc_callback` | Verify an RS256, JWKS-published third-party token | **EXTEND** (primitives reused, new pure function) | Confirmed by DISCUSS and re-confirmed here: `oidc_callback`'s own flow is not reusable, but these primitives are — composed into a new pure function, not copied inline a second time |
+| AES-256-GCM-under-`EMBYR_ENCRYPTION_KEY` (`adapters/encryption.rs::decrypt_with_rotation` + `oidc_providers.rs`/`projects.rs`'s inline encrypt shape) | `adapters/encryption.rs`, `admin/handlers/oidc_providers.rs`, `admin/handlers/projects.rs` | Encrypt/decrypt an embyr-owned secret that does not need per-project `api_key` scoping | **EXTEND** (pattern + `decrypt_with_rotation` fn reused directly; encrypt side follows the identical inline shape) | Central evidence for ADR-037 § Decision 2 — already proven at 2 call sites for exactly this threat-model class |
+| `TOKEN_TTL_SECS` | `rest/sign_up.rs` (`pub(crate)`) | Minted-token lifetime constant | **EXTEND** (reused unchanged) | Already `pub(crate)` for exactly this kind of cross-module reuse (Slice 03 of the sibling feature already reused it once) |
+| `ClientIdentityCredential` | `crates/embyr-core/src/client_identity/mod.rs` | Verification input shape (`public_key_current`/`public_key_previous`) | **EXTEND** (reused unchanged) | `oauth_signing_keys.public_key` is wrapped in this exact existing type at verification time — no new type needed |
+| `SystemDb` (struct + pool) | `adapters/system_db.rs` | Owns every System DB table's CRUD | **EXTEND** (new methods on the existing struct) | Mirrors every prior Identity-track feature's own convention — no second System-DB-access struct |
+| `oauth_identity` (Google ID-token verification) | — | RS256/JWKS-published third-party verification, distinct claims shape, distinct algorithm from `client_identity` | **CREATE NEW** (`crates/embyr-core/src/oauth_identity.rs`) | Structurally different concern from `client_identity`'s EdDSA/single-key scheme — identical justification pattern ADR-036 Decision 9 already established for `hosted_identity::validate_password_strength`; extending `client_identity` would repeat that exact "unrelated concern crammed into an existing module" mistake |
+| `GoogleJwksCache` (JWKS fetch + TTL cache) | — | No existing adapter fetches/caches a third-party JWKS | **CREATE NEW** (`crates/embyr-server/src/adapters/google_jwks_cache.rs`) | `oidc_callback`'s own inline `reqwest::get` has no caching and no bounded timeout — not extractable as a shared adapter without first fixing `oidc_callback` itself, out of this feature's scope; a small, focused new adapter is the smaller diff |
+| `oauth_provider_credentials`, `oauth_signing_keys` (tables) | — | No existing table stores a registered third-party OAuth Client ID or this feature's own disjoint signing key | **CREATE NEW** (2 migrations) | Hard constraint (structural disjointness from `client_identity_credentials`) forecloses reuse for the second; the first has no existing analog (`client_identity_credentials` stores a CUSTOMER's key, not a third-party provider's public Client ID) |
+| `register_google_oauth_provider` (admin handler), `sign_in_with_idp` (REST handler) | — | No existing handler registers a third-party OAuth Client ID or verifies a Google ID token | **CREATE NEW** (2 new handler files) | New driving-port surface for a new mechanism — mirrors every prior Identity-track feature's own 1-2 new handler files per slice |
+
+**Tally**: 13 EXTEND, 5 CREATE NEW (2 pure/adapter modules, 2 migrations, 2
+handler files — counted as new files, not new mechanisms; every CREATE NEW
+row states the "no existing alternative" evidence the Reuse Analysis gate
+requires). Zero unjustified CREATE NEW decisions.
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement — Confirms Resolution 5
+
+Applying ADR-002's Option-D three-part test formally (not by inertia) to
+`OAuthProviderCredential`, the only candidate entity this feature's locked
+v1 scope introduces: **confirms Resolution 5 — extends BC-1 Tenant
+Management, no new BC-6.** Full three-part-test table:
+`docs/product/architecture/adr-037-oauth-providers-signing-key-and-verification-composition.md`
+§ Decision 1. `docs/product/architecture/adr-002-bounded-contexts.md` §
+Changed Assumptions is appended with a short confirming note (this wave's own
+SSOT update, see below) — the third application of the Option-D test in this
+codebase's history, and the first to NOT produce a new bounded context,
+direct evidence the test is applied per-case rather than by pattern-match
+(mirrors Resolution 5's own framing exactly).
+
+**BC-1 ubiquitous language gains**: `OAuthProviderCredential`, `OAuthSigningKey`,
+`GoogleIdToken`, `VerifiedOAuthIdentity`.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component | Path | Change Type | Responsibility |
+|---|---|---|---|
+| `oauth_identity` | `crates/embyr-core/src/oauth_identity.rs` | CREATE NEW | Pure Google ID-token verification (RS256/JWKS-published) + deterministic `end_user_id` derivation |
+| `oauth_providers` (admin handler) | `crates/embyr-server/src/admin/handlers/oauth_providers.rs` | CREATE NEW | `register_google_oauth_provider` — Slice 01 |
+| `sign_in_with_idp` (REST handler) | `crates/embyr-server/src/rest/sign_in_with_idp.rs` | CREATE NEW | `sign_in_with_idp` — Slice 02 |
+| `google_jwks_cache` (adapter) | `crates/embyr-server/src/adapters/google_jwks_cache.rs` | CREATE NEW | JWKS fetch, bounded timeout, fixed-TTL cache |
+| `SystemDb` | `crates/embyr-server/src/adapters/system_db.rs` | EXTEND | New methods: `register_oauth_provider` (transactional upsert-credential + idempotent-create-signing-key), `get_oauth_provider_credential`, `get_oauth_signing_key` |
+| `attach_client_identity_if_present` | `crates/embyr-server/src/grpc/handler.rs` | EXTEND | Third fallback credential source (`oauth_signing_keys`) |
+| `accounts_bridge_dispatch` / `AccountsBridgeState` | `crates/embyr-server/src/lib.rs` | EXTEND | Fifth `accounts:<verb>` match arm (`signInWithIdp`); new `OAuthProviderState` field |
+| Admin router | `crates/embyr-server/src/admin/router.rs` | EXTEND | New route: `POST /admin/v1/projects/:project_id/oauth_providers/google` |
+| Migrations | `migrations/0029_oauth_provider_credentials.sql`, `migrations/0030_oauth_signing_keys.sql` | CREATE NEW | System DB schema, zero new migration mechanism (ADR-022 already single-sourced) |
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports
+
+| Port | Protocol | Extension |
+|---|---|---|
+| Admin `:9090` | HTTP/1.1 | `POST /admin/v1/projects/:project_id/oauth_providers/google` (Slice 01) — session-auth, Owner/Admin, in-handler gate |
+| Data-plane REST `:8081` | HTTP | `POST /v1/projects/{project_id}/accounts:signInWithIdp` (Slice 02) — no auth header, no `?key=`; the Google ID token in the body is the sole credential, mirrors `signInWithCustomToken`'s own stateless shape |
+
+No new listener, no new network-facing port — both extend existing `:9090`/`:8081` surfaces exactly as DISCUSS's own § Driving Ports anticipated.
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters
+
+| Driven Port | Adapter | Fault Model / Earned Trust Answer |
+|---|---|---|
+| Google JWKS (`https://www.googleapis.com/oauth2/v3/certs`) | `GoogleJwksCache` (new) | Bounded 5s timeout; DNS/TCP/TLS/non-2xx/malformed-body/slow-response all fold into one `GOOGLE_JWKS_UNREACHABLE` rejection (AC-19-11 is the enforcement mechanism — see ADR-037 § Decision 7); not probed at startup (per-request soft dependency, deliberately) |
+| System DB (`oauth_provider_credentials`, `oauth_signing_keys`) | `SystemDb` (EXTEND) | Same connection-pool/error-mapping discipline every other `SystemDb` method already uses; no new fault class |
+| `EMBYR_ENCRYPTION_KEY` (server-wide secret, ADR-018) | `adapters/encryption.rs::decrypt_with_rotation` (EXTEND, reused unchanged) | Rotation-aware (current-then-previous), already proven at the TOTP call site |
+
+**External integration flag (per skill `nw-architecture-patterns` §
+Contract Testing)**: Google's OAuth/JWKS surface (`https://www.googleapis.com/oauth2/v3/certs`)
+is a third-party, externally-versioned API this feature depends on for its
+core security property (signature verification). See § Handoff Package
+below for the contract-testing annotation to `platform-architect`.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new crate dependencies. `jsonwebtoken` (already a workspace dependency,
+used by `client_identity` and `oidc_callback`), `reqwest` (already used by
+`oidc_callback`), `aes-gcm` (already used by `adapters/encryption.rs` and
+`oidc_providers.rs`), `ed25519-dalek` (already used by `hosted_identity.rs`'s
+own key generation). Every primitive this feature needs is already
+workspace-resident and OSS (MIT/Apache-2.0 licensed, matching this
+workspace's existing license posture — no new license to document).
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context — Extended (Mermaid)
+
+Additive to `docs/product/architecture/brief.md` § C4 System Context — adds
+Google as a new external system. No Container-level (L2) diagram change: no
+new container/service is introduced, only new endpoints on the existing
+`:9090` admin and `:8081` REST containers (see § Driving Ports above); a
+Container diagram would show the identical `embyr-server` box with two more
+labeled arrows, adding no new information over the table above.
+
+```mermaid
+C4Context
+  title System Context — oauth-providers (extends existing embyr-rs System Context)
+
+  Person(alex, "Alex", "SDK developer, project owner")
+  Person(maria, "Maria", "End user, already has a Google account")
+
+  System(embyr, "embyr-rs", "Firestore-protocol translation layer")
+  System_Ext(google, "Google OAuth / Identity", "Issues ID tokens; publishes JWKS at googleapis.com/oauth2/v3/certs")
+
+  Rel(alex, embyr, "Registers Google OAuth Client ID via admin API")
+  Rel(maria, google, "Authenticates via Google's own consent screen")
+  Rel(maria, embyr, "Presents Google-issued ID token to sign in")
+  Rel(embyr, google, "Fetches JWKS to verify ID token signature (read-only, cacheable)")
+```
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table (DDD-OAP-1..8)
+
+| # | Decision | Verdict | Rationale (one line) |
+|---|---|---|---|
+| DDD-OAP-1 | Bounded-context placement | Extends BC-1 Tenant Management | Same shape as `client_identity_credentials`; confirms Resolution 5 |
+| DDD-OAP-2 | Signing-key custody | New, disjoint `oauth_signing_keys` table | Reuse of `hosted_identity_signing_keys` would couple Google sign-in to hosted identity being enabled; rejected |
+| DDD-OAP-3 | Signing-key encryption | AES-256-GCM under `EMBYR_ENCRYPTION_KEY`, not ECIES/`api_key` | Slice 02 has no Customer DB dependency to justify forcing `api_key` onto the request |
+| DDD-OAP-4 | Slice 01 endpoint shape | `POST .../oauth_providers/google`, provider in path | Structurally forecloses silent GitHub expansion; no `api_key` field needed |
+| DDD-OAP-5 | Google ID-token verification | New pure module `embyr_core::oauth_identity` | Structurally different concern from `client_identity` (RS256/JWKS vs EdDSA/single-key) |
+| DDD-OAP-6 | Slice 02 endpoint shape | `POST .../accounts:signInWithIdp`, no `?key=` | Stateless, mirrors `signInWithCustomToken`'s own shape more closely than the hosted-identity family |
+| DDD-OAP-7 | JWKS caching | Fixed 6h TTL, 5s bounded timeout, new `GoogleJwksCache` adapter | Simplest correct choice; `oidc_callback`'s own unbounded fetch is a gap this feature does not inherit |
+| DDD-OAP-8 | Verification-time routing | Widen `attach_client_identity_if_present` a third time | Required for AC-19-05/AC-19-10; mirrors ADR-036 Decision 4's own widening one level deeper |
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+- `embyr-core` remains IO-free — `oauth_identity.rs` performs zero network
+  calls (JWKS is passed in, already-fetched, by the caller); enforced by the
+  existing `deny.toml` + CI mechanism, unchanged, zero new configuration.
+- `attach_client_identity_if_present`'s three-source fallback chain is
+  enforced by the unit-test triad named in ADR-037 § Decision 8 (single-source,
+  all-three-sources, zero-sources-zero-queries) — the same enforcement
+  discipline ADR-026/ADR-036 already established for this exact function.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions
+
+- **`OQ-OAP-01`** (unchanged from DISCUSS, not resolved by DESIGN): whether
+  the Firebase JS SDK's `signInWithPopup()`/`signInWithRedirect()` with
+  `GoogleAuthProvider`, pointed at a non-Google backend, lets embyr control
+  the shape of the token-presentation call, or insists on a fixed
+  Identity-Toolkit-specific endpoint shape. This wave's own endpoint design
+  (`accounts:signInWithIdp`, § Decision 6) is implementation-ready regardless
+  of the spike's outcome, mirroring `OQ-CA-01`/`OQ-CHI-01`'s own precedent —
+  required pre-DELIVER spike, not run here.
+  **Scope of the gate (peer-review clarification, addresses reviewer's one
+  HIGH finding)**: `OQ-OAP-01` does NOT block DESIGN's handoff or Slice 01's
+  DELIVER (registration has no SDK-wire-format dependency at all). It DOES
+  gate Slice 02 specifically: Slice 02's server-side contract
+  (`accounts:signInWithIdp`'s request/response shape, verification, minting)
+  can be implemented and unit-tested end-to-end against a real Google-issued
+  ID token without the spike — but Slice 02 is not DELIVER-*complete*
+  (walking-skeleton-closing, production-ready) until the spike confirms the
+  Firebase JS SDK can actually reach this endpoint shape from Trailmark's own
+  client code. If the spike finds the SDK insists on a different shape,
+  Slice 02's transport (not its logical contract, verification taxonomy, or
+  storage) is the only thing that changes. Concretely: run `OQ-OAP-01` before
+  or during Slice 02's own acceptance-test authoring in DISTILL, not deferred
+  to the end of DELIVER.
+
+---
+
+## Wave: DESIGN / [REF] External Integrations Requiring Contract Tests
+
+External Integrations Requiring Contract Tests:
+- Google OAuth / Identity (`https://www.googleapis.com/oauth2/v3/certs`, JWKS/OIDC): embyr fetches Google's published JSON Web Key Set to verify RS256-signed ID tokens; this is the sole cryptographic trust anchor for Slice 02's entire security property.
+  Recommended: consumer-driven contract test via Pact (or, minimally, a scheduled schema-shape smoke test against the live JWKS endpoint) in the CI acceptance stage, to detect a breaking JWKS schema/algorithm change (e.g. Google rotating away from RS256, or changing the response envelope) before it silently breaks every project's Google sign-in in production.
+
+---
+
+## Wave: DESIGN / [REF] Quality Gate Validation
+
+- [x] Requirements traced to components (§ Component Decomposition, every row traces to AC-19-01..11)
+- [x] Component boundaries with clear responsibilities
+- [x] Technology choices documented, zero new dependencies, OSS unchanged
+- [x] Quality attributes addressed (§ Quality Attribute Priorities)
+- [x] Dependency-inversion compliance — `oauth_identity` pure/IO-free; `GoogleJwksCache` is the sole IO boundary, injected via `OAuthProviderState`
+- [x] C4 diagrams — System Context extension produced; Container-level extension judged not warranted (no new container) and documented as such
+- [x] ADRs written with 2+ alternatives each (ADR-037 §§ Decision 2, 4, 6 all carry rejected alternatives)
+- [x] OSS preference validated — zero new dependencies
+- [x] AC behavioral, not implementation-coupled (unchanged from DISCUSS)
+- [x] External integrations annotated (§ External Integrations Requiring Contract Tests)
+- [x] Architectural enforcement tooling — existing `deny.toml`/CI mechanism unchanged; unit-test triad named for the routing widening
+- [x] Reuse Analysis table present, zero unjustified CREATE NEW (§ Reuse Analysis)
+
+---
+
+## Wave: DESIGN / [REF] Peer Review
+
+**Trigger evaluated**: this feature verifies a third-party-issued token
+(Google ID token) and mints a project-scoped `VerifiedEndUserIdentity` from
+it — a security boundary change per this wave's own trigger list. **Peer
+review invoked**: `nw-solution-architect-reviewer`, mirroring
+`client-auth-hosted-identity`'s own DESIGN-wave precedent for the identical
+reason.
+
+**Outcome (iteration 1): `approved`, 0 critical, 1 high, 2 medium.**
+
+Strengths confirmed independently: the signing-key-custody correction (§
+Changed Assumptions) is sound with fairly-represented rejected alternatives;
+the `attach_client_identity_if_present` third-widening claim was verified
+directly against the actual code (confirmed the current `.ok()??` hard-return
+shape at the cited lines); Reuse Analysis (13 EXTEND / 5 CREATE NEW) fully
+justified, zero unjustified CREATE NEW; bounded-context placement correctly
+applies Option D fresh; security boundary (forged/mismatched-audience/expired
+rejection, JWKS-unreachable graceful degradation) adequately addressed;
+priority validation Q1-Q4 all pass (UNCLEAR/ADEQUATE/CORRECT/JUSTIFIED, no
+inverted constraints, no unjustified technology choices).
+
+**1 HIGH issue, remediated**: `OQ-OAP-01`'s gating scope was ambiguous —
+unclear whether it blocks Slice 02's DELIVER-completion or only a later
+polish step. **Remediation**: § Open Questions above now states explicitly
+that `OQ-OAP-01` does not block Slice 01 or DESIGN's own handoff, but DOES
+gate Slice 02's DELIVER-*completion* (not its implementability) — the spike
+should run before or during Slice 02's acceptance-test authoring in DISTILL,
+not deferred to end of DELIVER.
+
+**2 MEDIUM issues, accepted as-is (no remediation required)**: (1) the fixed
+6h JWKS TTL's rotation-window ceiling — reviewer confirmed the named upgrade
+path is adequate, recommended (not required) linking a future metric;
+deferred to DISTILL's own scenario generation, not a DESIGN-blocking gap. (2)
+Resolution 3(B)'s stateless design being a conditional, not a hard lock —
+reviewer confirmed this is correctly, explicitly flagged already, no change
+needed.
+
+**Quality gate status**: approved, no re-review iteration required (all
+findings were either remediated inline above or explicitly accepted by the
+reviewer as non-blocking). Full YAML review record retained in this wave's
+session transcript; summary captured here per this wave's own Review Proof
+Display convention.
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package
+
+**To DISTILL/DELIVER (direct Outside-In TDD, per this session's own modified
+flow — not nWave's DISTILL/DELIVER pipeline)**: this `feature-delta.md`
+(DESIGN sections above), `docs/product/architecture/adr-037-oauth-providers-signing-key-and-verification-composition.md`,
+`docs/product/architecture/brief.md` § Application Architecture —
+oauth-providers, `docs/product/architecture/adr-002-bounded-contexts.md` §
+Changed Assumptions (BC-1 confirmation note).
+
+**To DEVOPS (platform-architect)**: § External Integrations Requiring
+Contract Tests above (Google JWKS — Pact or scheduled schema-shape smoke
+test); § Outcome KPIs (DISCUSS, unchanged) for instrumentation planning.
+
+**Explicit flags for DELIVER**:
+1. `OQ-OAP-01` — required pre-DELIVER spike (unchanged from DISCUSS), not run
+   by this wave.
+2. § Changed Assumptions above — Slice 01 DOES generate a signing key (a
+   correction to the slice brief's own Reference Class text); crafter should
+   read ADR-037 § Decision 2 before implementing Slice 01, not the slice
+   brief's Reference Class section alone.
+3. `attach_client_identity_if_present`'s tail (`grpc/handler.rs`) requires a
+   structural change (hard-return → fall-through on the second attempt, ADR-037
+   § Decision 8) before the third attempt can be added — this is a
+   modification to existing, already-tested code, not a pure addition; the
+   existing unit tests for the two-source chain must continue to pass
+   unmodified after the change (regression-safety requirement, not optional).
+4. Migration numbering locked: `migrations/0029_oauth_provider_credentials.sql`,
+   `migrations/0030_oauth_signing_keys.sql`. ADR numbering locked: `adr-037`.
+5. No new judgment calls requiring orchestrator confirmation were found
+   beyond DISCUSS's own two (both already resolved/confirmed 2026-08-30). The
+   signing-key-custody finding (§ Changed Assumptions) was resolved within
+   DESIGN, not escalated — flagged prominently in this wave's final report
+   per this session's standing practice, in case the orchestrator judges
+   otherwise.

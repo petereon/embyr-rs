@@ -229,3 +229,45 @@ BC-5 Hosted Identity
 
 This entry does not modify BC-1, BC-2, BC-3, or BC-4's own existing map
 entries above — it is purely additive.
+
+---
+
+## Changed Assumptions (appended by feature `oauth-providers`, DESIGN wave, 2026-08-30)
+
+**Why this is being appended, not reopened:** both amendments above (BC-4,
+BC-5) stand unchanged. This amendment records a **third** application of the
+Option-D three-part test, applied fresh to a genuinely different candidate
+entity — and, unlike the two amendments above, this application does **not**
+add a new bounded context. That outcome is itself the point being recorded:
+Option D is a per-case test, not a rule that always produces "add a new BC"
+once a codebase has added two.
+
+**Candidate entity evaluated**: `OAuthProviderCredential`
+(`project_id, provider → client_id` — the Google OAuth Client ID `oauth-providers`
+US-01 lets a project owner register).
+
+| Test | Result |
+|---|---|
+| Entity with identity of its own? | Yes — `(project_id, provider)`. |
+| Lifecycle of its own? | Yes, but thin — register → redefine (idempotent upsert) → [deferred: deregister]. |
+| Invariants of its own? | Yes, but thin — non-empty `client_id`, uniqueness per `(project_id, provider)`. |
+
+**Decision: no new bounded context.** `OAuthProviderCredential` is
+structurally the SAME kind of thing `client_identity_credentials` already
+is — project-scoped, System-DB-resident, no-confidentiality-property auth
+material — and that entity was never itself treated as warranting a
+standalone context; it lives inside BC-1 without controversy. Extending BC-1
+Tenant Management is the correct, evidence-based conclusion, not an
+inertia-driven one — full three-part-test table and the rejected
+alternatives (a new BC-6; extending BC-5 instead) are recorded in
+`docs/product/architecture/adr-037-oauth-providers-signing-key-and-verification-composition.md`
+§ Decision 1.
+
+**BC-1 ubiquitous language addition** (additive, not a rewrite of BC-1's
+existing vocabulary, § BC-1 above): `OAuthProviderCredential`,
+`OAuthSigningKey`, `GoogleIdToken`, `VerifiedOAuthIdentity`.
+
+No Context Map addition — this feature introduces no new inter-context
+relationship; `OAuthProviderCredential` and `oauth_signing_keys` are read/
+written entirely within BC-1's own existing storage boundary (System DB),
+exactly as `client_identity_credentials` already is.
