@@ -33,7 +33,7 @@ use embyr_proto::firestore::{
     firestore_client::FirestoreClient,
     run_aggregation_query_request::QueryType as AggregationQueryType,
     structured_aggregation_query::{
-        aggregation::{Count, Operator as AggregationOperator},
+        aggregation::{Count, Operator as AggregationOperator, Sum},
         Aggregation, QueryType as StructuredAggQueryType,
     },
     structured_query::{
@@ -47,6 +47,13 @@ use embyr_proto::firestore::{
 
 fn string_value(s: &str) -> Value {
     Value { value_type: Some(ValueType::StringValue(s.to_string())) }
+}
+
+/// A single-field integer value — Slice 03's own numeric fixture shape
+/// (SUM's `AC-01-11`/`AC-01-12` need integer-typed field values; `string_field`
+/// above only covers the string shape Slice 01 needed).
+pub fn integer_field(value: i64) -> Value {
+    Value { value_type: Some(ValueType::IntegerValue(value)) }
 }
 
 fn equality_filter(field_path: &str, value: &str) -> Filter {
@@ -140,5 +147,90 @@ pub async fn run_count_aggregation(
     match &value.value_type {
         Some(ValueType::IntegerValue(n)) => Ok(*n),
         other => panic!("expected IntegerValue for a COUNT result, got {other:?}"),
+    }
+}
+
+/// Real gRPC `RunAggregationQuery` call with a SUM aggregation — driving
+/// port entry (Pillar 3), mirroring `run_count_aggregation` above exactly
+/// except for the `Sum` operator and the `DoubleValue` result shape
+/// (ADR-040 § Response value mapping — SUM is always `DoubleValue`, even
+/// for whole-number totals).
+pub async fn run_sum_aggregation(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    all_descendants: bool,
+    sum_field: &str,
+    equality_filters: &[(&str, &str)],
+    client_identity_token: Option<&str>,
+) -> Result<f64, tonic::Status> {
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let where_filter = match equality_filters {
+        [] => None,
+        [(field, value)] => Some(equality_filter(field, value)),
+        many => Some(Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: many.iter().map(|(f, v)| equality_filter(f, v)).collect(),
+            })),
+        }),
+    };
+
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: collection_id.to_string(),
+            all_descendants,
+        }],
+        r#where: where_filter,
+        ..Default::default()
+    };
+
+    let saq = StructuredAggregationQuery {
+        query_type: Some(StructuredAggQueryType::StructuredQuery(sq)),
+        aggregations: vec![Aggregation {
+            operator: Some(AggregationOperator::Sum(Sum {
+                field: Some(FieldReference { field_path: sum_field.to_string() }),
+            })),
+            alias: String::new(),
+        }],
+    };
+
+    let mut request = tonic::Request::new(RunAggregationQueryRequest {
+        parent: format!("projects/{}/databases/(default)/documents", ctx.project_id),
+        query_type: Some(AggregationQueryType::StructuredAggregationQuery(saq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    let mut stream = client.run_aggregation_query(request).await?.into_inner();
+    use tokio_stream::StreamExt;
+    let response = stream
+        .next()
+        .await
+        .expect("expected exactly one RunAggregationQueryResponse message")?;
+    let result = response
+        .result
+        .expect("response must carry an AggregationResult");
+    let value = result
+        .aggregate_fields
+        .get("field_0")
+        .expect("expected default-synthesized alias field_0");
+    match &value.value_type {
+        Some(ValueType::DoubleValue(d)) => Ok(*d),
+        other => panic!("expected DoubleValue for a SUM result, got {other:?}"),
     }
 }

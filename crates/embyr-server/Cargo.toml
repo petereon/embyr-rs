@@ -610,6 +610,13 @@ path = "../../tests/aggregation_queries/acceptance/count_aggregation_rejection.r
 name = "aggregation_queries_collection_group_count"
 path = "../../tests/aggregation_queries/acceptance/collection_group_count.rs"
 
+# Slice 03 (US-03, ADR-040) — SUM aggregation for Postgres-family backend
+# modes, reusing Slice 01's own WHERE-clause/compliance/field-path-validation
+# machinery unchanged.
+[[test]]
+name = "aggregation_queries_sum_aggregation"
+path = "../../tests/aggregation_queries/acceptance/sum_aggregation.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

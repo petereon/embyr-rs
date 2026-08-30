@@ -729,10 +729,58 @@ impl BackendAdapter for PostgresBackendAdapter {
 
                 Ok(AggregateValue::Count(count))
             }
-            // SUM/AVG are Slices 03/04's own scope (ADR-040) — this slice
-            // wires the branch, not the SQL.
-            AggregationKind::Sum(_) | AggregationKind::Avg(_) => Err(CoreError::FailedPrecondition(
-                "SUM/AVG aggregation is not supported in this slice".into(),
+            AggregationKind::Sum(field_path) => {
+                use crate::encoding::query::append_filter;
+                use sqlx::{QueryBuilder, Row};
+
+                // WHERE-clause construction copied byte-for-byte from
+                // `run_query`/COUNT above (ADR-040 § 2) — only the SELECT
+                // clause differs. `field_path` is already validated by
+                // `handle_run_aggregation_query` (^[a-zA-Z_][a-zA-Z0-9_.]*$,
+                // ADR-040 § 1) before reaching this adapter — interpolated
+                // into the JSON-path expression the same way
+                // `append_field_filter` interpolates a validated field path;
+                // the type-tag check (`'t' IN ('I','D')`) plus `COALESCE`
+                // are what make AC-01-12/AC-01-13 true by construction.
+                let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
+                    "SELECT COALESCE(SUM(CASE WHEN fields->'{fp}'->>'t' IN ('I','D') \
+                     THEN (fields->'{fp}'->>'v')::float8 ELSE NULL END), 0) \
+                     FROM documents WHERE project_id = ",
+                    fp = field_path
+                ));
+                qb.push_bind(collection.project_id.as_str());
+                if query.query.all_descendants {
+                    qb.push(" AND (collection_path = ");
+                    qb.push_bind(&collection.collection_path);
+                    qb.push(" OR collection_path LIKE ");
+                    qb.push_bind(format!("%/{}", collection.collection_path));
+                    qb.push(")");
+                } else {
+                    qb.push(" AND collection_path = ");
+                    qb.push_bind(&collection.collection_path);
+                }
+                qb.push(" AND NOT deleted");
+
+                if let Some(filter) = &query.query.filter {
+                    qb.push(" AND ");
+                    append_filter(&mut qb, filter);
+                }
+
+                let row = qb
+                    .build()
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                let sum: f64 = row
+                    .try_get(0)
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+                Ok(AggregateValue::Sum(sum))
+            }
+            // AVG is Slice 04's own scope (ADR-040) — this slice wires SUM
+            // only.
+            AggregationKind::Avg(_) => Err(CoreError::FailedPrecondition(
+                "AVG aggregation is not supported in this slice".into(),
             )),
         }
     }
