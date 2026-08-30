@@ -10,6 +10,7 @@
 //!               Agent gRPC (:9191) — mTLS inbound to MockAgentServer
 //! Red classification: MISSING_FUNCTIONALITY
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
@@ -198,12 +199,15 @@ fn build_agent_binary() -> std::path::PathBuf {
 // ---------------------------------------------------------------------------
 
 use embyr_proto::agent::{
+    filter::FilterType as AgentFilterType,
     storage_agent_server::{StorageAgent, StorageAgentServer},
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, DocChange, Document as AgentDocument,
-    GetDocumentRequest, ListDocumentsRequest, ListDocumentsResponse,
-    PingRequest, PingResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
+    FieldFilterOp as AgentFieldFilterOp, GetDocumentRequest, ListDocumentsRequest,
+    ListDocumentsResponse, PingRequest, PingResponse, RollbackRequest,
+    RunAggregationQueryRequest, RunAggregationQueryResponse,
     RunQueryRequest, RunQueryResponse, SubscribeRequest, UpdateDocumentRequest,
+    Value as AgentValue,
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
@@ -212,13 +216,26 @@ use tonic::{
 };
 use sqlx::PgPool;
 
+/// A document seeded directly into `MockAgentServer`'s in-memory query
+/// store — used only by `run_query`, independent of the Postgres-backed
+/// `mock_documents` table the other RPCs use.
+#[derive(Clone)]
+struct QueryDoc {
+    name: String,
+    fields: HashMap<String, AgentValue>,
+}
+
 /// MockAgentServer: in-process tonic server implementing StorageAgent.
 ///
 /// Stores calls in `calls` for test assertions.
 /// For create_document: stores the document in Postgres to verify persistence.
+/// `query_docs` backs `run_query` with a real (if minimal) equality-filter
+/// evaluator — needed to prove the caller's filter is actually forwarded
+/// and applied, not just present on the wire (AC-12g regression, security).
 struct MockAgentServer {
     calls: Arc<Mutex<Vec<String>>>,
     pool: PgPool,
+    query_docs: Arc<Mutex<Vec<QueryDoc>>>,
 }
 
 #[tonic::async_trait]
@@ -318,10 +335,33 @@ impl StorageAgent for MockAgentServer {
 
     async fn run_query(
         &self,
-        _request: Request<RunQueryRequest>,
+        request: Request<RunQueryRequest>,
     ) -> Result<Response<Self::RunQueryStream>, Status> {
         self.calls.lock().unwrap().push("run_query".to_string());
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        use embyr_proto::agent::run_query_request::QueryType;
+        let filter = match &request.get_ref().query_type {
+            Some(QueryType::StructuredQuery(sq)) => sq.filter.clone(),
+            None => None,
+        };
+        let docs = self.query_docs.lock().unwrap().clone();
+        let matching: Vec<QueryDoc> = docs
+            .into_iter()
+            .filter(|d| query_doc_matches_filter(d, &filter))
+            .collect();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(matching.len() + 1);
+        for doc in matching {
+            let _ = tx
+                .send(Ok(RunQueryResponse {
+                    document: Some(AgentDocument {
+                        name: doc.name,
+                        fields: doc.fields,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }))
+                .await;
+        }
         let _ = tx.send(Ok(RunQueryResponse {
             continuation_selector: Some(
                 embyr_proto::agent::run_query_response::ContinuationSelector::Done(true),
@@ -402,13 +442,38 @@ impl StorageAgent for MockAgentServer {
     }
 }
 
+/// Minimal equality-filter evaluator for `MockAgentServer::run_query`.
+/// A missing filter matches every document (the "no filter -> full
+/// collection" contract, AC-12g regression test (c)). A present Equal
+/// field filter matches only docs whose field equals the filter value —
+/// enough to prove `AgentBackendAdapter::run_query` actually forwards and
+/// the agent actually applies the caller's ownership-scoped filter.
+// ponytail: only the Equal operator is evaluated (all this suite's tests
+// need); extend if a future test needs another operator.
+fn query_doc_matches_filter(doc: &QueryDoc, filter: &Option<embyr_proto::agent::Filter>) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    match &filter.filter_type {
+        Some(AgentFilterType::FieldFilter(ff)) if ff.op == AgentFieldFilterOp::Equal as i32 => {
+            doc.fields.get(&ff.field_path) == ff.value.as_ref()
+        }
+        _ => true,
+    }
+}
+
 /// Start a MockAgentServer with mTLS using the provided cert set.
 ///
-/// Returns (calls_arc, actual_port, shutdown_sender).
+/// Returns (calls_arc, query_docs_arc, actual_port, shutdown_sender).
 async fn start_mock_agent_server(
     certs: &MtlsCerts,
     pool: PgPool,
-) -> (Arc<Mutex<Vec<String>>>, u16, tokio::sync::oneshot::Sender<()>) {
+) -> (
+    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<QueryDoc>>>,
+    u16,
+    tokio::sync::oneshot::Sender<()>,
+) {
     // Apply mock schema
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS mock_documents (doc_name TEXT PRIMARY KEY)"
@@ -419,6 +484,8 @@ async fn start_mock_agent_server(
 
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let calls_clone = Arc::clone(&calls);
+    let query_docs: Arc<Mutex<Vec<QueryDoc>>> = Arc::new(Mutex::new(Vec::new()));
+    let query_docs_clone = Arc::clone(&query_docs);
 
     let identity = Identity::from_pem(&certs.server_cert_pem, &certs.server_key_pem);
     let ca_cert = Certificate::from_pem(&certs.ca_pem);
@@ -433,7 +500,7 @@ async fn start_mock_agent_server(
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let service = MockAgentServer { calls: calls_clone, pool };
+    let service = MockAgentServer { calls: calls_clone, pool, query_docs: query_docs_clone };
 
     tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -450,7 +517,7 @@ async fn start_mock_agent_server(
     // Give server time to start
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    (calls, port, shutdown_tx)
+    (calls, query_docs, port, shutdown_tx)
 }
 
 // ---------------------------------------------------------------------------
@@ -810,7 +877,7 @@ async fn provision_with_agent_stores_endpoint_not_dsn() {
     let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
     let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
 
-    let (_calls, mock_port, _shutdown_tx) =
+    let (_calls, _query_docs, mock_port, _shutdown_tx) =
         start_mock_agent_server(&certs, agent_pool).await;
 
     let agent_endpoint = format!("127.0.0.1:{}", mock_port);
@@ -894,7 +961,7 @@ async fn sdk_write_forwarded_through_agent_persists_in_customer_db() {
     let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
     let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
 
-    let (calls, mock_port, _shutdown_tx) =
+    let (calls, _query_docs, mock_port, _shutdown_tx) =
         start_mock_agent_server(&certs, agent_pool.clone()).await;
 
     let agent_endpoint = format!("127.0.0.1:{}", mock_port);
@@ -1005,7 +1072,7 @@ async fn rolling_cert_rotation_has_zero_downtime() {
     let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
     let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
 
-    let (calls, mock_port, _shutdown_tx) =
+    let (calls, _query_docs, mock_port, _shutdown_tx) =
         start_mock_agent_server(&certs, agent_pool.clone()).await;
 
     let agent_endpoint = format!("127.0.0.1:{}", mock_port);
@@ -1106,7 +1173,7 @@ async fn agent_projects_have_zero_dsn_rows_in_system_db() {
     let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
     let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
 
-    let (_calls, mock_port, _shutdown_tx) =
+    let (_calls, _query_docs, mock_port, _shutdown_tx) =
         start_mock_agent_server(&certs, agent_pool).await;
     let agent_endpoint = format!("127.0.0.1:{}", mock_port);
 
@@ -1166,4 +1233,192 @@ async fn agent_projects_have_zero_dsn_rows_in_system_db() {
         "All agent-mode projects must have backend_agent_endpoint set; {} have NULL/empty",
         missing_endpoint_count
     );
+}
+
+// ---------------------------------------------------------------------------
+// AC-12g: RunQuery forwards the caller's filter to the agent (security)
+//
+// Bug: AgentBackendAdapter::run_query hardcoded `filter: None` on the
+// request sent to the agent, discarding the ownership-scoped filter that
+// check_query_compliance() had already approved upstream. Every agent-mode
+// deployment using ownership-style security rules leaked every user's
+// documents to every other authenticated user. These tests exercise
+// AgentBackendAdapter directly (the driven port adapter, real mTLS gRPC to
+// MockAgentServer) — the same architectural boundary the bug lived in.
+// ---------------------------------------------------------------------------
+
+use embyr_core::domain::document::CollectionPath;
+use embyr_core::domain::field_value::FieldValue as DomainFieldValue;
+use embyr_core::domain::project::ProjectId;
+use embyr_core::domain::query::{FieldFilter, FilterOp, QueryFilter, StructuredQuery};
+use embyr_core::storage::backend_adapter::BackendAdapter;
+use embyr_server::adapters::agent_backend::AgentBackendAdapter;
+
+fn agent_value_string(s: &str) -> AgentValue {
+    use embyr_proto::agent::value::ValueType;
+    AgentValue { value_type: Some(ValueType::StringValue(s.to_string())) }
+}
+
+/// AC-12g: an ownership-equality query in backend_mode=agent returns ONLY
+/// the calling user's own documents, not every document in the collection.
+///
+/// Given:  two documents in the same collection, owned by "alice" and "bob"
+/// When:   AgentBackendAdapter::run_query is called with filter
+///         owner_uid == "alice"
+/// Then:   alice's document is returned
+/// And:    bob's document is absent from the result set (not just "count
+///         is right" — the wrong document must not be present)
+#[tokio::test]
+async fn agent_mode_run_query_forwards_filter_excludes_other_owners_document() {
+    install_ring_provider();
+
+    let certs = generate_mtls_cert_set();
+    use testcontainers_modules::testcontainers::ImageExt;
+    let agent_pg = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start agent postgres");
+    let agent_pg_port = agent_pg.get_host_port_ipv4(5432).await.expect("get agent pg port");
+    let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
+    let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
+
+    let (_calls, query_docs, mock_port, _shutdown_tx) =
+        start_mock_agent_server(&certs, agent_pool).await;
+
+    let mut alice_fields = HashMap::new();
+    alice_fields.insert("owner_uid".to_string(), agent_value_string("alice"));
+    let mut bob_fields = HashMap::new();
+    bob_fields.insert("owner_uid".to_string(), agent_value_string("bob"));
+    query_docs.lock().unwrap().extend([
+        QueryDoc {
+            name: "projects/filter-fwd-proj/databases/(default)/documents/notes/alice-note".to_string(),
+            fields: alice_fields,
+        },
+        QueryDoc {
+            name: "projects/filter-fwd-proj/databases/(default)/documents/notes/bob-note".to_string(),
+            fields: bob_fields,
+        },
+    ]);
+
+    let adapter = AgentBackendAdapter::new(
+        &format!("127.0.0.1:{}", mock_port),
+        &certs.ca_pem,
+        &certs.client_cert_pem,
+        &certs.client_key_pem,
+    )
+    .await
+    .expect("connect AgentBackendAdapter to MockAgentServer");
+
+    let collection = CollectionPath {
+        project_id: ProjectId::new("filter-fwd-proj").unwrap(),
+        collection_path: "notes".to_string(),
+    };
+    let query = StructuredQuery {
+        collection_id: "notes".to_string(),
+        all_descendants: false,
+        filter: Some(QueryFilter::Field(FieldFilter {
+            field_path: "owner_uid".to_string(),
+            op: FilterOp::Equal,
+            value: DomainFieldValue::String("alice".to_string()),
+        })),
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        start_at: None,
+        end_at: None,
+        since_update_time: None,
+    };
+
+    let docs = adapter
+        .run_query(&collection, &query, None)
+        .await
+        .expect("run_query through AgentBackendAdapter");
+
+    assert!(
+        docs.iter().any(|d| d.path.document_id == "alice-note"),
+        "expected alice's own document in the result set, got: {:?}",
+        docs.iter().map(|d| &d.path.document_id).collect::<Vec<_>>()
+    );
+    assert!(
+        !docs.iter().any(|d| d.path.document_id == "bob-note"),
+        "cross-user data exposure: bob's document must NOT be in alice's filtered result, got: {:?}",
+        docs.iter().map(|d| &d.path.document_id).collect::<Vec<_>>()
+    );
+}
+
+/// AC-12g (additive-correctness check): an unrestricted query (no filter)
+/// in backend_mode=agent still returns the full collection, unaffected by
+/// the filter-forwarding fix.
+///
+/// Given:  two documents in the same collection, owned by different users
+/// When:   AgentBackendAdapter::run_query is called with no filter
+/// Then:   both documents are returned
+#[tokio::test]
+async fn agent_mode_run_query_without_filter_returns_full_collection() {
+    install_ring_provider();
+
+    let certs = generate_mtls_cert_set();
+    use testcontainers_modules::testcontainers::ImageExt;
+    let agent_pg = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start agent postgres");
+    let agent_pg_port = agent_pg.get_host_port_ipv4(5432).await.expect("get agent pg port");
+    let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
+    let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
+
+    let (_calls, query_docs, mock_port, _shutdown_tx) =
+        start_mock_agent_server(&certs, agent_pool).await;
+
+    let mut alice_fields = HashMap::new();
+    alice_fields.insert("owner_uid".to_string(), agent_value_string("alice"));
+    let mut bob_fields = HashMap::new();
+    bob_fields.insert("owner_uid".to_string(), agent_value_string("bob"));
+    query_docs.lock().unwrap().extend([
+        QueryDoc {
+            name: "projects/unfiltered-proj/databases/(default)/documents/notes/alice-note".to_string(),
+            fields: alice_fields,
+        },
+        QueryDoc {
+            name: "projects/unfiltered-proj/databases/(default)/documents/notes/bob-note".to_string(),
+            fields: bob_fields,
+        },
+    ]);
+
+    let adapter = AgentBackendAdapter::new(
+        &format!("127.0.0.1:{}", mock_port),
+        &certs.ca_pem,
+        &certs.client_cert_pem,
+        &certs.client_key_pem,
+    )
+    .await
+    .expect("connect AgentBackendAdapter to MockAgentServer");
+
+    let collection = CollectionPath {
+        project_id: ProjectId::new("unfiltered-proj").unwrap(),
+        collection_path: "notes".to_string(),
+    };
+    let query = StructuredQuery {
+        collection_id: "notes".to_string(),
+        all_descendants: false,
+        filter: None,
+        order_by: vec![],
+        limit: None,
+        offset: None,
+        start_at: None,
+        end_at: None,
+        since_update_time: None,
+    };
+
+    let docs = adapter
+        .run_query(&collection, &query, None)
+        .await
+        .expect("run_query through AgentBackendAdapter");
+
+    let ids: Vec<_> = docs.iter().map(|d| d.path.document_id.clone()).collect();
+    assert!(ids.contains(&"alice-note".to_string()), "expected alice-note, got: {ids:?}");
+    assert!(ids.contains(&"bob-note".to_string()), "expected bob-note, got: {ids:?}");
+    assert_eq!(docs.len(), 2, "unfiltered query must return the full collection unaffected, got: {ids:?}");
 }

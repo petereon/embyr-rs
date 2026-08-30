@@ -12,17 +12,20 @@ use embyr_core::{
         document::{CollectionPath, DocumentPath, FirestoreDocument, WriteResult},
         field_value::FieldValue,
         project::ProjectId,
-        query::StructuredQuery,
+        query::{FilterOp, QueryFilter, StructuredQuery},
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
     storage::backend_adapter::{BackendAdapter, Write, WritePrecondition},
 };
 use embyr_proto::agent::{
+    filter::FilterType as AgentFilterType,
     storage_agent_client::StorageAgentClient,
-    BeginTransactionRequest, CommitRequest, CreateDocumentRequest, DeleteDocumentRequest,
-    Document as AgentDocument, GetDocumentRequest, RollbackRequest,
-    UpdateDocumentRequest, Value as AgentValue, Write as AgentWrite,
+    BeginTransactionRequest, CommitRequest, CompositeFilterOp as AgentCompositeFilterOp,
+    CompositeFilterProto as AgentCompositeFilterProto, CreateDocumentRequest,
+    DeleteDocumentRequest, Document as AgentDocument, FieldFilterOp as AgentFieldFilterOp,
+    FieldFilterProto as AgentFieldFilterProto, Filter as AgentFilter, GetDocumentRequest,
+    RollbackRequest, UpdateDocumentRequest, Value as AgentValue, Write as AgentWrite,
     Precondition as AgentPrecondition,
 };
 use prost_types::Timestamp;
@@ -230,6 +233,65 @@ fn grpc_err(e: tonic::Status) -> CoreError {
     CoreError::BackendUnavailable(format!("agent gRPC error: {e}"))
 }
 
+/// Translate a domain `FilterOp` to the agent proto's `FieldFilterOp`.
+///
+/// The agent proto has no NaN comparison operators (see
+/// `proto/embyr/agent/v1/storage_agent.proto`'s `FieldFilterOp` enum) —
+/// reject rather than silently drop or misrepresent the filter.
+fn domain_filter_op_to_agent(op: &FilterOp) -> Result<AgentFieldFilterOp, CoreError> {
+    Ok(match op {
+        FilterOp::LessThan => AgentFieldFilterOp::LessThan,
+        FilterOp::LessThanOrEqual => AgentFieldFilterOp::LessThanOrEqual,
+        FilterOp::GreaterThan => AgentFieldFilterOp::GreaterThan,
+        FilterOp::GreaterThanOrEqual => AgentFieldFilterOp::GreaterThanOrEqual,
+        FilterOp::Equal => AgentFieldFilterOp::Equal,
+        FilterOp::NotEqual => AgentFieldFilterOp::NotEqual,
+        FilterOp::ArrayContains => AgentFieldFilterOp::ArrayContains,
+        FilterOp::In => AgentFieldFilterOp::In,
+        FilterOp::NotIn => AgentFieldFilterOp::NotIn,
+        FilterOp::ArrayContainsAny => AgentFieldFilterOp::ArrayContainsAny,
+        FilterOp::IsNan | FilterOp::IsNotNan => {
+            return Err(CoreError::InvalidArgument(
+                "IS_NAN/IS_NOT_NAN filters are not supported in backend_mode=agent".into(),
+            ));
+        }
+    })
+}
+
+/// Translate a domain `QueryFilter` — already validated and approved by
+/// `check_query_compliance()` upstream — into the agent's own proto
+/// `Filter` shape. This is the inverse of `embyr-agent`'s own
+/// `proto_filter_to_domain` (crates/embyr-agent/src/server.rs), running the
+/// other direction and living in embyr-server: without it, `run_query`
+/// forwarded no filter at all to the agent, so an approved ownership-scoped
+/// query returned every document in the collection (cross-user leak).
+fn domain_filter_to_agent_filter(filter: &QueryFilter) -> Result<AgentFilter, CoreError> {
+    match filter {
+        QueryFilter::Field(ff) => {
+            let op = domain_filter_op_to_agent(&ff.op)? as i32;
+            Ok(AgentFilter {
+                filter_type: Some(AgentFilterType::FieldFilter(AgentFieldFilterProto {
+                    field_path: ff.field_path.clone(),
+                    op,
+                    value: Some(field_value_to_agent_value(&ff.value)),
+                })),
+            })
+        }
+        QueryFilter::Composite(filters) => {
+            let translated = filters
+                .iter()
+                .map(domain_filter_to_agent_filter)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(AgentFilter {
+                filter_type: Some(AgentFilterType::CompositeFilter(AgentCompositeFilterProto {
+                    op: AgentCompositeFilterOp::And as i32,
+                    filters: translated,
+                })),
+            })
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BackendAdapter implementation
 // ---------------------------------------------------------------------------
@@ -334,7 +396,7 @@ impl BackendAdapter for AgentBackendAdapter {
     async fn run_query(
         &self,
         collection: &CollectionPath,
-        _query: &StructuredQuery,
+        query: &StructuredQuery,
         _transaction_id: Option<&TransactionId>,
     ) -> Result<Vec<FirestoreDocument>, CoreError> {
         use embyr_proto::agent::{
@@ -346,12 +408,22 @@ impl BackendAdapter for AgentBackendAdapter {
             "projects/{}/databases/(default)/documents",
             collection.project_id.as_str()
         );
+        // Forward the caller's already-compliance-checked filter to the
+        // agent (security fix: previously hardcoded to None, so agent-mode
+        // ownership-scoped queries leaked every user's documents).
+        let filter = query
+            .filter
+            .as_ref()
+            .map(domain_filter_to_agent_filter)
+            .transpose()?;
         let sq = AgentStructuredQuery {
             from: vec![CollectionSelector {
                 collection_id: collection.collection_path.clone(),
+                // Pre-existing hardcoded false, unchanged — out of scope for
+                // this fix (cross-user filter-forwarding leak only).
                 all_descendants: false,
             }],
-            filter: None,
+            filter,
         };
         let req = RunQueryRequest {
             parent,
