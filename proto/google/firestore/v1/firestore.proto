@@ -42,6 +42,9 @@ service Firestore {
   // Runs a query.
   rpc RunQuery(RunQueryRequest) returns (stream RunQueryResponse);
 
+  // Runs an aggregation query.
+  rpc RunAggregationQuery(RunAggregationQueryRequest) returns (stream RunAggregationQueryResponse);
+
   // Listens to changes. This method is only available via gRPC or WebChannel
   // (not REST).
   rpc Listen(stream ListenRequest) returns (stream ListenResponse);
@@ -190,6 +193,106 @@ message RunQueryResponse {
     // If true, there are no more results.
     bool done = 6;
   }
+}
+
+// The request for [Firestore.RunAggregationQuery][google.firestore.v1.Firestore.RunAggregationQuery].
+message RunAggregationQueryRequest {
+  // Required. The parent resource name.
+  string parent = 1;
+
+  oneof query_type {
+    // An aggregation query.
+    StructuredAggregationQuery structured_aggregation_query = 2;
+  }
+
+  oneof consistency_selector {
+    // Executes the query in a transaction.
+    bytes transaction = 4;
+
+    // Starts a new transaction as part of the query.
+    TransactionOptions new_transaction = 6;
+
+    // Executes the query at the given time.
+    google.protobuf.Timestamp read_time = 7;
+  }
+}
+
+// Firestore query for running an aggregation over a
+// [StructuredQuery][google.firestore.v1.StructuredQuery].
+message StructuredAggregationQuery {
+  oneof query_type {
+    // Nested structured query.
+    StructuredQuery structured_query = 1;
+  }
+
+  // Optional. Series of aggregations to apply over the results of the
+  // `structured_query`.
+  //
+  // v1 restriction (embyr-specific): exactly one entry is accepted; a
+  // request with zero or more than one entry is rejected with
+  // `Unimplemented` (ADR-038).
+  repeated Aggregation aggregations = 3;
+
+  // Defines a aggregation that produces a single result.
+  message Aggregation {
+    // Count of documents that match the query.
+    message Count {
+      // Optional. Constrains the maximum number of documents to count.
+      //
+      // v1 restriction (embyr-specific): must be unset; a request that sets
+      // this is rejected with `Unimplemented` (ADR-038).
+      google.protobuf.Int64Value up_to = 1;
+    }
+
+    // Sum of the values of the requested field over a query's result set.
+    message Sum {
+      // The field to aggregate on.
+      StructuredQuery.FieldReference field = 1;
+    }
+
+    // Average of the values of the requested field over a query's result set.
+    message Avg {
+      // The field to aggregate on.
+      StructuredQuery.FieldReference field = 1;
+    }
+
+    oneof operator {
+      // Count aggregator.
+      Count count = 1;
+
+      // Sum aggregator.
+      Sum sum = 2;
+
+      // Average aggregator.
+      Avg avg = 3;
+    }
+
+    // Optional. Alias for this aggregation. If not set, the server
+    // synthesizes `field_0`, `field_1`, ... in request order.
+    string alias = 7;
+  }
+}
+
+// The streamed response for
+// [Firestore.RunAggregationQuery][google.firestore.v1.Firestore.RunAggregationQuery].
+message RunAggregationQueryResponse {
+  // A single aggregation result.
+  AggregationResult result = 1;
+
+  // The transaction that was started as part of this request.
+  bytes transaction = 2;
+
+  // The time at which the aggregate value is valid for.
+  google.protobuf.Timestamp read_time = 3;
+}
+
+// The result of a single bucket from a Firestore aggregation query.
+message AggregationResult {
+  // The result of the aggregation functions, ex: `COUNT(*) AS total_docs`.
+  //
+  // The key of each entry in the map corresponds to the alias of the
+  // aggregation under the `structured_aggregation_query`.
+  map<string, Value> aggregate_fields = 2;
 }
 
 // A request for [Firestore.Listen][google.firestore.v1.Firestore.Listen]

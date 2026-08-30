@@ -152,3 +152,34 @@ pub struct StructuredQuery {
 /// Opaque byte token for resuming a listen stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeToken(pub Vec<u8>);
+
+/// The aggregation operator requested by an `AggregationQuery` (aggregation-queries,
+/// ADR-038). `Sum`/`Avg` carry the field path to aggregate over; only `Count`
+/// is functional in Slice 01 — the Postgres adapter's `Sum`/`Avg` branches
+/// return `CoreError::FailedPrecondition` until Slices 03/04.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregationKind {
+    Count,
+    Sum(String),
+    Avg(String),
+}
+
+/// A `StructuredQuery` paired with a single aggregation to compute over its
+/// result set, plus the caller-supplied (or server-synthesized) alias for the
+/// result. Mirrors real Firestore's `StructuredAggregationQuery` (ADR-038).
+#[derive(Debug, Clone)]
+pub struct AggregationQuery {
+    pub query: StructuredQuery,
+    pub aggregation: AggregationKind,
+    pub alias: String,
+}
+
+/// The computed result of an `AggregationQuery` (ADR-040 § Response value
+/// mapping). `Avg(None)` distinguishes "zero matching documents" from a real
+/// average of zero — never conflated with `Avg(Some(0.0))`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateValue {
+    Count(i64),
+    Sum(f64),
+    Avg(Option<f64>),
+}

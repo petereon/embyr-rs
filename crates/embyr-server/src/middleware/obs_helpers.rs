@@ -15,6 +15,7 @@ pub const METHOD_BEGIN_TRANSACTION: &str = "BeginTransaction";
 pub const METHOD_COMMIT: &str = "Commit";
 pub const METHOD_ROLLBACK: &str = "Rollback";
 pub const METHOD_RUN_QUERY: &str = "RunQuery";
+pub const METHOD_RUN_AGGREGATION_QUERY: &str = "RunAggregationQuery";
 pub const METHOD_LISTEN: &str = "Listen";
 
 // ── Status label mapping (AC-OBS-02-03) ───────────────────────────────────

@@ -11,7 +11,7 @@ use embyr_core::{
         document::{CollectionPath, DocumentPath, FirestoreDocument, WriteResult},
         field_value::FieldValue,
         project::ProjectId,
-        query::StructuredQuery,
+        query::{AggregateValue, AggregationKind, AggregationQuery, StructuredQuery},
         schema_readiness::SchemaReadiness,
         transaction::{TransactionId, TransactionOptions},
     },
@@ -681,6 +681,60 @@ impl BackendAdapter for PostgresBackendAdapter {
             });
         }
         Ok(docs)
+    }
+
+    async fn run_aggregation_query(
+        &self,
+        collection: &CollectionPath,
+        query: &AggregationQuery,
+        _transaction_id: Option<&TransactionId>,
+    ) -> Result<AggregateValue, CoreError> {
+        match &query.aggregation {
+            AggregationKind::Count => {
+                use sqlx::{QueryBuilder, Row};
+                use crate::encoding::query::append_filter;
+
+                // WHERE-clause construction copied byte-for-byte from
+                // `run_query` above (ADR-040 § 2) — only the SELECT clause
+                // differs; ORDER BY/LIMIT/OFFSET/cursor logic is omitted
+                // entirely (not meaningful for aggregation).
+                let mut qb: QueryBuilder<sqlx::Postgres> =
+                    QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE project_id = ");
+                qb.push_bind(collection.project_id.as_str());
+                if query.query.all_descendants {
+                    qb.push(" AND (collection_path = ");
+                    qb.push_bind(&collection.collection_path);
+                    qb.push(" OR collection_path LIKE ");
+                    qb.push_bind(format!("%/{}", collection.collection_path));
+                    qb.push(")");
+                } else {
+                    qb.push(" AND collection_path = ");
+                    qb.push_bind(&collection.collection_path);
+                }
+                qb.push(" AND NOT deleted");
+
+                if let Some(filter) = &query.query.filter {
+                    qb.push(" AND ");
+                    append_filter(&mut qb, filter);
+                }
+
+                let row = qb
+                    .build()
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                let count: i64 = row
+                    .try_get(0)
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+                Ok(AggregateValue::Count(count))
+            }
+            // SUM/AVG are Slices 03/04's own scope (ADR-040) — this slice
+            // wires the branch, not the SQL.
+            AggregationKind::Sum(_) | AggregationKind::Avg(_) => Err(CoreError::FailedPrecondition(
+                "SUM/AVG aggregation is not supported in this slice".into(),
+            )),
+        }
     }
 
     async fn begin_transaction(

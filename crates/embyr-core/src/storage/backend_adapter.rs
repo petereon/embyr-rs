@@ -7,7 +7,7 @@ use crate::{
         document::{CollectionPath, DocumentPath, FirestoreDocument, WriteResult},
         field_value::FieldValue,
         project::ProjectId,
-        query::StructuredQuery,
+        query::{AggregateValue, AggregationQuery, StructuredQuery},
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
@@ -90,6 +90,25 @@ pub trait BackendAdapter: Send + Sync {
         query: &StructuredQuery,
         transaction_id: Option<&TransactionId>,
     ) -> Result<Vec<FirestoreDocument>, CoreError>;
+
+    /// Runs an aggregation query (COUNT/SUM/AVG) against this backend.
+    ///
+    /// Default-provided body (ADR-041): implementors that have not yet added
+    /// real aggregation support (`AgentBackendAdapter` until Slice 02)
+    /// compile unmodified and simply reject at runtime — never a new
+    /// `CoreError` variant, reusing the existing `FailedPrecondition`
+    /// (`crates/embyr-agent`'s own exhaustive `core_error_to_status` match
+    /// has no wildcard arm; adding a variant would force an edit there).
+    async fn run_aggregation_query(
+        &self,
+        _collection: &CollectionPath,
+        _query: &AggregationQuery,
+        _transaction_id: Option<&TransactionId>,
+    ) -> Result<AggregateValue, CoreError> {
+        Err(CoreError::FailedPrecondition(
+            "aggregation queries are not supported by this backend".into(),
+        ))
+    }
 
     async fn begin_transaction(
         &self,

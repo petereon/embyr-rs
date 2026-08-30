@@ -16,8 +16,8 @@ use embyr_core::{
         field_value::FieldValue,
         project::CredentialCacheKey,
         query::{
-            validate_field_path, Cursor, FieldFilter, FilterOp, OrderBy, OrderDirection,
-            QueryFilter, StructuredQuery,
+            validate_field_path, AggregateValue, AggregationKind, AggregationQuery, Cursor,
+            FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter, StructuredQuery,
         },
         transaction::TransactionOptions,
     },
@@ -25,12 +25,15 @@ use embyr_core::{
     storage::backend_adapter::{Write as DomainWrite, WritePrecondition},
 };
 use embyr_proto::firestore::{
-    firestore_server::Firestore, precondition::ConditionType, BatchGetDocumentsRequest,
-    BatchGetDocumentsResponse, BeginTransactionRequest, BeginTransactionResponse, CommitRequest,
-    CommitResponse, CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
-    ListenRequest, ListenResponse, RollbackRequest, RunQueryRequest, RunQueryResponse,
-    UpdateDocumentRequest,
+    firestore_server::Firestore, precondition::ConditionType, AggregationResult,
+    BatchGetDocumentsRequest, BatchGetDocumentsResponse, BeginTransactionRequest,
+    BeginTransactionResponse, CommitRequest, CommitResponse, CreateDocumentRequest,
+    DeleteDocumentRequest, Document, GetDocumentRequest, ListenRequest, ListenResponse,
+    RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse, RunQueryRequest,
+    RunQueryResponse, UpdateDocumentRequest,
+    run_aggregation_query_request::QueryType as AggregationQueryType,
     run_query_request::QueryType,
+    structured_aggregation_query::{aggregation::Operator as AggregationOperator, QueryType as StructuredAggQueryType},
     structured_query::{
         composite_filter::Operator as CompositeOp,
         field_filter::Operator as FieldOp,
@@ -1492,6 +1495,247 @@ impl FirestoreService {
         Ok(response)
     }
 
+    /// aggregation-queries Slice 01 (US-01, ADR-038/039/040) — `RunAggregationQuery`
+    /// handler. Mirrors `handle_run_query`'s own composition closely: auth,
+    /// rate-limit, suspension check, `attach_client_identity_if_present`,
+    /// the SAME dual-arm access-rule composition (`check_query_compliance()`
+    /// on `all_descendants` via `get_access_rule`/`get_group_access_rule`),
+    /// dispatch to the adapter, single-message response.
+    ///
+    /// Filter-identity invariant (ADR-039 § Decision 2): `domain_query` is
+    /// parsed from the proto exactly ONCE and shared by reference into both
+    /// `check_query_compliance()` and `adapter.run_aggregation_query()` —
+    /// never a second, independent parse of the same proto filter.
+    async fn handle_run_aggregation_query(
+        &self,
+        request: Request<RunAggregationQueryRequest>,
+    ) -> Result<Response<tonic::codegen::BoxStream<RunAggregationQueryResponse>>, Status> {
+        let req = request.get_ref();
+
+        let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
+        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status_str == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
+        let saq = match &req.query_type {
+            Some(AggregationQueryType::StructuredAggregationQuery(saq)) => saq,
+            None => return Err(Status::invalid_argument("query_type is required")),
+        };
+
+        // v1 restriction (ADR-038): exactly one aggregation per request.
+        if saq.aggregations.len() != 1 {
+            return Err(Status::unimplemented(
+                "multiple aggregations per request are not yet supported",
+            ));
+        }
+        let agg_proto = &saq.aggregations[0];
+        let alias = if agg_proto.alias.is_empty() {
+            "field_0".to_string()
+        } else {
+            agg_proto.alias.clone()
+        };
+
+        let aggregation_kind = match &agg_proto.operator {
+            Some(AggregationOperator::Count(c)) => {
+                // v1 restriction (ADR-038): `Count.up_to` is not supported.
+                if c.up_to.is_some() {
+                    return Err(Status::unimplemented(
+                        "count up_to limiting is not yet supported",
+                    ));
+                }
+                AggregationKind::Count
+            }
+            Some(AggregationOperator::Sum(s)) => {
+                let field_path = s
+                    .field
+                    .as_ref()
+                    .map(|f| f.field_path.clone())
+                    .ok_or_else(|| Status::invalid_argument("sum aggregation requires a field"))?;
+                // Field-path validation wired now (ADR-040) so Slices 03/04
+                // don't need to touch this handler again — not exercised by
+                // this slice's own COUNT-only scope.
+                validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
+                AggregationKind::Sum(field_path)
+            }
+            Some(AggregationOperator::Avg(a)) => {
+                let field_path = a
+                    .field
+                    .as_ref()
+                    .map(|f| f.field_path.clone())
+                    .ok_or_else(|| Status::invalid_argument("avg aggregation requires a field"))?;
+                validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
+                AggregationKind::Avg(field_path)
+            }
+            None => return Err(Status::invalid_argument("aggregation operator is required")),
+        };
+
+        let sq_proto = match &saq.query_type {
+            Some(StructuredAggQueryType::StructuredQuery(sq)) => sq,
+            None => return Err(Status::invalid_argument("structured_query is required")),
+        };
+
+        let collection_id = sq_proto
+            .from
+            .first()
+            .map(|cs| cs.collection_id.clone())
+            .unwrap_or_default();
+        let all_descendants = sq_proto
+            .from
+            .first()
+            .map(|cs| cs.all_descendants)
+            .unwrap_or(false);
+
+        let filter = sq_proto
+            .r#where
+            .as_ref()
+            .and_then(translate_filter)
+            .transpose()
+            .map_err(Status::invalid_argument)?;
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let collection = CollectionPath {
+            project_id,
+            collection_path: collection_id,
+        };
+
+        let domain_query = StructuredQuery {
+            collection_id: collection.collection_path.clone(),
+            all_descendants,
+            filter,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            start_at: None,
+            end_at: None,
+            since_update_time: None,
+        };
+
+        // Dual-arm access-rule composition — IDENTICAL to handle_run_query's
+        // own (ADR-039 § Decision 1): reuses check_query_compliance()/
+        // query_compliance_rejection()/group_rule_not_defined_rejection()
+        // byte-for-byte unchanged, at the same composition point (strictly
+        // before backend dispatch).
+        if all_descendants {
+            let group_rule_row = self
+                .system_db
+                .get_group_access_rule(&project_id_str, &collection.collection_path)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            let Some(group_rule_row) = group_rule_row else {
+                return Err(group_rule_not_defined_rejection());
+            };
+
+            let condition =
+                embyr_core::access_control::parse_condition(&group_rule_row.condition_source)
+                    .map_err(|e| {
+                        Status::internal(format!(
+                            "stored group access rule failed to re-parse: {e:?}"
+                        ))
+                    })?;
+            let auth_ctx = verified_identity
+                .as_ref()
+                .map(|v| embyr_core::access_control::AuthContext {
+                    uid: v.end_user_id.clone(),
+                    claims: std::collections::BTreeMap::new(),
+                });
+
+            match embyr_core::access_control::check_query_compliance(
+                &condition,
+                domain_query.filter.as_ref(),
+                auth_ctx.as_ref(),
+            ) {
+                embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
+                outcome => return Err(query_compliance_rejection(&outcome)),
+            }
+        } else {
+            let rule_row = self
+                .system_db
+                .get_access_rule(&project_id_str, &collection.collection_path)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            if let Some(rule_row) = rule_row {
+                let condition =
+                    embyr_core::access_control::parse_condition(&rule_row.condition_source)
+                        .map_err(|e| {
+                            Status::internal(format!(
+                                "stored access rule failed to re-parse: {e:?}"
+                            ))
+                        })?;
+                let auth_ctx = verified_identity
+                    .as_ref()
+                    .map(|v| embyr_core::access_control::AuthContext {
+                        uid: v.end_user_id.clone(),
+                        claims: std::collections::BTreeMap::new(),
+                    });
+
+                match embyr_core::access_control::check_query_compliance(
+                    &condition,
+                    domain_query.filter.as_ref(),
+                    auth_ctx.as_ref(),
+                ) {
+                    embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
+                    outcome => return Err(query_compliance_rejection(&outcome)),
+                }
+            }
+        }
+
+        let agg_query = AggregationQuery {
+            query: domain_query,
+            aggregation: aggregation_kind,
+            alias: alias.clone(),
+        };
+
+        let value = adapter
+            .run_aggregation_query(&collection, &agg_query, None)
+            .await
+            .map_err(aggregation_error_to_status)?;
+
+        let value_proto = {
+            use embyr_proto::firestore::value::ValueType;
+            let vt = match value {
+                AggregateValue::Count(n) => ValueType::IntegerValue(n),
+                AggregateValue::Sum(d) => ValueType::DoubleValue(d),
+                AggregateValue::Avg(Some(d)) => ValueType::DoubleValue(d),
+                AggregateValue::Avg(None) => ValueType::NullValue(0),
+            };
+            embyr_proto::firestore::Value { value_type: Some(vt) }
+        };
+
+        let mut aggregate_fields = HashMap::new();
+        aggregate_fields.insert(alias, value_proto);
+
+        // Response stream carries exactly one message, then closes — no
+        // continuation/done-marker message (ADR-038: `RunAggregationQueryResponse`
+        // has no `continuation_selector`, unlike `RunQueryResponse`).
+        let response_msg = RunAggregationQueryResponse {
+            result: Some(AggregationResult { aggregate_fields }),
+            transaction: vec![],
+            read_time: None,
+        };
+
+        let stream: tonic::codegen::BoxStream<RunAggregationQueryResponse> =
+            Box::pin(tokio_stream::iter(vec![Ok(response_msg)]));
+        let mut response = Response::new(stream);
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
+    }
+
     async fn handle_listen(
         &self,
         mut request: Request<tonic::Streaming<ListenRequest>>,
@@ -1732,6 +1976,22 @@ impl Firestore for FirestoreService {
         result
     }
 
+    type RunAggregationQueryStream = tonic::codegen::BoxStream<RunAggregationQueryResponse>;
+
+    async fn run_aggregation_query(
+        &self,
+        request: Request<RunAggregationQueryRequest>,
+    ) -> Result<Response<Self::RunAggregationQueryStream>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_run_aggregation_query(request).await;
+        obs_helpers::record_grpc_call(
+            obs_helpers::METHOD_RUN_AGGREGATION_QUERY,
+            &result,
+            obs_start,
+        );
+        result
+    }
+
     type ListenStream = tonic::codegen::BoxStream<ListenResponse>;
 
     async fn listen(
@@ -1907,6 +2167,21 @@ fn translate_field_op(op: FieldOp) -> Option<FilterOp> {
         FieldOp::ArrayContainsAny => Some(FilterOp::ArrayContainsAny),
         FieldOp::NotIn => Some(FilterOp::NotIn),
         FieldOp::Unspecified => None,
+    }
+}
+
+/// aggregation-queries (ADR-041 § Decision 2): a LOCAL error-mapping
+/// function used ONLY by `handle_run_aggregation_query`, distinct from the
+/// shared `core_error_to_status` below. `FailedPrecondition` carries a
+/// different client-facing meaning for THIS one RPC (SPEC.md's documented
+/// `Unimplemented` for "this backend/operator combination isn't
+/// implemented") than it does for every other handler in this file (e.g.
+/// `RunQuery`'s composite-index rejection, still `failed_precondition`
+/// there, unaffected — reused via the `other` fallthrough arm).
+fn aggregation_error_to_status(e: CoreError) -> Status {
+    match e {
+        CoreError::FailedPrecondition(msg) => Status::unimplemented(msg),
+        other => core_error_to_status(other),
     }
 }
 

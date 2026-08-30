@@ -595,6 +595,21 @@ path = "../../tests/custom_claims/acceptance/string_literal_claim_comparison.rs"
 name = "custom_claims_simulate_claims_based_rule"
 path = "../../tests/custom_claims/acceptance/simulate_claims_based_rule.rs"
 
+# aggregation-queries acceptance tests (Slice 01, ADR-038/039/040) — US-01,
+# Walking Skeleton: COUNT aggregation for Postgres-family backend modes, with
+# the identical access-rule enforcement RunQuery already has.
+[[test]]
+name = "aggregation_queries_count_aggregation"
+path = "../../tests/aggregation_queries/acceptance/count_aggregation.rs"
+
+[[test]]
+name = "aggregation_queries_count_aggregation_rejection"
+path = "../../tests/aggregation_queries/acceptance/count_aggregation_rejection.rs"
+
+[[test]]
+name = "aggregation_queries_collection_group_count"
+path = "../../tests/aggregation_queries/acceptance/collection_group_count.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
