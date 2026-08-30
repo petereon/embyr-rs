@@ -8,22 +8,19 @@ use embyr_core::admin::email::IEmailSender;
 use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::adapters::{
-    aws_secret_fetcher::AwsSecretFetcher,
-    cap_status_cache::CapStatusCache,
-    credential_cache::CredentialCache,
-    gcp_secret_fetcher::GcpSecretFetcher,
-    stripe_gateway::StripeGateway,
-    system_db::SystemDb,
+    aws_secret_fetcher::AwsSecretFetcher, cap_status_cache::CapStatusCache,
+    credential_cache::CredentialCache, gcp_secret_fetcher::GcpSecretFetcher,
+    stripe_gateway::StripeGateway, system_db::SystemDb,
 };
 
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
+use super::handlers::auth::{oidc_callback, signin, signout};
 use super::handlers::billing::get_billing;
 use super::handlers::billing_metering::run_metering;
 use super::handlers::billing_subscription::{get_subscription, post_subscription};
 use super::handlers::oidc_providers::{
     create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
 };
-use super::handlers::auth::{oidc_callback, signin, signout};
 // client-auth (US-01/US-03/US-04, ADR-025): credential register/rotate/verify.
 use super::handlers::client_identity::{
     register_client_identity_credential, rotate_client_identity_credential,
@@ -31,6 +28,9 @@ use super::handlers::client_identity::{
 };
 // client-auth-hosted-identity (US-01, ADR-036): admin enablement action.
 use super::handlers::hosted_identity::enable_hosted_identity;
+// oauth-providers (US-01, ADR-037): admin registration of a project's
+// Google OAuth Client ID.
+use super::handlers::oauth_providers::register_google_oauth_provider;
 // security-rules (US-01/US-05, ADR-029): access-rule define/redefine + simulate.
 // security-rules-write-path (US-01, ADR-030): independent write-rule define/redefine.
 // security-rules-query-path (US-07, ADR-031): simulate a candidate query
@@ -52,15 +52,15 @@ use super::handlers::access_rules::{
     get_access_rule_history, get_group_access_rule_history, get_write_access_rule_history,
     simulate_access_rule, simulate_group_query_compliance, simulate_query_compliance,
 };
-use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
-use super::handlers::projects::{list_projects, patch_project};
-use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
 use super::handlers::get_project::get_project;
-use super::handlers::metrics::get_project_metrics;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
+use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
+use super::handlers::metrics::get_project_metrics;
+use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::prometheus_metrics::get_prometheus_metrics;
 use super::handlers::provision::provision;
 use super::handlers::query_logs::list_query_logs;
+use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
 use super::handlers::service_accounts::{
     create_service_account, delete_service_account, list_service_accounts,
 };
@@ -216,6 +216,13 @@ pub fn build_admin_router(
             "/admin/v1/projects/:project_id/hosted_identity/enable",
             post(enable_hosted_identity),
         )
+        // oauth-providers (US-01, ADR-037): register/redefine a project's
+        // Google OAuth Client ID (Owner/Admin, gated in-handler) — mirrors
+        // hosted_identity/enable's identical in-handler-gate shape.
+        .route(
+            "/admin/v1/projects/:project_id/oauth_providers/google",
+            post(register_google_oauth_provider),
+        )
         // security-rules (US-01/US-05, ADR-029): define/redefine an access
         // rule (Owner/Admin, gated in-handler) + simulate a candidate rule
         // (any role, read-only, gated in-handler) — mirrors
@@ -298,7 +305,10 @@ pub fn build_admin_router(
         // Members routes (step 05-02).
         .route("/admin/v1/members", get(list_members))
         .route("/admin/v1/members/invite", post(invite_member))
-        .route("/admin/v1/members/:member_id/role", patch(change_member_role))
+        .route(
+            "/admin/v1/members/:member_id/role",
+            patch(change_member_role),
+        )
         .route("/admin/v1/members/:member_id", delete(remove_member))
         // Service account routes (step 05-03).
         .route(
@@ -378,7 +388,13 @@ pub fn build_with_aws(
     credential_cache: Arc<CredentialCache>,
     aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
 ) -> Router {
-    build_with_secret_fetchers(system_db, admin_key, credential_cache, aws_secret_fetcher, None)
+    build_with_secret_fetchers(
+        system_db,
+        admin_key,
+        credential_cache,
+        aws_secret_fetcher,
+        None,
+    )
 }
 
 pub fn build_with_gcp(
@@ -387,7 +403,13 @@ pub fn build_with_gcp(
     credential_cache: Arc<CredentialCache>,
     gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
 ) -> Router {
-    build_with_secret_fetchers(system_db, admin_key, credential_cache, None, gcp_secret_fetcher)
+    build_with_secret_fetchers(
+        system_db,
+        admin_key,
+        credential_cache,
+        None,
+        gcp_secret_fetcher,
+    )
 }
 
 pub fn build_with_secret_fetchers(

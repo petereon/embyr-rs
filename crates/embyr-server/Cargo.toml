@@ -308,6 +308,11 @@ path = "../../tests/client_auth_hosted_identity/acceptance/hi03_maria_signs_in.r
 name = "client_auth_hosted_identity_hi04_maria_resets_password"
 path = "../../tests/client_auth_hosted_identity/acceptance/hi04_maria_resets_password.rs"
 
+# oauth-providers acceptance tests (Slice 01, ADR-037).
+[[test]]
+name = "oauth_providers_op01_alex_registers_google_oauth_client"
+path = "../../tests/oauth_providers/acceptance/op01_alex_registers_google_oauth_client.rs"
+
 # security-rules acceptance tests (Slices 01-05, mirroring the srNN
 # registration convention client-auth's own caNN entries established).
 [[test]]

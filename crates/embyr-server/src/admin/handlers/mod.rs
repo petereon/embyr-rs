@@ -12,6 +12,9 @@ pub mod hosted_identity;
 pub mod lifecycle;
 pub mod members;
 pub mod metrics;
+// oauth-providers (US-01, ADR-037): admin registration of a project's Google
+// OAuth Client ID.
+pub mod oauth_providers;
 pub mod oidc_providers;
 pub mod projects;
 pub mod prometheus_metrics;

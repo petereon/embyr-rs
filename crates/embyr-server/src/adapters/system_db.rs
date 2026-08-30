@@ -50,6 +50,17 @@ pub struct HostedIdentitySigningKeyRow {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// oauth-providers (ADR-037 Decision 4): the result of registering (or
+/// redefining) a project's Google OAuth Client ID — `oauth_provider_credentials`
+/// row fields only, never the signing-key material transactionally inserted
+/// alongside it (ADR-037 Decision 2's own "never echo raw material back"
+/// discipline).
+#[derive(Debug, Clone)]
+pub struct OAuthProviderRow {
+    pub client_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// security-rules (ADR-028): a project's per-collection access-control rule
 /// row, as stored in `access_rules`. `condition_source` is the raw,
 /// validated grammar text — NOT a serialized AST (ADR-028 § Store Source,
@@ -514,6 +525,100 @@ impl SystemDb {
     }
 
     // -----------------------------------------------------------------------
+    // oauth-providers (ADR-037) — oauth_provider_credentials + oauth_signing_keys.
+    // -----------------------------------------------------------------------
+
+    /// Register OR redefine (ADR-037 Decision 1/4: idempotent upsert, the
+    /// SAME action either way, mirrors `upsert_access_rule`'s identical
+    /// lifecycle shape) a project's Google OAuth Client ID, transactionally
+    /// alongside an idempotent signing-key insert (ADR-037 Decision 2) — a
+    /// partial failure can never leave a project with a registered Client ID
+    /// but no signing key to mint with. `provider` is fixed to `'google'`
+    /// here — v1's only writer (the caller's own route path IS the provider
+    /// constraint, ADR-037 Decision 4), not a parameter.
+    ///
+    /// Returns `(row, is_first_registration)` — `is_first_registration`
+    /// drives the handler's 201-vs-200 response (ADR-037 Decision 4),
+    /// derived from Postgres's own `xmax = 0` idiom on the
+    /// `INSERT ... ON CONFLICT DO UPDATE RETURNING` statement (true when the
+    /// row was just inserted, false when an existing row was updated) — no
+    /// second round-trip to check existence.
+    ///
+    /// The signing-key INSERT never returns/re-reads its row: the handler
+    /// response never echoes signing material regardless of first-time vs.
+    /// redefine (mirrors `enable_hosted_identity`'s "never echo raw
+    /// material" discipline), so unlike that method's own fallback-SELECT
+    /// shape, an `ON CONFLICT (project_id) DO NOTHING` with no `RETURNING`
+    /// consumption suffices — the row exists either way, untouched on
+    /// conflict.
+    pub async fn register_oauth_provider(
+        &self,
+        project_id: &str,
+        client_id: &str,
+        public_key: &[u8; 32],
+        private_key_enc: &[u8],
+    ) -> Result<(OAuthProviderRow, bool), CoreError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx begin failed: {e}")))?;
+
+        let cred_row = sqlx::query(
+            "INSERT INTO oauth_provider_credentials (project_id, provider, client_id) \
+             VALUES ($1, 'google', $2) \
+             ON CONFLICT (project_id, provider) \
+             DO UPDATE SET client_id = EXCLUDED.client_id, updated_at = now() \
+             RETURNING client_id, created_at, (xmax = 0) AS is_first_registration",
+        )
+        .bind(project_id)
+        .bind(client_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("oauth_provider_credentials upsert failed: {e}"))
+        })?;
+
+        let stored_client_id: String = cred_row
+            .try_get("client_id")
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        let created_at: chrono::DateTime<chrono::Utc> = cred_row
+            .try_get("created_at")
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        let is_first_registration: bool = cred_row
+            .try_get("is_first_registration")
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        // AC-19-02: idempotent INSERT — a redefine of the Client ID never
+        // regenerates or touches the signing key (untouched on conflict).
+        sqlx::query(
+            "INSERT INTO oauth_signing_keys (project_id, public_key, private_key_enc, algorithm) \
+             VALUES ($1, $2, $3, 'EdDSA') \
+             ON CONFLICT (project_id) DO NOTHING",
+        )
+        .bind(project_id)
+        .bind(&public_key[..])
+        .bind(private_key_enc)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("oauth_signing_keys insert failed: {e}"))
+        })?;
+
+        tx.commit()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx commit failed: {e}")))?;
+
+        Ok((
+            OAuthProviderRow {
+                client_id: stored_client_id,
+                created_at,
+            },
+            is_first_registration,
+        ))
+    }
+
+    // -----------------------------------------------------------------------
     // security-rules (ADR-028) — access_rules CRUD.
     // -----------------------------------------------------------------------
 
@@ -639,7 +744,9 @@ impl SystemDb {
         .bind(collection_path)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| CoreError::BackendUnavailable(format!("get_access_rule_history failed: {e}")))?;
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("get_access_rule_history failed: {e}"))
+        })?;
 
         rows.into_iter()
             .map(|r| {
