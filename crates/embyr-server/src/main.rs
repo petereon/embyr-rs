@@ -25,6 +25,7 @@ use embyr_server::{
     adapters::{
         credential_cache::CredentialCache,
         email::NoopEmailSender,
+        google_jwks_cache::GoogleJwksCache,
         index_manager::IndexManager,
         metrics_adapter::MetricsAdapter,
         postgres_notify_listener::PostgresNotifyListener,
@@ -241,6 +242,9 @@ async fn main() {
         admin_app,
         shutdown_rx,
         email_sender,
+        cfg.encryption_key,
+        cfg.encryption_key_previous,
+        Arc::new(GoogleJwksCache::production()),
     );
 
     // ── Step 12: log ready ────────────────────────────────────────────────

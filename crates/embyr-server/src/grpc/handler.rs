@@ -360,15 +360,22 @@ impl FirestoreService {
     /// ORIGINAL `client_identity_credentials` lookup above (unchanged in
     /// shape — a `client-auth`-only project's successful-verification code
     /// path is untouched, byte-for-byte) is absent or fails to verify, also
-    /// attempts `hosted_identity_signing_keys`. Both attempts call the
+    /// attempts `hosted_identity_signing_keys`.
+    ///
+    /// oauth-providers (ADR-037 Decision 8, a THIRD widening): after the
+    /// hosted-identity attempt is also absent or fails to verify, also
+    /// attempts `oauth_signing_keys`. All three attempts call the
     /// IDENTICAL, unchanged `verify_client_identity_token()` — a
-    /// correctly-formed token from either source only ever verifies against
+    /// correctly-formed token from any one source only ever verifies against
     /// its own signer's public key; a wrong-source attempt fails
-    /// deterministically. A project with neither table populated (today's
-    /// default) never queries either table for a request with no
+    /// deterministically. A project with none of the three tables populated
+    /// (today's default) never queries any of them for a request with no
     /// `x-embyr-client-identity` header — the early `?` above short-circuits
-    /// before either lookup, preserving AC-16-08(c)'s structural
-    /// unreachability guarantee.
+    /// before any lookup, preserving AC-16-08(c)'s structural
+    /// unreachability guarantee a third time. Each attempt below is a
+    /// fall-through `if let Some(...) { ... }` block (not a hard `?`
+    /// short-circuit) precisely so a later attempt can still run after an
+    /// earlier one is absent or fails.
     async fn attach_client_identity_if_present<T>(
         &self,
         request: &Request<T>,
@@ -404,22 +411,53 @@ impl FirestoreService {
 
         // Fall through: no client_identity_credentials row, or it failed to
         // verify — try the embyr-owned hosted-identity signing key.
-        let hosted_row = self
+        if let Some(hosted_row) = self
             .system_db
             .get_hosted_identity_signing_key(project_id_str)
             .await
-            .ok()??;
-        let credential = embyr_core::client_identity::ClientIdentityCredential {
-            public_key_current: hosted_row.public_key.try_into().ok()?,
-            public_key_previous: None,
-        };
+            .ok()
+            .flatten()
+        {
+            if let Some(public_key_current) = hosted_row.public_key.try_into().ok() {
+                let credential = embyr_core::client_identity::ClientIdentityCredential {
+                    public_key_current,
+                    public_key_previous: None,
+                };
+                if let Ok(identity) = embyr_core::client_identity::verify_client_identity_token(
+                    Some(&token),
+                    project_id_str,
+                    &credential,
+                ) {
+                    return Some(identity);
+                }
+            }
+        }
 
-        embyr_core::client_identity::verify_client_identity_token(
-            Some(&token),
-            project_id_str,
-            &credential,
-        )
-        .ok()
+        // Fall through: neither prior source matched or verified — try the
+        // embyr-owned oauth (Google sign-in) signing key.
+        if let Some(oauth_row) = self
+            .system_db
+            .get_oauth_signing_key(project_id_str)
+            .await
+            .ok()
+            .flatten()
+        {
+            if let Some(public_key_current) = oauth_row.public_key.try_into().ok() {
+                let credential = embyr_core::client_identity::ClientIdentityCredential {
+                    public_key_current,
+                    public_key_previous: None,
+                };
+                if let Ok(identity) = embyr_core::client_identity::verify_client_identity_token(
+                    Some(&token),
+                    project_id_str,
+                    &credential,
+                ) {
+                    return Some(identity);
+                }
+            }
+        }
+
+        None
     }
 
     /// Convert a proto `Precondition` to a domain `WritePrecondition`.

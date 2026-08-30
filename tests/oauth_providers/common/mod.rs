@@ -258,3 +258,291 @@ impl OAuthProviderAdminContext {
         .expect("query signing key material")
     }
 }
+
+// ─── MockJwksServer (Slice 02) ─────────────────────────────────────────────────
+
+/// A local, test-only fake JWKS server (per this codebase's own
+/// "driven external / non-deterministic" fake-with-output-capture
+/// convention, `nw-distill` skill) — never a live call to Google, never a
+/// hand-mocked verification result. Generates a REAL RSA keypair, serves
+/// its public half as a real JWKS document over real HTTP, and mints real
+/// RS256-signed Google-ID-token-shaped JWTs with the private half — so
+/// `GoogleJwksCache`'s own HTTP-fetching logic and
+/// `oauth_identity::verify_google_id_token`'s own RS256 verification are
+/// both genuinely exercised end-to-end.
+pub struct MockJwksServer {
+    pub base_url: String,
+    kid: String,
+    private_key_pem: String,
+}
+
+impl MockJwksServer {
+    pub async fn start() -> Self {
+        use rand_core::OsRng;
+        use rsa::pkcs1::EncodeRsaPrivateKey;
+        use rsa::traits::PublicKeyParts;
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+        let mut rng = OsRng;
+        let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA key");
+        let public_key = private_key.to_public_key();
+        let n = URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be());
+        let e = URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be());
+        let kid = "mock-google-kid-1".to_string();
+
+        let jwks_json = serde_json::json!({
+            "keys": [{
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": kid,
+                "n": n,
+                "e": e,
+            }]
+        });
+
+        let private_key_pem = private_key
+            .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)
+            .expect("encode PKCS1 PEM")
+            .to_string();
+
+        async fn serve_jwks(
+            axum::extract::State(jwks): axum::extract::State<serde_json::Value>,
+        ) -> axum::Json<serde_json::Value> {
+            axum::Json(jwks)
+        }
+
+        let router = axum::Router::new()
+            .route("/certs", axum::routing::get(serve_jwks))
+            .with_state(jwks_json);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock JWKS ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+
+        tokio::spawn(async move {
+            axum::serve(listener, router)
+                .await
+                .expect("mock JWKS server task panicked");
+        });
+        tokio::task::yield_now().await;
+
+        MockJwksServer {
+            base_url,
+            kid,
+            private_key_pem,
+        }
+    }
+
+    pub fn jwks_url(&self) -> String {
+        format!("{}/certs", self.base_url)
+    }
+
+    /// Mint a real RS256-signed, Google-ID-token-shaped JWT — plays the
+    /// role of Google's own token-issuing service (an external actor),
+    /// mirroring this codebase's own established precedent of minting real
+    /// signed tokens to simulate a third party (`client-auth`'s own
+    /// Trailmark-backend-simulation, `client-auth-hosted-identity`'s own
+    /// `FakeEmailSender`).
+    pub fn mint_id_token(&self, sub: &str, aud: &str, exp_unix: i64) -> String {
+        let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(self.private_key_pem.as_bytes())
+            .expect("build jsonwebtoken RSA key");
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(self.kid.clone());
+        let claims = serde_json::json!({
+            "sub": sub,
+            "aud": aud,
+            "exp": exp_unix,
+            "iss": "https://accounts.google.com",
+        });
+        jsonwebtoken::encode(&header, &claims, &encoding_key).expect("mint RS256 token")
+    }
+}
+
+// ─── OAuthProviderFullContext (Slice 02 — full production stack) ─────────────
+
+/// Full production composition root: gRPC :8080, REST :8081, admin :9090,
+/// via `embyr_server::start_test_server_with_oauth` — mirrors
+/// `tests/client_auth_hosted_identity/common/mod.rs::HostedIdentityFullContext`
+/// exactly (this slice's own AC-19-05/10 need the SAME "real getDoc call
+/// after sign-in" regression proof).
+pub struct OAuthProviderFullContext {
+    _sys_container: ContainerAsync<Postgres>,
+    _cust_container: ContainerAsync<Postgres>,
+    pub server: embyr_server::TestServer,
+    pub sys_pool: sqlx::PgPool,
+    pub api_key: String,
+    pub project_id: String,
+    pub account_id: uuid::Uuid,
+    pub encryption_key: [u8; 32],
+}
+
+impl OAuthProviderFullContext {
+    /// `project_id` is seeded active, `direct_pg` backend, with one
+    /// document written at `documents/{project_id}-doc-1` so AC-19-05's
+    /// subsequent getDoc call has something real to read. Google sign-in is
+    /// NOT registered by `new()` — call `register_google_oauth_provider()`
+    /// explicitly (so AC-19-08's "not enabled" scenario can use a context
+    /// that never does). `google_jwks_url` is threaded straight into
+    /// `GoogleJwksCache` — pass `MockJwksServer::start().await.jwks_url()`
+    /// for the happy/error-taxonomy scenarios, or an address nothing
+    /// listens on (e.g. `"http://127.0.0.1:9/certs"`) for AC-19-11.
+    pub async fn new(project_id: &str, google_jwks_url: String) -> Self {
+        let sys_container = Postgres::default()
+            .with_tag("15-alpine")
+            .start()
+            .await
+            .expect("start system Postgres container");
+        let sys_port = sys_container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("system Postgres host port");
+        let sys_url = format!("postgres://postgres:postgres@127.0.0.1:{sys_port}/postgres");
+
+        let cust_container = Postgres::default()
+            .with_tag("15-alpine")
+            .start()
+            .await
+            .expect("start customer Postgres container");
+        let cust_port = cust_container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("customer Postgres host port");
+        let cust_url = format!("postgres://postgres:postgres@127.0.0.1:{cust_port}/postgres");
+
+        let system_db = Arc::new(SystemDb::new(&sys_url).await.expect("SystemDb::new failed"));
+        system_db.migrate().await.expect("system DB migrations failed");
+        let sys_pool = system_db.pool().clone();
+
+        let cust_pool = sqlx::PgPool::connect(&cust_url)
+            .await
+            .expect("connect customer DB");
+        sqlx::migrate!("../../migrations/customer")
+            .run(&cust_pool)
+            .await
+            .expect("customer DB migrations failed");
+
+        let account_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO accounts (name) VALUES ('OAuth Providers Full-Stack Test Account') RETURNING id",
+        )
+        .fetch_one(&sys_pool)
+        .await
+        .expect("insert account");
+
+        let api_key = format!("test-sk-oauth-providers-{project_id}");
+        let api_key_hash = argon2::hash_api_key(api_key.as_bytes()).expect("hash api key");
+        let pub_key = embyr_core::auth::ecies::derive_public_key(api_key.as_bytes());
+        let encrypted_dsn = embyr_core::auth::ecies::encrypt(&pub_key, cust_url.as_bytes())
+            .expect("ecies encrypt dsn");
+
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, account_id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
+             VALUES ($1, $2, 'active', 'direct_pg', $3, $4)",
+        )
+        .bind(project_id)
+        .bind(account_id)
+        .bind(&api_key_hash)
+        .bind(&encrypted_dsn)
+        .execute(&sys_pool)
+        .await
+        .expect("insert project");
+
+        sqlx::query(
+            "INSERT INTO documents (project_id, collection_path, document_id, fields, create_time, update_time, version) \
+             VALUES ($1, 'trip-journal', $2, $3, now(), now(), 1)",
+        )
+        .bind(project_id)
+        .bind(format!("{project_id}-doc-1"))
+        .bind(serde_json::json!({"title": {"t": "S", "v": "hello"}}))
+        .execute(&cust_pool)
+        .await
+        .expect("insert seed document");
+
+        let encryption_key: [u8; 32] =
+            *blake3::hash(b"oauth-providers-full-context-test-encryption-key").as_bytes();
+
+        let server = embyr_server::start_test_server_with_oauth(
+            system_db,
+            encryption_key,
+            google_jwks_url,
+        )
+        .await;
+
+        OAuthProviderFullContext {
+            _sys_container: sys_container,
+            _cust_container: cust_container,
+            server,
+            sys_pool,
+            api_key,
+            project_id: project_id.to_string(),
+            account_id,
+            encryption_key,
+        }
+    }
+
+    /// Hand-seed `oauth_provider_credentials` + `oauth_signing_keys`
+    /// directly (bypasses the Slice-01 admin registration endpoint — same
+    /// "hand-seeded row" allowance `HostedIdentityFullContext::enable_hosted_identity`
+    /// already uses). Generates a fresh Ed25519 keypair, AES-256-GCM
+    /// -encrypts the seed under `self.encryption_key` (mirrors
+    /// `register_google_oauth_provider`'s own exact crypto call shape,
+    /// ADR-037 Decision 2 — NOT ECIES, unlike hosted-identity's own
+    /// equivalent).
+    pub async fn register_google_oauth_provider(&self, client_id: &str) {
+        use aes_gcm::{
+            aead::{Aead, KeyInit},
+            Aes256Gcm, Nonce,
+        };
+        use ed25519_dalek::SigningKey;
+        use rand_core::RngCore;
+
+        let signing_key = SigningKey::generate(&mut rand_core::OsRng);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let private_key_seed = signing_key.to_bytes();
+
+        let mut nonce_bytes = [0u8; 12];
+        rand_core::OsRng.fill_bytes(&mut nonce_bytes);
+        let cipher = Aes256Gcm::new_from_slice(&self.encryption_key).expect("32-byte key");
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ct = cipher
+            .encrypt(nonce, private_key_seed.as_slice())
+            .expect("aes-gcm encrypt");
+        let mut private_key_enc = nonce_bytes.to_vec();
+        private_key_enc.extend_from_slice(&ct);
+
+        sqlx::query(
+            "INSERT INTO oauth_provider_credentials (project_id, provider, client_id) \
+             VALUES ($1, 'google', $2)",
+        )
+        .bind(&self.project_id)
+        .bind(client_id)
+        .execute(&self.sys_pool)
+        .await
+        .expect("insert oauth_provider_credentials row");
+
+        sqlx::query(
+            "INSERT INTO oauth_signing_keys (project_id, public_key, private_key_enc, algorithm) \
+             VALUES ($1, $2, $3, 'EdDSA')",
+        )
+        .bind(&self.project_id)
+        .bind(&public_key[..])
+        .bind(&private_key_enc)
+        .execute(&self.sys_pool)
+        .await
+        .expect("insert oauth_signing_keys row");
+    }
+
+    pub fn rest_url(&self, path: &str) -> String {
+        format!("http://{}{}", self.server.rest_addr, path)
+    }
+
+    pub fn document_resource_name(&self) -> String {
+        format!(
+            "projects/{}/databases/(default)/documents/trip-journal/{}-doc-1",
+            self.project_id, self.project_id
+        )
+    }
+}

@@ -64,6 +64,9 @@ impl Drop for TestServer {
 struct AccountsBridgeState {
     sign_in: rest::sign_in::SignInState,
     hosted_identity: rest::sign_up::HostedIdentityState,
+    // oauth-providers (US-02, ADR-037 Decision 6): one new state field for
+    // the fifth accounts:<verb> dispatch arm, `signInWithIdp`.
+    oauth_provider: rest::sign_in_with_idp::OAuthProviderState,
 }
 
 /// Dispatches on the captured `action` param (the literal text after
@@ -164,6 +167,20 @@ async fn accounts_bridge_dispatch(
                 axum::extract::Query(rest::sign_up::SignUpQuery {
                     key: query.get("key").cloned(),
                 }),
+                axum::extract::Json(body),
+            )
+            .await
+        }
+        // oauth-providers (US-02, ADR-037 Decision 6): Maria signs in with
+        // her Google account — no `?key=` query param (Resolution 3(B)
+        // stateless, ADR-037's own positive consequence), mirrors
+        // `signInWithCustomToken`'s identical no-query-param shape.
+        "signInWithIdp" => {
+            let body: rest::sign_in_with_idp::SignInWithIdpBody = serde_json::from_slice(&body_bytes)
+                .unwrap_or(rest::sign_in_with_idp::SignInWithIdpBody { id_token: None });
+            rest::sign_in_with_idp::sign_in_with_idp(
+                axum::extract::Path(params),
+                axum::extract::State(state.oauth_provider),
                 axum::extract::Json(body),
             )
             .await
@@ -289,6 +306,11 @@ async fn alloc_test_components(system_db: &Arc<SystemDb>) -> TestComponents {
 /// (`serve_with_incoming_shutdown`) as an independent task so that, when the
 /// outer signal fires, it stops accepting *new* connections but keeps
 /// serving already-open streams/connections until they close naturally.
+// oauth-providers (US-02, ADR-037 Decision 6/7): three new trailing
+// parameters wire OAuthProviderState's own fields — mirrors this function's
+// established precedent of growing by parameter (`email_sender` was added
+// the same way) rather than introducing a second wiring mechanism.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_all_servers(
     grpc_listener: tokio::net::TcpListener,
     rest_listener: tokio::net::TcpListener,
@@ -297,6 +319,9 @@ pub fn spawn_all_servers(
     admin_app: axum::Router,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     email_sender: Arc<dyn IEmailSender + Send + Sync>,
+    encryption_key: [u8; 32],
+    encryption_key_previous: Option<[u8; 32]>,
+    google_jwks_cache: Arc<adapters::google_jwks_cache::GoogleJwksCache>,
 ) -> tokio::task::JoinHandle<()> {
     let service_for_rest = service.clone();
 
@@ -335,9 +360,16 @@ pub fn spawn_all_servers(
         gcp_secret_fetcher: service.gcp_secret_fetcher.clone(),
         email_sender,
     };
+    let oauth_provider_state = rest::sign_in_with_idp::OAuthProviderState {
+        system_db: std::sync::Arc::clone(&service.system_db),
+        encryption_key,
+        encryption_key_previous,
+        google_jwks_cache,
+    };
     let accounts_bridge_state = AccountsBridgeState {
         sign_in: sign_in_state,
         hosted_identity: hosted_identity_state,
+        oauth_provider: oauth_provider_state,
     };
     let accounts_bridge_app = axum::Router::new()
         .route(
@@ -426,6 +458,8 @@ pub async fn start_test_server_with_keepalive(
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
+        [0u8; 32], None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -487,6 +521,65 @@ pub async fn start_test_server_with_email_sender(
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
         service, admin_app, c.shutdown_rx, email_sender,
+        [0u8; 32], None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    TestServer {
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
+    }
+}
+
+/// Start an in-process server with a real `EMBYR_ENCRYPTION_KEY`-equivalent
+/// and a `GoogleJwksCache` pointed at a caller-supplied URL (oauth-providers
+/// Slice 02 acceptance tests: `google_jwks_base_url` is a local mock JWKS
+/// server for AC-19-05/06/07/09, or a closed/unresponsive address to
+/// simulate AC-19-11's unreachability). Production keep-alive interval
+/// (30s); `NoopEmailSender` (this feature never sends email).
+pub async fn start_test_server_with_oauth(
+    system_db: Arc<SystemDb>,
+    encryption_key: [u8; 32],
+    google_jwks_base_url: String,
+) -> TestServer {
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
+
+    let rate_limit_rps = default_rate_limit_capacity();
+    let rate_limiter = RateLimiter::new(rate_limit_rps, rate_limit_rps);
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
+    let service = FirestoreService {
+        system_db: Arc::clone(&system_db),
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
+        keepalive_interval: std::time::Duration::from_secs(30),
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
+        aws_secret_fetcher: None,
+        gcp_secret_fetcher: None,
+        rate_limiter,
+    };
+
+    let admin_app = admin::router::build_with_aws(
+        system_db,
+        "test-admin-key-secret".to_string(),
+        c.cache_for_admin,
+        None,
+    );
+
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
+        encryption_key, None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::new(google_jwks_base_url)),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -537,6 +630,8 @@ pub async fn start_test_server_with_aws_fetcher(
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
+        [0u8; 32], None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -587,6 +682,8 @@ pub async fn start_test_server_with_gcp_fetcher(
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
+        [0u8; 32], None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -642,6 +739,8 @@ pub async fn start_test_server_with_distributed_rate_limit(
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
+        [0u8; 32], None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -700,6 +799,8 @@ pub async fn start_test_server_with_rate_limit(
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
+        [0u8; 32], None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

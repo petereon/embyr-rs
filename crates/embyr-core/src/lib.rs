@@ -18,6 +18,9 @@ pub mod error;
 // client-auth-hosted-identity (BC-5, ADR-036 Decision 9): pure
 // validate_password_strength(). Zero IO.
 pub mod hosted_identity;
+// oauth-providers (BC-1 extension, ADR-037 Decision 5): pure
+// verify_google_id_token()/derive_end_user_id(). Zero IO.
+pub mod oauth_identity;
 pub mod rate_limit;
 pub mod realtime;
 pub mod storage;

@@ -15,3 +15,5 @@ pub mod sign_up;
 // client-auth-hosted-identity (US-04, ADR-036): accounts:sendOobCode() /
 // accounts:resetPassword() endpoints.
 pub mod reset_password;
+// oauth-providers (US-02, ADR-037): accounts:signInWithIdp() endpoint.
+pub mod sign_in_with_idp;

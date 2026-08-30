@@ -5,6 +5,8 @@ pub mod credential_cache;
 pub mod email;
 pub mod encryption;
 pub mod gcp_secret_fetcher;
+// oauth-providers (US-02, ADR-037 Decision 7): Google JWKS fetch/cache.
+pub mod google_jwks_cache;
 pub mod index_manager;
 pub mod metrics_adapter;
 pub mod postgres_backend;

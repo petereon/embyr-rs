@@ -61,6 +61,19 @@ pub struct OAuthProviderRow {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// oauth-providers (ADR-037 Decision 2): a project's embyr-owned
+/// OAuth-derived signing key, as stored in `oauth_signing_keys` — disjoint
+/// from BOTH `client_identity_credentials` and
+/// `hosted_identity_signing_keys`. `private_key_enc` is AES-256-GCM
+/// ciphertext (12-byte nonce prefix) under `EMBYR_ENCRYPTION_KEY`, never
+/// ECIES/`api_key`-based (unlike `HostedIdentitySigningKeyRow`).
+#[derive(Debug, Clone)]
+pub struct OAuthSigningKeyRow {
+    pub public_key: Vec<u8>,
+    pub private_key_enc: Vec<u8>,
+    pub algorithm: String,
+}
+
 /// security-rules (ADR-028): a project's per-collection access-control rule
 /// row, as stored in `access_rules`. `condition_source` is the raw,
 /// validated grammar text — NOT a serialized AST (ADR-028 § Store Source,
@@ -616,6 +629,73 @@ impl SystemDb {
             },
             is_first_registration,
         ))
+    }
+
+    /// Read a project's registered Google OAuth Client ID, if any (US-02,
+    /// ADR-037 Decision 6). `Ok(None)` means Google sign-in has not been
+    /// registered for this project (Slice 01 never ran) — caller maps this
+    /// to `400 GOOGLE_SIGN_IN_NOT_ENABLED` (AC-19-08), distinguishable from
+    /// a token-validation failure.
+    pub async fn get_oauth_provider_credential(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<OAuthProviderRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT client_id, created_at FROM oauth_provider_credentials \
+             WHERE project_id = $1 AND provider = 'google'",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(OAuthProviderRow {
+            client_id: r
+                .try_get("client_id")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
+    }
+
+    /// Read a project's embyr-owned OAuth signing key, if any (US-02,
+    /// ADR-037 Decision 2/8). `Ok(None)` for a project that never
+    /// registered Google sign-in — the transactional
+    /// `register_oauth_provider` insert makes this row's existence
+    /// coincide exactly with `oauth_provider_credentials`'s own.
+    pub async fn get_oauth_signing_key(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<OAuthSigningKeyRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT public_key, private_key_enc, algorithm \
+             FROM oauth_signing_keys WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(OAuthSigningKeyRow {
+            public_key: r
+                .try_get("public_key")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            private_key_enc: r
+                .try_get("private_key_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            algorithm: r
+                .try_get("algorithm")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
     }
 
     // -----------------------------------------------------------------------
