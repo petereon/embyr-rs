@@ -31,6 +31,8 @@ use super::handlers::hosted_identity::enable_hosted_identity;
 // oauth-providers (US-01, ADR-037): admin registration of a project's
 // Google OAuth Client ID.
 use super::handlers::oauth_providers::register_google_oauth_provider;
+// anonymous-sessions (US-01, ADR-043): admin enablement action.
+use super::handlers::anonymous_identity::enable_anonymous_identity;
 // security-rules (US-01/US-05, ADR-029): access-rule define/redefine + simulate.
 // security-rules-write-path (US-01, ADR-030): independent write-rule define/redefine.
 // security-rules-query-path (US-07, ADR-031): simulate a candidate query
@@ -222,6 +224,14 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/oauth_providers/google",
             post(register_google_oauth_provider),
+        )
+        // anonymous-sessions (US-01, ADR-043): enable anonymous end-user
+        // identity for a project (Owner/Admin, gated in-handler) — mirrors
+        // oauth_providers/google's identical in-handler-gate shape, no
+        // backend_mode check (ADR-044).
+        .route(
+            "/admin/v1/projects/:project_id/anonymous_identity/enable",
+            post(enable_anonymous_identity),
         )
         // security-rules (US-01/US-05, ADR-029): define/redefine an access
         // rule (Owner/Admin, gated in-handler) + simulate a candidate rule

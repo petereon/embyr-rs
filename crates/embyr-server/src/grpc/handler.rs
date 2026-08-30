@@ -461,6 +461,31 @@ impl FirestoreService {
             }
         }
 
+        // Fall through: none of the three prior sources matched or
+        // verified — try the embyr-owned anonymous-sessions signing key
+        // (anonymous-sessions, ADR-043 Decision 6, a FOURTH widening).
+        if let Some(anonymous_row) = self
+            .system_db
+            .get_anonymous_signing_key(project_id_str)
+            .await
+            .ok()
+            .flatten()
+        {
+            if let Ok(public_key_current) = anonymous_row.public_key.try_into() {
+                let credential = embyr_core::client_identity::ClientIdentityCredential {
+                    public_key_current,
+                    public_key_previous: None,
+                };
+                if let Ok(identity) = embyr_core::client_identity::verify_client_identity_token(
+                    Some(&token),
+                    project_id_str,
+                    &credential,
+                ) {
+                    return Some(identity);
+                }
+            }
+        }
+
         None
     }
 

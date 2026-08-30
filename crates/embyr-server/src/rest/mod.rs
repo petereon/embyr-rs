@@ -17,3 +17,5 @@ pub mod sign_up;
 pub mod reset_password;
 // oauth-providers (US-02, ADR-037): accounts:signInWithIdp() endpoint.
 pub mod sign_in_with_idp;
+// anonymous-sessions (US-02, ADR-043): accounts:signInAnonymously() endpoint.
+pub mod sign_in_anonymously;

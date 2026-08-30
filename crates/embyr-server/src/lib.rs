@@ -67,6 +67,9 @@ struct AccountsBridgeState {
     // oauth-providers (US-02, ADR-037 Decision 6): one new state field for
     // the fifth accounts:<verb> dispatch arm, `signInWithIdp`.
     oauth_provider: rest::sign_in_with_idp::OAuthProviderState,
+    // anonymous-sessions (US-02, ADR-043 Decision 5): one new state field
+    // for the sixth accounts:<verb> dispatch arm, `signInAnonymously`.
+    anonymous_identity: rest::sign_in_anonymously::AnonymousIdentityState,
 }
 
 /// Dispatches on the captured `action` param (the literal text after
@@ -182,6 +185,20 @@ async fn accounts_bridge_dispatch(
                 axum::extract::Path(params),
                 axum::extract::State(state.oauth_provider),
                 axum::extract::Json(body),
+            )
+            .await
+        }
+        // anonymous-sessions (US-02, ADR-043 Decision 5): Maria gets a real
+        // identity with zero prior credential — no request body fields at
+        // all (Resolution 3, stateless), `?key=` required (mirrors
+        // `signUp`'s query-param shape, unlike `signInWithIdp`'s none).
+        "signInAnonymously" => {
+            rest::sign_in_anonymously::sign_in_anonymously(
+                axum::extract::Path(params),
+                axum::extract::State(state.anonymous_identity),
+                axum::extract::Query(rest::sign_in_anonymously::SignInAnonymouslyQuery {
+                    key: query.get("key").cloned(),
+                }),
             )
             .await
         }
@@ -366,10 +383,21 @@ pub fn spawn_all_servers(
         encryption_key_previous,
         google_jwks_cache,
     };
+    // anonymous-sessions (US-02, ADR-043 Decision 5): reuses the SAME
+    // encryption_key/encryption_key_previous OAuthProviderState already
+    // threads above — no new spawn_all_servers parameter needed (both
+    // signing-key tables share the identical AES-256-GCM/EMBYR_ENCRYPTION_KEY
+    // custody mechanism, Resolution 2).
+    let anonymous_identity_state = rest::sign_in_anonymously::AnonymousIdentityState {
+        system_db: std::sync::Arc::clone(&service.system_db),
+        encryption_key,
+        encryption_key_previous,
+    };
     let accounts_bridge_state = AccountsBridgeState {
         sign_in: sign_in_state,
         hosted_identity: hosted_identity_state,
         oauth_provider: oauth_provider_state,
+        anonymous_identity: anonymous_identity_state,
     };
     let accounts_bridge_app = axum::Router::new()
         .route(

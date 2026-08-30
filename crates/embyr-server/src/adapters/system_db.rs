@@ -74,6 +74,20 @@ pub struct OAuthSigningKeyRow {
     pub algorithm: String,
 }
 
+/// anonymous-sessions (ADR-043 Decision 2): a project's embyr-owned
+/// anonymous-sign-in signing key, as stored in `anonymous_signing_keys` —
+/// disjoint from `client_identity_credentials`, `hosted_identity_signing_keys`,
+/// AND `oauth_signing_keys` alike. `private_key_enc` is AES-256-GCM
+/// ciphertext (12-byte nonce prefix) under `EMBYR_ENCRYPTION_KEY`, mirrors
+/// `OAuthSigningKeyRow`'s exact shape.
+#[derive(Debug, Clone)]
+pub struct AnonymousSigningKeyRow {
+    pub public_key: Vec<u8>,
+    pub private_key_enc: Vec<u8>,
+    pub algorithm: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// security-rules (ADR-028): a project's per-collection access-control rule
 /// row, as stored in `access_rules`. `condition_source` is the raw,
 /// validated grammar text — NOT a serialized AST (ADR-028 § Store Source,
@@ -694,6 +708,110 @@ impl SystemDb {
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
             algorithm: r
                 .try_get("algorithm")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
+    }
+
+    // -----------------------------------------------------------------------
+    // anonymous-sessions (ADR-043) — anonymous_signing_keys CRUD.
+    // -----------------------------------------------------------------------
+
+    /// Enable anonymous identity for a project (US-01): stores the
+    /// server-generated, AES-256-GCM-encrypted signing key. Idempotent
+    /// UPSERT (AC-20-02) — mirrors `enable_hosted_identity`'s exact
+    /// `INSERT ... ON CONFLICT (project_id) DO NOTHING RETURNING` +
+    /// fallback `SELECT` shape (always 201, no redefinable field, unlike
+    /// `register_oauth_provider`'s own 201-vs-200 dance): a second
+    /// enablement call returns the SAME row, byte-identical — no
+    /// regeneration, no re-encryption.
+    pub async fn enable_anonymous_identity(
+        &self,
+        project_id: &str,
+        public_key: &[u8; 32],
+        private_key_enc: &[u8],
+    ) -> Result<AnonymousSigningKeyRow, CoreError> {
+        let row_opt = sqlx::query(
+            "INSERT INTO anonymous_signing_keys \
+             (project_id, public_key, private_key_enc, algorithm) \
+             VALUES ($1, $2, $3, 'EdDSA') \
+             ON CONFLICT (project_id) DO NOTHING \
+             RETURNING public_key, private_key_enc, algorithm, created_at",
+        )
+        .bind(project_id)
+        .bind(&public_key[..])
+        .bind(private_key_enc)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("enable_anonymous_identity insert failed: {e}"))
+        })?;
+
+        let row = match row_opt {
+            Some(r) => r,
+            None => sqlx::query(
+                "SELECT public_key, private_key_enc, algorithm, created_at \
+                 FROM anonymous_signing_keys WHERE project_id = $1",
+            )
+            .bind(project_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| {
+                CoreError::BackendUnavailable(format!(
+                    "enable_anonymous_identity fallback select failed: {e}"
+                ))
+            })?,
+        };
+
+        Ok(AnonymousSigningKeyRow {
+            public_key: row
+                .try_get("public_key")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            private_key_enc: row
+                .try_get("private_key_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            algorithm: row
+                .try_get("algorithm")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        })
+    }
+
+    /// Read a project's embyr-owned anonymous signing key, if any (US-02,
+    /// ADR-043 Decision 5/6). `Ok(None)` means anonymous auth has not been
+    /// enabled for this project (US-01 never ran) — callers map this to
+    /// `400 ANONYMOUS_AUTH_NOT_ENABLED` (AC-20-06), distinguishable from an
+    /// `INVALID_API_KEY` credential-validation failure.
+    pub async fn get_anonymous_signing_key(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<AnonymousSigningKeyRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT public_key, private_key_enc, algorithm, created_at \
+             FROM anonymous_signing_keys WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(AnonymousSigningKeyRow {
+            public_key: r
+                .try_get("public_key")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            private_key_enc: r
+                .try_get("private_key_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            algorithm: r
+                .try_get("algorithm")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
     }

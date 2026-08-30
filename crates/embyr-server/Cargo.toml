@@ -318,6 +318,16 @@ path = "../../tests/oauth_providers/acceptance/op01_alex_registers_google_oauth_
 name = "oauth_providers_op02_maria_signs_in_with_google"
 path = "../../tests/oauth_providers/acceptance/op02_maria_signs_in_with_google.rs"
 
+# anonymous-sessions acceptance tests (Slice 01, ADR-043).
+[[test]]
+name = "anonymous_sessions_as01_alex_enables_anonymous_auth"
+path = "../../tests/anonymous_sessions/acceptance/as01_alex_enables_anonymous_auth.rs"
+
+# anonymous-sessions acceptance tests (Slice 02, LAST slice, ADR-043).
+[[test]]
+name = "anonymous_sessions_as02_maria_signs_in_anonymously"
+path = "../../tests/anonymous_sessions/acceptance/as02_maria_signs_in_anonymously.rs"
+
 # security-rules acceptance tests (Slices 01-05, mirroring the srNN
 # registration convention client-auth's own caNN entries established).
 [[test]]
