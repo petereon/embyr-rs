@@ -650,6 +650,12 @@ path = "../../tests/batch_get_documents/acceptance/bg01_batch_resolution_and_per
 name = "firestore_write_streaming_ws01_single_write_happy_path"
 path = "../../tests/firestore_write_streaming/acceptance/ws01_single_write_happy_path.rs"
 
+# firestore-write-streaming acceptance tests (Slice 04, US-04, ADR-046 §
+# Decision 4 — termination conditions).
+[[test]]
+name = "firestore_write_streaming_ws04_termination_conditions"
+path = "../../tests/firestore_write_streaming/acceptance/ws04_termination_conditions.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
