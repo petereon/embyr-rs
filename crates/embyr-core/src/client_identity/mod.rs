@@ -108,6 +108,12 @@ pub fn verify_client_identity_token(
     // verification is ever attempted.
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
     validation.set_audience(&[project_id]);
+    // `jsonwebtoken::Validation::new` defaults to a 60s clock-skew leeway on
+    // `exp`, silently accepting a token expired by up to a minute — this
+    // module's own contract (see doc comment above: "Expired — ... `exp` in
+    // the past") makes no leeway exception. Disable it: any past expiry is
+    // Expired, no grace window.
+    validation.leeway = 0;
 
     let current_key = jsonwebtoken::DecodingKey::from_ed_der(&credential.public_key_current);
     match jsonwebtoken::decode::<ClientIdentityClaims>(token, &current_key, &validation) {
