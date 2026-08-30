@@ -93,6 +93,22 @@ pub(crate) async fn run_write_session(
             Some(Ok(msg)) => msg,
         };
 
+        // Slice 03 (ADR-046 § Decision 3 / Escalation 1): token check first,
+        // before any translation or apply. A stream_token mismatch is a
+        // sequencer-check failure — same status-code family as this
+        // codebase's own OccConflict/TransactionAborted convention
+        // (Status::aborted), reusing the SAME error-exit path as every other
+        // terminal error below: whole-stream termination, no per-message
+        // recoverable-rejection shape for `Write`.
+        if msg.stream_token != current_token.as_bytes() {
+            let _ = tx
+                .send(Err(Status::aborted(
+                    "stream_token mismatch: a WriteRequest must present the most recently issued stream_token",
+                )))
+                .await;
+            return;
+        }
+
         let project_id = match ProjectId::new(&project_id_str) {
             Ok(p) => p,
             Err(e) => {

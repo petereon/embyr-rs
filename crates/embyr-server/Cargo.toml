@@ -663,6 +663,12 @@ path = "../../tests/firestore_write_streaming/acceptance/ws02_multi_write_batch.
 name = "firestore_write_streaming_ws04_termination_conditions"
 path = "../../tests/firestore_write_streaming/acceptance/ws04_termination_conditions.rs"
 
+# firestore-write-streaming acceptance tests (Slice 03, US-03, ADR-046 §
+# Decision 3 / Escalation 1 — stream_token mismatch rejection, LAST slice).
+[[test]]
+name = "firestore_write_streaming_ws03_stream_token_rejection"
+path = "../../tests/firestore_write_streaming/acceptance/ws03_stream_token_rejection.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
