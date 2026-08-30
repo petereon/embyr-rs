@@ -8,8 +8,24 @@ jobs:
   - JOB-16  # client-identity-verification (added by client-auth DISCUSS, 2026-08-16)
   - JOB-17  # document-access-control (added by security-rules DISCUSS, 2026-08-17)
   - JOB-18  # embyr-hosted-identity (added by client-auth-hosted-identity DISCUSS, 2026-08-27)
-updated: "2026-08-27"
+  - JOB-19  # oauth-provider-identity (added by oauth-providers DISCUSS, 2026-08-30)
+updated: "2026-08-30"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (oauth-providers DISCUSS, 2026-08-30): JOB-19 is a new, distinct job
+# for one-click "Sign in with Google" (same persona, P1 Alex; a THIRD mental
+# model distinct from both JOB-16's custom-token bridge and JOB-18's hosted
+# email/password — a third-party OAuth provider's own consent screen
+# performs authentication). Decision 3 (UX Research Depth) = Comprehensive
+# for this feature — Maria's one-click-but-first-time-consent emotional arc
+# was mapped in full, but per this codebase's established convention it
+# lives inline in docs/feature/oauth-providers/feature-delta.md § Journey,
+# not as a separate journey-*.yaml artifact. v1 scope is Google only
+# (Resolution 1) — GitHub and other non-OIDC providers are an explicitly
+# named, deferred candidate follow-up, not silently ruled out. One genuinely
+# unresolved, security-adjacent judgment call is explicitly escalated: does
+# this job's verification mechanism need the same backend_mode=agent gating
+# JOB-18 required (see feature-delta.md § Job Discovery Framing Resolution,
+# Resolution 2).
 # NOTE (client-auth-hosted-identity DISCUSS, 2026-08-27): JOB-18 is a new,
 # distinct job for embyr-hosted email/password identity (same persona, P1
 # Alex; goal differs from JOB-16's custom-token-verification focus — Alex's

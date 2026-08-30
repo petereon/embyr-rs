@@ -1,6 +1,6 @@
 version: "1.0"
 feature: embyr-rs
-updated: "2026-08-08"
+updated: "2026-08-30"
 
 jobs:
   - id: JOB-01
@@ -589,6 +589,16 @@ jobs:
     # NOTE above named as a candidate follow-up, not silently ruled out. See
     # docs/feature/client-auth-hosted-identity/feature-delta.md § Job
     # Discovery Framing Resolution.
+    # NOTE (oauth-providers DISCUSS, 2026-08-30): this job's own verification
+    # mechanism is now joined by a SECOND sibling job, JOB-19
+    # (oauth-provider-identity), for end users who already have a Google
+    # account and want one-click social sign-in rather than a custom-token
+    # bridge (this job) or a new hosted password (JOB-18). JOB-19 is a NEW
+    # job, not an amendment — same persona (P1 Alex), a THIRD distinct mental
+    # model (a third-party OAuth provider's own consent screen performs
+    # authentication; no Trailmark backend, no embyr-hosted password). See
+    # docs/feature/oauth-providers/feature-delta.md § Job Discovery Framing
+    # Resolution.
 
   - id: JOB-17
     name: document-access-control
@@ -864,4 +874,90 @@ jobs:
     # signing-key entity (never colocated with client_identity_credentials,
     # ADR-024/025) — a hard, non-negotiable constraint, not a preference.
     # See docs/feature/client-auth-hosted-identity/feature-delta.md § Job
+    # Discovery Framing Resolution and § Scope Assessment.
+    # NOTE (oauth-providers DISCUSS, 2026-08-30): this job's own sibling,
+    # JOB-19 (oauth-provider-identity), covers a THIRD, distinct mental model
+    # for the same persona (P1 Alex) — Trailmark's end users authenticate via
+    # a third-party OAuth provider's OWN consent screen (Google), not by
+    # typing a password into an embyr-hosted form (this job) and not via
+    # Trailmark's own backend minting a token (JOB-16). JOB-19 is a NEW job,
+    # not an amendment to this one. See
+    # docs/feature/oauth-providers/feature-delta.md § Job Discovery Framing
+    # Resolution.
+
+  - id: JOB-19
+    name: oauth-provider-identity
+    persona: P1
+    feature: oauth-providers
+    job_story: >
+      When my app's end users already have a Google account and no interest in creating
+      yet another password, I want them to sign in to Trailmark using their existing
+      Google account through embyr, so my end users get the same one-click "Sign in with
+      Google" experience Firebase's built-in OAuth providers gave them, without me having
+      to build my own OAuth token-exchange plumbing or hand embyr a secret to custody on
+      my behalf.
+    dimensions:
+      functional: >
+        Maria signs in via the SDK's existing signInWithPopup()/signInWithRedirect()
+        call with GoogleAuthProvider; embyr verifies the Google-issued ID token against
+        Google's own published keys and mints a VerifiedEndUserIdentity, identical in
+        shape to every other identity mechanism this codebase already produces; embyr
+        custodies no third-party secret and no end-user password for this path
+      emotional: >
+        Alex feels he doesn't have to build OAuth token-exchange logic or hand embyr a
+        secret to custody just to offer "Sign in with Google"; Maria feels she can sign
+        in in one click using an account she already trusts, without creating and
+        remembering yet another password
+      social: >
+        Alex can tell his team "we support Sign in with Google the same way Firebase
+        did"; Trailmark's end users see the same one-click Google button they expect
+        from any modern app
+    four_forces:
+      push: >
+        Neither JOB-16 (custom-token, requires Trailmark's own backend to mint) nor
+        JOB-18 (hosted email/password, requires Maria to create and remember a new
+        password) serves the segment of end users who already have a Google account and
+        expect one-click social sign-in — a materially common Firebase Auth usage
+        pattern this codebase does not yet support at all
+      pull: >
+        A verified Google identity, resolving to the same VerifiedEndUserIdentity type
+        every other mechanism already produces, gives Alex "Sign in with Google" parity
+        with Firebase without operating a password-storage surface or a backend of his
+        own
+      anxiety: >
+        "Does embyr now need to hold a secret that lets it act as my end users' Google
+        identity, the way it holds their password in hosted identity?" — mitigated for
+        Google specifically because the ID-token verification flow requires no client
+        secret, only a public OAuth Client ID Alex registers himself (mirrors
+        client_identity_credentials' own public-key-only, no-confidentiality-property
+        design) — a genuinely lower-custody-risk shape than hosted identity's password
+        storage. The deeper question (whether a future non-OIDC provider requiring
+        server-side token exchange would require embyr to custody a customer's own
+        third-party client secret) is NOT resolved by this job and is explicitly
+        deferred — see Job Discovery Framing Resolution, Resolution 1
+      habit: >
+        Alex is used to Firebase's GoogleAuthProvider/signInWithPopup() pattern; "Sign
+        in with Google" is one of the most common Firebase Auth methods in production
+        apps, more familiar to most end users than either a custom-token bridge or
+        creating a new password
+    opportunity_score: 11
+    priority: high
+    # NOTE (oauth-providers DISCUSS, 2026-08-30): new job, not a JOB-16 or
+    # JOB-18 amendment — same persona (P1 Alex), a THIRD materially different
+    # mental model (a third-party OAuth provider's own consent screen
+    # performs authentication; neither Trailmark's backend nor an
+    # embyr-hosted password is in the loop), mirroring this project's own
+    # "same persona, different goal ⇒ new job" precedent (JOB-11/JOB-06,
+    # JOB-14/JOB-10, JOB-17/JOB-16, JOB-18/JOB-16). Partially reverses, by
+    # explicit orchestrator commission, the "Social/OAuth ... providers" line
+    # both client-auth's and client-auth-hosted-identity's own Out-of-Scope
+    # sections named as a candidate follow-up, not silently ruled out — but
+    # only PARTIALLY: v1 is scoped to Google only (Resolution 1), a
+    # deliberate, evidenced narrowing, not full parity with "any OAuth
+    # provider." One genuinely unresolved, security-adjacent judgment call is
+    # explicitly escalated, not silently decided: whether this job's identity
+    # -verification mechanism needs the same backend_mode=agent gating
+    # JOB-18 required, given it structurally touches no Customer DB and no
+    # Postgres credential at all (see Job Discovery Framing Resolution,
+    # Resolution 2). See docs/feature/oauth-providers/feature-delta.md § Job
     # Discovery Framing Resolution and § Scope Assessment.
