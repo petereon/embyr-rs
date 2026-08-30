@@ -469,6 +469,66 @@ async fn is_nan_filter_returns_only_nan_documents() {
     assert!(name.ends_with("score-nan"), "expected score-nan document, got {name}");
 }
 
+/// AC-04g (error path, security): RunQuery rejects a field path containing
+/// SQL metacharacters before it ever reaches the SQL query builder.
+///
+/// Given:  a collection with a seeded document
+/// When:   a RunQuery filter references a field path shaped like a SQL
+///         injection payload
+/// Then:   the RPC fails with InvalidArgument (SPEC.md Invariant 6) — never
+///         a panic, an internal 500, or a silently-accepted/empty result
+#[tokio::test]
+async fn field_filter_with_sql_metacharacters_rejected_before_data_read() {
+    let env = setup("test-sk-us04-inj-01", "us04-inj-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let mut fields = HashMap::new();
+    fields.insert("age".to_string(), integer_value(20));
+    seed_document(&mut client, &env.project_id, &env.api_key, "users", "user-1", fields).await;
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    for malicious_path in ["x'); DROP TABLE documents; --", "x' OR '1'='1"] {
+        let sq = StructuredQuery {
+            from: vec![CollectionSelector {
+                collection_id: "users".to_string(),
+                all_descendants: false,
+            }],
+            r#where: Some(Filter {
+                filter_type: Some(FilterType::FieldFilter(FieldFilter {
+                    field: Some(field_ref(malicious_path)),
+                    op: FieldOp::Equal as i32,
+                    value: Some(string_value("x")),
+                })),
+            }),
+            ..Default::default()
+        };
+        let req = make_authed_request(
+            RunQueryRequest {
+                parent: parent.clone(),
+                query_type: Some(QueryType::StructuredQuery(sq)),
+                ..Default::default()
+            },
+            &env.api_key,
+        );
+
+        // For server-streaming, the error may surface on the initial call OR
+        // on the first stream.message() — accept either, matching the
+        // equivalent embyr-agent test's convention.
+        match client.run_query(req).await {
+            Err(status) => assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "expected InvalidArgument for malicious field path {malicious_path:?}, got {status:?}"
+            ),
+            Ok(response) => {
+                let mut stream = response.into_inner();
+                let err = stream.message().await.expect_err("expected error from stream");
+                assert_eq!(err.code(), tonic::Code::InvalidArgument);
+            }
+        }
+    }
+}
+
 /// AC-04f (error path): query requiring composite index returns FAILED_PRECONDITION when no READY index
 ///
 /// Given:  a collection with documents having fields "category" and "score"

@@ -16,7 +16,8 @@ use embyr_core::{
         field_value::FieldValue,
         project::CredentialCacheKey,
         query::{
-            Cursor, FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter, StructuredQuery,
+            validate_field_path, Cursor, FieldFilter, FilterOp, OrderBy, OrderDirection,
+            QueryFilter, StructuredQuery,
         },
         transaction::TransactionOptions,
     },
@@ -1288,7 +1289,11 @@ impl FirestoreService {
             .transpose()
             .map_err(Status::invalid_argument)?;
 
-        // Translate proto order_by → domain OrderBy
+        // Translate proto order_by → domain OrderBy. Field paths are
+        // validated here (SPEC.md Invariant 6) — this is the only place
+        // order-by field paths enter the domain from proto; `Listen`'s own
+        // order_by is always empty (realtime/listen_handler.rs), so this
+        // single guard covers every order-by-carrying entry point.
         let order_by: Vec<OrderBy> = sq_proto
             .order_by
             .iter()
@@ -1298,9 +1303,14 @@ impl FirestoreService {
                     Direction::Descending => OrderDirection::Descending,
                     _ => OrderDirection::Ascending,
                 };
-                Some(OrderBy { field_path, direction })
+                Some((field_path, direction))
             })
-            .collect();
+            .map(|(field_path, direction)| {
+                validate_field_path(&field_path)
+                    .map(|()| OrderBy { field_path, direction })
+                    .map_err(|e| Status::invalid_argument(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Translate proto limit → domain
         let limit = sq_proto.limit;
@@ -1832,6 +1842,9 @@ pub(crate) fn translate_filter(
     match f.filter_type.as_ref()? {
         FilterType::FieldFilter(ff) => {
             let field_path = ff.field.as_ref()?.field_path.clone();
+            if let Err(e) = validate_field_path(&field_path) {
+                return Some(Err(e.to_string()));
+            }
             let op = translate_field_op(FieldOp::try_from(ff.op).ok()?)?;
             let value =
                 crate::encoding::firestore_proto::proto_value_to_field_value(ff.value.as_ref()?)?;
@@ -1862,6 +1875,9 @@ pub(crate) fn translate_filter(
                         fr,
                     ) => fr.field_path.clone(),
                 })?;
+            if let Err(e) = validate_field_path(&field_path) {
+                return Some(Err(e.to_string()));
+            }
             let op = match UnaryOp::try_from(uf.op).ok()? {
                 UnaryOp::IsNan => FilterOp::IsNan,
                 UnaryOp::IsNotNan => FilterOp::IsNotNan,

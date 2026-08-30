@@ -1,6 +1,90 @@
 use chrono::{DateTime, Utc};
 
 use super::field_value::FieldValue;
+use crate::error::CoreError;
+
+/// Validate a Firestore field path against the SPEC.md-mandated character
+/// class `^[a-zA-Z_][a-zA-Z0-9_.]*$` (SPEC.md Invariant 6, "Limits and
+/// Constraints" table).
+///
+/// This is the single root-cause guard: every client-supplied field path
+/// (query filters, order-by clauses) must pass through here before it is
+/// ever interpolated into raw SQL text by `embyr-pg-storage`'s query
+/// builder. Values are always bound via `push_bind` and are never at risk;
+/// the field path itself is raw-string-interpolated, so this is the only
+/// thing standing between a crafted field path and SQL injection.
+pub fn validate_field_path(path: &str) -> Result<(), CoreError> {
+    if is_valid_field_path(path) {
+        Ok(())
+    } else {
+        Err(CoreError::InvalidArgument(format!(
+            "field path must match ^[a-zA-Z_][a-zA-Z0-9_.]*$, got: {path}"
+        )))
+    }
+}
+
+fn is_valid_field_path(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+// Test Budget: 2 behaviors (accepts spec-compliant paths / rejects
+// non-compliant paths incl. SQL metacharacters) x 2 = 4 tests.
+#[cfg(test)]
+mod field_path_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Behavior 1: any path built only from the spec's allowed character
+        /// class, starting with a letter or underscore, is accepted —
+        /// zero behavior change for legitimate field paths (e.g. "user_id",
+        /// "address.city").
+        #[test]
+        fn spec_compliant_paths_always_accepted(
+            first in "[a-zA-Z_]",
+            rest in "[a-zA-Z0-9_.]{0,20}",
+        ) {
+            let path = format!("{first}{rest}");
+            prop_assert!(validate_field_path(&path).is_ok());
+        }
+
+        /// Behavior 2: any spec-compliant path with ONE disallowed
+        /// character appended (quote, semicolon, space, dash, parens) is
+        /// rejected with InvalidArgument, not silently accepted or panicking.
+        #[test]
+        fn path_with_any_disallowed_char_is_rejected(
+            prefix in "[a-zA-Z_][a-zA-Z0-9_.]{0,10}",
+            bad in prop::sample::select(vec!['\'', ';', ' ', '-', '(', ')', '=']),
+        ) {
+            let path = format!("{prefix}{bad}");
+            prop_assert!(matches!(
+                validate_field_path(&path),
+                Err(CoreError::InvalidArgument(_))
+            ));
+        }
+    }
+
+    /// Documents the exact exploit-shaped payloads from the security brief.
+    #[test]
+    fn known_sql_injection_payloads_rejected() {
+        for payload in ["x'); DROP TABLE documents; --", "x' OR '1'='1"] {
+            assert!(
+                matches!(validate_field_path(payload), Err(CoreError::InvalidArgument(_))),
+                "expected InvalidArgument rejection for: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_string_rejected() {
+        assert!(matches!(validate_field_path(""), Err(CoreError::InvalidArgument(_))));
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterOp {
