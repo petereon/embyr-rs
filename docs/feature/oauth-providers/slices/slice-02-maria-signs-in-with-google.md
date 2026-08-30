@@ -17,7 +17,7 @@ An end user who already has a Google account can sign in through embyr using her
 
 - GitHub or any other non-OIDC provider (§ Job Discovery Framing Resolution, Resolution 1).
 - Persisted admin visibility into signed-in Google accounts (§ Out of Scope).
-- `backend_mode=agent` gating — this DISCUSS's own evidenced lean is that none is needed, but this is EXPLICITLY ESCALATED, not locked (§ Job Discovery Framing Resolution, Resolution 2). This slice's own implementation must not silently assume either answer without the orchestrator's confirmation landing first.
+- `backend_mode=agent` gating — **RESOLVED (Resolution 2, confirmed by the orchestrator 2026-08-30, re-confirmed by DESIGN/ADR-037 § Context)**: no gating needed. Google sign-in is available to every `backend_mode`. No longer an open escalation.
 
 ## Learning Hypothesis
 
