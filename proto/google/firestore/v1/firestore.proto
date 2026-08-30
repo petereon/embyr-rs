@@ -39,6 +39,10 @@ service Firestore {
   // Rolls back a transaction.
   rpc Rollback(RollbackRequest) returns (google.protobuf.Empty);
 
+  // Streams batches of document writes, in order, applying each batch
+  // atomically and replying once per batch.
+  rpc Write(stream WriteRequest) returns (stream WriteResponse);
+
   // Runs a query.
   rpc RunQuery(RunQueryRequest) returns (stream RunQueryResponse);
 

@@ -30,7 +30,7 @@ use embyr_proto::firestore::{
     BeginTransactionResponse, CommitRequest, CommitResponse, CreateDocumentRequest,
     DeleteDocumentRequest, Document, GetDocumentRequest, ListenRequest, ListenResponse,
     RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse, RunQueryRequest,
-    RunQueryResponse, UpdateDocumentRequest,
+    RunQueryResponse, UpdateDocumentRequest, WriteRequest, WriteResponse,
     run_aggregation_query_request::QueryType as AggregationQueryType,
     run_query_request::QueryType,
     structured_aggregation_query::{aggregation::Operator as AggregationOperator, QueryType as StructuredAggQueryType},
@@ -647,6 +647,103 @@ impl FirestoreService {
             }
             embyr_core::access_control::EvaluationOutcome::Allow => Ok(()),
         }
+    }
+
+    /// firestore-write-streaming (Slice 01, ADR-046 § Decision 3, Reuse
+    /// Analysis): the proto-`Write`-message → `DomainWrite` translation loop,
+    /// extracted verbatim from `handle_commit`'s own pre-existing inline body
+    /// (including `evaluate_write_rule_for_commit`'s per-write call) so both
+    /// `handle_commit` and the new `write_stream.rs` receive-and-reply loop
+    /// call the SAME logic. Zero new write-semantics code — this is a pure
+    /// extraction, not a rewrite.
+    pub(crate) async fn translate_writes_for_commit(
+        system_db: &SystemDb,
+        adapter: &SharedBackendAdapter,
+        project_id_str: &str,
+        verified_identity: Option<&embyr_core::client_identity::VerifiedEndUserIdentity>,
+        proto_writes: &[embyr_proto::firestore::Write],
+    ) -> Result<Vec<DomainWrite>, Status> {
+        let mut domain_writes = Vec::with_capacity(proto_writes.len());
+        for proto_write in proto_writes {
+            let precondition = Self::convert_precondition(proto_write.current_document);
+            match &proto_write.operation {
+                Some(embyr_proto::firestore::write::Operation::Update(doc)) => {
+                    let path = Self::parse_document_path(&doc.name)?;
+                    let fields = proto_fields_to_domain(&doc.fields)
+                        .ok_or_else(|| Status::invalid_argument("invalid field value in write"))?;
+
+                    Self::evaluate_write_rule_for_commit(
+                        system_db,
+                        adapter,
+                        project_id_str,
+                        &path,
+                        verified_identity,
+                        Some(&fields),
+                    )
+                    .await?;
+
+                    domain_writes.push(DomainWrite::Update {
+                        path,
+                        fields,
+                        version: None,
+                        precondition,
+                    });
+                }
+                Some(embyr_proto::firestore::write::Operation::Delete(doc_name)) => {
+                    let path = Self::parse_document_path(doc_name)?;
+
+                    // Delete has no proposed new document (mirrors
+                    // `handle_delete_document`'s own always-empty
+                    // `request_resource_fields`).
+                    let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                        std::collections::BTreeMap::new();
+                    Self::evaluate_write_rule_for_commit(
+                        system_db,
+                        adapter,
+                        project_id_str,
+                        &path,
+                        verified_identity,
+                        Some(&empty_fields),
+                    )
+                    .await?;
+
+                    domain_writes.push(DomainWrite::Delete {
+                        path,
+                        version: None,
+                        precondition,
+                    });
+                }
+                Some(embyr_proto::firestore::write::Operation::Transform(dt)) => {
+                    let path = Self::parse_document_path(&dt.document)?;
+
+                    // `field_transforms` are discarded elsewhere in this
+                    // codebase (pre-existing, separately-tracked gap — out
+                    // of scope for this fix). No proposed-fields shape is
+                    // modeled for a transform, so `request_resource_fields`
+                    // mirrors the CURRENT document (`None` — see
+                    // `evaluate_write_rule_for_commit`'s own doc comment).
+                    // This still evaluates the write rule for the
+                    // transform's own document path/collection rather than
+                    // silently skipping it.
+                    Self::evaluate_write_rule_for_commit(
+                        system_db,
+                        adapter,
+                        project_id_str,
+                        &path,
+                        verified_identity,
+                        None,
+                    )
+                    .await?;
+
+                    domain_writes.push(DomainWrite::Transform {
+                        path,
+                        transforms: vec![],
+                    });
+                }
+                None => {}
+            }
+        }
+        Ok(domain_writes)
     }
 }
 
@@ -1383,87 +1480,17 @@ impl FirestoreService {
             .attach_client_identity_if_present(&request, &project_id_str)
             .await;
 
-        // Translate proto writes to domain writes
-        let mut domain_writes = Vec::with_capacity(req.writes.len());
-        for proto_write in &req.writes {
-            let precondition = Self::convert_precondition(proto_write.current_document);
-            match &proto_write.operation {
-                Some(embyr_proto::firestore::write::Operation::Update(doc)) => {
-                    let path = Self::parse_document_path(&doc.name)?;
-                    let fields = proto_fields_to_domain(&doc.fields)
-                        .ok_or_else(|| Status::invalid_argument("invalid field value in write"))?;
-
-                    Self::evaluate_write_rule_for_commit(
-                        &self.system_db,
-                        &adapter,
-                        &project_id_str,
-                        &path,
-                        verified_identity.as_ref(),
-                        Some(&fields),
-                    )
-                    .await?;
-
-                    domain_writes.push(DomainWrite::Update {
-                        path,
-                        fields,
-                        version: None,
-                        precondition,
-                    });
-                }
-                Some(embyr_proto::firestore::write::Operation::Delete(doc_name)) => {
-                    let path = Self::parse_document_path(doc_name)?;
-
-                    // Delete has no proposed new document (mirrors
-                    // `handle_delete_document`'s own always-empty
-                    // `request_resource_fields`).
-                    let empty_fields: std::collections::BTreeMap<String, FieldValue> =
-                        std::collections::BTreeMap::new();
-                    Self::evaluate_write_rule_for_commit(
-                        &self.system_db,
-                        &adapter,
-                        &project_id_str,
-                        &path,
-                        verified_identity.as_ref(),
-                        Some(&empty_fields),
-                    )
-                    .await?;
-
-                    domain_writes.push(DomainWrite::Delete {
-                        path,
-                        version: None,
-                        precondition,
-                    });
-                }
-                Some(embyr_proto::firestore::write::Operation::Transform(dt)) => {
-                    let path = Self::parse_document_path(&dt.document)?;
-
-                    // `field_transforms` are discarded elsewhere in this
-                    // codebase (pre-existing, separately-tracked gap — out
-                    // of scope for this fix). No proposed-fields shape is
-                    // modeled for a transform, so `request_resource_fields`
-                    // mirrors the CURRENT document (`None` — see
-                    // `evaluate_write_rule_for_commit`'s own doc comment).
-                    // This still evaluates the write rule for the
-                    // transform's own document path/collection rather than
-                    // silently skipping it.
-                    Self::evaluate_write_rule_for_commit(
-                        &self.system_db,
-                        &adapter,
-                        &project_id_str,
-                        &path,
-                        verified_identity.as_ref(),
-                        None,
-                    )
-                    .await?;
-
-                    domain_writes.push(DomainWrite::Transform {
-                        path,
-                        transforms: vec![],
-                    });
-                }
-                None => {}
-            }
-        }
+        // Translate proto writes to domain writes — shared with the
+        // `Write` bidi-stream's own per-message loop (firestore-write-streaming,
+        // Slice 01, ADR-046 § Decision 3, Reuse Analysis).
+        let domain_writes = Self::translate_writes_for_commit(
+            &self.system_db,
+            &adapter,
+            &project_id_str,
+            verified_identity.as_ref(),
+            &req.writes,
+        )
+        .await?;
 
         let write_results = adapter
             .commit_transaction(&project_id, &txn_id, domain_writes)
@@ -2155,6 +2182,78 @@ impl FirestoreService {
         Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
         Ok(response)
     }
+
+    /// firestore-write-streaming (Slice 01, ADR-046 § Decision 2): mirrors
+    /// `handle_listen`'s own scaffold exactly — peek the handshake message
+    /// while `request`'s metadata is still available, reject a non-empty
+    /// handshake (AC-01-04), run rate-limit/authenticate/identity exactly
+    /// once (AC-01-05/06), then hand the owned stream + response sender to
+    /// `write_stream::run_write_session`, which owns all further session
+    /// state (stream_id/stream_token generation, the receive-and-reply loop).
+    async fn handle_write(
+        &self,
+        mut request: Request<tonic::Streaming<WriteRequest>>,
+    ) -> Result<Response<tonic::codegen::BoxStream<WriteResponse>>, Status> {
+        let api_key = Self::extract_api_key(&request)?;
+
+        let first_msg = request
+            .get_mut()
+            .next()
+            .await
+            .ok_or_else(|| Status::invalid_argument("empty write stream"))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // AC-01-04: the handshake message must be empty (no writes, no
+        // stream_id) — rejected before any write is attempted, before auth.
+        if !first_msg.writes.is_empty() || !first_msg.stream_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "handshake WriteRequest must have empty writes and empty stream_id",
+            ));
+        }
+
+        let project_id_str = Self::extract_project_id(&first_msg.database)?.to_string();
+
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
+        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        // Metadata-only request, mirroring `handle_listen`'s own reasoning:
+        // `Request<Streaming<WriteRequest>>` is not `Sync` (its body is a
+        // `dyn Decoder`), so holding `&request` across this `.await` would
+        // make the handler future non-`Send`.
+        let mut metadata_only_request = Request::new(());
+        *metadata_only_request.metadata_mut() = request.metadata().clone();
+        let verified_identity = self
+            .attach_client_identity_if_present(&metadata_only_request, &project_id_str)
+            .await;
+
+        let system_db = Arc::clone(&self.system_db);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<WriteResponse, Status>>(16);
+
+        let in_stream = request.into_inner();
+
+        tokio::spawn(crate::grpc::write_stream::run_write_session(
+            in_stream,
+            tx,
+            adapter,
+            system_db,
+            project_id_str,
+            verified_identity,
+        ));
+
+        let stream: tonic::codegen::BoxStream<WriteResponse> = Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        );
+        let mut response = Response::new(stream);
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2290,6 +2389,18 @@ impl Firestore for FirestoreService {
         let obs_start = std::time::Instant::now();
         let result = self.handle_listen(request).await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_LISTEN, &result, obs_start);
+        result
+    }
+
+    type WriteStream = tonic::codegen::BoxStream<WriteResponse>;
+
+    async fn write(
+        &self,
+        request: Request<tonic::Streaming<WriteRequest>>,
+    ) -> Result<Response<Self::WriteStream>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_write(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_WRITE, &result, obs_start);
         result
     }
 }
@@ -2474,7 +2585,7 @@ fn aggregation_error_to_status(e: CoreError) -> Status {
     }
 }
 
-fn core_error_to_status(e: CoreError) -> Status {
+pub(crate) fn core_error_to_status(e: CoreError) -> Status {
     match e {
         CoreError::DocumentNotFound(_) => Status::not_found(e.to_string()),
         CoreError::AlreadyExists(_) => Status::already_exists(e.to_string()),

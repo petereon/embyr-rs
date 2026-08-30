@@ -55,3 +55,42 @@ message BeginTransactionResponse {
   // The transaction that was started.
   bytes transaction = 1;
 }
+
+// A request for [Firestore.Write][google.firestore.v1.Firestore.Write].
+message WriteRequest {
+  // Required. The database name. Present on every message (handshake and
+  // subsequent), matching real Firestore's own wire shape.
+  string database = 1;
+
+  // The ID of the write stream, issued by the first WriteResponse. Empty on
+  // the first (handshake) message; must echo the issued stream_id on every
+  // subsequent message.
+  string stream_id = 2;
+
+  // The writes to apply. Empty on the first (handshake) message — a non-empty
+  // `writes` on the handshake message is rejected (AC-01-04).
+  repeated Write writes = 3;
+
+  // A token from the most recent WriteResponse, used to ensure ordered
+  // request delivery. Empty on the first (handshake) message; must echo the
+  // most-recently-issued stream_token on every subsequent message (Slice 03).
+  bytes stream_token = 4;
+}
+
+// The response for [Firestore.Write][google.firestore.v1.Firestore.Write].
+message WriteResponse {
+  // The ID of the write stream, issued once at handshake and echoed
+  // unchanged on every subsequent response.
+  string stream_id = 1;
+
+  // A token to use on the next WriteRequest. Rotates on every response.
+  bytes stream_token = 2;
+
+  // The result of applying the writes. Empty on the handshake response (no
+  // writes were submitted).
+  repeated WriteResult write_results = 3;
+
+  // The time at which the commit occurred. Set on every response, including
+  // the handshake response (docs/SPEC.md §Write Stream, step 2).
+  google.protobuf.Timestamp commit_time = 4;
+}
