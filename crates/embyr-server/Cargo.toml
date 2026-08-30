@@ -650,6 +650,13 @@ path = "../../tests/batch_get_documents/acceptance/bg01_batch_resolution_and_per
 name = "firestore_write_streaming_ws01_single_write_happy_path"
 path = "../../tests/firestore_write_streaming/acceptance/ws01_single_write_happy_path.rs"
 
+# firestore-write-streaming acceptance tests (Slice 02, US-02, ADR-046) —
+# multi-write batches in one WriteRequest, pure composition on Slice 01's own
+# loop.
+[[test]]
+name = "firestore_write_streaming_ws02_multi_write_batch"
+path = "../../tests/firestore_write_streaming/acceptance/ws02_multi_write_batch.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
