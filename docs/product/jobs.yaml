@@ -48,6 +48,24 @@ jobs:
     # identity, not an extension of this job's scope. See
     # docs/feature/client-auth/feature-delta.md § Job Discovery Framing
     # Resolution for why this is a new job rather than a JOB-01 amendment.
+    # NOTE (batch-get-documents DISCUSS, 2026-08-30): this job's functional
+    # dimension is now also realized for the SDK's batch document-resolution
+    # surface (db.getAll(...)) via this feature — same job, same persona
+    # (P1 Alex), not a new job (the "make it real"/close-the-remaining-gap
+    # pattern, same as aggregation-queries -> JOB-01 and admin-api-v2 ->
+    # JOB-10). Unlike aggregation-queries, no proto-surface gap existed —
+    # BatchGetDocumentsRequest/Response were already fully vendored with
+    # correct field numbers; only the handler body was an unimplemented stub.
+    # Reuses handle_get_document's own per-document access-control sequence
+    # (get_access_rule/parse_condition/evaluate(), ADR-027/029) N times, once
+    # per requested document, unchanged. No dependency on aggregation-queries
+    # — a separate, independent, parallel completion of this same job. Zero
+    # escalated open questions this time (unlike aggregation-queries' own
+    # OQ-AGG-01) — every judgment call (single-slice scope, per-call vs.
+    # per-document granularity, Deny-rejects-the-whole-batch behavior) was
+    # resolvable directly from this codebase's own already-shipped
+    # precedent. See docs/feature/batch-get-documents/feature-delta.md § Job
+    # Discovery Framing Resolution.
 
   - id: JOB-02
     name: tenant-provision

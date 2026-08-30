@@ -11,6 +11,18 @@ jobs:
   - JOB-19  # oauth-provider-identity (added by oauth-providers DISCUSS, 2026-08-30)
 updated: "2026-08-30"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (batch-get-documents DISCUSS, 2026-08-30): JOB-01 now also covers
+# server-side batch document resolution (db.getAll(...)) via this feature —
+# same job, same persona, not a new job. No new Alex-facing mental model
+# beyond "the same GetDocument he already knows, asking for several document
+# paths at once instead of one" — Decision 3 (UX Research Depth) = Lightweight;
+# no separate journey-*.yaml artifact, journey detail lives inline in
+# docs/feature/batch-get-documents/feature-delta.md § Journey. No open
+# questions escalated to DESIGN — unlike aggregation-queries (OQ-AGG-01),
+# every judgment call was resolvable directly from this codebase's own
+# already-shipped GetDocument precedent, confirmed by direct reading, not
+# guessed. See docs/feature/batch-get-documents/feature-delta.md § Job
+# Discovery Framing Resolution.
 # NOTE (aggregation-queries DISCUSS, 2026-08-30): JOB-01 now also covers
 # server-side count()/sum()/average() aggregation queries via this feature —
 # same job, same persona, not a new job. No new Alex-facing mental model
