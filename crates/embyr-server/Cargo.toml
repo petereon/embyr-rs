@@ -624,6 +624,12 @@ path = "../../tests/aggregation_queries/acceptance/sum_aggregation.rs"
 name = "aggregation_queries_avg_aggregation"
 path = "../../tests/aggregation_queries/acceptance/avg_aggregation.rs"
 
+# batch-get-documents acceptance tests (Slice 01, LAST/ONLY slice, US-01,
+# ADR-042).
+[[test]]
+name = "batch_get_documents_bg01_batch_resolution_and_per_document_denial"
+path = "../../tests/batch_get_documents/acceptance/bg01_batch_resolution_and_per_document_denial.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

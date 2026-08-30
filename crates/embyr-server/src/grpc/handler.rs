@@ -1073,9 +1073,158 @@ impl FirestoreService {
 
     async fn handle_batch_get_documents(
         &self,
-        _: Request<BatchGetDocumentsRequest>,
+        request: Request<BatchGetDocumentsRequest>,
     ) -> Result<Response<tonic::codegen::BoxStream<BatchGetDocumentsResponse>>, Status> {
-        Err(Status::unimplemented("not implemented"))
+        // Per-call composition (DDD-BGD-2/DDD-BGD-1): project identity comes
+        // from `database`, NOT `documents[0]` — mirrors `handle_run_query`'s
+        // own auth/rate-limit/identity-once-per-call granularity.
+        let req = request.get_ref();
+        let project_id_str = Self::extract_project_id(&req.database)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
+        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status_str == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
+        let documents = req.documents.clone();
+
+        // DDD-BGD-3: non-empty + single-project validation, up front,
+        // before any per-document work begins (AC-01-05/06).
+        if documents.is_empty() {
+            return Err(Status::invalid_argument("documents must not be empty"));
+        }
+        // DDD-BGD-14 (peer-review-surfaced, orchestrator-confirmed): bound
+        // per-call resource consumption — a single rate-limit token must not
+        // purchase an unbounded number of get_access_rule/get_document calls.
+        if documents.len() > 1000 {
+            return Err(Status::invalid_argument(
+                "documents must not exceed 1000 per call",
+            ));
+        }
+        for doc_name in &documents {
+            if Self::extract_project_id(doc_name)? != project_id_str {
+                return Err(Status::invalid_argument(
+                    "all documents must belong to the same project as database",
+                ));
+            }
+        }
+
+        // DDD-BGD-9: usage metering counts N documents, once per call.
+        self.metrics_adapter
+            .record_read(&project_id_str, documents.len() as i64)
+            .await;
+
+        let auth_ctx = verified_identity
+            .as_ref()
+            .map(|v| embyr_core::access_control::AuthContext {
+                uid: v.end_user_id.clone(),
+                claims: v.claims.clone(),
+            });
+
+        let build_found = |doc: embyr_core::domain::document::FirestoreDocument| BatchGetDocumentsResponse {
+            result: Some(embyr_proto::firestore::batch_get_documents_response::Result::Found(
+                document_to_proto(doc),
+            )),
+            ..Default::default()
+        };
+        let build_missing = |name: &str| BatchGetDocumentsResponse {
+            result: Some(embyr_proto::firestore::batch_get_documents_response::Result::Missing(
+                name.to_string(),
+            )),
+            ..Default::default()
+        };
+
+        // DDD-BGD-6: in-request per-collection access-rule cache — lazily
+        // populated on first reference to a given collection_path, read on
+        // every subsequent reference within this same call.
+        let mut rule_cache: HashMap<String, Option<crate::adapters::system_db::AccessRuleRow>> =
+            HashMap::new();
+        let mut responses: Vec<Result<BatchGetDocumentsResponse, Status>> =
+            Vec::with_capacity(documents.len());
+
+        for doc_name in &documents {
+            let path = Self::parse_document_path(doc_name)?;
+
+            // DDD-BGD-4/6: cached per-collection access-rule lookup,
+            // mirrors handle_get_document's own single indexed lookup.
+            let rule_row = match rule_cache.get(&path.collection_path) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let fetched = self
+                        .system_db
+                        .get_access_rule(&project_id_str, &path.collection_path)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                    rule_cache.insert(path.collection_path.clone(), fetched.clone());
+                    fetched
+                }
+            };
+
+            // DDD-BGD-7: a genuine infra error aborts the whole call — never
+            // conflated with a `Deny` (ADR-042 handles denial separately).
+            let doc_opt = adapter
+                .get_document(&path)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            let response_item = match rule_row {
+                // No rule defined — unrestricted, mirrors GetDocument's own
+                // no-rule short-circuit (AC-01-04).
+                None => match doc_opt {
+                    None => build_missing(doc_name),
+                    Some(doc) => build_found(doc),
+                },
+                Some(rule_row) => {
+                    let condition = embyr_core::access_control::parse_condition(&rule_row.condition_source)
+                        .map_err(|e| {
+                            Status::internal(format!(
+                                "stored access rule failed to re-parse: {e:?}"
+                            ))
+                        })?;
+                    let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                        std::collections::BTreeMap::new();
+                    let resource_fields =
+                        doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+
+                    match embyr_core::access_control::evaluate(
+                        &condition,
+                        auth_ctx.as_ref(),
+                        resource_fields,
+                        &empty_fields,
+                    ) {
+                        // ADR-042/DDD-BGD-5: `Deny` maps to a per-document
+                        // `missing` item — the batch is NEVER aborted
+                        // (AC-01-03), unlike GetDocument's own PermissionDenied.
+                        embyr_core::access_control::EvaluationOutcome::Deny => {
+                            build_missing(doc_name)
+                        }
+                        embyr_core::access_control::EvaluationOutcome::Allow => match doc_opt {
+                            None => build_missing(doc_name),
+                            Some(doc) => build_found(doc),
+                        },
+                    }
+                }
+            };
+            responses.push(Ok(response_item));
+        }
+
+        // DDD-BGD-8/DDD-BGD-11: eager Vec -> stream, mirroring
+        // handle_run_query's own construction; streamed in request order.
+        let stream: tonic::codegen::BoxStream<BatchGetDocumentsResponse> =
+            Box::pin(tokio_stream::iter(responses));
+        let mut response = Response::new(stream);
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
     }
 
     async fn handle_begin_transaction(
