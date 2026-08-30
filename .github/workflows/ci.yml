@@ -31,6 +31,14 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/embyr_test
       EMBYR_ADMIN_KEY: ci-admin-key
       EMBYR_ENCRYPTION_KEY: 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+      # card_payments_backend's own tests (D-13) require real Stripe
+      # test-mode API access — no mocking, matching this codebase's
+      # real-I/O testing convention elsewhere. Must be a `sk_test_...` key
+      # from a real (test-mode) Stripe account, added as a repo secret:
+      # `gh secret set STRIPE_SECRET_KEY`. Empty/unset in a fork or before
+      # that secret exists — those 4 tests fail with a clear "not an
+      # acceptable RED reason" panic rather than a silent skip.
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
       # This workspace now builds ~38 separate integration test binaries
       # (grown well past the "6+" this file's own disk-space comment below
       # was written for), each statically linking its own copy of every
