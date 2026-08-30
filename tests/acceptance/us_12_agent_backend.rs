@@ -420,9 +420,20 @@ impl StorageAgent for MockAgentServer {
 
     async fn run_aggregation_query(
         &self,
-        _request: Request<RunAggregationQueryRequest>,
+        request: Request<RunAggregationQueryRequest>,
     ) -> Result<Response<RunAggregationQueryResponse>, Status> {
-        Err(Status::unimplemented("not implemented — step 05-02"))
+        self.calls.lock().unwrap().push("run_aggregation_query".to_string());
+        use embyr_proto::agent::run_aggregation_query_request::QueryType;
+        let filter = match &request.get_ref().query_type {
+            Some(QueryType::StructuredQuery(sq)) => sq.filter.clone(),
+            None => None,
+        };
+        let docs = self.query_docs.lock().unwrap().clone();
+        let count = docs
+            .iter()
+            .filter(|d| query_doc_matches_filter(d, &filter))
+            .count() as i64;
+        Ok(Response::new(RunAggregationQueryResponse { count }))
     }
 
     async fn list_documents(
@@ -1250,7 +1261,10 @@ async fn agent_projects_have_zero_dsn_rows_in_system_db() {
 use embyr_core::domain::document::CollectionPath;
 use embyr_core::domain::field_value::FieldValue as DomainFieldValue;
 use embyr_core::domain::project::ProjectId;
-use embyr_core::domain::query::{FieldFilter, FilterOp, QueryFilter, StructuredQuery};
+use embyr_core::domain::query::{
+    AggregationKind, AggregationQuery, FieldFilter, FilterOp, QueryFilter, StructuredQuery,
+};
+use embyr_core::error::CoreError;
 use embyr_core::storage::backend_adapter::BackendAdapter;
 use embyr_server::adapters::agent_backend::AgentBackendAdapter;
 
@@ -1421,4 +1435,331 @@ async fn agent_mode_run_query_without_filter_returns_full_collection() {
     assert!(ids.contains(&"alice-note".to_string()), "expected alice-note, got: {ids:?}");
     assert!(ids.contains(&"bob-note".to_string()), "expected bob-note, got: {ids:?}");
     assert_eq!(docs.len(), 2, "unfiltered query must return the full collection unaffected, got: {ids:?}");
+}
+
+// ---------------------------------------------------------------------------
+// aggregation-queries Slice 02 (US-02, ADR-041) — COUNT aggregation for
+// backend_mode=agent projects, proxying embyr-agent's own already-shipped
+// RunAggregationQuery RPC unchanged.
+// ---------------------------------------------------------------------------
+
+/// Provision a backend_mode=agent project against the given MockAgentServer
+/// endpoint and return its api_key. Shared setup for the aggregation-queries
+/// Slice 02 tests below — identical shape to `provision_with_agent_stores_endpoint_not_dsn`'s
+/// own inline POST, factored out since three tests below need it.
+async fn provision_agent_project(env: &TestEnv, project_id: &str, certs: &MtlsCerts, agent_endpoint: &str) -> String {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/admin/v1/projects", env.server.admin_addr))
+        .header("Authorization", format!("Bearer {}", env.admin_key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "project_id": project_id,
+            "backend_mode": "agent",
+            "agent_endpoint": agent_endpoint,
+            "agent_ca_pem": String::from_utf8_lossy(&certs.ca_pem),
+            "agent_client_cert_pem": String::from_utf8_lossy(&certs.client_cert_pem),
+            "agent_client_key_pem": String::from_utf8_lossy(&certs.client_key_pem),
+        }))
+        .send()
+        .await
+        .expect("provision request failed");
+    assert_eq!(resp.status(), 201, "expected 201 Created; body: {:?}", resp.text().await);
+    let body: serde_json::Value = resp.json().await.expect("parse provision response");
+    body["api_key"].as_str().expect("api_key in response").to_string()
+}
+
+/// AC-01-07: a COUNT aggregation against a backend_mode=agent project is
+/// proxied through embyr-agent's own RunAggregationQuery RPC unchanged and
+/// returns the same response shape/correct count as the Postgres-family
+/// path (Slice 01) — driving port entry (real gRPC :8080 RunAggregationQuery,
+/// same client-facing RPC Slice 01's own tests use).
+///
+/// Given:  a backend_mode=agent project with 3 documents seeded into
+///         MockAgentServer's query_docs store under "widgets"
+/// When:   the SDK issues RunAggregationQuery COUNT against "widgets"
+/// Then:   the response carries count: 3
+/// And:    MockAgentServer's own run_aggregation_query RPC was invoked
+///
+/// Tags: @real_io @adapter_integration @AC-01-07
+#[tokio::test]
+async fn agent_mode_count_aggregation_returns_exact_count() {
+    install_ring_provider();
+
+    let env = setup_test_env().await;
+    let certs = generate_mtls_cert_set();
+
+    use testcontainers_modules::testcontainers::ImageExt;
+    let agent_pg = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start agent postgres");
+    let agent_pg_port = agent_pg.get_host_port_ipv4(5432).await.expect("get agent pg port");
+    let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
+    let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
+
+    let (calls, query_docs, mock_port, _shutdown_tx) =
+        start_mock_agent_server(&certs, agent_pool).await;
+    let agent_endpoint = format!("127.0.0.1:{}", mock_port);
+
+    let api_key = provision_agent_project(&env, "agg-agent-count-proj", &certs, &agent_endpoint).await;
+
+    for i in 0..3u32 {
+        query_docs.lock().unwrap().push(QueryDoc {
+            name: format!(
+                "projects/agg-agent-count-proj/databases/(default)/documents/widgets/w{i}"
+            ),
+            fields: HashMap::new(),
+        });
+    }
+
+    use embyr_proto::firestore::{
+        firestore_client::FirestoreClient,
+        run_aggregation_query_request::QueryType as AggregationQueryType,
+        structured_aggregation_query::{
+            aggregation::{Count, Operator as AggregationOperator},
+            Aggregation, QueryType as StructuredAggQueryType,
+        },
+        structured_query::CollectionSelector,
+        value::ValueType,
+        RunAggregationQueryRequest as FsRunAggregationQueryRequest, StructuredAggregationQuery,
+        StructuredQuery as FsStructuredQuery,
+    };
+    use tonic::metadata::MetadataValue;
+
+    let grpc_addr = format!("http://{}", env.server.grpc_addr);
+    let mut firestore_client = FirestoreClient::connect(grpc_addr)
+        .await
+        .expect("connect to firestore gRPC");
+
+    let sq = FsStructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: "widgets".to_string(),
+            all_descendants: false,
+        }],
+        ..Default::default()
+    };
+    let saq = StructuredAggregationQuery {
+        query_type: Some(StructuredAggQueryType::StructuredQuery(sq)),
+        aggregations: vec![Aggregation {
+            operator: Some(AggregationOperator::Count(Count { up_to: None })),
+            alias: String::new(),
+        }],
+    };
+    let mut request = tonic::Request::new(FsRunAggregationQueryRequest {
+        parent: "projects/agg-agent-count-proj/databases/(default)/documents".to_string(),
+        query_type: Some(AggregationQueryType::StructuredAggregationQuery(saq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        MetadataValue::try_from(format!("Bearer {}", api_key)).unwrap(),
+    );
+
+    let mut stream = firestore_client
+        .run_aggregation_query(request)
+        .await
+        .expect("RunAggregationQuery must succeed for agent-mode COUNT")
+        .into_inner();
+    use tokio_stream::StreamExt;
+    let response = stream
+        .next()
+        .await
+        .expect("expected exactly one RunAggregationQueryResponse message")
+        .expect("response stream item");
+    let result = response.result.expect("response must carry an AggregationResult");
+    let value = result
+        .aggregate_fields
+        .get("field_0")
+        .expect("expected default-synthesized alias field_0");
+    let count = match &value.value_type {
+        Some(ValueType::IntegerValue(n)) => *n,
+        other => panic!("expected IntegerValue for a COUNT result, got {other:?}"),
+    };
+    assert_eq!(
+        count, 3,
+        "AC-01-07: expected count 3, matching Slice 01's own Postgres-family response shape"
+    );
+
+    let agent_calls = calls.lock().unwrap().clone();
+    assert!(
+        agent_calls.contains(&"run_aggregation_query".to_string()),
+        "AC-01-07: MockAgentServer must have received run_aggregation_query call; calls: {:?}",
+        agent_calls
+    );
+}
+
+/// AC-01-08: access-rule compliance is evaluated in embyr-server BEFORE the
+/// agent is ever contacted — a caller check_query_compliance() would reject
+/// never causes a request to reach the customer's own agent process. Uses
+/// the SAME group-rule-not-defined rejection handle_run_query already
+/// enforces (no group_access_rules row for an all_descendants=true query) —
+/// no client-identity token machinery needed to prove the point.
+///
+/// Given:  a backend_mode=agent project with NO group_access_rules row
+///         defined for "widgets"
+/// When:   a caller issues an all_descendants=true COUNT aggregation
+///         against "widgets"
+/// Then:   the request is rejected (PermissionDenied)
+/// And:    MockAgentServer's own calls log contains no
+///         "run_aggregation_query" entry — the agent was never contacted
+///
+/// Tags: @real_io @adapter_integration @security-critical @AC-01-08
+#[tokio::test]
+async fn agent_mode_compliance_rejection_never_reaches_agent() {
+    install_ring_provider();
+
+    let env = setup_test_env().await;
+    let certs = generate_mtls_cert_set();
+
+    use testcontainers_modules::testcontainers::ImageExt;
+    let agent_pg = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start agent postgres");
+    let agent_pg_port = agent_pg.get_host_port_ipv4(5432).await.expect("get agent pg port");
+    let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
+    let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
+
+    let (calls, _query_docs, mock_port, _shutdown_tx) =
+        start_mock_agent_server(&certs, agent_pool).await;
+    let agent_endpoint = format!("127.0.0.1:{}", mock_port);
+
+    let api_key = provision_agent_project(&env, "agg-agent-reject-proj", &certs, &agent_endpoint).await;
+
+    use embyr_proto::firestore::{
+        firestore_client::FirestoreClient,
+        run_aggregation_query_request::QueryType as AggregationQueryType,
+        structured_aggregation_query::{
+            aggregation::{Count, Operator as AggregationOperator},
+            Aggregation, QueryType as StructuredAggQueryType,
+        },
+        structured_query::CollectionSelector,
+        RunAggregationQueryRequest as FsRunAggregationQueryRequest, StructuredAggregationQuery,
+        StructuredQuery as FsStructuredQuery,
+    };
+    use tonic::metadata::MetadataValue;
+
+    let grpc_addr = format!("http://{}", env.server.grpc_addr);
+    let mut firestore_client = FirestoreClient::connect(grpc_addr)
+        .await
+        .expect("connect to firestore gRPC");
+
+    let sq = FsStructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: "widgets".to_string(),
+            all_descendants: true,
+        }],
+        ..Default::default()
+    };
+    let saq = StructuredAggregationQuery {
+        query_type: Some(StructuredAggQueryType::StructuredQuery(sq)),
+        aggregations: vec![Aggregation {
+            operator: Some(AggregationOperator::Count(Count { up_to: None })),
+            alias: String::new(),
+        }],
+    };
+    let mut request = tonic::Request::new(FsRunAggregationQueryRequest {
+        parent: "projects/agg-agent-reject-proj/databases/(default)/documents".to_string(),
+        query_type: Some(AggregationQueryType::StructuredAggregationQuery(saq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        MetadataValue::try_from(format!("Bearer {}", api_key)).unwrap(),
+    );
+
+    let result = firestore_client.run_aggregation_query(request).await;
+    let err = result.expect_err(
+        "AC-01-08: an all_descendants aggregation with no group rule defined must be rejected, \
+         never reaching the agent",
+    );
+    assert_eq!(
+        err.code(),
+        tonic::Code::PermissionDenied,
+        "AC-01-08: expected PermissionDenied, got {:?}: {}",
+        err.code(),
+        err.message()
+    );
+
+    let agent_calls = calls.lock().unwrap().clone();
+    assert!(
+        !agent_calls.contains(&"run_aggregation_query".to_string()),
+        "AC-01-08: agent must never be contacted for a compliance-rejected caller; calls: {:?}",
+        agent_calls
+    );
+}
+
+/// AC-01-09: an unreachable agent produces a distinguishable,
+/// retryable-sounding error — never a silently-wrong count, never a crash.
+/// Reuses the SAME grpc_err convention every other AgentBackendAdapter
+/// method already uses (CoreError::BackendUnavailable), exercised directly
+/// at the driven port adapter boundary (real mTLS gRPC to a MockAgentServer
+/// that is shut down mid-test) — mirrors AC-12g's own direct-adapter test
+/// shape.
+///
+/// Tags: @real_io @adapter_integration @AC-01-09
+#[tokio::test]
+async fn agent_mode_unreachable_agent_produces_backend_unavailable_error() {
+    install_ring_provider();
+
+    let certs = generate_mtls_cert_set();
+    use testcontainers_modules::testcontainers::ImageExt;
+    let agent_pg = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start agent postgres");
+    let agent_pg_port = agent_pg.get_host_port_ipv4(5432).await.expect("get agent pg port");
+    let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
+    let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
+
+    let (_calls, _query_docs, mock_port, shutdown_tx) =
+        start_mock_agent_server(&certs, agent_pool).await;
+
+    let adapter = AgentBackendAdapter::new(
+        &format!("127.0.0.1:{}", mock_port),
+        &certs.ca_pem,
+        &certs.client_cert_pem,
+        &certs.client_key_pem,
+    )
+    .await
+    .expect("connect AgentBackendAdapter to MockAgentServer");
+
+    // Shut the mock agent server down so the RPC itself fails transport-level.
+    let _ = shutdown_tx.send(());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let collection = CollectionPath {
+        project_id: ProjectId::new("unreachable-proj").unwrap(),
+        collection_path: "widgets".to_string(),
+    };
+    let query = AggregationQuery {
+        query: StructuredQuery {
+            collection_id: "widgets".to_string(),
+            all_descendants: false,
+            filter: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            start_at: None,
+            end_at: None,
+            since_update_time: None,
+        },
+        aggregation: AggregationKind::Count,
+        alias: "field_0".to_string(),
+    };
+
+    let result = adapter.run_aggregation_query(&collection, &query, None).await;
+    let err = result.expect_err(
+        "AC-01-09: an unreachable agent must produce an error, never a silently-wrong count",
+    );
+    assert!(
+        matches!(err, CoreError::BackendUnavailable(_)),
+        "AC-01-09: error must be the same BackendUnavailable convention every other \
+         AgentBackendAdapter method uses for an unreachable agent, got: {:?}",
+        err
+    );
 }

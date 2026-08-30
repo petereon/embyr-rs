@@ -12,7 +12,7 @@ use embyr_core::{
         document::{CollectionPath, DocumentPath, FirestoreDocument, WriteResult},
         field_value::FieldValue,
         project::ProjectId,
-        query::{FilterOp, QueryFilter, StructuredQuery},
+        query::{AggregateValue, AggregationKind, AggregationQuery, FilterOp, QueryFilter, StructuredQuery},
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
@@ -449,6 +449,62 @@ impl BackendAdapter for AgentBackendAdapter {
             }
         }
         Ok(docs)
+    }
+
+    /// aggregation-queries Slice 02 (US-02, ADR-041 § Decision 3): proxies
+    /// `embyr-agent`'s own already-shipped, unchanged `RunAggregationQuery`
+    /// RPC (unary, COUNT-only). Filter translation reuses
+    /// `domain_filter_to_agent_filter` — the exact same helper `run_query`
+    /// above uses — so an approved, compliance-checked filter is forwarded
+    /// identically for both RPCs (no second translator).
+    async fn run_aggregation_query(
+        &self,
+        collection: &CollectionPath,
+        query: &AggregationQuery,
+        _transaction_id: Option<&TransactionId>,
+    ) -> Result<AggregateValue, CoreError> {
+        match &query.aggregation {
+            AggregationKind::Sum(_) | AggregationKind::Avg(_) => {
+                return Err(CoreError::FailedPrecondition(
+                    "SUM/AVG aggregation is not supported for backend_mode=agent in v1".into(),
+                ));
+            }
+            AggregationKind::Count => {}
+        }
+
+        use embyr_proto::agent::{
+            run_aggregation_query_request::QueryType,
+            structured_query::CollectionSelector,
+            RunAggregationQueryRequest as AgentAggregationRequest,
+            StructuredQuery as AgentStructuredQuery,
+        };
+        let parent = format!(
+            "projects/{}/databases/(default)/documents",
+            collection.project_id.as_str()
+        );
+        let filter = query
+            .query
+            .filter
+            .as_ref()
+            .map(domain_filter_to_agent_filter)
+            .transpose()?;
+        let sq = AgentStructuredQuery {
+            from: vec![CollectionSelector {
+                collection_id: collection.collection_path.clone(),
+                all_descendants: query.query.all_descendants,
+            }],
+            filter,
+        };
+        let req = AgentAggregationRequest {
+            parent,
+            query_type: Some(QueryType::StructuredQuery(sq)),
+        };
+        let mut client = self.client.clone();
+        let resp = client
+            .run_aggregation_query(req)
+            .await
+            .map_err(grpc_err)?;
+        Ok(AggregateValue::Count(resp.into_inner().count))
     }
 
     async fn begin_transaction(
