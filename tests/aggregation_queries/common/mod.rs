@@ -33,7 +33,7 @@ use embyr_proto::firestore::{
     firestore_client::FirestoreClient,
     run_aggregation_query_request::QueryType as AggregationQueryType,
     structured_aggregation_query::{
-        aggregation::{Count, Operator as AggregationOperator, Sum},
+        aggregation::{Avg, Count, Operator as AggregationOperator, Sum},
         Aggregation, QueryType as StructuredAggQueryType,
     },
     structured_query::{
@@ -232,5 +232,95 @@ pub async fn run_sum_aggregation(
     match &value.value_type {
         Some(ValueType::DoubleValue(d)) => Ok(*d),
         other => panic!("expected DoubleValue for a SUM result, got {other:?}"),
+    }
+}
+
+/// Real gRPC `RunAggregationQuery` call with an AVG aggregation — driving
+/// port entry (Pillar 3), mirroring `run_sum_aggregation` above exactly
+/// except for the `Avg` operator and the `Option<f64>` result shape
+/// (ADR-040 § Response value mapping — AVG maps `NullValue` -> `None`,
+/// `DoubleValue` -> `Some`, distinguishing "zero matching documents" from a
+/// real average of zero; AC-01-19). Any other wire shape (including an
+/// absent alias key) panics — the exhaustive match is itself the proof that
+/// a returned `None` came from a genuine `NullValue`, not from "not a
+/// DoubleValue".
+pub async fn run_avg_aggregation(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    all_descendants: bool,
+    avg_field: &str,
+    equality_filters: &[(&str, &str)],
+    client_identity_token: Option<&str>,
+) -> Result<Option<f64>, tonic::Status> {
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let where_filter = match equality_filters {
+        [] => None,
+        [(field, value)] => Some(equality_filter(field, value)),
+        many => Some(Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: many.iter().map(|(f, v)| equality_filter(f, v)).collect(),
+            })),
+        }),
+    };
+
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: collection_id.to_string(),
+            all_descendants,
+        }],
+        r#where: where_filter,
+        ..Default::default()
+    };
+
+    let saq = StructuredAggregationQuery {
+        query_type: Some(StructuredAggQueryType::StructuredQuery(sq)),
+        aggregations: vec![Aggregation {
+            operator: Some(AggregationOperator::Avg(Avg {
+                field: Some(FieldReference { field_path: avg_field.to_string() }),
+            })),
+            alias: String::new(),
+        }],
+    };
+
+    let mut request = tonic::Request::new(RunAggregationQueryRequest {
+        parent: format!("projects/{}/databases/(default)/documents", ctx.project_id),
+        query_type: Some(AggregationQueryType::StructuredAggregationQuery(saq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    let mut stream = client.run_aggregation_query(request).await?.into_inner();
+    use tokio_stream::StreamExt;
+    let response = stream
+        .next()
+        .await
+        .expect("expected exactly one RunAggregationQueryResponse message")?;
+    let result = response
+        .result
+        .expect("response must carry an AggregationResult");
+    let value = result
+        .aggregate_fields
+        .get("field_0")
+        .expect("expected default-synthesized alias field_0");
+    match &value.value_type {
+        Some(ValueType::DoubleValue(d)) => Ok(Some(*d)),
+        Some(ValueType::NullValue(_)) => Ok(None),
+        other => panic!("expected DoubleValue or NullValue for an AVG result, got {other:?}"),
     }
 }

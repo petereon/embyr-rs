@@ -777,11 +777,57 @@ impl BackendAdapter for PostgresBackendAdapter {
 
                 Ok(AggregateValue::Sum(sum))
             }
-            // AVG is Slice 04's own scope (ADR-040) — this slice wires SUM
-            // only.
-            AggregationKind::Avg(_) => Err(CoreError::FailedPrecondition(
-                "AVG aggregation is not supported in this slice".into(),
-            )),
+            AggregationKind::Avg(field_path) => {
+                use crate::encoding::query::append_filter;
+                use sqlx::{QueryBuilder, Row};
+
+                // WHERE-clause construction copied byte-for-byte from
+                // `run_query`/COUNT/SUM above (ADR-040 § 2) — only the
+                // SELECT clause differs. `field_path` is already validated
+                // by `handle_run_aggregation_query`
+                // (^[a-zA-Z_][a-zA-Z0-9_.]*$, ADR-040 § 1) before reaching
+                // this adapter. Bare `AVG(...)` — deliberately no
+                // `COALESCE`, unlike SUM's own: Postgres's native `AVG()`
+                // already excludes NULL inputs from both numerator and
+                // denominator and returns SQL NULL over a zero/all-excluded
+                // result set, which is exactly AC-01-19's required
+                // null-vs-zero distinction, delivered by the primitive
+                // itself.
+                let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
+                    "SELECT AVG(CASE WHEN fields->'{fp}'->>'t' IN ('I','D') \
+                     THEN (fields->'{fp}'->>'v')::float8 ELSE NULL END) \
+                     FROM documents WHERE project_id = ",
+                    fp = field_path
+                ));
+                qb.push_bind(collection.project_id.as_str());
+                if query.query.all_descendants {
+                    qb.push(" AND (collection_path = ");
+                    qb.push_bind(&collection.collection_path);
+                    qb.push(" OR collection_path LIKE ");
+                    qb.push_bind(format!("%/{}", collection.collection_path));
+                    qb.push(")");
+                } else {
+                    qb.push(" AND collection_path = ");
+                    qb.push_bind(&collection.collection_path);
+                }
+                qb.push(" AND NOT deleted");
+
+                if let Some(filter) = &query.query.filter {
+                    qb.push(" AND ");
+                    append_filter(&mut qb, filter);
+                }
+
+                let row = qb
+                    .build()
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                let avg: Option<f64> = row
+                    .try_get(0)
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+                Ok(AggregateValue::Avg(avg))
+            }
         }
     }
 

@@ -617,6 +617,13 @@ path = "../../tests/aggregation_queries/acceptance/collection_group_count.rs"
 name = "aggregation_queries_sum_aggregation"
 path = "../../tests/aggregation_queries/acceptance/sum_aggregation.rs"
 
+# Slice 04 (US-04, ADR-040) — AVG aggregation for Postgres-family backend
+# modes, reusing Slice 03's own numeric-field-extraction/exclusion mechanism;
+# the last slice of aggregation-queries.
+[[test]]
+name = "aggregation_queries_avg_aggregation"
+path = "../../tests/aggregation_queries/acceptance/avg_aggregation.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
