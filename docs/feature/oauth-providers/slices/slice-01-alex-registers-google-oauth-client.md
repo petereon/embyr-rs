@@ -43,7 +43,7 @@ None — this is the Walking Skeleton's first slice. Slice 02 depends on this on
 
 ## Reference Class
 
-Mirrors `client-auth`'s own US-01 (register verification credential) admin-action shape and `client-auth-hosted-identity`'s own US-01 enablement-action shape — but simpler than both: no signing-key generation (unlike hosted identity, embyr generates nothing here), no rotation-window/dual-generation complexity (unlike `client_identity_credentials`, a single idempotent-upsert suffices since the Client ID is not itself security-sensitive to overwrite).
+Mirrors `client-auth`'s own US-01 (register verification credential) admin-action shape and `client-auth-hosted-identity`'s own US-01 enablement-action shape. **Correction (ADR-037 Decision 2, DESIGN-wave finding)**: this slice's own original framing ("no signing-key generation... embyr generates nothing here") was disproven by tracing `mint_client_identity_token()`'s signature — Slice 02 cannot mint without an embyr-owned signing key, so this slice DOES generate one (a new, disjoint `oauth_signing_keys` row, transactionally alongside the Client ID upsert), mirroring hosted identity's own US-01 in that respect after all. What remains genuinely simpler than both precedents: no rotation-window/dual-generation complexity for the Client ID itself (a single idempotent-upsert suffices, since the Client ID is not security-sensitive to overwrite), and no `api_key` field in the request body (the signing key is encrypted under `EMBYR_ENCRYPTION_KEY`, not ECIES/`api_key` — ADR-037 Decision 2's own positive consequence).
 
 ## Pre-Slice SPIKE
 
