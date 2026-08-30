@@ -1,6 +1,14 @@
 version: "1.0"
 feature: embyr-rs
 updated: "2026-08-30"
+# NOTE (anonymous-sessions DISCUSS, 2026-08-30): JOB-20 is a new job for a
+# fourth, distinct end-user-identity-establishment mechanism (same persona,
+# P1 Alex) — an identity obtained with ZERO prior credential of any kind,
+# materially different from JOB-16 (custom-token, Trailmark's own backend
+# mints), JOB-18 (hosted email/password, Maria types a password), and JOB-19
+# (Google OAuth, a third-party consent screen). See jobs.yaml JOB-16/18/19
+# NOTEs below and docs/feature/anonymous-sessions/feature-delta.md § Job
+# Discovery Framing Resolution.
 
 jobs:
   - id: JOB-01
@@ -641,6 +649,13 @@ jobs:
     # authentication; no Trailmark backend, no embyr-hosted password). See
     # docs/feature/oauth-providers/feature-delta.md § Job Discovery Framing
     # Resolution.
+    # NOTE (anonymous-sessions DISCUSS, 2026-08-30): this job's own
+    # verification mechanism is now joined by a FOURTH sibling job, JOB-20
+    # (anonymous-identity), for end users who present NO credential at all —
+    # not a custom token this job's own backend mints, not a hosted password
+    # (JOB-18), not a Google consent screen (JOB-19). JOB-20 is a NEW job,
+    # not an amendment. See docs/feature/anonymous-sessions/feature-delta.md
+    # § Job Discovery Framing Resolution.
 
   - id: JOB-17
     name: document-access-control
@@ -926,6 +941,13 @@ jobs:
     # not an amendment to this one. See
     # docs/feature/oauth-providers/feature-delta.md § Job Discovery Framing
     # Resolution.
+    # NOTE (anonymous-sessions DISCUSS, 2026-08-30): a FOURTH sibling, JOB-20
+    # (anonymous-identity), covers a materially different mental model still —
+    # Trailmark's end users get a real, verified identity with ZERO prior
+    # credential of any kind, not a password (this job) and not a Trailmark
+    # backend minting a token (JOB-16). JOB-20 is a NEW job, not an amendment
+    # to this one. See docs/feature/anonymous-sessions/feature-delta.md §
+    # Job Discovery Framing Resolution.
 
   - id: JOB-19
     name: oauth-provider-identity
@@ -1003,3 +1025,76 @@ jobs:
     # Postgres credential at all (see Job Discovery Framing Resolution,
     # Resolution 2). See docs/feature/oauth-providers/feature-delta.md § Job
     # Discovery Framing Resolution and § Scope Assessment.
+    # NOTE (anonymous-sessions DISCUSS, 2026-08-30): this job's own still-open
+    # escalation (does this job's verification mechanism need JOB-18's own
+    # backend_mode=agent gating, given it structurally touches no Customer DB)
+    # is independently re-raised, not coincidentally, by JOB-20
+    # (anonymous-identity) — the SAME structural profile (no Customer DB
+    # touch, no api_key-derived encryption) produces the SAME open question a
+    # second time. See docs/feature/anonymous-sessions/feature-delta.md §
+    # Handoff Package, Escalation 2 — DESIGN should resolve fresh, ideally in
+    # a way that also settles this job's own outstanding question if the
+    # reasoning generalizes.
+
+  - id: JOB-20
+    name: anonymous-identity
+    persona: P1
+    feature: anonymous-sessions
+    job_story: >
+      When my app's end users want to try key features before committing to an
+      account — or complete a guest action without ever creating one — I want
+      each such visitor to get a real, stable, server-issued identity with zero
+      prior credential and zero backend involvement, so I can let people use my
+      app immediately while still building real per-visitor data (their own
+      draft, their own cart) the same way I would for a signed-up user.
+    dimensions:
+      functional: >
+        Maria's app calls the SDK's existing signInAnonymously() with zero
+        arguments; her session resolves to the identical VerifiedEndUserIdentity
+        type every other identity mechanism already produces, usable in the
+        same security-rule-gated reads/writes immediately
+      emotional: >
+        Alex feels he can remove the signup wall entirely for a first-touch
+        experience without losing per-visitor data isolation; Maria feels she
+        can just start using the app, no typing, no commitment
+      social: >
+        Alex can tell his team "embyr let us keep the exact same
+        try-before-you-buy flow Firebase gave us" instead of forcing every
+        visitor through a signup screen just to see a single draft
+    four_forces:
+      push: >
+        Every existing identity path (JOB-16 custom-token, JOB-18 hosted
+        password, JOB-19 Google OAuth) requires the end user to commit to SOME
+        credential before Alex's app can attach any per-user data at all — a
+        hard signup wall Firebase never imposed, a real conversion cost for
+        users who just want to try the app first
+      pull: >
+        signInAnonymously() gives Maria a real, usable uid in one call with zero
+        typing, so Alex can let her build a draft immediately and only ask her
+        to commit to a real account once she is already invested
+      anxiety: >
+        "If every anonymous visitor gets a real database identity, does my
+        Customer DB fill up with millions of one-time throwaway rows I now have
+        to clean up forever?" — addressed by this feature's own stateless
+        recommendation (zero persisted rows, zero cleanup, by construction)
+      habit: >
+        Alex already calls signInAnonymously() with zero arguments in real
+        Firebase apps for exactly this guest/try-before-signup pattern — one of
+        the more common Firebase Auth methods in production consumer apps
+    opportunity_score: 11
+    priority: high
+    # NOTE (anonymous-sessions DISCUSS, 2026-08-30): new job, not a JOB-16,
+    # JOB-18, or JOB-19 amendment — same persona (P1 Alex), a FOURTH
+    # materially different mental model (zero credential of any kind is
+    # presented — not a custom token, not a password, not an OAuth consent
+    # screen), mirroring this project's own "same persona, different goal ⇒
+    # new job" precedent applied a fourth time. Two genuinely unresolved
+    # judgment calls are explicitly escalated, not silently decided: (1)
+    # whether an anonymous identity's stability across token expiry needs a
+    # refresh-token mechanism this codebase does not build anywhere today, or
+    # a longer TTL, or an honestly-documented v1 gap; (2) whether this job's
+    # verification mechanism needs the same backend_mode=agent gating JOB-18
+    # required, the SAME open question JOB-19's own NOTE above already left
+    # unresolved for itself. See
+    # docs/feature/anonymous-sessions/feature-delta.md § Job Discovery
+    # Framing Resolution and § Handoff Package.

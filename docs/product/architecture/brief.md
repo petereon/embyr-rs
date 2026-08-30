@@ -4572,6 +4572,116 @@ Questions, Peer Review Record) lives in
 `docs/feature/batch-get-documents/feature-delta.md` §§ Wave: DESIGN — the
 single narrative file per the lean output convention. Summary below.
 
+## Application Architecture — anonymous-sessions
+
+> Updated: 2026-08-30
+> Feature: anonymous-sessions (JOB-20 — a fourth, zero-prior-credential
+> identity-establishment mechanism, `signInAnonymously()`-equivalent,
+> joining `client-auth`'s custom tokens, `client-auth-hosted-identity`'s
+> hosted email/password, and `oauth-providers`' Google sign-in)
+> Mode: Guide/Propose per Decision 1 (session-level, full-rigor DESIGN,
+> single-file SSOT convention — no DISTILL/DELIVER roadmap machinery)
+> ADRs: `adr-043-anonymous-sessions-signing-key-custody-and-driving-port.md`
+> (main — bundles bounded-context confirmation, signing-key custody,
+> stateless minting, driving-port composition, a fourth widening of
+> verification-time credential routing, and a REST-rate-limiting-gap
+> finding), `adr-044-anonymous-sessions-no-backend-mode-gating.md`
+> (Escalation 2 — no `backend_mode=agent` gating, amends `adr-036` Decision
+> 5's scope language), `adr-045-anonymous-sessions-token-ttl-reuse-no-refresh.md`
+> (Escalation 1 — reuse `TOKEN_TTL_SECS` unchanged, no refresh mechanism
+> built in this feature). Amends `adr-036-hosted-identity-bounded-context-and-storage.md`
+> (§ Decision 5, scoping clarification appended, not rewritten). Does not
+> amend `adr-002`/`adr-024`/`adr-025`/`adr-026`/`adr-037` — all reused
+> unchanged (`verify_client_identity_token`, `mint_client_identity_token`,
+> `EMBYR_ENCRYPTION_KEY`/`decrypt_with_rotation` all have ZERO code changes).
+
+Full DESIGN content (Reuse Analysis, Bounded-Context Placement, Component
+Decomposition, Driving/Driven Ports, Technology Choices, Decisions Table
+DDD-AS-1..11, C4 System Context/Container diagrams, Slice-by-Slice Design
+Notes, Open Questions) lives in
+`docs/feature/anonymous-sessions/feature-delta.md` §§ Wave: DESIGN — the
+single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: applying ADR-002's Option-D three-part test a fourth
+time to the one candidate entity this feature introduces
+(`anonymous_signing_keys`' row) confirms **extends BC-1 Tenant Management,
+no new context** — thinner even than `oauth_signing_keys`' own already-thin
+BC-1 extension (no redefinable content field at all).
+
+**Two escalations, resolved with fresh reasoning, not by inertia from
+`client-auth-hosted-identity`'s precedent**:
+1. **Refresh-token/TTL** — reuse `TOKEN_TTL_SECS` (3600s) unchanged; no
+   refresh mechanism built here. A longer anonymous-specific TTL was
+   considered and rejected (only shrinks the gap's frequency, AC-20-10
+   remains accepted regardless; breaks the codebase's one-constant-for-all
+   convention for no closing benefit). A genuine refresh mechanism is named
+   explicitly as a cross-cutting follow-up spanning all four identity
+   mechanisms, not this feature's own job (ADR-045).
+2. **`backend_mode=agent` gating** — NO gate, any call site. Ground-truth
+   code read of `oauth_providers.rs`/`sign_in_with_idp.rs` (not the ADR-037
+   prose alone) confirms oauth-providers already shipped with zero
+   `backend_mode` checks. The generalized rule: the gate exists specifically
+   to protect `resolve_customer_db_adapter`'s own structural incapability
+   for `backend_mode=agent` projects — a precondition that only applies to
+   features whose runtime path resolves a Customer DB adapter. Neither
+   oauth-providers nor anonymous-sessions ever calls that function, so
+   neither needs the gate. Recorded as a scoping amendment to ADR-036
+   Decision 5, not a rewrite (ADR-044).
+
+**One correction to DISCUSS's own assumption, found by ground-truth code
+reading**: DISCUSS's § System Constraints claimed anonymous sign-in abuse is
+"bounded today only by [the] existing generic per-project request-rate
+limiting" — `grep` across `crates/embyr-server/src/rest/` for
+`RateLimiter`/`rate_limit` returns zero matches; that limiter is gRPC-only.
+No REST `accounts:<verb>` endpoint, including this feature's own, is rate
+limited today — a pre-existing, cross-cutting gap this feature inherits and
+materially sharpens (anonymous sign-in requires strictly less proof of
+identity than its three siblings), named explicitly and not fixed here
+(extending the REST surface generally is a cross-cutting follow-up, ADR-043
+Decision 7).
+
+**Storage/custody**: confirms DISCUSS's Resolution 2 with no deviation — a
+NEW, structurally disjoint `anonymous_signing_keys` table (System DB),
+AES-256-GCM under `EMBYR_ENCRYPTION_KEY`, generated at US-01 enablement,
+byte-for-byte the same shape and generation sequence `oauth_signing_keys`
+already established. Confirms Resolution 3 (stateless minting) with no
+deviation — `end_user_id = Uuid::new_v4()`, never persisted, no Customer DB
+touch anywhere in this feature.
+
+**Driving port**: confirms Resolution 4 with no deviation — new file
+`crates/embyr-server/src/rest/sign_in_anonymously.rs`, `accounts:signUp`-compatible
+wire aim but never touching `sign_up.rs`'s own function body; `?key=`
+structurally required (the only admission bar this endpoint has, since
+anonymous sign-in presents zero other credential — a materially different
+justification than hosted-identity's own `?key=` requirement, which exists
+for Customer DB resolution this feature never performs). `OQ-AS-01` (does
+the real SDK reuse `accounts:signUp`'s action verb or a distinct one)
+remains an open, required pre-DELIVER spike; both possible dispatch
+outcomes are fully specified so DELIVER does not need to re-derive the
+decision.
+
+**Composition**: `verify_client_identity_token()`/`mint_client_identity_token()`
+have ZERO code changes. `attach_client_identity_if_present` is widened a
+FOURTH time — `client_identity_credentials` → `hosted_identity_signing_keys`
+→ `oauth_signing_keys` → `anonymous_signing_keys` — the identical
+"try source A, then B, then C, then D" pattern normalized twice already.
+
+**Reuse**: 7 EXTEND, 1 CREATE NEW (the signing-key table — structural
+disjointness leaves no alternative), 4 REUSE UNCHANGED — zero new crate
+dependencies, zero new pure `embyr-core` module (confirmed directly: unlike
+hosted-identity's password-strength rule, anonymous sign-in has no
+analogous domain logic to isolate).
+
+**External integrations**: none — every call site is this codebase's own
+System DB or a pure, zero-IO function; no contract-testing annotation
+needed.
+
+Full alternatives-considered analysis, exact schema, exact dispatch-mechanics
+contingency, and the C4 diagrams: the three ADRs above and
+`docs/feature/anonymous-sessions/feature-delta.md` §§ Wave: DESIGN.
+
 ### Summary
 
 **Bounded context**: confirms BC-2 Document Storage, no new context —

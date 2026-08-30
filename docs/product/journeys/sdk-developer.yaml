@@ -9,8 +9,24 @@ jobs:
   - JOB-17  # document-access-control (added by security-rules DISCUSS, 2026-08-17)
   - JOB-18  # embyr-hosted-identity (added by client-auth-hosted-identity DISCUSS, 2026-08-27)
   - JOB-19  # oauth-provider-identity (added by oauth-providers DISCUSS, 2026-08-30)
+  - JOB-20  # anonymous-identity (added by anonymous-sessions DISCUSS, 2026-08-30)
 updated: "2026-08-30"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (anonymous-sessions DISCUSS, 2026-08-30): JOB-20 is a new, distinct
+# job for a fourth end-user-identity-establishment mechanism (same persona,
+# P1 Alex; a materially different mental model — zero prior credential of any
+# kind, not a custom token, not a password, not an OAuth consent screen).
+# Decision 3 (UX Research Depth) = Lightweight for this feature — backend/
+# SDK-facing, not end-user UI; journey detail lives inline in
+# docs/feature/anonymous-sessions/feature-delta.md § Journey, not as a
+# separate journey-*.yaml artifact. Two genuinely unresolved judgment calls
+# are explicitly escalated, not decided here: whether an anonymous identity's
+# stability across token expiry needs a refresh-token mechanism (none exists
+# anywhere in this codebase today), and whether the same backend_mode=agent
+# gating JOB-18 required applies here too — the SAME open question JOB-19's
+# own DISCUSS already left unresolved for itself. See
+# docs/feature/anonymous-sessions/feature-delta.md § Job Discovery Framing
+# Resolution and § Handoff Package.
 # NOTE (batch-get-documents DISCUSS, 2026-08-30): JOB-01 now also covers
 # server-side batch document resolution (db.getAll(...)) via this feature —
 # same job, same persona, not a new job. No new Alex-facing mental model
