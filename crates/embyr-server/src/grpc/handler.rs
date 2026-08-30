@@ -422,7 +422,7 @@ impl FirestoreService {
             .ok()
             .flatten()
         {
-            if let Some(public_key_current) = hosted_row.public_key.try_into().ok() {
+            if let Ok(public_key_current) = hosted_row.public_key.try_into() {
                 let credential = embyr_core::client_identity::ClientIdentityCredential {
                     public_key_current,
                     public_key_previous: None,
@@ -446,7 +446,7 @@ impl FirestoreService {
             .ok()
             .flatten()
         {
-            if let Some(public_key_current) = oauth_row.public_key.try_into().ok() {
+            if let Ok(public_key_current) = oauth_row.public_key.try_into() {
                 let credential = embyr_core::client_identity::ClientIdentityCredential {
                     public_key_current,
                     public_key_previous: None,

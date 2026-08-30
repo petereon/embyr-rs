@@ -31,14 +31,29 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/embyr_test
       EMBYR_ADMIN_KEY: ci-admin-key
       EMBYR_ENCRYPTION_KEY: 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+      # This workspace now builds ~38 separate integration test binaries
+      # (grown well past the "6+" this file's own disk-space comment below
+      # was written for), each statically linking its own copy of every
+      # dependency. Even after the disk-space cleanup step, a full run has
+      # started hitting "No space left on device" mid-compile (LLVM IO
+      # errors, `ld` Bus errors from truncated mmap'd output — both are the
+      # SAME root cause, not two different bugs). Full debug info
+      # (`-C debuginfo=2`, rustc's default for the test profile) is by far
+      # the largest share of that footprint. `line-tables-only` keeps
+      # file:line info for panic backtraces while dropping the much larger
+      # variable/type debug data test binaries don't need in CI (only
+      # local interactive debugging with lldb/gdb benefits from full
+      # debuginfo=2, which local `cargo test` — unaffected by this CI-only
+      # env var — still gets).
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
     steps:
       - uses: actions/checkout@v4
 
-      # cargo test --workspace builds 7 crates + 6+ separate integration test
-      # binaries with debug symbols, which reliably exceeds the ~14 GB free
-      # on a stock ubuntu-latest runner. Removing unused preinstalled SDKs
-      # frees ~30-40 GB before the build starts.
+      # cargo test --workspace builds 7 crates + ~38 separate integration
+      # test binaries with debug symbols, which reliably exceeds the
+      # ~14 GB free on a stock ubuntu-latest runner. Removing unused
+      # preinstalled SDKs frees ~30-40 GB before the build starts.
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \

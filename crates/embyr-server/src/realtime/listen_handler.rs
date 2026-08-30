@@ -44,6 +44,12 @@ use crate::{
 /// US-04): every live `Changed` event is re-checked against `condition` (the
 /// loop-lifetime local built once below, at subscribe time) via `evaluate()`
 /// — reused completely unmodified from `embyr_core::access_control`.
+// Single call site (grpc/handler.rs); every parameter is a distinct,
+// necessary dependency of this one streaming session handler (message,
+// backend, DB, identity, response channel, timing, registry, channel name,
+// resume token) — bundling them into a params struct for a lint threshold
+// alone would be an unrequested abstraction with one caller to serve.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_add_target(
     first_msg: &ListenRequest,
     adapter: &SharedBackendAdapter,

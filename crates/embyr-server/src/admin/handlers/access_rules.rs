@@ -370,17 +370,20 @@ fn condition_parse_error_response(err: ConditionParseError) -> Response {
 /// (collection_id NOT LIKE '%/%')` constraint (migration 0024) is a second,
 /// independent defense-in-depth layer for the same invariant — this is the
 /// friendly, user-facing 400 path.
-fn validate_bare_collection_id(id: &str) -> Result<(), Response> {
+fn validate_bare_collection_id(id: &str) -> Result<(), Box<Response>> {
     if id.contains('/') {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ConditionRejectionResponse {
-                reason: "INVALID_COLLECTION_ID",
-                error: "a collection-group id must be a bare collection identifier, not a path"
-                    .to_string(),
-            }),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ConditionRejectionResponse {
+                    reason: "INVALID_COLLECTION_ID",
+                    error:
+                        "a collection-group id must be a bare collection identifier, not a path"
+                            .to_string(),
+                }),
+            )
+                .into_response(),
+        ));
     }
     Ok(())
 }
@@ -710,7 +713,7 @@ pub async fn define_group_access_rule(
     // path — validated BEFORE the condition itself (domain example: an
     // invalid collection id is rejected independent of condition validity).
     if let Err(resp) = validate_bare_collection_id(&body.collection_id) {
-        return Ok(resp);
+        return Ok(*resp);
     }
 
     // Validate against the SAME, unmodified locked v1 grammar
@@ -920,9 +923,14 @@ pub async fn simulate_query_compliance(
     // own "UNSUPPORTED_RULE_SHAPE" vocabulary for the undecidable case.
     let (compliant, reasons): (bool, Vec<&'static str>) = match outcome {
         QueryComplianceOutcome::Admitted => (true, Vec::new()),
-        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts } => (
+        QueryComplianceOutcome::Rejected {
+            unsatisfied_conjuncts,
+        } => (
             false,
-            unsatisfied_conjuncts.iter().map(|c| c.reason_code()).collect(),
+            unsatisfied_conjuncts
+                .iter()
+                .map(|c| c.reason_code())
+                .collect(),
         ),
         QueryComplianceOutcome::RejectedUnsupportedRuleShape => {
             (false, vec!["UNSUPPORTED_RULE_SHAPE"])
@@ -999,9 +1007,14 @@ pub async fn simulate_group_query_compliance(
 
     let (compliant, reasons): (bool, Vec<&'static str>) = match outcome {
         QueryComplianceOutcome::Admitted => (true, Vec::new()),
-        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts } => (
+        QueryComplianceOutcome::Rejected {
+            unsatisfied_conjuncts,
+        } => (
             false,
-            unsatisfied_conjuncts.iter().map(|c| c.reason_code()).collect(),
+            unsatisfied_conjuncts
+                .iter()
+                .map(|c| c.reason_code())
+                .collect(),
         ),
         QueryComplianceOutcome::RejectedUnsupportedRuleShape => {
             (false, vec!["UNSUPPORTED_RULE_SHAPE"])
