@@ -16,6 +16,30 @@ jobs:
       social: Be seen as infrastructure-independent; avoid "locked into Google" reputation
     opportunity_score: 18
     priority: critical
+    # NOTE (aggregation-queries DISCUSS, 2026-08-30): this job's functional
+    # dimension ("all SDK calls succeed unchanged") is now realized for the
+    # SDK's aggregate-query surface (.count()/.sum()/.average()) via this
+    # feature — same job, same persona (P1 Alex), not a new job (mirrors the
+    # "make it real"/close-the-remaining-gap pattern of admin-api-v2 -> JOB-10
+    # and card-payments-backend -> JOB-14, not the Identity track's own
+    # "same persona, different goal -> new job" pattern). Investigation found
+    # RunAggregationQuery's absence from the client-facing
+    # google.firestore.v1.Firestore proto was NOT a deliberate exclusion —
+    # docs/SPEC.md already documented a complete contract, and BC-2 Document
+    # Storage's own ubiquitous language (adr-002-bounded-contexts.md) already
+    # named "AggregationQuery" — a documented-but-unbuilt gap, not a founding
+    # decision. Reuses embyr_core::access_control::check_query_compliance()
+    # (ADR-031/032) unchanged for access-rule enforcement over the
+    # aggregation's own underlying filter tree. v1 scope: COUNT for all
+    # backend_mode families; SUM/AVG for direct_pg/aws_secret/gcp_secret only
+    # (backend_mode=agent SUM/AVG deferred — requires extending
+    # embyr-agent's own internal proto, a separate deployment artifact). One
+    # genuinely unresolved item is explicitly escalated, not decided: whether
+    # real Firestore's own RunAggregationQuery wire method is unary or
+    # server-streaming (OQ-AGG-01) — this DISCUSS had no tool available to
+    # verify against the actual public googleapis proto/SDK stubs. See
+    # docs/feature/aggregation-queries/feature-delta.md § Job Discovery
+    # Framing Resolution and § Handoff Package.
     # NOTE (client-auth DISCUSS, 2026-08-16): this job's functional dimension
     # ("all SDK calls succeed unchanged") is scoped to the Firestore data-plane
     # SDK surface (setDoc/getDoc/onSnapshot/etc, per the shipped embyr-rs

@@ -11,6 +11,18 @@ jobs:
   - JOB-19  # oauth-provider-identity (added by oauth-providers DISCUSS, 2026-08-30)
 updated: "2026-08-30"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (aggregation-queries DISCUSS, 2026-08-30): JOB-01 now also covers
+# server-side count()/sum()/average() aggregation queries via this feature —
+# same job, same persona, not a new job. No new Alex-facing mental model
+# beyond "the same filtered-query builder he already knows, asking for a
+# computed summary instead of documents" — Decision 3 (UX Research Depth) =
+# Lightweight; no separate journey-*.yaml artifact, journey detail lives
+# inline in docs/feature/aggregation-queries/feature-delta.md § Journey.
+# One item is explicitly escalated to DESIGN, not decided here: whether real
+# Firestore's own RunAggregationQuery wire method is unary or
+# server-streaming (OQ-AGG-01, no verification tool available to this
+# DISCUSS). See docs/feature/aggregation-queries/feature-delta.md § Job
+# Discovery Framing Resolution and § Handoff Package.
 # NOTE (oauth-providers DISCUSS, 2026-08-30): JOB-19 is a new, distinct job
 # for one-click "Sign in with Google" (same persona, P1 Alex; a THIRD mental
 # model distinct from both JOB-16's custom-token bridge and JOB-18's hosted
