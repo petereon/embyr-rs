@@ -84,9 +84,16 @@ async fn rerunning_preparation_after_an_interrupted_partial_run_resumes_safely()
             .unwrap_or_else(|| "None".into()),
     );
 
+    // Expected total asserted against the real migrations/customer/ count,
+    // not a hardcoded "2" — client-auth-hosted-identity added 0003/0004
+    // this session (previously max was 2).
+    let expected_total_migrations = migrator.iter().count();
     let universe = &["migrations.applied_count", "prep_process.exit_code"];
     let mut expected = HashMap::new();
-    expected.insert("migrations.applied_count", set_to("2".to_string()));
+    expected.insert(
+        "migrations.applied_count",
+        set_to(expected_total_migrations.to_string()),
+    );
     expected.insert("prep_process.exit_code", set_to("0".to_string()));
 
     assert_state_delta(&before, &after, universe, &expected);

@@ -90,10 +90,17 @@ async fn provisioning_fails_with_a_specific_complaint_when_schema_is_stale() {
     );
 
     assert_state_delta(&before, &after, universe, &expected);
+    // Expected version asserted against the real migrations/customer/
+    // migration count, not a hardcoded "2" — client-auth-hosted-identity
+    // added 0003/0004 this session (previously 2 files, now 4), and this
+    // literal-'2'-character check silently kept "passing or failing" on
+    // incidental digit matches elsewhere in the message rather than
+    // actually verifying the expected version named is current.
+    let expected_migration_count = migrator.iter().count();
     let detail = body["detail"].as_str().unwrap_or("");
     assert!(
-        detail.contains('2') && detail.contains('1'),
-        "AC-02-03: detail must name both expected (2) and found (1) \
+        detail.contains(&expected_migration_count.to_string()) && detail.contains('1'),
+        "AC-02-03: detail must name both expected ({expected_migration_count}) and found (1) \
          versions; body: {body}"
     );
 }

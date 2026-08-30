@@ -45,10 +45,25 @@ async fn elena_preps_a_fresh_database_and_sees_the_applied_schema_version() {
         "AC-01-01: successful preparation must exit 0; stderr: {}",
         run.stderr
     );
+    // Migration count asserted against the real migrations/customer/
+    // directory count, not a hardcoded literal — client-auth-hosted-identity
+    // added 0003/0004 this session (previously 2 files, now 4), and this
+    // assertion's own prior hardcoded "contains('2')" silently broke rather
+    // than failing loudly when that count changed.
+    let expected_migration_count = std::fs::read_dir(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../migrations/customer"),
+    )
+    .expect("read migrations/customer directory")
+    .filter(|e| {
+        e.as_ref()
+            .is_ok_and(|e| e.path().extension().is_some_and(|ext| ext == "sql"))
+    })
+    .count();
+    let expected_marker = format!("{expected_migration_count} of {expected_migration_count}");
     assert!(
-        run.stdout.to_lowercase().contains("ready") && run.stdout.contains('2'),
+        run.stdout.to_lowercase().contains("ready") && run.stdout.contains(&expected_marker),
         "AC-01-01: stdout must confirm readiness and name the schema version \
-         applied (expected 2 of 2 migrations); got: {}",
+         applied (expected {expected_marker} migrations); got: {}",
         run.stdout
     );
 

@@ -40,16 +40,25 @@ async fn a_found_version_higher_than_expected_is_treated_as_ready() {
         .expect("connect to seed the customer database");
     seed_adapter.migrate().await.expect("seed migration");
 
-    // Given: a bookkeeping row for a hypothetical migration 3 — simulates a
-    // newer prep-tool build having applied a migration this server's
-    // compiled-in Migrator (expected_version = 2) does not itself know
-    // about yet.
+    // Given: a bookkeeping row for a hypothetical migration one past the
+    // real current max — simulates a newer prep-tool build having applied a
+    // migration this server's compiled-in Migrator does not itself know
+    // about yet. Computed dynamically (max real version + 1), not
+    // hardcoded — client-auth-hosted-identity added 0003/0004 this session
+    // (previously max was 2), and a hardcoded "3" collided with the now-real
+    // migration 0003's own bookkeeping row (duplicate primary key).
     let customer_sys_pool = sqlx::PgPool::connect(&customer_db_url).await.unwrap();
+    let max_real_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+        .fetch_one(&customer_sys_pool)
+        .await
+        .expect("read max applied migration version");
+    let forward_compat_version = max_real_version + 1;
     sqlx::query(
         "INSERT INTO _sqlx_migrations \
          (version, description, installed_on, success, checksum, execution_time) \
-         VALUES (3, 'forward_compat_probe', now(), true, '\\x00'::bytea, 0)",
+         VALUES ($1, 'forward_compat_probe', now(), true, '\\x00'::bytea, 0)",
     )
+    .bind(forward_compat_version)
     .execute(&customer_sys_pool)
     .await
     .expect("insert forward-compatibility bookkeeping row");
@@ -80,7 +89,7 @@ async fn a_found_version_higher_than_expected_is_treated_as_ready() {
     // Then: treated as Ready — provisioning succeeds, not blocked as Stale.
     assert_eq!(
         status, 201,
-        "OQ-1/CDO-AD-05: found_version (3) >= expected_version (2) must be \
-         Ready, not Stale; body: {body}"
+        "OQ-1/CDO-AD-05: found_version ({forward_compat_version}) >= expected_version \
+         ({max_real_version}) must be Ready, not Stale; body: {body}"
     );
 }
