@@ -551,3 +551,357 @@ Next step (NOT performed by this agent): orchestrator dispatches `nw-solution-ar
 
 - `docs/product/jobs.yaml` — NOTE appended to JOB-01 documenting this feature's realization (extends, not a new job). See diff below.
 - `docs/product/journeys/sdk-developer.yaml` — NOTE appended documenting this feature, mirroring the established cross-reference convention for other JOB-01-realizing features.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Agent**: Morgan (nw-solution-architect) | **Mode**: Propose (per Decision 1, no live user)
+
+✓ `docs/feature/aggregation-queries/feature-delta.md` (full, DISCUSS's own content above) — 4 slices, 4 user stories, OQ-AGG-01 resolved by the orchestrator (server-streaming), Resolution 3 (Option B, proxy-only agent-mode COUNT).
+✓ `docs/feature/aggregation-queries/slices/slice-01-count-postgres.md` through `slice-04-average.md` (full) — IN/OUT scope, Learning Hypotheses, AC per slice.
+✓ `docs/SPEC.md §RunAggregationQuery` (line 682), `§Aggregation` (line 888), `§Server-Streaming RPCs` (line 669) — confirms SPEC.md already groups `RunAggregationQuery` with `RunQuery`/`BatchGetDocuments` under streaming RPCs, resolving the apparent "exactly one response" unary-sounding phrasing (message cardinality, not transport) — cross-checked against this architect's own knowledge of real Firestore's public `StructuredAggregationQuery`/`Aggregation` shape, **no divergence found**. See ADR-038.
+✓ `proto/google/firestore/v1/firestore.proto` (full) — confirmed current 10-RPC set, exact message shapes for `RunQueryRequest`/`RunQueryResponse` used as the direct structural precedent for the new messages.
+✓ `crates/embyr-server/src/grpc/handler.rs::handle_run_query` (full, lines 1236-1483) — confirmed the exact composition: `extract_project_id` → `extract_api_key` → `rate_limiter.check` → `authenticate` (+ suspension check) → `attach_client_identity_if_present` → proto→domain translation → dual-arm `all_descendants` branch (`get_group_access_rule`/`get_access_rule` → `parse_condition` → `check_query_compliance` → `Admitted` falls through, else `query_compliance_rejection`) → composite-index check (v1 aggregation has no `order_by`, so this arm is skipped entirely, not reused) → `adapter.run_query(...)` → stream construction. This is `handle_run_aggregation_query`'s own direct structural precedent, confirmed by reading, not assumed.
+✓ `crates/embyr-core/src/access_control/mod.rs::check_query_compliance` (full function body, lines 747-791, plus `Atom`/`decompose_decidable`) — confirmed signature `fn(condition: &Condition, filter: Option<&QueryFilter>, auth: Option<&AuthContext>) -> QueryComplianceOutcome`, pure, IO-free, zero coupling to `RunQuery`'s own response shape. Directly reusable, unchanged. See ADR-039.
+✓ `crates/embyr-core/src/storage/backend_adapter.rs` (full, `BackendAdapter` trait, 119 lines) — confirmed exactly 8 existing methods, no aggregation method, `Send + Sync` object-safe trait, existing `probe()` method already the substrate-liveness contract both concrete adapters implement.
+✓ `crates/embyr-pg-storage/src/backend_adapter.rs::run_query` (lines 530-670+) and `crates/embyr-pg-storage/src/encoding/query.rs` (full, `append_filter`/`append_field_filter`/`order_by_expr`) — confirmed WHERE-clause-building is cleanly reusable for aggregation's SELECT-clause swap; **also confirmed field paths are raw-string-interpolated into SQL with zero validation anywhere in this call path** — new finding, see ADR-040.
+✓ `crates/embyr-pg-storage/src/encoding/field_value.rs` (full) — confirmed the type-tagged JSON field encoding (`{"t":"I"|"D"|"S"|...,"v":...}`), the load-bearing fact behind ADR-040's crash-free, type-correct SUM/AVG numeric exclusion.
+✓ `proto/embyr/agent/v1/storage_agent.proto` (full) and `crates/embyr-agent/src/server.rs::run_aggregation_query` (lines 469-511, full) — confirmed the agent's own shipped `RunAggregationQuery` is unary, COUNT-only, `docs.len()`-based, and DOES read/apply an inbound `filter` via `proto_filter_to_domain` — meaning it is READY to receive a forwarded filter, the load-bearing fact behind Slice 02's own filter-translator design (ADR-039).
+✓ `crates/embyr-server/src/adapters/agent_backend.rs` (full, `AgentBackendAdapter`, 492 lines) — confirmed the structural precedent for Slice 02's own implementation (`get_document`/`create_document`/etc.'s call shape, `grpc_err` convention, `field_value_to_agent_value` conversion pattern) — **and confirmed the severity-flagged `run_query` filter-dropping finding** (§ ADR-039).
+✓ `crates/embyr-agent/src/server.rs::core_error_to_status` (lines 84-97, full) — confirmed this is an EXHAUSTIVE match with no wildcard arm, the load-bearing fact behind ADR-041's correction of Slice 01's own `CoreError::Unimplemented` assumption.
+✓ `crates/embyr-core/src/error.rs` (full, `CoreError` enum) — confirmed current 11 variants, none named `Unimplemented`; confirmed `FailedPrecondition(String)` already exists and already maps correctly in both existing `core_error_to_status` implementations.
+✓ `crates/embyr-proto/build.rs` (full) — confirmed `tonic_build::configure().compile_protos(...)` already globs `firestore.proto` in its `proto_files` list; zero new build step needed for the new RPC/messages.
+✓ `docs/product/architecture/adr-002-bounded-contexts.md` (targeted, BC-2 section) — confirmed line 71/73 already names `RunAggregationQuery`/`AggregationQuery` as BC-2's own responsibility and ubiquitous language — no bounded-context change, confirmed not revised.
+✓ `docs/product/architecture/adr-031-query-shape-compliance-check.md`, `adr-032-collection-group-rule-storage-and-composition.md` — read in full during DISCUSS, re-confirmed unchanged by this DESIGN.
+
+No contradictions found between this DESIGN's own findings and DISCUSS's requirements. Two genuinely new, DISCUSS-unanticipated findings were surfaced (§ Escalated Findings below) — both are pre-existing gaps in already-shipped, unrelated code (`RunQuery`'s own agent-mode filter handling; the codebase-wide absence of field-path validation), not contradictions of this feature's own requirements, and neither blocks this feature's own design from proceeding.
+
+---
+
+## Wave: DESIGN / [REF] Escalated Findings — Flagged First, Read Before Anything Else Below
+
+**These are NOT this feature's own bugs and are NOT fixed by this feature's own slices.** They are named here, prominently, because they were discovered only as a byproduct of this feature's own required reading, and because leaving them undocumented would repeat the exact failure mode this DISCUSS's own Resolution 1 identified for `RunAggregationQuery` itself (a real gap, silently undocumented, discovered by accident years later).
+
+### Finding 1 (HIGH severity) — `AgentBackendAdapter::run_query` never forwards the caller's filter to the agent
+
+`crates/embyr-server/src/adapters/agent_backend.rs::run_query` (client-facing, already shipped, `backend_mode=agent`'s own `RunQuery` proxy) takes `_query: &StructuredQuery` (deliberately unused, underscore-prefixed) and hardcodes `filter: None` when building the agent's own `RunQueryRequest`. `check_query_compliance()` correctly ADMITS a caller whose filter satisfies an ownership-equality rule (e.g., `owner_id == caller's own uid`), but the actual query executed against the agent's own Postgres is **unfiltered** — every document in the collection is returned to any admitted caller, not just their own. This is a genuine, already-in-production, cross-user data exposure for every `backend_mode=agent` deployment's `RunQuery` calls. Postgres-family (`direct_pg`/`aws_secret`/`gcp_secret`) is unaffected. Full detail, and this feature's own designed-not-to-repeat mitigation for `RunAggregationQuery` specifically: `adr-039-aggregation-compliance-and-filter-integrity.md`. **Recommended remediation** (separate, urgent, out-of-scope-for-this-feature bugfix): reuse the `domain_filter_to_agent_filter` function this feature introduces (Slice 02) to fix `run_query` too — the fix is a small, already-designed, drop-in reuse once Slice 02 ships.
+
+### Finding 2 (HIGH severity) — field-path validation (SPEC.md Invariant 6) is not enforced anywhere in `embyr-server`/`embyr-pg-storage`
+
+`docs/SPEC.md` documents `^[a-zA-Z_][a-zA-Z0-9_.]*$` as a required field-path validation invariant (Invariant 6, line 1367), and this feature's own DISCUSS slices (Slice 01/03 Technical Notes) assumed this validation is "reused... existing." Reading `crates/embyr-pg-storage/src/encoding/query.rs` in full shows field paths are raw-string-interpolated into SQL fragments (filter comparisons, `ORDER BY`, cursor comparisons) with **zero validation anywhere in the call path** — the only implementation resembling this invariant anywhere in the codebase is `embyr-agent`'s own private `validate_field_path`, which is weaker (checks only for consecutive dots) and lives in a separately-deployed binary. This is a latent SQL-injection-shaped gap in the already-shipped `RunQuery` (Postgres-family) path. Full detail, and this feature's own new, first-ever real enforcement of the invariant (scoped to its own new SUM/AVG field selector only): `adr-040-aggregation-sql-pushdown-and-field-path-validation.md`. **Recommended remediation** (separate, out-of-scope-for-this-feature follow-up): apply the new `validate_field_path` (introduced by this feature in `embyr-core`) to `RunQuery`'s own existing filter/order-by/cursor field paths.
+
+Both findings are also named in § Out of Scope (below) and in § Handoff Package, for orchestrator triage.
+
+---
+
+## Wave: DESIGN / [REF] DDD List
+
+| # | Decision | Verdict | One-line rationale |
+|---|---|---|---|
+| DDD-AGG-1 | Wire shape (message-field level) | `stream RunAggregationQueryResponse`, exactly-one-message cardinality, field numbers per real Firestore's public proto (best-available knowledge, DELIVER-time verification recommended) | Locks OQ-AGG-01 at the byte-shape level; SPEC.md cross-checked, no divergence (ADR-038) |
+| DDD-AGG-2 | v1 aggregation-count limit | Exactly 1 `Aggregation` entry required; 0 or >1 → `Unimplemented` | DISCUSS System Constraints, not reopened; wire shape stays future-proof (`repeated`) |
+| DDD-AGG-3 | `Count.up_to` | Present on the wire, rejected (`Unimplemented`) if set, in v1 | Matches real proto shape without implementing capped-count semantics yet |
+| DDD-AGG-4 | `check_query_compliance()` reuse | Reused byte-for-byte unchanged, same composition point as `handle_run_query` | Confirmed pure function, zero coupling (ADR-039) |
+| DDD-AGG-5 | Filter-identity invariant | Same in-memory `QueryFilter` value used for both the compliance check and the adapter call, by construction | Prevents check/execute divergence — the exact bug Finding 1 exposes for `RunQuery`'s own agent-mode path |
+| DDD-AGG-6 | Agent-mode filter forwarding | New `domain_filter_to_agent_filter` (Slice 02 only) forwards the compliance-checked filter into the agent's `RunAggregationQueryRequest` | Required for AC-01-07 correctness AND to avoid repeating Finding 1 in new code (ADR-039) |
+| DDD-AGG-7 | SQL push-down mechanism | `COUNT(*)` / `COALESCE(SUM(CASE WHEN t IN ('I','D') THEN ... END),0)` / `AVG(CASE WHEN t IN ('I','D') THEN ... END)`, reusing `append_filter` unchanged | Type-tagged JSON encoding makes this crash-free and type-correct; Postgres's native `AVG()` gives AC-01-19's null-vs-zero for free (ADR-040) |
+| DDD-AGG-8 | Field-path validation | New pure `validate_field_path` in `embyr-core`, hand-written regex-equivalent, zero new dependency | First real enforcement of SPEC.md Invariant 6 outside `embyr-agent`; required for the new SUM/AVG SQL-interpolation site (ADR-040) |
+| DDD-AGG-9 | Agent-mode SUM/AVG scope | Deferred, `Unimplemented`, per Resolution 3 Option B, not reopened | Requires agent-binary/proto changes, materially separate deployment artifact |
+| DDD-AGG-10 | `CoreError` plumbing | No new variant; reuse `FailedPrecondition` + a handler-local `aggregation_error_to_status` mapping it to `Status::unimplemented` | New variant would force a compile-fix inside `embyr-agent`'s own exhaustive match, contradicting Resolution 3's "zero agent-binary changes" (ADR-041) |
+| DDD-AGG-11 | Response value mapping | `Count`→`IntegerValue`, `Sum`/`Avg(Some)`→`DoubleValue`, `Avg(None)`→`NullValue` (present, not absent) | Matches real Firestore's null-present AVG behavior; `DoubleValue`-always-for-Sum is a documented, low-risk simplification (ADR-040) |
+| DDD-AGG-12 | Bounded context | Confirms BC-2 Document Storage, no new context, no `adr-002` amendment | Already named in BC-2's own ubiquitous language before this feature existed |
+| DDD-AGG-13 | Development paradigm | Unchanged — functional-where-practical Rust, per project `CLAUDE.md` | No paradigm-affecting decision in this feature; pure `Result`-returning functions throughout |
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component | Path | Change Type | Slice |
+|---|---|---|---|
+| `Firestore` service definition | `proto/google/firestore/v1/firestore.proto` | EXTEND (new RPC + 4 new messages, 10 existing RPCs untouched) | 01 |
+| `AggregationKind`, `AggregationQuery`, `AggregateValue` domain types | `crates/embyr-core/src/domain/query.rs` | EXTEND (new types alongside existing `StructuredQuery`/`QueryFilter`) | 01 |
+| `validate_field_path` | `crates/embyr-core/src/domain/query.rs` | CREATE NEW (pure function) | 01 (used by 03/04) |
+| `BackendAdapter::run_aggregation_query` | `crates/embyr-core/src/storage/backend_adapter.rs` | EXTEND (new trait method, default-provided body) | 01 |
+| `PostgresBackendAdapter::run_aggregation_query` | `crates/embyr-pg-storage/src/backend_adapter.rs` | EXTEND (new method; COUNT in Slice 01, +SUM in Slice 03, +AVG in Slice 04) | 01, 03, 04 |
+| `AgentBackendAdapter::run_aggregation_query` + `domain_filter_to_agent_filter` | `crates/embyr-server/src/adapters/agent_backend.rs` | EXTEND (new method + new helper function) | 02 |
+| `handle_run_aggregation_query` + `aggregation_error_to_status` | `crates/embyr-server/src/grpc/handler.rs` | EXTEND (new handler + new local error-mapping fn, `FirestoreService` trait impl gains one method) | 01 |
+| `embyr-proto` generated stubs | `crates/embyr-proto/` (generated by `build.rs`, no manual edits) | AUTO (zero-touch, `build.rs` already globs the proto file) | 01 |
+
+No changes: `check_query_compliance`, `get_access_rule`, `get_group_access_rule`, `parse_condition`, `query_compliance_rejection`, `group_rule_not_defined_rejection`, `append_filter`, `field_value_to_proto`, `storage_agent.proto`, any `crates/embyr-agent/` file, `crates/embyr-proto/build.rs`.
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports
+
+- **gRPC :8080** (`google.firestore.v1.Firestore`) — new `RunAggregationQuery` RPC, added alongside the existing 10.
+- **gRPC-Web :8081** — automatic via the existing generic `tonic-web` wrap; zero new code (confirmed by DISCUSS, re-confirmed here — no REST-specific handler exists to touch).
+- **Plain-REST JSON :8081** — explicitly not a driving port for this feature (pre-existing, shared gap; unbuilt for `RunQuery` too).
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters
+
+| Driven Port | New/Extended Method | Adapter | Backend | External Dependency |
+|---|---|---|---|---|
+| `BackendAdapter` | `run_aggregation_query` | `PostgresBackendAdapter` | `direct_pg`/`aws_secret`/`gcp_secret` | Customer Postgres — already `probe()`-covered, no new probe needed (same connection pool `run_query` already uses) |
+| `BackendAdapter` | `run_aggregation_query` | `AgentBackendAdapter` | `agent` | `embyr-agent`'s mTLS gRPC channel — already `probe()`-covered (`AgentBackendAdapter::probe`, sentinel `GetDocument`), no new probe needed; the new method reuses the SAME already-established, already-probed `Channel`/`StorageAgentClient` |
+
+**Earned Trust check (principle 12)**: this feature introduces zero NEW external dependencies — both adapters already implement `probe()` and are already wired through the existing "wire → probe → use" composition root (confirmed by reading `BackendAdapter`'s trait definition, which already mandates `probe()` for every implementor). `run_aggregation_query` is a new PORT METHOD over an already-probed connection, not a new substrate. No new probe is designed for this feature; this is a deliberate, reasoned conclusion, not an omission.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new dependencies. `tonic-build` (existing), `sqlx::QueryBuilder` (existing), `async-trait` (existing) — all reused unchanged. `regex` crate deliberately NOT added (ADR-040 § Alternatives Considered) — field-path validation is a hand-written character scan.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table
+
+| # | Decision |
+|---|---|
+| DDD-AGG-1 | `stream RunAggregationQueryResponse`, real-Firestore-shaped messages |
+| DDD-AGG-2 | Exactly 1 aggregation/request in v1, `repeated` wire shape |
+| DDD-AGG-3 | `Count.up_to` rejected in v1 |
+| DDD-AGG-4 | `check_query_compliance()` reused unchanged |
+| DDD-AGG-5 | Filter-identity invariant (compliance-checked filter == executed filter) |
+| DDD-AGG-6 | New agent-mode filter translator (Slice 02) |
+| DDD-AGG-7 | Type-tag-based SQL push-down for COUNT/SUM/AVG |
+| DDD-AGG-8 | New `validate_field_path`, no new dependency |
+| DDD-AGG-9 | Agent-mode SUM/AVG deferred |
+| DDD-AGG-10 | No new `CoreError` variant; handler-local error mapping |
+| DDD-AGG-11 | Count→Integer, Sum/Avg→Double, empty-Avg→present-Null |
+| DDD-AGG-12 | BC-2, no new bounded context |
+| DDD-AGG-13 | Paradigm unchanged (functional-where-practical Rust) |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| `Firestore` service (proto) | `proto/google/firestore/v1/firestore.proto` | New RPC on an existing service definition | EXTEND | Adds 1 RPC + 4 messages alongside the existing 10 RPCs; zero changes to any existing message |
+| `handle_run_query`'s composition (auth/rate-limit/suspension/identity/compliance) | `crates/embyr-server/src/grpc/handler.rs:1236-1483` | New `handle_run_aggregation_query` needs the identical shared-helper composition | EXTEND (new sibling handler, shared helpers called unchanged) | `extract_project_id`/`extract_api_key`/`rate_limiter.check`/`authenticate`/`attach_client_identity_if_present`/`check_query_compliance`/`query_compliance_rejection`/`group_rule_not_defined_rejection` all reused verbatim; only the terminal proto-parsing and dispatch differ |
+| `check_query_compliance` / `QueryComplianceOutcome` / `AuthContext` | `crates/embyr-core/src/access_control/mod.rs` | Aggregation's embedded filter tree needs identical compliance evaluation | REUSE UNCHANGED | Confirmed pure, IO-free, no coupling to `RunQuery`'s own shape (ADR-039) |
+| `get_access_rule` / `get_group_access_rule` | `crates/embyr-server/src/adapters/system_db.rs:774,1115` | Same dual-arm rule lookup `RunQuery` uses | REUSE UNCHANGED | Called identically, same signatures, same call site shape |
+| `BackendAdapter` trait | `crates/embyr-core/src/storage/backend_adapter.rs` | New port method needed | EXTEND | Default-provided body (`FailedPrecondition`, ADR-041) — zero-cost for both existing implementors until each opts in |
+| `PostgresBackendAdapter::run_query` / `append_filter` / collection-group WHERE branch | `crates/embyr-pg-storage/src/backend_adapter.rs:530+`, `encoding/query.rs` | SELECT-clause differs; WHERE-clause fully reusable | EXTEND (reuse WHERE-building, new SELECT variant) | `append_filter` and the collection-group `LIKE`/`=` branch copied unchanged; only SELECT and the (not-applicable-to-aggregation) trailing ORDER BY/LIMIT/OFFSET/cursor logic differ |
+| `AgentBackendAdapter` (client-facing) | `crates/embyr-server/src/adapters/agent_backend.rs` | New port method + new helper needed | EXTEND | Adds `run_aggregation_query` + `domain_filter_to_agent_filter`, following the file's own existing `field_value_to_agent_value`/`grpc_err` conventions |
+| `embyr-agent`'s `RunAggregationQuery` (already shipped) | `proto/embyr/agent/v1/storage_agent.proto`, `crates/embyr-agent/src/server.rs:469-511` | Slice 02's proxy target | REUSE UNCHANGED | Zero changes to agent proto or binary (ADR-041 § Decision 4), per Resolution 3 Option B |
+| `field_value_to_proto` / `Value`/`ValueType` | `crates/embyr-server/src/encoding/firestore_proto.rs` | Building `aggregate_fields` map values | EXTEND (direct construction, no new conversion fn) | `Value{value_type: Some(ValueType::IntegerValue/DoubleValue/NullValue(...))}` built inline; trivial, no new abstraction needed |
+| `CoreError` enum | `crates/embyr-core/src/error.rs` | Considered for a new "unimplemented" variant | **REJECTED — REUSE `FailedPrecondition` instead** | Adding a variant would force a compile-fix inside `embyr-agent`'s own exhaustive `core_error_to_status` match, contradicting Resolution 3's "zero agent-binary changes" (ADR-041) |
+| Field-path validation | *(none existing anywhere in `embyr-server`/`embyr-pg-storage`)* | New SUM/AVG field selector is a new SQL-interpolation site | CREATE NEW | No existing, enforced validator in embyr-core/embyr-server; `embyr-agent`'s own private copy is weaker and lives in a separately-deployed, untouched binary (Finding 2, ADR-040) |
+| Domain→agent-proto filter translator | *(none existing — `run_query`'s own proxy hardcodes `filter: None`)* | Slice 02's COUNT proxy must forward the filter for correctness AND to avoid Finding 1 | CREATE NEW (narrowly scoped) | Mirrors the existing `field_value_to_agent_value` pattern in the same file; used ONLY by the new `run_aggregation_query` method, `run_query`'s own bug is untouched (Finding 1, ADR-039) |
+
+**9 EXTEND, 2 CREATE NEW, 1 explicitly-rejected-CREATE-NEW (converted to REUSE)** — zero unjustified `CREATE NEW` decisions; both `CREATE NEW` entries are pure, IO-free functions with no existing reusable equivalent, each independently justified above.
+
+---
+
+## Wave: DESIGN / [REF] C4 Diagrams
+
+### System Context (L1)
+
+```mermaid
+C4Context
+  title System Context — RunAggregationQuery (aggregation-queries)
+  Person(alex, "Alex", "SDK Developer — Trailmark's own trip-journal app")
+  System(embyr, "embyr-rs", "Firestore protocol translation server")
+  SystemDb(pg_direct, "Customer Postgres", "direct_pg / aws_secret / gcp_secret backend modes")
+  System_Ext(agent, "embyr-agent", "Customer-VPC agent binary — already shipped, unchanged")
+  SystemDb(pg_agent, "Agent's own Postgres", "Inside customer VPC, never reachable directly by embyr-rs")
+
+  Rel(alex, embyr, "Calls RunAggregationQuery (COUNT/SUM/AVG) via Firestore SDK, gRPC/gRPC-Web")
+  Rel(embyr, pg_direct, "Pushes down SELECT COUNT/SUM/AVG for direct_pg/aws_secret/gcp_secret projects")
+  Rel(embyr, agent, "Proxies COUNT via mTLS gRPC for backend_mode=agent projects")
+  Rel(agent, pg_agent, "Executes fetch-then-count (pre-existing, unchanged) inside the customer's own VPC")
+```
+
+### Container (L2)
+
+```mermaid
+C4Container
+  title Container — RunAggregationQuery request flow
+  Person(alex, "Alex", "SDK Developer")
+  Container(grpc, "gRPC :8080 / gRPC-Web :8081", "tonic + tonic-web", "FirestoreService — RunAggregationQuery added alongside 10 existing RPCs")
+  Container(handler, "handle_run_aggregation_query", "Rust, grpc/handler.rs", "New handler: auth, rate-limit, compliance check, dispatch")
+  Container(compliance, "check_query_compliance()", "Rust, access_control/mod.rs", "REUSED UNCHANGED from RunQuery/ADR-031/032")
+  Container(port, "BackendAdapter::run_aggregation_query", "Rust trait, embyr-core", "New driven port method")
+  Container(pgadapter, "PostgresBackendAdapter", "Rust, embyr-pg-storage", "COUNT/SUM/AVG SQL push-down")
+  Container(agentadapter, "AgentBackendAdapter", "Rust, embyr-server", "Proxies to embyr-agent, COUNT only")
+  ContainerDb(pg, "Customer Postgres", "direct_pg/aws_secret/gcp_secret")
+  Container_Ext(agent, "embyr-agent", "Already shipped, unchanged")
+
+  Rel(alex, grpc, "RunAggregationQuery request")
+  Rel(grpc, handler, "Dispatches to")
+  Rel(handler, compliance, "Checks aggregation's embedded StructuredQuery filter against the access rule")
+  Rel(handler, port, "Dispatches admitted request to")
+  Rel(port, pgadapter, "Resolves to, for Postgres-family projects")
+  Rel(port, agentadapter, "Resolves to, for backend_mode=agent projects")
+  Rel(pgadapter, pg, "SELECT COUNT(*)/SUM(...)/AVG(...) WHERE ...")
+  Rel(agentadapter, agent, "Proxies COUNT via mTLS gRPC, forwards compliance-checked filter")
+```
+
+### Component (L3) — `handle_run_aggregation_query` internals
+
+Complex-subsystem threshold met (6 internal collaborators): included per the mandatory-C4 rule for subsystems this size.
+
+```mermaid
+C4Component
+  title Component — handle_run_aggregation_query internals
+  Component(parse, "Proto → domain translation", "Parses StructuredAggregationQuery, validates aggregation count == 1, validates alias/Count.up_to")
+  Component(fieldval, "validate_field_path", "NEW — validates SUM/AVG field selector before any SQL is built")
+  Component(ruleload, "get_access_rule / get_group_access_rule", "REUSED — dual-arm lookup on all_descendants")
+  Component(compliance, "check_query_compliance", "REUSED UNCHANGED")
+  Component(dispatch, "adapter.run_aggregation_query(...)", "Dispatches to the resolved BackendAdapter")
+  Component(errmap, "aggregation_error_to_status", "NEW — maps FailedPrecondition to Status::unimplemented, delegates everything else")
+  Component(respbuild, "Response construction", "Builds AggregationResult{aggregate_fields} under the caller's alias")
+
+  Rel(parse, fieldval, "Validates field selector (SUM/AVG only)")
+  Rel(parse, ruleload, "Looks up the applicable rule")
+  Rel(ruleload, compliance, "Checks the SAME filter object (filter-identity invariant, DDD-AGG-5)")
+  Rel(compliance, dispatch, "Admitted -> dispatches")
+  Rel(dispatch, errmap, "Maps any adapter error")
+  Rel(dispatch, respbuild, "Success -> builds response")
+```
+
+---
+
+## Wave: DESIGN / [REF] Slice-by-Slice Design Notes
+
+### Slice 01 (COUNT, Postgres-family) — Walking Skeleton
+
+- Proto: `RunAggregationQuery` RPC + 4 messages added to `firestore.proto` (ADR-038).
+- `crates/embyr-core/src/domain/query.rs`: `AggregationKind{Count, Sum(String), Avg(String)}`, `AggregationQuery{query: StructuredQuery, aggregation: AggregationKind, alias: String}`, `AggregateValue{Count(i64), Sum(f64), Avg(Option<f64>)}`, `validate_field_path(path: &str) -> Result<(), CoreError>`.
+- `BackendAdapter::run_aggregation_query` — new trait method, default body `Err(CoreError::FailedPrecondition("aggregation queries are not supported by this backend".into()))` (ADR-041 — NOT `CoreError::Unimplemented`).
+- `PostgresBackendAdapter::run_aggregation_query` — `AggregationKind::Count` implemented (`SELECT COUNT(*) FROM documents WHERE <shared WHERE-clause>`); `Sum`/`Avg` return the same `FailedPrecondition` default until Slices 03/04.
+- `handle_run_aggregation_query` — new handler: parses `StructuredAggregationQuery`, enforces `aggregations.len() == 1` and `Count.up_to` unset (else `Status::unimplemented`), reuses the dual-arm compliance composition verbatim, dispatches, builds a 1-message response stream, maps errors via the new local `aggregation_error_to_status`.
+- `FirestoreService` trait impl (tonic-generated) gains one method, mirroring `handle_run_query`'s own registration.
+
+### Slice 02 (COUNT, agent-mode)
+
+- `AgentBackendAdapter::run_aggregation_query` — `Count` builds the agent's `RunAggregationQueryRequest` via the new `domain_filter_to_agent_filter(filter: Option<&QueryFilter>) -> Result<Option<AgentFilter>, CoreError>` (fails closed on `IsNan`/`IsNotNan`, unmappable in the agent's own `FieldFilterOp`), calls the agent's existing unary RPC, maps `count: i64` → `AggregateValue::Count`. `Sum`/`Avg` → `FailedPrecondition`.
+- Zero changes to `storage_agent.proto` or any `crates/embyr-agent/` file (ADR-041 § Decision 4, verified by construction, not just intention).
+
+### Slice 03 (SUM, Postgres-family)
+
+- `PostgresBackendAdapter::run_aggregation_query`'s `Sum(field)` arm: `validate_field_path(field)` (handler-level, before this point) then `SELECT COALESCE(SUM(CASE WHEN fields->'{field}'->>'t' IN ('I','D') THEN (fields->'{field}'->>'v')::float8 ELSE NULL END), 0) FROM documents WHERE <shared WHERE-clause>`.
+- `handle_run_aggregation_query`'s proto-parsing extended to accept the `Sum` oneof arm and its `FieldReference`.
+
+### Slice 04 (AVG, Postgres-family)
+
+- `PostgresBackendAdapter::run_aggregation_query`'s `Avg(field)` arm: identical `CASE` expression, bare `AVG(...)` (no `COALESCE`) — SQL `NULL` on empty/all-excluded maps to `AggregateValue::Avg(None)` via `sqlx`'s `Option<f64>` row decoding.
+- `handle_run_aggregation_query`'s proto-parsing extended to accept the `Avg` oneof arm.
+
+---
+
+## Wave: DESIGN / [REF] Quality Attributes
+
+- **Security**: aggregation's access-control guarantee is provably identical to `RunQuery`'s own Postgres-family guarantee, for BOTH backend families (ADR-039's filter-identity invariant + new agent-mode filter forwarding) — a structural, not conventional, property. New field-path validation closes this feature's own SQL-interpolation surface (ADR-040).
+- **Performance**: real SQL push-down (`COUNT(*)`/`SUM`/`AVG`) replaces fetch-then-compute for Postgres-family — the entire value proposition (KPI #1). Agent-mode COUNT retains the agent's own pre-existing fetch-then-`len()` inefficiency (named, deferred, Resolution 3) — the client-facing win (no document transfer to the SDK caller) is preserved regardless.
+- **Maintainability**: zero new abstractions beyond what's justified by the Reuse Analysis; SQL push-down expressed as 3-4 lines of `QueryBuilder` code per aggregation kind, not a generic query-compiler.
+- **Testability**: `validate_field_path` and `domain_filter_to_agent_filter` are pure functions, unit-testable without IO. `PostgresBackendAdapter`/`AgentBackendAdapter` remain integration-test targets via the existing testcontainers/mock-agent harness (unchanged).
+- **Compatibility (SDK wire compat)**: DDD-AGG-1's own residual field-number-verification risk is the single largest unresolved compatibility risk in this design — named explicitly, not hidden, recommended as a DELIVER-time check.
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+No new architectural-boundary rule is introduced by this feature (no new bounded context, no new crate). Existing enforcement carries over unchanged: `embyr-core` remains IO-free (`deny.toml` + CI) — `validate_field_path`, `AggregationKind`/`AggregationQuery`/`AggregateValue` are all pure, zero new IO-crate imports into `embyr-core`, satisfying the existing constraint by construction, not by exception.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions
+
+- **Field-number verification (DDD-AGG-1)** — recommend a lightweight DELIVER-time confirmation of `StructuredAggregationQuery`/`Aggregation`/`RunAggregationQueryResponse`/`AggregationResult`'s exact field numbers against a real captured Firestore Admin SDK payload or an updated `googleapis` vendor copy, if network access is available at delivery time. Non-blocking for DISTILL/DELIVER to proceed.
+- **Finding 1 remediation (agent-mode `RunQuery` filter-dropping)** — recommend the orchestrator commission this as its own urgent, separate bugfix feature. Not scheduled by this DESIGN.
+- **Finding 2 remediation (retroactive field-path validation for `RunQuery`)** — recommend the orchestrator schedule this as a follow-up, HIGH priority given the SQL-interpolation nature. Not scheduled by this DESIGN.
+- **Multi-aggregation-per-request** (already named in DISCUSS's own Out of Scope) — the wire shape supports it; a future slice can lift the v1 `len() == 1` restriction with zero proto changes.
+- **`backend_mode=agent` SUM/AVG + the agent's own COUNT inefficiency** (Resolution 3, unchanged) — candidate follow-up to the `embyr-agent` feature itself.
+
+---
+
+## Wave: DESIGN / [REF] Peer Review Decision
+
+**Trigger evaluated**: this feature touches the security-rules enforcement path (`check_query_compliance()`). Per the standing session practice, DESIGN self-evaluates whether this crosses the "security boundary change" trigger.
+
+**Assessment**: `check_query_compliance()` itself is REUSED UNCHANGED — a clear-cut case of reusing an already-reviewed mechanism (ADR-031/032 were reviewed at their own time), not a new boundary. HOWEVER, this DESIGN independently introduces two pieces of genuinely NEW security-relevant logic not present in DISCUSS's own scope: (1) the filter-identity invariant + new agent-mode filter-forwarding translator (ADR-039), directly motivated by a newly-discovered pre-existing data-exposure bug; (2) new field-path validation closing a newly-discovered latent SQL-injection-shaped gap (ADR-040). Both are NET-NEW enforcement (closing gaps), not reuse of already-reviewed code, and both were discovered mid-DESIGN rather than anticipated by DISCUSS.
+
+**Decision: TRIGGER FIRES.** Peer review is dispatched — `nw-solution-architect-reviewer`, scoped to ADR-039 and ADR-040 specifically (the two new security-relevant decisions), plus a general completeness/bias pass over ADR-038/041 and the Reuse Analysis table. See § Peer Review Record below.
+
+---
+
+## Wave: DESIGN / [REF] Peer Review Record
+
+**Iteration 1 of max 2. Result: APPROVED, zero critical, zero high issues (design-relevant). No iteration 2 needed.**
+
+```yaml
+review_id: "arch_rev_2026-08-30_aggregation-queries_design_i1"
+reviewer: "solution-architect-reviewer (Atlas)"
+artifact: "docs/feature/aggregation-queries/feature-delta.md (DESIGN wave), adr-038/039/040/041, brief.md §Application Architecture — aggregation-queries"
+iteration: 1
+
+strengths:
+  - "ADR-039 surfaces a HIGH-severity pre-existing cross-user data exposure in AgentBackendAdapter::run_query, correctly does NOT repeat this pattern in new aggregation code, and explicitly escalates it."
+  - "ADR-040 introduces the FIRST real enforcement of SPEC.md's own documented field-path Invariant 6; correctly names the pre-existing RunQuery gap as a separate follow-up; zero new dependency."
+  - "Filter-identity invariant (ADR-039 Decision 2) is structural, not conventional — same in-memory QueryFilter value used for both compliance check and adapter call, by construction."
+  - "Null-vs-zero distinction (AC-01-13 vs AC-01-19) delivered structurally by SQL primitives (COALESCE(SUM,0) vs bare AVG), not a convention the code must remember."
+  - "Reuse discipline exemplary: 9 EXTEND + 2 CREATE NEW (both narrowly-scoped pure functions), zero new crate dependencies."
+  - "Wire contract (ADR-038) cross-checked against SPEC.md's own pre-existing documentation, no divergence found; residual field-number risk named explicitly, not hidden."
+  - "ADR-041 correctly identifies and fixes a DISCUSS-level implementation assumption (CoreError::Unimplemented would force a compile-fix inside embyr-agent's own exhaustive match) before it became a delivery-time surprise."
+
+issues_identified:
+  architectural_bias: []
+  decision_quality:
+    - issue: "ADR-038 field-number verification is a residual, non-blocking risk — cannot byte-verify against googleapis source from this sandbox (no network access)."
+      severity: "medium"
+      location: "ADR-038 § Decision"
+      recommendation: "Lightweight DELIVER-time confirmation against a real Firestore Admin SDK payload or updated googleapis vendor copy, if network access is available. Non-blocking."
+  completeness_gaps:
+    - issue: "Two HIGH-severity pre-existing findings (Finding 1: RunQuery/agent-mode filter drop; Finding 2: field-path validation gap) surface during DESIGN, correctly scoped OUT of this feature, correctly NOT repeated in new code, but require independent orchestrator triage."
+      severity: "high"
+      location: "ADR-039 § Context, ADR-040 § Context, § Escalated Findings"
+      recommendation: "Orchestrator: schedule both as independent follow-up bugfixes post-delivery of this feature. Remediation already designed in each ADR's own Decision 4/Alternatives section — drop-in reuse, not fresh design work."
+  implementation_feasibility:
+    - issue: "Two-tier aggregation surface (COUNT everywhere, SUM/AVG Postgres-family only) is intentional (Resolution 3) but should be surfaced in release notes/deployment guidance for agent-mode customers."
+      severity: "medium"
+      location: "ADR-041 § Decision 1/3"
+      recommendation: "No code change; ensure documentation surfaces the limitation at delivery/release time."
+  priority_validation:
+    q1_largest_bottleneck: { evidence: "Orchestrator's own framing + SPEC.md's pre-existing, unbuilt contract confirm this is the primary remaining SDK-compat gap.", assessment: "YES" }
+    q2_simple_alternatives: { evidence: "Resolution 3's 3-option table (A/B/C) with documented rejection rationale for A/C; ADR-040/041 both name and reject simpler/riskier alternatives with reasoning.", assessment: "ADEQUATE" }
+    q3_constraint_prioritization: { evidence: "Walking-skeleton-first slice ordering (COUNT both backends before SUM/AVG); security/wire-compat/agent-immutability constraints all satisfied per-slice.", assessment: "CORRECT" }
+    q4_data_justified: { evidence: "AC-01-13/AC-01-19's null-vs-zero split is anchored to real Firestore's own documented behavior AND Postgres's own native SUM/AVG NULL semantics, not hand-waved.", assessment: "JUSTIFIED" }
+
+approval_status: "approved"
+critical_issues_count: 0
+high_issues_count: 0
+notes: "The two flagged HIGH items are pre-existing gaps this design correctly avoids repeating and correctly escalates — evidence of rigor, not design defects. Approval contingent on orchestrator processing ADR-039 §Decision 4 and ADR-040 §Alternatives #3 as independent post-delivery bugfixes."
+```
+
+**Revisions made in response to review**: none required — zero critical/high issues against the design itself. The one `medium` decision-quality item (field-number residual risk) and one `medium` feasibility item (release-notes guidance) are already captured verbatim in this file's own § Open Questions and § Handoff Package sections, written before the review ran; no content changes were needed post-review.
+
+**Quality gate status**: PASSED. **Handoff**: accepted, proceeding to § Handoff Package below.
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package
+
+**Deliverables for acceptance-designer (this session's own modified flow proceeds to direct Outside-In TDD delivery, not nWave's DISTILL/DELIVER pipeline — handoff content below is prepared per the standing session practice regardless, for whichever agent picks up delivery)**:
+
+- This file, `## Wave: DESIGN` sections above.
+- `docs/product/architecture/adr-038-aggregation-query-wire-contract.md`
+- `docs/product/architecture/adr-039-aggregation-compliance-and-filter-integrity.md`
+- `docs/product/architecture/adr-040-aggregation-sql-pushdown-and-field-path-validation.md`
+- `docs/product/architecture/adr-041-agent-mode-aggregation-scope.md`
+- `docs/product/architecture/brief.md § Application Architecture — aggregation-queries` (summary + pointer, per this codebase's own established convention)
+
+**Flagged first, for orchestrator triage, independent of this feature's own delivery**:
+1. **HIGH severity** — `AgentBackendAdapter::run_query` (already shipped) never forwards the caller's filter to the agent; cross-user data exposure for `backend_mode=agent` `RunQuery` today (§ Escalated Findings, Finding 1).
+2. **HIGH severity** — field-path validation (SPEC.md Invariant 6) is not enforced anywhere in `embyr-server`/`embyr-pg-storage` (§ Escalated Findings, Finding 2).
+
+**External integrations**: none new. Postgres and the agent's mTLS gRPC channel are both pre-existing, already-`probe()`-covered dependencies — no new contract-testing recommendation for this feature.
+
+**Development paradigm**: unchanged — functional-where-practical Rust, `Result<T, E>` throughout, `@nw-software-crafter` for implementation, per project `CLAUDE.md`.
+
+Next step (NOT performed by this agent): per this session's own standing modified delivery flow, direct Outside-In TDD delivery proceeds from this DESIGN output — not nWave's DISTILL/DELIVER pipeline.

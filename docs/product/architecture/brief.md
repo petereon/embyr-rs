@@ -4461,3 +4461,93 @@ Full alternatives-considered analysis, exact schemas, and the C4 System
 Context extension: `docs/product/architecture/adr-037-oauth-providers-signing-key-and-verification-composition.md`
 and `docs/feature/oauth-providers/feature-delta.md` §§ Wave: DESIGN.
 
+## Application Architecture — aggregation-queries
+
+> Updated: 2026-08-30
+> Feature: aggregation-queries (JOB-01 — `RunAggregationQuery`, closing the
+> single most consequential remaining client-facing proto gap for real
+> Firestore SDK compatibility: COUNT/SUM/AVG without transferring documents)
+> Mode: Propose (autonomous analysis per Decision 1)
+> ADRs: `adr-038-aggregation-query-wire-contract.md` (RPC/message shapes,
+> locks OQ-AGG-01's server-streaming shape at the message-field level),
+> `adr-039-aggregation-compliance-and-filter-integrity.md`
+> (`check_query_compliance()` reuse + a HIGH-severity pre-existing finding),
+> `adr-040-aggregation-sql-pushdown-and-field-path-validation.md` (COUNT/SUM/AVG
+> SQL push-down + first real enforcement of SPEC.md's own field-path
+> Invariant 6), `adr-041-agent-mode-aggregation-scope.md` (Resolution 3
+> confirmation + a correction to Slice 01's own `CoreError` assumption).
+> Does not amend `adr-002-bounded-contexts.md` — BC-2's own ubiquitous
+> language already named `AggregationQuery`/`RunAggregationQuery` (line 71,
+> 73) before this feature existed; DESIGN confirms, not revises, that
+> placement. Does not amend `adr-031`/`adr-032` — both reused with zero code
+> changes.
+
+Full DESIGN content (Reuse Analysis, Component Decomposition, Driving/Driven
+Ports, Technology Choices, Decisions Table DDD-AGG-1..N, C4 System
+Context/Container/Component diagrams, Open Questions, escalated findings)
+lives in `docs/feature/aggregation-queries/feature-delta.md` §§ Wave: DESIGN
+— the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context — the
+one candidate placement question DISCUSS itself already closed with direct
+textual evidence from ADR-002.
+
+**Two severity-flagged findings, surfaced only by this DESIGN's own required
+reading of already-shipped adapter code, neither anticipated by DISCUSS**:
+(1) `AgentBackendAdapter::run_query` (client-facing, `backend_mode=agent`'s
+existing `RunQuery` proxy) hardcodes `filter: None` when calling the agent —
+the caller's own compliance-admitted filter is never actually applied to the
+executed query, meaning any `backend_mode=agent` deployment's `RunQuery`
+today returns EVERY document in a collection to any caller admitted under an
+ownership-equality rule, not just their own — a genuine, already-in-production
+cross-user data exposure, unrelated to this feature's own scope but directly
+informing its own design (ADR-039). (2) Field-path validation
+(`^[a-zA-Z_][a-zA-Z0-9_.]*$`, documented as SPEC.md's own Invariant 6) is not
+actually enforced ANYWHERE in `embyr-server`/`embyr-pg-storage` today, despite
+this feature's own DISCUSS slices assuming it is reusable — a latent
+SQL-injection-shaped gap in the already-shipped `RunQuery` path (ADR-040).
+Both are named, HIGH-severity, NOT fixed by this feature (out of slice
+scope), and flagged first in this DESIGN's own Handoff for orchestrator
+triage as independent follow-ups.
+
+**Wire contract**: locks OQ-AGG-01's server-streaming shape at the message
+level — `StructuredAggregationQuery`/`Aggregation` (oneof count/sum/avg +
+alias)/`RunAggregationQueryRequest`/`RunAggregationQueryResponse` — cross-checked
+against SPEC.md's own pre-existing `§RunAggregationQuery` documentation (no
+divergence found) and against this architect's own knowledge of real
+Firestore's public proto (field-number verification flagged as a residual,
+non-blocking DELIVER-time check — no network access from this sandbox).
+
+**SQL push-down**: COUNT/SUM/AVG reuse `append_filter` and the
+collection-group WHERE-clause branch from `run_query` unchanged (Slice 01's
+own Learning Hypothesis confirmed); SUM/AVG exploit the existing type-tagged
+JSON field encoding (`{"t":"I"|"D"|...,"v":...}`) for crash-free,
+type-correct numeric exclusion, and Postgres's own native `AVG()` aggregate
+supplies AC-01-19's null-vs-zero distinction structurally, not by convention.
+
+**Agent-mode scope**: confirms DISCUSS's Resolution 3 (Option B — proxy
+`embyr-agent`'s existing COUNT RPC unchanged; SUM/AVG-for-agent deferred) and
+corrects one of its own implementation assumptions — no new `CoreError`
+variant is introduced (would have forced a compile-fix edit inside the
+`embyr-agent` binary via its own exhaustive `core_error_to_status` match,
+contradicting Resolution 3's own "zero agent-binary changes"); a
+handler-local error-mapping function achieves the same client-facing
+`Unimplemented` contract instead.
+
+**Reuse**: 9 EXTEND, 2 CREATE NEW (both narrowly-scoped pure functions:
+`validate_field_path`, `domain_filter_to_agent_filter`) in the Reuse
+Analysis table — zero new crate dependencies.
+
+**External integrations**: none new — Postgres and the agent's mTLS gRPC
+channel are both pre-existing, already-`probe()`-covered dependencies; this
+feature adds a new PORT METHOD on each, not a new external dependency, so no
+new probe and no new contract-testing recommendation are required (Earned
+Trust principle applied: confirmed, not assumed, by reading the existing
+`BackendAdapter::probe()` contract both adapters already implement).
+
+Full alternatives-considered analysis, exact SQL, exact proto text, and the
+C4 diagrams: the four ADRs above and
+`docs/feature/aggregation-queries/feature-delta.md` §§ Wave: DESIGN.
+
