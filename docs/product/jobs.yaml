@@ -74,6 +74,39 @@ jobs:
     # resolvable directly from this codebase's own already-shipped
     # precedent. See docs/feature/batch-get-documents/feature-delta.md § Job
     # Discovery Framing Resolution.
+    # NOTE (firestore-write-streaming DISCUSS, 2026-08-30): this job's
+    # functional dimension is now also realized for the SDK's own default
+    # offline-write-durability behavior (the internal Write bidi-stream
+    # transport, used for offline-queue flushing / write-ahead durability —
+    # never called directly by Alex's own app code) via this feature — same
+    # job, same persona (P1 Alex), not a new job. A genuinely different gap
+    # category from both prior JOB-01 realizations: the Write RPC and its
+    # WriteRequest/WriteResponse envelope messages are net-new proto (like
+    # aggregation-queries' own gap), but their complete wire contract was
+    # already fully documented locally in docs/SPEC.md §Write Stream before
+    # this DISCUSS ran (unlike aggregation-queries' own OQ-AGG-01, which had
+    # no local documentation and required the orchestrator's own
+    # moderate-confidence recall). Reuses handle_commit's own write-
+    # application primitive (proto Write -> DomainWrite translation, atomic
+    # apply) unchanged, and handle_listen's own bidi-streaming Rust/tonic
+    # scaffold (peek-first-message-for-auth, then spawn a task owning the
+    # stream) for its shape — but requires a genuinely new receive-and-reply
+    # loop shape, since Listen's own spawned task only drains further client
+    # messages rather than processing each one as its own apply-and-reply
+    # cycle. Scoped to backend_mode in {direct_pg, aws_secret, gcp_secret};
+    # backend_mode=agent is explicitly deferred as a candidate follow-up
+    # feature (StorageAgent's own proto has zero bidi-streaming RPC today —
+    # a structurally larger gap than aggregation-queries' own agent-mode
+    # slice, which extended an existing unary shape). Two judgment calls are
+    # explicitly escalated to DESIGN, not decided here: the exact
+    # stream_token mismatch/expiry rejection mechanism (docs/SPEC.md's own
+    # documented contract specifies token formats and the write-loop shape
+    # but not mismatch behavior), and confirmation that deferring
+    # backend_mode=agent is acceptable given JOB-04/JOB-09's own
+    # credential-isolation customers remain unserved by Write until that
+    # follow-up ships. See
+    # docs/feature/firestore-write-streaming/feature-delta.md § Job
+    # Discovery Framing Resolution and § Handoff Package.
 
   - id: JOB-02
     name: tenant-provision

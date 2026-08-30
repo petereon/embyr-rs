@@ -12,6 +12,21 @@ jobs:
   - JOB-20  # anonymous-identity (added by anonymous-sessions DISCUSS, 2026-08-30)
 updated: "2026-08-30"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (firestore-write-streaming DISCUSS, 2026-08-30): JOB-01 now also
+# covers the SDK's own default offline-write-durability behavior (the
+# internal Write bidi-stream, used for offline-queue flushing / write-ahead
+# durability) via this feature — same job, same persona, not a new job.
+# No new Alex-facing mental model at all: Alex never calls Write directly,
+# he calls setDoc()/updateDoc()/deleteDoc() exactly as before, and the SDK's
+# own internal logic decides when to route over this stream instead of
+# one-shot Commit — Decision 3 (UX Research Depth) = Lightweight; no
+# separate journey-*.yaml artifact, journey detail lives inline in
+# docs/feature/firestore-write-streaming/feature-delta.md § Journey. Two
+# items are explicitly escalated to DESIGN, not decided here: the exact
+# stream_token mismatch/expiry rejection mechanism, and confirmation that
+# deferring backend_mode=agent Write is acceptable. See
+# docs/feature/firestore-write-streaming/feature-delta.md § Job Discovery
+# Framing Resolution and § Handoff Package.
 # NOTE (anonymous-sessions DISCUSS, 2026-08-30): JOB-20 is a new, distinct
 # job for a fourth end-user-identity-establishment mechanism (same persona,
 # P1 Alex; a materially different mental model — zero prior credential of any

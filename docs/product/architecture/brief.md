@@ -4748,3 +4748,128 @@ outcome.
 Full alternatives-considered analysis and the C4 diagrams: ADR-042 and
 `docs/feature/batch-get-documents/feature-delta.md` §§ Wave: DESIGN.
 
+## Application Architecture — firestore-write-streaming
+
+> Updated: 2026-08-30
+> Feature: firestore-write-streaming (JOB-01 — completes the entirely
+> undeclared `Write` bidirectional-streaming RPC the Firebase SDK uses
+> internally for offline-queue write-ahead durability)
+> Mode: Propose (autonomous analysis per Decision 1 — not passed explicitly;
+> the two escalations' shape favored autonomous options-with-reasoning over a
+> live Q&A)
+> ADRs: `adr-046-write-stream-wire-contract-and-session-lifecycle.md` (main —
+> proto wire contract, session lifecycle, unified error/termination model,
+> resolves Escalation 1 and the US-01 precondition-termination question),
+> `adr-047-write-stream-agent-mode-out-of-scope.md` (Escalation 2 —
+> ground-truth-reconfirms DISCUSS Resolution 4). Does not amend
+> `adr-002-bounded-contexts.md` — BC-2's own ubiquitous language already
+> named `Transaction`/`Mutation`/`Version`; `Write` is a new transport, not a
+> new bounded context. Does not amend `adr-030-write-path-grammar-storage-and-composition.md`
+> — `evaluate()` is not called by this feature at all (see below), so that
+> ADR's own scope is untouched.
+
+Full DESIGN content (Reading Confirmation, Escalation Resolutions, Component
+Decomposition per slice, Reuse Analysis, Driving/Driven Ports, C4 System
+Context/Container diagrams, Technology Choices, Enforcement, Quality
+Validation, Handoff sequencing) lives in
+`docs/feature/firestore-write-streaming/feature-delta.md` §§ Wave: DESIGN —
+the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context — a new
+*transport* (bidirectional stream) for BC-2's own already-named mutation/
+transaction vocabulary, not a new domain concept.
+
+**Two escalations, resolved with fresh ground-truth verification, not
+inherited from DISCUSS unexamined**:
+
+1. **`stream_token` mismatch mechanism (Resolution 3's open question)** —
+   `Status::aborted`, terminating the whole stream (client reconnects via a
+   fresh handshake). A `stream_token` mismatch is structurally a
+   sequencer-check failure; `ABORTED` is gRPC's own canonical code for that
+   shape and reuses this codebase's own established status-family convention
+   (`OccConflict`/`TransactionAborted` → `aborted`) WITHOUT reusing the OCC
+   MECHANISM itself, honoring DISCUSS's own non-conflation requirement.
+   Whole-stream termination (not a per-message recoverable rejection) because
+   `docs/SPEC.md`'s own termination taxonomy for `Write` is exhaustive — no
+   documented fourth shape; that shape belongs exclusively to the separate,
+   out-of-scope `BatchWrite` RPC. ADR-046.
+2. **Agent-mode `Write` (Resolution 4)** — CONFIRMED out of v1 scope, not
+   overridden. Independent re-verification of `storage_agent.proto` (372
+   lines, zero bidi/client-streaming RPC among its 11) and
+   `agent_backend.rs` reproduces DISCUSS's own finding exactly. Locked as a
+   named deferral with the JOB-04/JOB-09 credential-isolation trade-off
+   restated explicitly, not silently dropped. ADR-047.
+
+**A third question DISCUSS itself flagged as open** (US-01's own Domain
+Example 3 / Technical Notes — does a write's precondition violation
+terminate the stream or behave as a recoverable per-message rejection):
+resolved the SAME way, by the SAME reasoning, as Escalation 1 — whole-stream
+termination, reusing `core_error_to_status` unchanged
+(`Status::failed_precondition`, the identical mapping `Commit` already uses).
+Both questions collapse into ONE unifying architectural rule: "every non-EOF/
+Cancel error terminates the stream via one shared exit path" — ADR-046 §
+Decision 4.
+
+**Two findings this DESIGN pass surfaced that DISCUSS's own Reading
+Confirmation did not catch, both corrected via ground-truth code reading, not
+assumption**:
+1. `BackendAdapter::commit_transaction`'s own Postgres implementation
+   requires a pre-existing, `active`-status `transactions` row — there is no
+   transactionless atomic-apply path in this codebase today. `Write`'s own
+   per-`WriteRequest` independent-batch semantics (DISCUSS Resolution 3)
+   require a new, ad-hoc `begin_transaction()` call immediately before each
+   `commit_transaction()` call inside the loop — a new CALLER of an
+   already-shipped port method, zero new domain logic, but something the
+   crafter needed to be told explicitly rather than discover via a failing
+   test.
+2. `handle_commit` — `Write`'s own DISCUSS-directed reuse target — calls
+   `get_write_access_rule`/`evaluate()` ZERO times. DISCUSS's Resolution 2
+   named the wrong reuse target for its own described mechanism (the
+   per-write access-control pattern it describes lives in
+   `handle_create_document`/`handle_update_document`/`handle_delete_document`,
+   not `handle_commit`). Decision: `Write` does NOT add write-path
+   access-rule enforcement in v1 — doing so would make `Write` stricter than
+   `Commit` itself, trivially bypassable, and would be new, unrequested
+   write-semantics code. Named explicitly as a third item in the existing
+   "inherited, not introduced" gap family (alongside OCC `version` and
+   `DocumentTransform.field_transforms`), not silently papered over.
+
+   **Explicit override note**: this reconsiders and overrides DISCUSS's own
+   Resolution 2 requirement ("access-control evaluation... must run for
+   every subsequently-received `WriteRequest`'s own writes batch") — DISCUSS
+   wrote that requirement on the assumption `handle_commit` already had an
+   analogous per-write evaluation step to mirror; ground-truth reading shows
+   it does not. DESIGN's override is deliberate, evidenced, and reasoned
+   (ADR-046 § Decision 2, § Decision Driver 5), not a silent scope drop.
+
+**Component decomposition**: one new proto file addition
+(`WriteRequest`/`WriteResponse` in `write.proto` + the `rpc Write` declaration
+in `firestore.proto`), one new handler function (`handle_write`, mirroring
+`handle_listen`'s scaffold), one new file (`crates/embyr-server/src/grpc/write_stream.rs`
+— the spawned task's own per-message loop, token state held 100% locally, no
+registry), and one small refactor (extracting `handle_commit`'s own
+translation loop into a function shared by both `handle_commit` and the new
+loop). Slices 02/04 add zero new files (pure composition/extension). Slice 03
+adds one `if` at the loop's own entry point, reusing Slice 04's own
+error-exit mechanism — a structural, not just value-priority, reason Slice 04
+must land before Slice 03.
+
+**Reuse**: bidi-streaming scaffold shape (`handle_listen`), write translation
+loop (`handle_commit`), atomic apply and transaction-begin (`BackendAdapter`
+port, unchanged), error mapping (`core_error_to_status`, unchanged) — all
+REUSED. Write-path access-control enforcement — explicitly NOT ADDED, named.
+Zero new dependencies, zero new `CoreError` variant, zero new port trait
+method.
+
+**External integrations**: none — Postgres only, via the existing
+`BackendAdapter` port; no contract-testing annotation needed.
+
+**Peer review**: pending at time of this SSOT update — see
+`feature-delta.md` § Peer Review Record for the outcome once complete.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-046, ADR-047,
+and `docs/feature/firestore-write-streaming/feature-delta.md` §§ Wave:
+DESIGN.
+
