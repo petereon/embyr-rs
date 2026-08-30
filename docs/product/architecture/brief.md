@@ -4551,3 +4551,90 @@ Full alternatives-considered analysis, exact SQL, exact proto text, and the
 C4 diagrams: the four ADRs above and
 `docs/feature/aggregation-queries/feature-delta.md` §§ Wave: DESIGN.
 
+## Application Architecture — batch-get-documents
+
+> Updated: 2026-08-30
+> Feature: batch-get-documents (JOB-01 — completes the already-declared
+> `BatchGetDocuments` handler, the second, smaller, more contained
+> client-facing proto gap alongside `aggregation-queries`)
+> Mode: Propose (autonomous analysis per Decision 1)
+> ADR: `adr-042-batch-get-documents-per-document-denial-semantics.md`
+> (Resolution 5 — overturns DISCUSS's own draft whole-batch-abort choice in
+> favor of per-document denial, `Deny` -> `missing`). Does not amend
+> `adr-002-bounded-contexts.md` — BC-2's own ubiquitous language already
+> named `BatchGetRequest` (line 73) before this feature existed. Does not
+> amend `adr-027`/`adr-029` (`access_control::evaluate()` reused byte-for-byte
+> unchanged).
+
+Full DESIGN content (DDD-BGD-1..13, Component Decomposition, Reuse Analysis,
+Driving/Driven Ports, C4 System Context/Container/Component diagrams, Open
+Questions, Peer Review Record) lives in
+`docs/feature/batch-get-documents/feature-delta.md` §§ Wave: DESIGN — the
+single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context —
+already named in BC-2's own ubiquitous language.
+
+**The one genuine design question this feature raised**: DISCUSS's own draft
+Resolution 5 chose whole-batch abort (`Status::permission_denied` for the
+entire call) on any single denied document, mechanically mirroring
+`GetDocument`'s own per-call guarantee. The orchestrator flagged a
+moderately-confident concern post-handoff: real Firestore's own Security
+Rules evaluation for batched reads is, to the orchestrator's recollection,
+per-document, not per-call — whole-batch abort would silently drop every
+OTHER legitimately-accessible document in the same call, undermining the
+feature's own named core use case (resolving a batch of references gathered
+from a prior query, where not every reference being accessible is ordinary).
+**ADR-042 resolves this deliberately**: denial is per-document; `Deny` maps
+to a `missing` stream item (the proto's `found`/`missing` oneof has no third
+"denied" arm, so this is the only wire-legal, non-leaking signal available);
+the batch is never aborted. This *preserves* existence non-leakage at the
+per-item level (a denied document becomes indistinguishable from a genuinely
+absent one, isomorphic to `GetDocument`'s own single-document guarantee) and
+avoids the ADDITIONAL leak the rejected whole-batch-abort alternative would
+have introduced, and fully serves the batch's own core use case. Confidence
+in the real-Firestore behavioral claim is stated as moderate, not certain,
+with a named non-blocking residual for later verification — full reasoning,
+alternatives considered, and consequences in the ADR. **Peer-reviewed
+(iteration 1, `nw-solution-architect-reviewer`)**: conditionally approved —
+1 critical (AC-01-03 wording contradicted the ADR, now revised throughout
+`feature-delta.md`/`slice-01-batch-fetch.md`), 3 high (an over-claimed
+"strengthening" framing, now corrected to "preserved"; a missing batch-size
+cap, now added as a DESIGN recommendation pending orchestrator confirmation;
+the unverified-behavior residual, addressed via an explicit trivial-
+reversibility note rather than a runtime feature flag — see
+`feature-delta.md` § Peer Review Record for the full record and this
+architect's reasoning for declining the flag).
+
+**Upstream AC impact**: this decision revises AC-01-03 and its corresponding
+UAT scenario's literal wording (originally drafted around whole-batch abort)
+to per-document `missing` semantics — flagged explicitly in the DESIGN
+Handoff Package for the orchestrator, not silently implemented against stale
+AC text.
+
+**Reuse**: 9 REUSE-UNCHANGED/NO-CHANGE, 2 EXTEND (new caller of
+`handle_get_document`'s own per-document sequence and `handle_run_query`'s
+own per-call/stream-construction patterns), **0 CREATE NEW** — the leanest
+Reuse Analysis of any feature in this SSOT to date. Component Decomposition
+is a single function body (`handle_batch_get_documents`); zero new types,
+traits, adapters, or dependencies anywhere in the codebase.
+
+**External integrations**: none new — Postgres and the agent's mTLS gRPC
+channel are both pre-existing, already-`probe()`-covered dependencies; this
+feature adds zero new port methods, reusing `BackendAdapter::get_document`
+exactly as `GetDocument` already does, N times per call (Earned Trust
+principle applied: confirmed, not assumed).
+
+**Peer review**: triggered (security-boundary-adjacent decision — ADR-042
+changes existence-non-leakage's wire expression and overturns a DISCUSS
+draft resolution based on moderately-confident external-system recollection,
+exactly the shape of decision most susceptible to unexamined bias). Scoped
+to ADR-042 specifically plus a completeness pass on the zero-CREATE-NEW
+Reuse Analysis claim. See `feature-delta.md` § Peer Review Record for the
+outcome.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-042 and
+`docs/feature/batch-get-documents/feature-delta.md` §§ Wave: DESIGN.
+

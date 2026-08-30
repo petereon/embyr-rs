@@ -8,7 +8,8 @@ Complete the already-declared `BatchGetDocuments` gRPC handler so a caller can r
 - Per-call: `extract_project_id`, `extract_api_key`, `rate_limiter.check`, `authenticate` (+ suspension check), `attach_client_identity_if_present` — each called exactly once, mirroring `handle_run_query`'s own multi-result-RPC granularity.
 - Per requested document name: `parse_document_path`, `get_access_rule` (collection-scoped — a batch may span multiple collections), `adapter.get_document`, and — when a rule is defined — `parse_condition` + `evaluate()`, mirroring `handle_get_document`'s own sequence exactly.
 - `found`/`missing` streamed response construction, mirroring `handle_run_query`'s own `Box::pin(tokio_stream::iter(responses))` pattern.
-- `Deny` on any single requested document rejects the whole batch as `Status::permission_denied` (Resolution 5 of `feature-delta.md`).
+- `Deny` on any single requested document resolves that document as `missing` (per-document, not per-call) — the batch is never aborted (Resolution 5 of `feature-delta.md`, revised by DESIGN's ADR-042; see `feature-delta.md` § Changed Assumptions for DISCUSS's own original whole-batch-abort text).
+- Reject a batch naming more than 1,000 documents with `Status::invalid_argument`, checked alongside the non-empty/single-project validation (DESIGN's own recommendation, § New Constraint — Batch Size Cap in `feature-delta.md`; pending orchestrator confirmation, new scope beyond DISCUSS's own ACs).
 - Validation: reject an empty `documents` list; reject document names spanning more than one project/database. Both before any per-document work begins.
 - `metrics_adapter.record_read(project_id, documents.len())` — usage metering reflects N documents read, not 1 call.
 
@@ -27,7 +28,7 @@ Complete the already-declared `BatchGetDocuments` gRPC handler so a caller can r
 ## Acceptance Criteria
 - [ ] AC-01-01: A `BatchGetDocuments` call naming documents the caller is authorized to read, spanning one or more collections, returns a `found` result for every document that exists, in a single round trip.
 - [ ] AC-01-02: A document named in the batch that does not exist returns a `missing` result alongside `found` results for the rest of the batch — never an error.
-- [ ] AC-01-03: A batch containing at least one document the caller is not authorized to read is rejected as a permission denial for the whole request, mirroring `GetDocument`'s own outcome for the same scenario.
+- [ ] AC-01-03: A document in the batch the caller is not authorized to read resolves as a `missing` result for that document only — indistinguishable from a non-existent document — while every other document in the batch resolves normally; the batch is never rejected as a whole. **[Revised by DESIGN, ADR-042]**
 - [ ] AC-01-04: A collection with no access rule defined resolves every requested document from that collection unrestricted — zero behavior change from pre-feature `GetDocument`.
 - [ ] AC-01-05: A request naming zero documents is rejected as invalid before any access-control evaluation or document fetch occurs.
 - [ ] AC-01-06: A request naming documents that resolve to more than one distinct project/database is rejected as invalid before any access-control evaluation or document fetch occurs.
