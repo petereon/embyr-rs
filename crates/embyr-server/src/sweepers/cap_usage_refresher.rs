@@ -52,9 +52,28 @@ pub fn spawn(
             tick.tick().await;
 
             let lock_key = advisory_lock_key("embyr_cap_check");
+
+            // `pg_advisory_lock`/`pg_advisory_unlock` are session-scoped —
+            // the lock is tied to the specific physical backend connection
+            // that acquired it. `fetch_one(system_db.pool())` checks a
+            // connection OUT of the pool per call and returns it afterward;
+            // two separate pool borrows are NOT guaranteed to land on the
+            // same physical connection, especially with a small pool shared
+            // with a live HTTP server's own concurrent queries. Borrowing
+            // separately for lock and unlock risks the unlock silently
+            // no-oping on a different session (its bool result is discarded
+            // either way), leaking the lock on a now-idle pooled connection
+            // and starving every subsequent cycle's `pg_try_advisory_lock`.
+            // Holding one `PoolConnection` across the whole lock/unlock pair
+            // guarantees session affinity; `run_cycle`'s own queries still
+            // borrow the pool independently, which is fine — only the lock
+            // pair itself needs a fixed session.
+            let Ok(mut lock_conn) = system_db.pool().acquire().await else {
+                continue;
+            };
             let locked: Option<bool> = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
                 .bind(lock_key)
-                .fetch_one(system_db.pool())
+                .fetch_one(&mut *lock_conn)
                 .await
                 .ok();
 
@@ -71,7 +90,7 @@ pub fn spawn(
 
             let _: Option<bool> = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
                 .bind(lock_key)
-                .fetch_one(system_db.pool())
+                .fetch_one(&mut *lock_conn)
                 .await
                 .ok();
         }
