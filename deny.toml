@@ -11,20 +11,8 @@ all-features = false
 # ---------------------------------------------------------------------------
 [advisories]
 ignore = [
-    # sqlx 0.7.x binary protocol truncation — mitigated at application layer
-    "RUSTSEC-2024-0363",
-    # rustls-webpki 0.101.x CRL panic — not using CRLs
-    "RUSTSEC-2026-0104",
-    # rustls-webpki 0.101.x URI name constraints — post-signature-verification only
-    "RUSTSEC-2026-0098",
-    # rustls-webpki 0.101.x wildcard name constraints — post-signature-verification only
-    "RUSTSEC-2026-0099",
     # rustls-pemfile 1.x unmaintained — no safe upgrade available for sqlx 0.7.x dep
     "RUSTSEC-2025-0134",
-    # lru 0.12.x IterMut soundness — embyr-server only, not security-critical path
-    "RUSTSEC-2026-0002",
-    # paste 1.x unmaintained — transitive via sqlx 0.7.x, no safe upgrade
-    "RUSTSEC-2024-0436",
     # rsa 0.9.10 Marvin Attack (timing sidechannel key recovery) — dev-only,
     # via testcontainers' x509-parser chain (mTLS test fixtures). Never
     # ships in the production binary; not network-observable in CI. No
@@ -52,7 +40,6 @@ allow = [
     "Unicode-3.0",
     "CC0-1.0",
     "Zlib",
-    "MPL-2.0",
     # webpki-roots (transitive via aws-config's TLS stack) — permissive,
     # data-only license (bundles Mozilla's CA root list), no copyleft terms.
     "CDLA-Permissive-2.0",

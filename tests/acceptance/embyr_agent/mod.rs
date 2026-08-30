@@ -98,6 +98,11 @@ pub fn test_tls_config() -> TestTlsConfig {
 pub async fn start_test_postgres() -> (ContainerAsync<Postgres>, String) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let postgres = Postgres::default()
+        // Pinned to match every other test context in this codebase —
+        // testcontainers-modules' own default image tag predates
+        // PostgreSQL 13's native gen_random_uuid(), which this file's own
+        // customer migrations depend on.
+        .with_tag("15-alpine")
         .start()
         .await
         .expect("start postgres container");
@@ -123,6 +128,11 @@ pub async fn start_test_agent(
 
     // 1. Start Postgres testcontainer.
     let postgres = Postgres::default()
+        // Pinned to match every other test context in this codebase —
+        // testcontainers-modules' own default image tag predates
+        // PostgreSQL 13's native gen_random_uuid(), which this file's own
+        // customer migrations depend on.
+        .with_tag("15-alpine")
         .start()
         .await
         .expect("start postgres container");
