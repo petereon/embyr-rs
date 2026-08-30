@@ -22,6 +22,7 @@ use testcontainers_modules::{
     testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt},
 };
 
+use embyr_core::admin::email::{EmailError, EmailMessage, IEmailSender};
 use embyr_core::auth::{argon2, ecies};
 use embyr_server::{
     adapters::{
@@ -248,6 +249,14 @@ pub struct HostedIdentityFullContext {
     pub api_key: String,
     pub project_id: String,
     pub account_id: uuid::Uuid,
+    /// Slice 04 (US-04): captures every `EmailMessage` sent via
+    /// `IEmailSender` during this test's lifetime — used to read the raw
+    /// reset-token text mailed by `accounts:sendOobCode` (only its BLAKE3
+    /// hash is ever persisted). Wired into EVERY context, not just
+    /// reset-password tests — behaviorally identical to `NoopEmailSender`
+    /// for hi02/hi03 (`send` always returns `Ok`), so no other slice's tests
+    /// are affected by this becoming the default test-harness double.
+    pub captured_emails: Arc<FakeEmailSender>,
 }
 
 impl HostedIdentityFullContext {
@@ -327,7 +336,12 @@ impl HostedIdentityFullContext {
         .await
         .expect("insert seed document");
 
-        let server = embyr_server::start_test_server(system_db).await;
+        let captured_emails = Arc::new(FakeEmailSender::default());
+        let server = embyr_server::start_test_server_with_email_sender(
+            system_db,
+            captured_emails.clone(),
+        )
+        .await;
 
         HostedIdentityFullContext {
             _sys_container: sys_container,
@@ -337,7 +351,32 @@ impl HostedIdentityFullContext {
             api_key,
             project_id: project_id.to_string(),
             account_id,
+            captured_emails,
         }
+    }
+
+    /// Hand-seed a reset-token row directly (bypasses `accounts:sendOobCode`)
+    /// — used by AC-18-16 to seed an ALREADY-EXPIRED row (can't wait an hour
+    /// in a test). Mirrors `enable_hosted_identity`'s own "hand-seeded row"
+    /// allowance.
+    pub async fn seed_reset_token(
+        &self,
+        email: &str,
+        raw_token: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        let token_hash = blake3::hash(raw_token.as_bytes()).as_bytes().to_vec();
+        sqlx::query(
+            "INSERT INTO hosted_identity_reset_tokens (project_id, email, token_hash, expires_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&self.project_id)
+        .bind(email)
+        .bind(&token_hash)
+        .bind(expires_at)
+        .execute(self.customer_pool().await.pool())
+        .await
+        .expect("insert hosted_identity_reset_tokens row");
     }
 
     /// Hand-seed `hosted_identity_signing_keys` directly (bypasses the
@@ -406,5 +445,51 @@ impl HostedIdentityFullContext {
         embyr_server::adapters::postgres_backend::PostgresBackendAdapter::new(&dsn)
             .await
             .expect("connect customer db")
+    }
+}
+
+// ─── FakeEmailSender (Slice 04) ────────────────────────────────────────────────
+
+/// Captures every `EmailMessage` sent during a test, for assertion.
+/// Mirrors `tests/admin_api_v2/common/mod.rs::FakeEmailSender` (same
+/// capture-double shape) — a fresh, small copy rather than a cross-test-binary
+/// import, since each `tests/<feature>/` directory is its own compiled
+/// integration-test crate.
+#[derive(Debug, Default)]
+pub struct FakeEmailSender {
+    pub sent: std::sync::Mutex<Vec<CapturedEmail>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedEmail {
+    pub to: String,
+    pub subject: String,
+    pub body: String,
+}
+
+impl FakeEmailSender {
+    pub fn sent_count(&self) -> usize {
+        self.sent.lock().unwrap().len()
+    }
+
+    pub fn last_email(&self) -> Option<CapturedEmail> {
+        self.sent.lock().unwrap().last().cloned()
+    }
+}
+
+impl IEmailSender for FakeEmailSender {
+    fn send(
+        &self,
+        message: EmailMessage,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), EmailError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            self.sent.lock().unwrap().push(CapturedEmail {
+                to: message.to,
+                subject: message.subject,
+                body: message.body_text,
+            });
+            Ok(())
+        })
     }
 }

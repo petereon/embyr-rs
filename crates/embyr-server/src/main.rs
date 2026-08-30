@@ -196,6 +196,9 @@ async fn main() {
         embyr_server::adapters::cap_status_cache::CapStatusCache::new(),
     );
 
+    let email_sender: Arc<dyn embyr_core::admin::email::IEmailSender + Send + Sync> =
+        Arc::new(NoopEmailSender);
+
     let admin_app = build_admin_router(
         Arc::clone(&system_db),
         cfg.admin_key.clone(),
@@ -203,7 +206,7 @@ async fn main() {
         cache_for_admin,
         cfg.encryption_key,
         cfg.encryption_key_previous,
-        Arc::new(NoopEmailSender),
+        Arc::clone(&email_sender),
         None,
         None,
         cfg.rate_limit_rps,
@@ -237,6 +240,7 @@ async fn main() {
         service,
         admin_app,
         shutdown_rx,
+        email_sender,
     );
 
     // ── Step 12: log ready ────────────────────────────────────────────────

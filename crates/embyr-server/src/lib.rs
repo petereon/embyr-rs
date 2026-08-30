@@ -16,12 +16,14 @@ use std::sync::Arc;
 use adapters::{
     aws_secret_fetcher::AwsSecretFetcher,
     credential_cache::CredentialCache,
+    email::NoopEmailSender,
     gcp_secret_fetcher::GcpSecretFetcher,
     index_manager::IndexManager,
     metrics_adapter::MetricsAdapter,
     postgres_notify_listener::PostgresNotifyListener,
     system_db::SystemDb,
 };
+use embyr_core::admin::email::IEmailSender;
 use middleware::rate_limit::RateLimiter;
 use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
@@ -124,6 +126,39 @@ async fn accounts_bridge_dispatch(
                     },
                 );
             rest::sign_in_with_password::sign_in_with_password(
+                axum::extract::Path(params),
+                axum::extract::State(state.hosted_identity),
+                axum::extract::Query(rest::sign_up::SignUpQuery {
+                    key: query.get("key").cloned(),
+                }),
+                axum::extract::Json(body),
+            )
+            .await
+        }
+        // client-auth-hosted-identity (US-04, ADR-036): shares the SAME
+        // `HostedIdentityState` field as `signUp`/`signInWithPassword` above.
+        "sendOobCode" => {
+            let body: rest::reset_password::SendOobCodeBody = serde_json::from_slice(&body_bytes)
+                .unwrap_or(rest::reset_password::SendOobCodeBody { email: None });
+            rest::reset_password::send_oob_code(
+                axum::extract::Path(params),
+                axum::extract::State(state.hosted_identity),
+                axum::extract::Query(rest::sign_up::SignUpQuery {
+                    key: query.get("key").cloned(),
+                }),
+                axum::extract::Json(body),
+            )
+            .await
+        }
+        "resetPassword" => {
+            let body: rest::reset_password::ResetPasswordBody =
+                serde_json::from_slice(&body_bytes).unwrap_or(
+                    rest::reset_password::ResetPasswordBody {
+                        oob_code: None,
+                        new_password: None,
+                    },
+                );
+            rest::reset_password::reset_password(
                 axum::extract::Path(params),
                 axum::extract::State(state.hosted_identity),
                 axum::extract::Query(rest::sign_up::SignUpQuery {
@@ -261,6 +296,7 @@ pub fn spawn_all_servers(
     service: FirestoreService,
     admin_app: axum::Router,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    email_sender: Arc<dyn IEmailSender + Send + Sync>,
 ) -> tokio::task::JoinHandle<()> {
     let service_for_rest = service.clone();
 
@@ -297,6 +333,7 @@ pub fn spawn_all_servers(
         credential_cache: std::sync::Arc::clone(&service.credential_cache),
         aws_secret_fetcher: service.aws_secret_fetcher.clone(),
         gcp_secret_fetcher: service.gcp_secret_fetcher.clone(),
+        email_sender,
     };
     let accounts_bridge_state = AccountsBridgeState {
         sign_in: sign_in_state,
@@ -388,7 +425,7 @@ pub async fn start_test_server_with_keepalive(
 
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
-        service, admin_app, c.shutdown_rx,
+        service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -409,6 +446,59 @@ pub async fn start_test_server_with_keepalive(
 /// `TestServer` sends a `()` on the oneshot channel.
 pub async fn start_test_server(system_db: Arc<SystemDb>) -> TestServer {
     start_test_server_with_keepalive(system_db, std::time::Duration::from_secs(30)).await
+}
+
+/// Start an in-process server with an injected `IEmailSender` (for
+/// client-auth-hosted-identity's own hi04 reset-password tests, which need
+/// to capture the reset token mailed via `accounts:sendOobCode`). Production
+/// keep-alive interval (30s); admin router still uses `NoopEmailSender`
+/// (admin routes are not under test here).
+pub async fn start_test_server_with_email_sender(
+    system_db: Arc<SystemDb>,
+    email_sender: Arc<dyn IEmailSender + Send + Sync>,
+) -> TestServer {
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
+
+    let rate_limit_rps = default_rate_limit_capacity();
+    let rate_limiter = RateLimiter::new(rate_limit_rps, rate_limit_rps);
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
+    let service = FirestoreService {
+        system_db: Arc::clone(&system_db),
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
+        keepalive_interval: std::time::Duration::from_secs(30),
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
+        aws_secret_fetcher: None,
+        gcp_secret_fetcher: None,
+        rate_limiter,
+    };
+
+    let admin_app = admin::router::build_with_aws(
+        system_db,
+        "test-admin-key-secret".to_string(),
+        c.cache_for_admin,
+        None,
+    );
+
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx, email_sender,
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    TestServer {
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
+    }
 }
 
 /// Start an in-process server with an injected `AwsSecretFetcher` (for US-10 tests).
@@ -446,7 +536,7 @@ pub async fn start_test_server_with_aws_fetcher(
 
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
-        service, admin_app, c.shutdown_rx,
+        service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -496,7 +586,7 @@ pub async fn start_test_server_with_gcp_fetcher(
 
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
-        service, admin_app, c.shutdown_rx,
+        service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -551,7 +641,7 @@ pub async fn start_test_server_with_distributed_rate_limit(
 
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
-        service, admin_app, c.shutdown_rx,
+        service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -609,7 +699,7 @@ pub async fn start_test_server_with_rate_limit(
 
     spawn_all_servers(
         c.grpc_listener, c.rest_listener, c.admin_listener,
-        service, admin_app, c.shutdown_rx,
+        service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

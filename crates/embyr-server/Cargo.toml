@@ -304,6 +304,10 @@ path = "../../tests/client_auth_hosted_identity/acceptance/hi02_maria_signs_up.r
 name = "client_auth_hosted_identity_hi03_maria_signs_in"
 path = "../../tests/client_auth_hosted_identity/acceptance/hi03_maria_signs_in.rs"
 
+[[test]]
+name = "client_auth_hosted_identity_hi04_maria_resets_password"
+path = "../../tests/client_auth_hosted_identity/acceptance/hi04_maria_resets_password.rs"
+
 # security-rules acceptance tests (Slices 01-05, mirroring the srNN
 # registration convention client-auth's own caNN entries established).
 [[test]]

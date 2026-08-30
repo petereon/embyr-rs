@@ -76,6 +76,9 @@ pub struct HostedIdentityState {
     pub credential_cache: Arc<CredentialCache>,
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+    /// Slice 04: reset-request's own driven port for "if this account
+    /// exists, a reset was sent" (ADR-036, ADR-011). V1: `NoopEmailSender`.
+    pub email_sender: Arc<dyn embyr_core::admin::email::IEmailSender + Send + Sync>,
 }
 
 #[derive(Deserialize)]
