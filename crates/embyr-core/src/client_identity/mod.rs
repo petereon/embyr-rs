@@ -190,6 +190,40 @@ fn map_jwt_error_kind(kind: &jsonwebtoken::errors::ErrorKind) -> ClientIdentityV
     }
 }
 
+/// Mint a client-identity token (client-auth-hosted-identity, ADR-036
+/// Decision 3): the mirror operation of `verify_client_identity_token` —
+/// embyr itself signs, using its own embyr-owned signing key (never the
+/// customer's registered `client_identity_credentials` key — Resolution 3,
+/// structural disjointness). Identical wire format to a customer-minted
+/// token (`header.payload.signature`, base64url no-pad, `alg: EdDSA`) so the
+/// EXISTING `verify_client_identity_token` verifies it unchanged.
+///
+/// `signing_key_seed` is the DECRYPTED 32-byte Ed25519 seed (caller decrypts
+/// `hosted_identity_signing_keys.private_key_enc` via `ecies::decrypt`
+/// before calling this — this function never touches ECIES itself, pure
+/// computation only). No custom claims in v1 — mints with an empty `extra`
+/// map, matching every pre-existing token (zero behavior change).
+pub fn mint_client_identity_token(
+    signing_key_seed: &[u8; 32],
+    end_user_id: &str,
+    project_id: &str,
+    expires_at_unix: i64,
+) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use ed25519_dalek::{Signer, SigningKey};
+
+    let signing_key = SigningKey::from_bytes(signing_key_seed);
+    let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(
+        serde_json::json!({"sub": end_user_id, "aud": project_id, "exp": expires_at_unix})
+            .to_string(),
+    );
+    let signing_input = format!("{header}.{payload}");
+    let signature = signing_key.sign(signing_input.as_bytes());
+    let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+    format!("{signing_input}.{sig_b64}")
+}
+
 /// Compute the non-secret, truncated BLAKE3 fingerprint of a registered
 /// public key for the admin registration response (ADR-025 § Registration).
 ///
@@ -229,8 +263,12 @@ mod tests {
     /// specifies: `header.payload.signature`, base64url (no pad), EdDSA.
     /// Mirrors the "customer's own backend" role — Trailmark, not embyr —
     /// real Ed25519 signing, not a mock of any embyr-owned port.
+    /// client-auth-hosted-identity (ADR-036 Decision 3): delegates to the
+    /// production `mint_client_identity_token` — no third hand-rolled copy
+    /// of the encoding shape. `SigningKey::to_bytes()` is the 32-byte seed
+    /// the production function expects.
     fn mint_token(signing_key: &SigningKey, sub: &str, aud: &str, exp_unix: i64) -> String {
-        mint_token_with_claims(signing_key, sub, aud, exp_unix, serde_json::json!({}))
+        mint_client_identity_token(&signing_key.to_bytes(), sub, aud, exp_unix)
     }
 
     /// Mint a client-identity token carrying arbitrary extra claims
@@ -287,6 +325,57 @@ mod tests {
 
     fn now_unix() -> i64 {
         chrono::Utc::now().timestamp()
+    }
+
+    // ── mint_client_identity_token (client-auth-hosted-identity, ADR-036 Decision 3) ──
+
+    /// Port-to-port: `mint_client_identity_token` IS the driving port for
+    /// embyr's own hosted-identity minting. A token minted from a raw
+    /// 32-byte seed must verify successfully against the corresponding
+    /// public key, round-tripping `sub`/`aud`/`exp` exactly — proves the
+    /// EXISTING, unchanged `verify_client_identity_token` accepts an
+    /// embyr-minted token with zero special-casing (Resolution 3).
+    #[test]
+    fn a_token_minted_by_embyr_itself_verifies_successfully_via_the_unchanged_verifier() {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let seed = signing_key.to_bytes();
+        let credential = credential_for(&signing_key);
+        let exp = now_unix() + 3600;
+
+        let token = mint_client_identity_token(&seed, "maria-santos", "trailmark-prod", exp);
+        let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
+
+        assert_eq!(
+            result,
+            Ok(VerifiedEndUserIdentity {
+                end_user_id: "maria-santos".to_string(),
+                project_id: "trailmark-prod".to_string(),
+                expires_at_unix: exp,
+                claims: std::collections::BTreeMap::new(),
+            })
+        );
+    }
+
+    /// A forged token minted against a DIFFERENT project's own signing key
+    /// (structural disjointness, Resolution 3) must never verify against
+    /// this project's credential — same Malformed taxonomy as the
+    /// customer-minted forgery case above, proving embyr's own minting path
+    /// carries no special trust bypass.
+    #[test]
+    fn a_hosted_identity_token_minted_under_the_wrong_signing_key_is_rejected_as_malformed() {
+        let real_key = SigningKey::generate(&mut OsRng);
+        let attacker_key = SigningKey::generate(&mut OsRng);
+        let credential = credential_for(&real_key);
+        let forged = mint_client_identity_token(
+            &attacker_key.to_bytes(),
+            "maria-santos",
+            "trailmark-prod",
+            now_unix() + 3600,
+        );
+
+        let result = verify_client_identity_token(Some(&forged), "trailmark-prod", &credential);
+
+        assert_eq!(result, Err(ClientIdentityVerifyError::Malformed));
     }
 
     // ── Pinned examples (AC-16-07's four rejection reasons + happy path) ──

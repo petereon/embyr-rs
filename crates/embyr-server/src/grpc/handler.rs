@@ -355,6 +355,20 @@ impl FirestoreService {
     /// AC-16-09's full "available to embyr's own request handling" surface
     /// is explicit DELIVER-wave follow-through, not a DISTILL gap — see
     /// feature-delta.md § DISTILL scaffolds note.
+    ///
+    /// client-auth-hosted-identity (ADR-036 Decision 4, additive): after the
+    /// ORIGINAL `client_identity_credentials` lookup above (unchanged in
+    /// shape — a `client-auth`-only project's successful-verification code
+    /// path is untouched, byte-for-byte) is absent or fails to verify, also
+    /// attempts `hosted_identity_signing_keys`. Both attempts call the
+    /// IDENTICAL, unchanged `verify_client_identity_token()` — a
+    /// correctly-formed token from either source only ever verifies against
+    /// its own signer's public key; a wrong-source attempt fails
+    /// deterministically. A project with neither table populated (today's
+    /// default) never queries either table for a request with no
+    /// `x-embyr-client-identity` header — the early `?` above short-circuits
+    /// before either lookup, preserving AC-16-08(c)'s structural
+    /// unreachability guarantee.
     async fn attach_client_identity_if_present<T>(
         &self,
         request: &Request<T>,
@@ -362,16 +376,42 @@ impl FirestoreService {
     ) -> Option<embyr_core::client_identity::VerifiedEndUserIdentity> {
         let token = Self::extract_client_identity_token(request)?;
 
-        let row = self
+        if let Some(row) = self
             .system_db
             .get_client_identity_credential(project_id_str)
             .await
+            .ok()
+            .flatten()
+        {
+            let public_key_current: Option<[u8; 32]> = row.public_key_current.try_into().ok();
+            let public_key_previous: Option<[u8; 32]> = row
+                .public_key_previous
+                .and_then(|v| v.try_into().ok());
+            if let Some(public_key_current) = public_key_current {
+                let credential = embyr_core::client_identity::ClientIdentityCredential {
+                    public_key_current,
+                    public_key_previous,
+                };
+                if let Ok(identity) = embyr_core::client_identity::verify_client_identity_token(
+                    Some(&token),
+                    project_id_str,
+                    &credential,
+                ) {
+                    return Some(identity);
+                }
+            }
+        }
+
+        // Fall through: no client_identity_credentials row, or it failed to
+        // verify — try the embyr-owned hosted-identity signing key.
+        let hosted_row = self
+            .system_db
+            .get_hosted_identity_signing_key(project_id_str)
+            .await
             .ok()??;
         let credential = embyr_core::client_identity::ClientIdentityCredential {
-            public_key_current: row.public_key_current.try_into().ok()?,
-            public_key_previous: row
-                .public_key_previous
-                .and_then(|v| v.try_into().ok()),
+            public_key_current: hosted_row.public_key.try_into().ok()?,
+            public_key_previous: None,
         };
 
         embyr_core::client_identity::verify_client_identity_token(

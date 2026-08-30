@@ -475,6 +475,44 @@ impl SystemDb {
         })
     }
 
+    /// Read a project's hosted-identity signing key row, if any (US-02,
+    /// ADR-036 Decision 4/7). `Ok(None)` means hosted identity has not been
+    /// enabled for this project (US-01 never ran) — callers map this to
+    /// `400 HOSTED_IDENTITY_NOT_ENABLED` (AC-18-08), distinguishable from an
+    /// `INVALID_API_KEY` credential-validation failure.
+    pub async fn get_hosted_identity_signing_key(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<HostedIdentitySigningKeyRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT public_key, private_key_enc, algorithm, created_at \
+             FROM hosted_identity_signing_keys WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(HostedIdentitySigningKeyRow {
+            public_key: r
+                .try_get("public_key")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            private_key_enc: r
+                .try_get("private_key_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            algorithm: r
+                .try_get("algorithm")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
+    }
+
     // -----------------------------------------------------------------------
     // security-rules (ADR-028) — access_rules CRUD.
     // -----------------------------------------------------------------------

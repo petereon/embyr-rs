@@ -9,6 +9,8 @@ pub mod index_manager;
 pub mod metrics_adapter;
 pub mod postgres_backend;
 pub mod postgres_notify_listener;
+// client-auth-hosted-identity (ADR-036 Decision 7): resolve_customer_db_adapter.
+pub mod project_auth;
 pub mod query_log;
 pub mod stripe_gateway;
 pub mod system_db;

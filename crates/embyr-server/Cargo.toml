@@ -291,10 +291,14 @@ path = "../../tests/client_auth/acceptance/ca04_standalone_verify_debug_check.rs
 name = "client_auth_ca05_algorithm_confusion_defense"
 path = "../../tests/client_auth/acceptance/ca05_algorithm_confusion_defense.rs"
 
-# client-auth-hosted-identity acceptance tests (Slice 01, ADR-036).
+# client-auth-hosted-identity acceptance tests (Slice 01/02, ADR-036).
 [[test]]
 name = "client_auth_hosted_identity_hi01_alex_enables_hosted_identity"
 path = "../../tests/client_auth_hosted_identity/acceptance/hi01_alex_enables_hosted_identity.rs"
+
+[[test]]
+name = "client_auth_hosted_identity_hi02_maria_signs_up"
+path = "../../tests/client_auth_hosted_identity/acceptance/hi02_maria_signs_up.rs"
 
 # security-rules acceptance tests (Slices 01-05, mirroring the srNN
 # registration convention client-auth's own caNN entries established).

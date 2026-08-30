@@ -51,6 +51,71 @@ impl Drop for TestServer {
 }
 
 // ---------------------------------------------------------------------------
+// accounts:<verb> REST bridge dispatch (client-auth + client-auth-hosted-identity)
+// ---------------------------------------------------------------------------
+
+/// Combined state for the single `/v1/projects/:project_id/accounts:action`
+/// route — see the wiring comment in `spawn_all_servers` for why
+/// `signInWithCustomToken` and `signUp` cannot be registered as two separate
+/// matchit routes.
+#[derive(Clone)]
+struct AccountsBridgeState {
+    sign_in: rest::sign_in::SignInState,
+    hosted_identity: rest::sign_up::HostedIdentityState,
+}
+
+/// Dispatches on the captured `action` param (the literal text after
+/// `accounts:` in the request path, e.g. `signInWithCustomToken` or
+/// `signUp`) to each feature's own, otherwise-untouched handler function —
+/// called directly as a plain async fn, not re-routed through axum.
+async fn accounts_bridge_dispatch(
+    axum::extract::Path(params): axum::extract::Path<std::collections::HashMap<String, String>>,
+    axum::extract::State(state): axum::extract::State<AccountsBridgeState>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body_bytes: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let action = params
+        .get("action")
+        .map(|s| s.trim_start_matches(':'))
+        .unwrap_or_default();
+
+    match action {
+        "signInWithCustomToken" => {
+            let body: rest::sign_in::SignInWithCustomTokenBody =
+                serde_json::from_slice(&body_bytes).unwrap_or(rest::sign_in::SignInWithCustomTokenBody {
+                    token: None,
+                });
+            rest::sign_in::sign_in_with_custom_token(
+                axum::extract::Path(params),
+                axum::extract::State(state.sign_in),
+                axum::extract::Json(body),
+            )
+            .await
+            .into_response()
+        }
+        "signUp" => {
+            let body: rest::sign_up::SignUpBody = serde_json::from_slice(&body_bytes)
+                .unwrap_or(rest::sign_up::SignUpBody {
+                    email: None,
+                    password: None,
+                });
+            rest::sign_up::sign_up(
+                axum::extract::Path(params),
+                axum::extract::State(state.hosted_identity),
+                axum::extract::Query(rest::sign_up::SignUpQuery {
+                    key: query.get("key").cloned(),
+                }),
+                axum::extract::Json(body),
+            )
+            .await
+        }
+        _ => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -187,22 +252,41 @@ pub fn spawn_all_servers(
         )
         .with_state(bc_state);
 
-    // client-auth (US-02, ADR-026): signInWithCustomToken() REST bridge —
-    // no auth header of its own (the token IN the body IS the credential),
-    // so it gets its own minimal state/router merged in here rather than
-    // reusing UserAdminState (which this route does not need any other
-    // field of). Cloned from `service` BEFORE `service` moves into
-    // `FirestoreServer::new(service)` below.
+    // client-auth (US-02, ADR-026) + client-auth-hosted-identity (US-02,
+    // ADR-036 Decision 6): both `accounts:signInWithCustomToken` and
+    // `accounts:signUp` embed a literal `:` inside the SAME final path
+    // segment ("accounts" + verb). `matchit` (axum's router) treats any `:`
+    // as starting a named capture regardless of position, and disallows two
+    // DIFFERENT capture names diverging from the identical static prefix
+    // ("/v1/projects/:project_id/accounts") — registering both as separate
+    // routes (each with its own differently-named embedded capture) fails
+    // at router-build time with "insertion failed due to conflict with
+    // previously registered route". Both verbs are therefore registered as
+    // ONE route sharing a single capture name ("action"), dispatched by
+    // `accounts_bridge_dispatch` below — which calls each module's own,
+    // otherwise-untouched handler function directly (a plain async fn call,
+    // not a second trip through axum's routing). Cloned from `service`
+    // BEFORE `service` moves into `FirestoreServer::new(service)` below.
     let sign_in_state = rest::sign_in::SignInState {
         system_db: std::sync::Arc::clone(&service.system_db),
     };
-    let sign_in_app = axum::Router::new()
+    let hosted_identity_state = rest::sign_up::HostedIdentityState {
+        system_db: std::sync::Arc::clone(&service.system_db),
+        credential_cache: std::sync::Arc::clone(&service.credential_cache),
+        aws_secret_fetcher: service.aws_secret_fetcher.clone(),
+        gcp_secret_fetcher: service.gcp_secret_fetcher.clone(),
+    };
+    let accounts_bridge_state = AccountsBridgeState {
+        sign_in: sign_in_state,
+        hosted_identity: hosted_identity_state,
+    };
+    let accounts_bridge_app = axum::Router::new()
         .route(
-            "/v1/projects/:project_id/accounts:signInWithCustomToken",
-            axum::routing::post(rest::sign_in::sign_in_with_custom_token),
+            "/v1/projects/:project_id/accounts:action",
+            axum::routing::post(accounts_bridge_dispatch),
         )
-        .with_state(sign_in_state);
-    let axum_app = axum_app.merge(sign_in_app);
+        .with_state(accounts_bridge_state);
+    let axum_app = axum_app.merge(accounts_bridge_app);
 
     let rest_task = rest::grpc_web::spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
 
