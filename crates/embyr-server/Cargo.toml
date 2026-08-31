@@ -679,6 +679,10 @@ path = "../../tests/rest_rate_limiting/acceptance/rest_calls_are_rate_limited.rs
 name = "firestore_batch_write_bw01_all_writes_succeed"
 path = "../../tests/firestore_batch_write/acceptance/bw01_all_writes_succeed.rs"
 
+[[test]]
+name = "firestore_batch_write_bw02_partial_failure_isolation"
+path = "../../tests/firestore_batch_write/acceptance/bw02_partial_failure_isolation.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

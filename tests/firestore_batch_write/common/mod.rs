@@ -56,3 +56,28 @@ pub async fn batch_write(
 
     Ok(client.batch_write(request).await?.into_inner())
 }
+
+/// Build a `Write { Operation::Update }` carrying a `current_document.exists
+/// = false` precondition (Slice 02, US-02) — the exact failure mode US-02's
+/// own UAT scenarios exercise: a duplicate of an already-imported document.
+/// Mirrors `update_write`'s own shape, differing only in `current_document`.
+pub fn update_write_requiring_not_exists(
+    resource_name: &str,
+    fields: std::collections::HashMap<String, embyr_proto::firestore::Value>,
+) -> Write {
+    use embyr_proto::firestore::{precondition::ConditionType, Precondition};
+    Write {
+        update_mask: None,
+        update_transforms: vec![],
+        current_document: Some(Precondition {
+            condition_type: Some(ConditionType::Exists(false)),
+        }),
+        operation: Some(embyr_proto::firestore::write::Operation::Update(
+            embyr_proto::firestore::Document {
+                name: resource_name.to_string(),
+                fields,
+                ..Default::default()
+            },
+        )),
+    }
+}
