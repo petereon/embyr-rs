@@ -931,6 +931,61 @@ impl BackendAdapter for PostgresBackendAdapter {
             }
         }
 
+        // OCC: verify MustExist/MustNotExist preconditions for all writes.
+        // Pre-existing gap (found while delivering firestore-write-streaming,
+        // 2026-08-30/31): this loop previously handled ONLY UpdateTime,
+        // silently ignoring MustExist/MustNotExist even though both are
+        // real, modeled `WritePrecondition` variants that `create_document`/
+        // `update_document`/`delete_document`'s own single-document methods
+        // already enforce — Commit's batch path (and firestore-write-streaming,
+        // which reuses it) let "create if not exists" / "update only if
+        // exists" preconditions pass through unenforced, always upserting
+        // regardless. Same FOR UPDATE-locked existence check as the
+        // UpdateTime loop above, so the precondition is guaranteed to still
+        // hold when the unconditional-upsert apply loop below runs. Any
+        // violation aborts the whole batch (CoreError::TransactionAborted),
+        // matching this function's own existing all-or-nothing contract for
+        // a failed precondition.
+        for write in &writes {
+            let (path, precondition) = match write {
+                Write::Update {
+                    path,
+                    precondition: Some(p @ (WritePrecondition::MustExist | WritePrecondition::MustNotExist)),
+                    ..
+                } => (path, p),
+                Write::Delete {
+                    path,
+                    precondition: Some(p @ (WritePrecondition::MustExist | WritePrecondition::MustNotExist)),
+                    ..
+                } => (path, p),
+                _ => continue,
+            };
+
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM documents \
+                 WHERE project_id = $1 \
+                   AND collection_path = $2 \
+                   AND document_id = $3 \
+                   AND NOT deleted \
+                 FOR UPDATE)",
+            )
+            .bind(path.project_id.as_str())
+            .bind(&path.collection_path)
+            .bind(&path.document_id)
+            .fetch_one(&mut *pg_txn)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+            let satisfied = match precondition {
+                WritePrecondition::MustExist => exists,
+                WritePrecondition::MustNotExist => !exists,
+                WritePrecondition::UpdateTime(..) => unreachable!("filtered out above"),
+            };
+            if !satisfied {
+                return Err(CoreError::TransactionAborted);
+            }
+        }
+
         // Also run version-based OCC for writes with version field
         crate::transactions::occ::verify_versions(
             &mut pg_txn,

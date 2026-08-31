@@ -538,3 +538,209 @@ async fn occ_conflict_causes_aborted_status() {
         "OCC conflict must return ABORTED, got: {status}"
     );
 }
+
+/// Regression test for a real pre-existing gap (found 2026-08-31 while
+/// delivering firestore-write-streaming): `commit_transaction`'s own OCC
+/// check loop previously validated ONLY `UpdateTime` preconditions, silently
+/// ignoring `current_document.exists = false` ("create if not exists")
+/// even though `CreateDocument`'s own single-document RPC already enforces
+/// it — a `Commit` batch could silently overwrite an existing document a
+/// client explicitly asked NOT to overwrite.
+#[tokio::test]
+async fn commit_write_with_must_not_exist_precondition_is_rejected_when_document_already_exists() {
+    let env = setup("test-sk-us06-mne-01", "us06-mne-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let database = format!("projects/{}/databases/(default)", env.project_id);
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/orders/must-not-exist",
+        env.project_id
+    );
+
+    let mut original_fields = HashMap::new();
+    original_fields.insert(
+        "status".to_string(),
+        Value {
+            value_type: Some(ValueType::StringValue("original".to_string())),
+        },
+    );
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent,
+                collection_id: "orders".to_string(),
+                document_id: "must-not-exist".to_string(),
+                document: Some(Document {
+                    name: String::new(),
+                    fields: original_fields,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("seed orders/must-not-exist");
+
+    let mut overwrite_fields = HashMap::new();
+    overwrite_fields.insert(
+        "status".to_string(),
+        Value {
+            value_type: Some(ValueType::StringValue("should-never-land".to_string())),
+        },
+    );
+    let write = ProtoWrite {
+        operation: Some(Operation::Update(Document {
+            name: doc_name.clone(),
+            fields: overwrite_fields,
+            ..Default::default()
+        })),
+        current_document: Some(embyr_proto::firestore::Precondition {
+            condition_type: Some(embyr_proto::firestore::precondition::ConditionType::Exists(
+                false,
+            )),
+        }),
+        ..Default::default()
+    };
+
+    let begin_resp = client
+        .begin_transaction(make_authed_request(
+            BeginTransactionRequest {
+                database: database.clone(),
+                options: None,
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("begin_transaction");
+    let txn_bytes = begin_resp.into_inner().transaction;
+
+    let commit_result = client
+        .commit(make_authed_request(
+            CommitRequest {
+                database,
+                writes: vec![write],
+                transaction: txn_bytes,
+            },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = commit_result.expect_err(
+        "commit of a write whose exists=false precondition is violated (document already \
+         exists) must fail, not silently overwrite",
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::Aborted,
+        "MustNotExist violation must return ABORTED, got: {status}"
+    );
+
+    let read_resp = client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name,
+                mask: None,
+                consistency_selector: None,
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("get orders/must-not-exist")
+        .into_inner();
+    let status_field = read_resp
+        .fields
+        .get("status")
+        .and_then(|v| v.value_type.clone());
+    assert_eq!(
+        status_field,
+        Some(ValueType::StringValue("original".to_string())),
+        "the rejected write must NOT have modified the existing document"
+    );
+}
+
+/// Same gap, the `MustExist` ("update only if exists") direction:
+/// `commit_transaction` previously let an Update-with-`exists=true`
+/// precondition silently CREATE a document that didn't exist, instead of
+/// rejecting the write.
+#[tokio::test]
+async fn commit_write_with_must_exist_precondition_is_rejected_when_document_does_not_exist() {
+    let env = setup("test-sk-us06-me-01", "us06-me-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let database = format!("projects/{}/databases/(default)", env.project_id);
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/orders/must-exist-missing",
+        env.project_id
+    );
+
+    let mut fields = HashMap::new();
+    fields.insert(
+        "status".to_string(),
+        Value {
+            value_type: Some(ValueType::StringValue("should-never-be-created".to_string())),
+        },
+    );
+    let write = ProtoWrite {
+        operation: Some(Operation::Update(Document {
+            name: doc_name.clone(),
+            fields,
+            ..Default::default()
+        })),
+        current_document: Some(embyr_proto::firestore::Precondition {
+            condition_type: Some(embyr_proto::firestore::precondition::ConditionType::Exists(
+                true,
+            )),
+        }),
+        ..Default::default()
+    };
+
+    let begin_resp = client
+        .begin_transaction(make_authed_request(
+            BeginTransactionRequest {
+                database: database.clone(),
+                options: None,
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("begin_transaction");
+    let txn_bytes = begin_resp.into_inner().transaction;
+
+    let commit_result = client
+        .commit(make_authed_request(
+            CommitRequest {
+                database,
+                writes: vec![write],
+                transaction: txn_bytes,
+            },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = commit_result.expect_err(
+        "commit of a write whose exists=true precondition is violated (document does not \
+         exist) must fail, not silently create it",
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::Aborted,
+        "MustExist violation must return ABORTED, got: {status}"
+    );
+
+    let read_result = client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name,
+                mask: None,
+                consistency_selector: None,
+            },
+            &env.api_key,
+        ))
+        .await;
+    assert!(
+        read_result.is_err(),
+        "the rejected write must NOT have created the document"
+    );
+}
