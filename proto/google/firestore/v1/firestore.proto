@@ -43,6 +43,11 @@ service Firestore {
   // atomically and replying once per batch.
   rpc Write(stream WriteRequest) returns (stream WriteResponse);
 
+  // Applies a batch of writes, each independently, without an all-or-nothing
+  // transaction. No top-level error is ever returned — all failures are
+  // reported per-write in the response's own `status` array.
+  rpc BatchWrite(BatchWriteRequest) returns (BatchWriteResponse);
+
   // Runs a query.
   rpc RunQuery(RunQueryRequest) returns (stream RunQueryResponse);
 

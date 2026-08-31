@@ -675,6 +675,10 @@ path = "../../tests/firestore_write_streaming/acceptance/ws03_stream_token_rejec
 name = "rest_rate_limiting_rest_calls_are_rate_limited"
 path = "../../tests/rest_rate_limiting/acceptance/rest_calls_are_rate_limited.rs"
 
+[[test]]
+name = "firestore_batch_write_bw01_all_writes_succeed"
+path = "../../tests/firestore_batch_write/acceptance/bw01_all_writes_succeed.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

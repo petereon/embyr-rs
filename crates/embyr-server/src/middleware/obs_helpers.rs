@@ -13,6 +13,7 @@ pub const METHOD_DELETE_DOCUMENT: &str = "DeleteDocument";
 pub const METHOD_BATCH_GET_DOCUMENTS: &str = "BatchGetDocuments";
 pub const METHOD_BEGIN_TRANSACTION: &str = "BeginTransaction";
 pub const METHOD_COMMIT: &str = "Commit";
+pub const METHOD_BATCH_WRITE: &str = "BatchWrite";
 pub const METHOD_ROLLBACK: &str = "Rollback";
 pub const METHOD_WRITE: &str = "Write";
 pub const METHOD_RUN_QUERY: &str = "RunQuery";

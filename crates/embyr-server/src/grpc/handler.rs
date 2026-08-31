@@ -26,11 +26,11 @@ use embyr_core::{
 };
 use embyr_proto::firestore::{
     firestore_server::Firestore, precondition::ConditionType, AggregationResult,
-    BatchGetDocumentsRequest, BatchGetDocumentsResponse, BeginTransactionRequest,
-    BeginTransactionResponse, CommitRequest, CommitResponse, CreateDocumentRequest,
-    DeleteDocumentRequest, Document, GetDocumentRequest, ListenRequest, ListenResponse,
-    RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse, RunQueryRequest,
-    RunQueryResponse, UpdateDocumentRequest, WriteRequest, WriteResponse,
+    BatchGetDocumentsRequest, BatchGetDocumentsResponse, BatchWriteRequest, BatchWriteResponse,
+    BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
+    CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest, ListenRequest,
+    ListenResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
+    RunQueryRequest, RunQueryResponse, UpdateDocumentRequest, WriteRequest, WriteResponse,
     run_aggregation_query_request::QueryType as AggregationQueryType,
     run_query_request::QueryType,
     structured_aggregation_query::{aggregation::Operator as AggregationOperator, QueryType as StructuredAggQueryType},
@@ -649,13 +649,111 @@ impl FirestoreService {
         }
     }
 
+    /// firestore-batch-write (Slice 01, ADR-048 § Decision 4): the per-write
+    /// body extracted verbatim from `translate_writes_for_commit`'s own
+    /// pre-existing inline loop (including `evaluate_write_rule_for_commit`'s
+    /// per-write call). Translates and access-rule-evaluates ONE write.
+    /// Shared by `translate_writes_for_commit` (short-circuiting, via `?`)
+    /// and `translate_writes_catching` (never short-circuits) — zero
+    /// write-semantics logic duplicated between them.
+    ///
+    /// Returns `Ok(None)` for a write with no `operation` set — mirrors the
+    /// pre-existing `None => {}` inline arm, which silently contributed
+    /// nothing to `domain_writes` rather than erroring. Preserved exactly so
+    /// `translate_writes_for_commit`'s own external behavior (used by
+    /// `handle_commit`/`write_stream.rs`) is unchanged by this extraction.
+    async fn translate_one_write_for_commit(
+        system_db: &SystemDb,
+        adapter: &SharedBackendAdapter,
+        project_id_str: &str,
+        verified_identity: Option<&embyr_core::client_identity::VerifiedEndUserIdentity>,
+        proto_write: &embyr_proto::firestore::Write,
+    ) -> Result<Option<DomainWrite>, Status> {
+        let precondition = Self::convert_precondition(proto_write.current_document);
+        match &proto_write.operation {
+            Some(embyr_proto::firestore::write::Operation::Update(doc)) => {
+                let path = Self::parse_document_path(&doc.name)?;
+                let fields = proto_fields_to_domain(&doc.fields)
+                    .ok_or_else(|| Status::invalid_argument("invalid field value in write"))?;
+
+                Self::evaluate_write_rule_for_commit(
+                    system_db,
+                    adapter,
+                    project_id_str,
+                    &path,
+                    verified_identity,
+                    Some(&fields),
+                )
+                .await?;
+
+                Ok(Some(DomainWrite::Update {
+                    path,
+                    fields,
+                    version: None,
+                    precondition,
+                }))
+            }
+            Some(embyr_proto::firestore::write::Operation::Delete(doc_name)) => {
+                let path = Self::parse_document_path(doc_name)?;
+
+                // Delete has no proposed new document (mirrors
+                // `handle_delete_document`'s own always-empty
+                // `request_resource_fields`).
+                let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                    std::collections::BTreeMap::new();
+                Self::evaluate_write_rule_for_commit(
+                    system_db,
+                    adapter,
+                    project_id_str,
+                    &path,
+                    verified_identity,
+                    Some(&empty_fields),
+                )
+                .await?;
+
+                Ok(Some(DomainWrite::Delete {
+                    path,
+                    version: None,
+                    precondition,
+                }))
+            }
+            Some(embyr_proto::firestore::write::Operation::Transform(dt)) => {
+                let path = Self::parse_document_path(&dt.document)?;
+
+                // `field_transforms` are discarded elsewhere in this
+                // codebase (pre-existing, separately-tracked gap — out
+                // of scope for this fix). No proposed-fields shape is
+                // modeled for a transform, so `request_resource_fields`
+                // mirrors the CURRENT document (`None` — see
+                // `evaluate_write_rule_for_commit`'s own doc comment).
+                // This still evaluates the write rule for the
+                // transform's own document path/collection rather than
+                // silently skipping it.
+                Self::evaluate_write_rule_for_commit(
+                    system_db,
+                    adapter,
+                    project_id_str,
+                    &path,
+                    verified_identity,
+                    None,
+                )
+                .await?;
+
+                Ok(Some(DomainWrite::Transform {
+                    path,
+                    transforms: vec![],
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// firestore-write-streaming (Slice 01, ADR-046 § Decision 3, Reuse
-    /// Analysis): the proto-`Write`-message → `DomainWrite` translation loop,
-    /// extracted verbatim from `handle_commit`'s own pre-existing inline body
-    /// (including `evaluate_write_rule_for_commit`'s per-write call) so both
-    /// `handle_commit` and the new `write_stream.rs` receive-and-reply loop
-    /// call the SAME logic. Zero new write-semantics code — this is a pure
-    /// extraction, not a rewrite.
+    /// Analysis): the proto-`Write`-message → `DomainWrite` translation loop.
+    /// A thin `?`-propagating loop over `translate_one_write_for_commit` —
+    /// external signature and behavior UNCHANGED (ADR-048 § Decision 4), so
+    /// `handle_commit` and `write_stream.rs` (both existing callers) require
+    /// zero call-site changes.
     pub(crate) async fn translate_writes_for_commit(
         system_db: &SystemDb,
         adapter: &SharedBackendAdapter,
@@ -665,85 +763,55 @@ impl FirestoreService {
     ) -> Result<Vec<DomainWrite>, Status> {
         let mut domain_writes = Vec::with_capacity(proto_writes.len());
         for proto_write in proto_writes {
-            let precondition = Self::convert_precondition(proto_write.current_document);
-            match &proto_write.operation {
-                Some(embyr_proto::firestore::write::Operation::Update(doc)) => {
-                    let path = Self::parse_document_path(&doc.name)?;
-                    let fields = proto_fields_to_domain(&doc.fields)
-                        .ok_or_else(|| Status::invalid_argument("invalid field value in write"))?;
-
-                    Self::evaluate_write_rule_for_commit(
-                        system_db,
-                        adapter,
-                        project_id_str,
-                        &path,
-                        verified_identity,
-                        Some(&fields),
-                    )
-                    .await?;
-
-                    domain_writes.push(DomainWrite::Update {
-                        path,
-                        fields,
-                        version: None,
-                        precondition,
-                    });
-                }
-                Some(embyr_proto::firestore::write::Operation::Delete(doc_name)) => {
-                    let path = Self::parse_document_path(doc_name)?;
-
-                    // Delete has no proposed new document (mirrors
-                    // `handle_delete_document`'s own always-empty
-                    // `request_resource_fields`).
-                    let empty_fields: std::collections::BTreeMap<String, FieldValue> =
-                        std::collections::BTreeMap::new();
-                    Self::evaluate_write_rule_for_commit(
-                        system_db,
-                        adapter,
-                        project_id_str,
-                        &path,
-                        verified_identity,
-                        Some(&empty_fields),
-                    )
-                    .await?;
-
-                    domain_writes.push(DomainWrite::Delete {
-                        path,
-                        version: None,
-                        precondition,
-                    });
-                }
-                Some(embyr_proto::firestore::write::Operation::Transform(dt)) => {
-                    let path = Self::parse_document_path(&dt.document)?;
-
-                    // `field_transforms` are discarded elsewhere in this
-                    // codebase (pre-existing, separately-tracked gap — out
-                    // of scope for this fix). No proposed-fields shape is
-                    // modeled for a transform, so `request_resource_fields`
-                    // mirrors the CURRENT document (`None` — see
-                    // `evaluate_write_rule_for_commit`'s own doc comment).
-                    // This still evaluates the write rule for the
-                    // transform's own document path/collection rather than
-                    // silently skipping it.
-                    Self::evaluate_write_rule_for_commit(
-                        system_db,
-                        adapter,
-                        project_id_str,
-                        &path,
-                        verified_identity,
-                        None,
-                    )
-                    .await?;
-
-                    domain_writes.push(DomainWrite::Transform {
-                        path,
-                        transforms: vec![],
-                    });
-                }
-                None => {}
+            if let Some(domain_write) = Self::translate_one_write_for_commit(
+                system_db,
+                adapter,
+                project_id_str,
+                verified_identity,
+                proto_write,
+            )
+            .await?
+            {
+                domain_writes.push(domain_write);
             }
         }
         Ok(domain_writes)
+    }
+
+    /// firestore-batch-write (Slice 01, ADR-048 § Decision 4): the
+    /// non-short-circuiting sibling of `translate_writes_for_commit`. Never
+    /// aborts the loop over the rest of the batch on a single write's own
+    /// translation/rule-denial failure — every write gets its own
+    /// `Result`, positionally aligned to `proto_writes` (a write with no
+    /// `operation` set becomes that write's own `InvalidArgument` — unlike
+    /// `translate_writes_for_commit`'s silent skip, `BatchWrite`'s own
+    /// positional-alignment invariant requires one entry per input write,
+    /// so a no-op write cannot be silently dropped here).
+    pub(crate) async fn translate_writes_catching(
+        system_db: &SystemDb,
+        adapter: &SharedBackendAdapter,
+        project_id_str: &str,
+        verified_identity: Option<&embyr_core::client_identity::VerifiedEndUserIdentity>,
+        proto_writes: &[embyr_proto::firestore::Write],
+    ) -> Vec<Result<DomainWrite, Status>> {
+        let mut results = Vec::with_capacity(proto_writes.len());
+        for proto_write in proto_writes {
+            let result = match Self::translate_one_write_for_commit(
+                system_db,
+                adapter,
+                project_id_str,
+                verified_identity,
+                proto_write,
+            )
+            .await
+            {
+                Ok(Some(domain_write)) => Ok(domain_write),
+                Ok(None) => Err(Status::invalid_argument("write has no operation set")),
+                Err(status) => Err(status),
+            };
+            results.push(result);
+        }
+        results
     }
 }
 
@@ -1515,6 +1583,152 @@ impl FirestoreService {
                 seconds: now.timestamp(),
                 nanos: now.timestamp_subsec_nanos() as i32,
             }),
+        });
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
+    }
+
+    /// firestore-batch-write (Slice 01, US-01, ADR-048 § Decision 2-3):
+    /// applies a batch of writes, each in its OWN `begin_transaction`+
+    /// `commit_transaction` pair — never once for the whole batch (§ Context
+    /// finding 1). Auth/rate-limit/suspension sequence mirrors
+    /// `handle_commit`'s own exactly (once per call, unary — no streaming
+    /// scaffold). Reused unmodified across every `backend_mode`, including
+    /// `agent` (ADR-049) — zero handler-level `backend_mode` branching.
+    ///
+    /// Once past pre-loop validation (auth/rate-limit/suspension/the 500-cap),
+    /// this handler NEVER returns a top-level `Err` for a write-specific
+    /// failure — every per-write failure becomes that write's own
+    /// `status[i]`/`write_results[i]` entry, and the loop continues
+    /// (ADR-048 § Decision Driver 3).
+    async fn handle_batch_write(
+        &self,
+        request: Request<BatchWriteRequest>,
+    ) -> Result<Response<BatchWriteResponse>, Status> {
+        let req = request.get_ref();
+        let project_id_str = Self::extract_project_id(&req.database)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
+        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status_str == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        // AC-01-04: empty batch short-circuits before any per-write
+        // machinery, ahead of even the 500-cap check (ADR-048 § Decision 2).
+        if req.writes.is_empty() {
+            let mut response = Response::new(BatchWriteResponse {
+                write_results: vec![],
+                status: vec![],
+            });
+            Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+            return Ok(response);
+        }
+
+        // ADR-048 § Decision 2: matches real Firestore's own documented
+        // per-call write limit for BatchWrite, mirroring
+        // `handle_batch_get_documents`'s own DDD-BGD-14 precedent (a
+        // different cap, same "unbounded per-call work" concern). Applied
+        // uniformly to every backend_mode (ADR-049) — no branching here.
+        if req.writes.len() > 500 {
+            return Err(Status::invalid_argument(
+                "writes must not exceed 500 per call",
+            ));
+        }
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
+        // ADR-048 § Decision 3, step 1: translate the WHOLE batch up front,
+        // catching every write's own failure — never short-circuiting.
+        let translated = Self::translate_writes_catching(
+            &self.system_db,
+            &adapter,
+            &project_id_str,
+            verified_identity.as_ref(),
+            &req.writes,
+        )
+        .await;
+
+        let mut write_results = Vec::with_capacity(req.writes.len());
+        let mut statuses = Vec::with_capacity(req.writes.len());
+
+        for translation in translated {
+            let domain_write = match translation {
+                Ok(domain_write) => domain_write,
+                Err(status) => {
+                    write_results.push(embyr_proto::firestore::WriteResult {
+                        update_time: None,
+                        transform_results: vec![],
+                    });
+                    statuses.push(status_to_proto(status));
+                    continue;
+                }
+            };
+
+            // ADR-048 § Decision 3, step 2 / § Context finding 1: a fresh
+            // `begin_transaction`+`commit_transaction` pair PER WRITE — never
+            // once for the whole batch, since `commit_transaction` is
+            // all-or-nothing per call.
+            let txn_id = match adapter
+                .begin_transaction(&project_id, TransactionOptions::ReadWrite)
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    write_results.push(embyr_proto::firestore::WriteResult {
+                        update_time: None,
+                        transform_results: vec![],
+                    });
+                    statuses.push(status_to_proto(core_error_to_status(e)));
+                    continue;
+                }
+            };
+
+            match adapter
+                .commit_transaction(&project_id, &txn_id, vec![domain_write])
+                .await
+            {
+                Ok(mut results) => {
+                    let wr = results.pop().unwrap_or(embyr_core::domain::document::WriteResult {
+                        update_time: (0, 0),
+                        create_time: None,
+                    });
+                    write_results.push(embyr_proto::firestore::WriteResult {
+                        update_time: Some(Timestamp {
+                            seconds: wr.update_time.0,
+                            nanos: wr.update_time.1,
+                        }),
+                        transform_results: vec![],
+                    });
+                    statuses.push(embyr_proto::rpc::Status {
+                        code: 0,
+                        message: String::new(),
+                        details: vec![],
+                    });
+                }
+                Err(e) => {
+                    write_results.push(embyr_proto::firestore::WriteResult {
+                        update_time: None,
+                        transform_results: vec![],
+                    });
+                    statuses.push(status_to_proto(core_error_to_status(e)));
+                }
+            }
+        }
+
+        let mut response = Response::new(BatchWriteResponse {
+            write_results,
+            status: statuses,
         });
         Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
         Ok(response)
@@ -2342,6 +2556,16 @@ impl Firestore for FirestoreService {
         result
     }
 
+    async fn batch_write(
+        &self,
+        request: Request<BatchWriteRequest>,
+    ) -> Result<Response<BatchWriteResponse>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_batch_write(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_BATCH_WRITE, &result, obs_start);
+        result
+    }
+
     async fn rollback(
         &self,
         request: Request<RollbackRequest>,
@@ -2598,6 +2822,22 @@ pub(crate) fn core_error_to_status(e: CoreError) -> Status {
         CoreError::ResourceExhausted(_) => Status::resource_exhausted(e.to_string()),
         CoreError::FailedPrecondition(_) => Status::failed_precondition(e.to_string()),
         _ => Status::internal(e.to_string()),
+    }
+}
+
+/// firestore-batch-write (Slice 01, ADR-048 § Decision 5): converts a
+/// `tonic::Status` to the wire type `BatchWriteResponse.status[i]` needs.
+/// `code: 0` (`google.rpc.Code.OK`) is used for a successful write —
+/// `docs/SPEC.md`'s own "`status[i] = null`" wording describes the SDK-level
+/// projection after decode, not the wire encoding, which cannot represent a
+/// sparse/absent entry in a `repeated message` field. First real producer of
+/// a populated `embyr_proto::rpc::Status` in this codebase — every other
+/// declared call site (`TargetChange.cause`) is never assigned.
+fn status_to_proto(status: Status) -> embyr_proto::rpc::Status {
+    embyr_proto::rpc::Status {
+        code: status.code() as i32,
+        message: status.message().to_string(),
+        details: vec![],
     }
 }
 

@@ -5,6 +5,7 @@ package google.firestore.v1;
 import "google/firestore/v1/common.proto";
 import "google/firestore/v1/document.proto";
 import "google/protobuf/timestamp.proto";
+import "google/rpc/status.proto";
 
 option java_package = "com.google.firestore.v1";
 
@@ -93,4 +94,29 @@ message WriteResponse {
   // The time at which the commit occurred. Set on every response, including
   // the handshake response (docs/SPEC.md §Write Stream, step 2).
   google.protobuf.Timestamp commit_time = 4;
+}
+
+// A request for [Firestore.BatchWrite][google.firestore.v1.Firestore.BatchWrite].
+message BatchWriteRequest {
+  // Required. The database name. In the format:
+  // `projects/{project_id}/databases/{database_id}`.
+  string database = 1;
+
+  // The writes to apply. Unlike `Commit`, this is NOT applied atomically —
+  // each write applies (or fails) independently (docs/SPEC.md §BatchWrite).
+  repeated Write writes = 2;
+}
+
+// The response for [Firestore.BatchWrite][google.firestore.v1.Firestore.BatchWrite].
+message BatchWriteResponse {
+  // The result of applying each write. Always the same length as the
+  // request's own `writes`, positionally aligned. Entry i is always present
+  // (an empty WriteResult on failure), never absent.
+  repeated WriteResult write_results = 1;
+
+  // The status of applying each write. Always the same length and position
+  // as `write_results`. A `Status{code: 0}` (OK) entry means that write
+  // succeeded; any other code means it failed. There is no separate
+  // top-level RPC error for a per-write failure.
+  repeated google.rpc.Status status = 2;
 }
