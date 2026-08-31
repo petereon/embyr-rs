@@ -110,6 +110,28 @@ pub trait BackendAdapter: Send + Sync {
         ))
     }
 
+    /// Returns the distinct names of collections immediately under `parent`
+    /// (one path segment deeper than `parent.collection_path`; empty
+    /// `collection_path` = database root). Reuses `CollectionPath`'s
+    /// existing (project_id, path-string) shape for a PARENT PREFIX, a
+    /// distinct semantic from its other call sites (an exact collection
+    /// name, or — with `all_descendants` — a collection-group name).
+    ///
+    /// Default-provided body (ADR-041/ADR-051 precedent): implementors
+    /// without real support (`AgentBackendAdapter`, deferred) compile
+    /// unmodified and reject at runtime via the existing `FailedPrecondition`
+    /// variant — never a new `CoreError` variant.
+    async fn list_collection_ids(
+        &self,
+        _parent: &CollectionPath,
+        _limit: i32,
+        _offset: i32,
+    ) -> Result<Vec<String>, CoreError> {
+        Err(CoreError::FailedPrecondition(
+            "distinct collection listing is not supported by this backend".into(),
+        ))
+    }
+
     async fn begin_transaction(
         &self,
         project_id: &ProjectId,

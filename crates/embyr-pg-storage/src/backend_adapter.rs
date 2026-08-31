@@ -831,6 +831,66 @@ impl BackendAdapter for PostgresBackendAdapter {
         }
     }
 
+    /// firestore-list-rpcs (Slice 01/02, ADR-051 § Decision 2): distinct
+    /// immediate-child collection names under `parent`. Single technique for
+    /// both root (`parent.collection_path` empty) and nested `parent`,
+    /// exploiting `split_part`'s own segment-collapsing behavior instead of
+    /// a second `NOT LIKE 'prefix/%/%'` exclusion branch.
+    async fn list_collection_ids(
+        &self,
+        parent: &CollectionPath,
+        limit: i32,
+        offset: i32,
+    ) -> Result<Vec<String>, CoreError> {
+        use sqlx::QueryBuilder;
+        let prefix = &parent.collection_path;
+
+        let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new("SELECT DISTINCT ");
+        if prefix.is_empty() {
+            // Root: the first segment of collection_path IS the top-level
+            // collection name, for every row regardless of nesting depth.
+            qb.push("split_part(collection_path, '/', 1)");
+        } else {
+            // Nested: strip "{prefix}/" then take the first remaining
+            // segment. char_length(prefix) + 2 = 1-indexed start, skipping
+            // prefix + '/'.
+            qb.push("split_part(substring(collection_path FROM ");
+            qb.push_bind(prefix.chars().count() as i32 + 2);
+            qb.push("), '/', 1)");
+        }
+        qb.push(" AS child_id FROM documents WHERE project_id = ");
+        qb.push_bind(parent.project_id.as_str());
+        qb.push(" AND NOT deleted");
+        if !prefix.is_empty() {
+            // Required guard: without it, rows whose collection_path does
+            // NOT start with "{prefix}/" would have `substring` compute
+            // nonsense (or an out-of-range start), incorrectly appearing as
+            // spurious children of an unrelated parent.
+            qb.push(" AND collection_path LIKE ");
+            qb.push_bind(format!("{prefix}/%"));
+        }
+        qb.push(" ORDER BY child_id LIMIT ");
+        qb.push_bind(limit as i64);
+        qb.push(" OFFSET ");
+        qb.push_bind(offset as i64);
+
+        let rows = qb
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            use sqlx::Row;
+            ids.push(
+                row.try_get("child_id")
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            );
+        }
+        Ok(ids)
+    }
+
     async fn begin_transaction(
         &self,
         project_id: &ProjectId,

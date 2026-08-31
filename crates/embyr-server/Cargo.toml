@@ -644,6 +644,12 @@ path = "../../tests/aggregation_queries/acceptance/avg_aggregation.rs"
 name = "batch_get_documents_bg01_batch_resolution_and_per_document_denial"
 path = "../../tests/batch_get_documents/acceptance/bg01_batch_resolution_and_per_document_denial.rs"
 
+# firestore-list-rpcs acceptance tests (Slice 01, Walking Skeleton, US-01,
+# ADR-050/051).
+[[test]]
+name = "firestore_list_rpcs_ld01_list_documents"
+path = "../../tests/firestore_list_rpcs/acceptance/ld01_list_documents.rs"
+
 # firestore-write-streaming acceptance tests (Slice 01, Walking Skeleton,
 # US-01, ADR-046).
 [[test]]

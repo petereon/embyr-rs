@@ -10,6 +10,7 @@ pub const METHOD_GET_DOCUMENT: &str = "GetDocument";
 pub const METHOD_CREATE_DOCUMENT: &str = "CreateDocument";
 pub const METHOD_UPDATE_DOCUMENT: &str = "UpdateDocument";
 pub const METHOD_DELETE_DOCUMENT: &str = "DeleteDocument";
+pub const METHOD_LIST_DOCUMENTS: &str = "ListDocuments";
 pub const METHOD_BATCH_GET_DOCUMENTS: &str = "BatchGetDocuments";
 pub const METHOD_BEGIN_TRANSACTION: &str = "BeginTransaction";
 pub const METHOD_COMMIT: &str = "Commit";

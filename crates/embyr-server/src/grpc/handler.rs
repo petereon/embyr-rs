@@ -28,7 +28,8 @@ use embyr_proto::firestore::{
     firestore_server::Firestore, precondition::ConditionType, AggregationResult,
     BatchGetDocumentsRequest, BatchGetDocumentsResponse, BatchWriteRequest, BatchWriteResponse,
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
-    CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest, ListenRequest,
+    CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
+    ListDocumentsRequest, ListDocumentsResponse, ListenRequest,
     ListenResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
     RunQueryRequest, RunQueryResponse, UpdateDocumentRequest, WriteRequest, WriteResponse,
     run_aggregation_query_request::QueryType as AggregationQueryType,
@@ -127,6 +128,26 @@ impl FirestoreService {
             collection_path,
             document_id,
         })
+    }
+
+    /// Parse `parent` into `(project_id, prefix)` for `ListDocuments` (and,
+    /// eventually, `ListCollectionIds`). Distinct from `parse_document_path`
+    /// above: `parent` here IS the complete document-or-root path — there is
+    /// no trailing `document_id` to pop.
+    ///
+    /// `parent` formats:
+    ///   `projects/{pid}/databases/(default)/documents` -> prefix = ""
+    ///   `projects/{pid}/databases/(default)/documents/a/b` -> prefix = "a/b"
+    fn parse_parent_prefix(parent: &str) -> Result<(String, String), Status> {
+        let project_id_str = Self::extract_project_id(parent)?.to_string();
+        let marker = "/documents";
+        let marker_pos = parent
+            .find(marker)
+            .ok_or_else(|| Status::invalid_argument("parent missing /documents"))?;
+        let prefix = parent[marker_pos + marker.len()..]
+            .trim_start_matches('/')
+            .to_string();
+        Ok((project_id_str, prefix))
     }
 
     /// Extract the bearer API key from the `authorization` metadata header.
@@ -1312,6 +1333,205 @@ impl FirestoreService {
             .map_err(core_error_to_status)?;
 
         let mut response = Response::new(());
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
+    }
+
+    /// firestore-list-rpcs (Slice 01, US-01, ADR-050/051): `ListDocuments`
+    /// handler. Auth/rate-limit/suspension sequence mirrors
+    /// `handle_get_document`'s own unary shape. Access-rule evaluation is
+    /// PER-DOCUMENT — mirrors `handle_batch_get_documents`'s own pattern
+    /// (the closer analog for a LIST of documents than `handle_run_query`'s
+    /// query-SHAPE compliance check, since `ListDocuments` accepts no
+    /// caller-supplied filter to validate the shape of): every candidate
+    /// document is evaluated against its own collection's read rule, denied
+    /// documents are silently excluded from the result (never abort the
+    /// whole call, mirroring `handle_batch_get_documents`'s own
+    /// never-abort-the-batch discipline).
+    ///
+    /// Uniform fetch-all-then-paginate-in-Rust for BOTH the `collection_id`
+    /// set AND empty cases (ADR-050's own named, accepted simplification for
+    /// the empty case, extended here to the set case too): `run_query` is
+    /// called with no `limit`/`offset`, and the merged/filtered/sorted `Vec`
+    /// is windowed in Rust via the same "fetch everything, then slice"
+    /// technique. This is deliberately NOT SQL `LIMIT`/`OFFSET` push-down —
+    /// `AgentBackendAdapter::run_query` does not forward `limit`/`offset` to
+    /// the agent's own `RunQuery` RPC at all (confirmed by reading
+    /// `crates/embyr-server/src/adapters/agent_backend.rs::run_query`, a
+    /// pre-existing characteristic unrelated to this feature), so a
+    /// SQL-push-down design would silently return page 1 for every
+    /// `backend_mode=agent` page request. The uniform in-Rust-windowing
+    /// design makes `backend_mode=agent` pagination correct by construction
+    /// instead — `run_query`'s "return everything" agent-mode behavior is
+    /// exactly what this handler already expects for every backend.
+    async fn handle_list_documents(
+        &self,
+        request: Request<ListDocumentsRequest>,
+    ) -> Result<Response<ListDocumentsResponse>, Status> {
+        let req = request.get_ref();
+        let (project_id_str, prefix) = Self::parse_parent_prefix(&req.parent)?;
+        let api_key = Self::extract_api_key(&request)?;
+
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
+        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status_str == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+        let auth_ctx = verified_identity
+            .as_ref()
+            .map(|v| embyr_core::access_control::AuthContext {
+                uid: v.end_user_id.clone(),
+                claims: v.claims.clone(),
+            });
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let page_size = if req.page_size <= 0 { 100i32 } else { req.page_size.min(100) };
+        let offset = embyr_core::pagination::decode_page_token(&req.page_token)
+            .map_err(core_error_to_status)?;
+
+        // Every collection this call must fan out over: exactly one when
+        // `collection_id` is set; every immediate child of `parent`
+        // (ADR-050/051's shared "immediate children" primitive, called
+        // internally/unpaginated) when it is empty (AC-01-03).
+        let collection_paths: Vec<String> = if req.collection_id.is_empty() {
+            let parent_collection = CollectionPath {
+                project_id: project_id.clone(),
+                collection_path: prefix.clone(),
+            };
+            let child_names = adapter
+                .list_collection_ids(&parent_collection, i32::MAX, 0)
+                .await
+                .map_err(core_error_to_status)?;
+            child_names
+                .into_iter()
+                .map(|name| {
+                    if prefix.is_empty() {
+                        name
+                    } else {
+                        format!("{prefix}/{name}")
+                    }
+                })
+                .collect()
+        } else if prefix.is_empty() {
+            vec![req.collection_id.clone()]
+        } else {
+            vec![format!("{prefix}/{}", req.collection_id)]
+        };
+
+        // DDD-BGD-6-style in-request per-collection access-rule cache — one
+        // lookup per distinct collection_path within this call.
+        let mut rule_cache: HashMap<String, Option<crate::adapters::system_db::AccessRuleRow>> =
+            HashMap::new();
+        let mut all_docs: Vec<embyr_core::domain::document::FirestoreDocument> = Vec::new();
+
+        for collection_path in &collection_paths {
+            let collection = CollectionPath {
+                project_id: project_id.clone(),
+                collection_path: collection_path.clone(),
+            };
+            let query = StructuredQuery {
+                collection_id: collection_path.clone(),
+                all_descendants: false,
+                filter: None,
+                order_by: vec![],
+                limit: None,
+                offset: None,
+                start_at: None,
+                end_at: None,
+                since_update_time: None,
+            };
+            let docs = adapter
+                .run_query(&collection, &query, None)
+                .await
+                .map_err(core_error_to_status)?;
+
+            let rule_row = match rule_cache.get(collection_path) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let fetched = self
+                        .system_db
+                        .get_access_rule(&project_id_str, collection_path)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                    rule_cache.insert(collection_path.clone(), fetched.clone());
+                    fetched
+                }
+            };
+
+            match rule_row {
+                // No rule defined — unrestricted, mirrors GetDocument's own
+                // no-rule short-circuit.
+                None => all_docs.extend(docs),
+                Some(rule_row) => {
+                    let condition =
+                        embyr_core::access_control::parse_condition(&rule_row.condition_source)
+                            .map_err(|e| {
+                                Status::internal(format!(
+                                    "stored access rule failed to re-parse: {e:?}"
+                                ))
+                            })?;
+                    let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                        std::collections::BTreeMap::new();
+                    for doc in docs {
+                        match embyr_core::access_control::evaluate(
+                            &condition,
+                            auth_ctx.as_ref(),
+                            &doc.fields,
+                            &empty_fields,
+                        ) {
+                            embyr_core::access_control::EvaluationOutcome::Allow => {
+                                all_docs.push(doc);
+                            }
+                            embyr_core::access_control::EvaluationOutcome::Deny => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deterministic merge order across collections (ADR-050).
+        all_docs.sort_by(|a, b| {
+            (a.path.collection_path.as_str(), a.path.document_id.as_str())
+                .cmp(&(b.path.collection_path.as_str(), b.path.document_id.as_str()))
+        });
+
+        // Fetch-one-extra-to-detect-more-pages, applied in Rust over the
+        // merged/filtered/sorted Vec (the same technique
+        // `crates/embyr-agent/src/server.rs::list_documents` already proved
+        // via SQL LIMIT/OFFSET, generalized here to work uniformly across
+        // every backend_mode).
+        let start = offset as usize;
+        let (page, has_more) = if start >= all_docs.len() {
+            (Vec::new(), false)
+        } else {
+            let end = start.saturating_add(page_size as usize + 1).min(all_docs.len());
+            let mut slice = all_docs[start..end].to_vec();
+            let more = slice.len() > page_size as usize;
+            if more {
+                slice.truncate(page_size as usize);
+            }
+            (slice, more)
+        };
+
+        let next_page_token = if has_more {
+            embyr_core::pagination::encode_page_token(offset + page_size as u32)
+        } else {
+            String::new()
+        };
+
+        let documents = page.into_iter().map(document_to_proto).collect();
+
+        let mut response = Response::new(ListDocumentsResponse { documents, next_page_token });
         Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
         Ok(response)
     }
@@ -2513,6 +2733,16 @@ impl Firestore for FirestoreService {
         let obs_start = std::time::Instant::now();
         let result = self.handle_delete_document(request).await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_DELETE_DOCUMENT, &result, obs_start);
+        result
+    }
+
+    async fn list_documents(
+        &self,
+        request: Request<ListDocumentsRequest>,
+    ) -> Result<Response<ListDocumentsResponse>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_list_documents(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_LIST_DOCUMENTS, &result, obs_start);
         result
     }
 

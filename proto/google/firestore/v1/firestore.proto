@@ -27,6 +27,9 @@ service Firestore {
   // Deletes a document.
   rpc DeleteDocument(DeleteDocumentRequest) returns (google.protobuf.Empty);
 
+  // Lists documents.
+  rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
+
   // Gets multiple documents.
   rpc BatchGetDocuments(BatchGetDocumentsRequest) returns (stream BatchGetDocumentsResponse);
 
@@ -117,6 +120,32 @@ message DeleteDocumentRequest {
 
   // An optional precondition on the document.
   Precondition current_document = 2;
+}
+
+// A request for [Firestore.ListDocuments][google.firestore.v1.Firestore.ListDocuments].
+message ListDocumentsRequest {
+  // Required. The parent resource name.
+  string parent = 1;
+
+  // Optional. The collection ID, relative to `parent`, to list. If empty,
+  // documents from every collection directly under `parent` are returned.
+  string collection_id = 2;
+
+  // Optional. The maximum number of documents to return.
+  int32 page_size = 3;
+
+  // Optional. A page token, received from a previous `ListDocuments` call.
+  string page_token = 4;
+}
+
+// The response for [Firestore.ListDocuments][google.firestore.v1.Firestore.ListDocuments].
+message ListDocumentsResponse {
+  // The documents found.
+  repeated Document documents = 1;
+
+  // A token to retrieve the next page of results, empty when this is the
+  // last page.
+  string next_page_token = 2;
 }
 
 // The request for [Firestore.BatchGetDocuments][google.firestore.v1.Firestore.BatchGetDocuments].
