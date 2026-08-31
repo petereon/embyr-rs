@@ -5422,6 +5422,126 @@ verify DESIGN output directly against the code, rather than dispatching a
 Full alternatives-considered analysis and the C4 diagrams: ADR-052, ADR-053,
 and `docs/feature/firestore-field-transforms/feature-delta.md` §§ Wave: DESIGN.
 
+## Application Architecture — agent-mode-list-collection-ids
+
+> Updated: 2026-08-31
+> Feature: agent-mode-list-collection-ids (JOB-01 — brings `ListCollectionIds`
+> to `backend_mode=agent`, closing the agent-mode parity gap
+> `firestore-list-rpcs` deferred, ADR-051 § Decision 3)
+> Mode: Propose (autonomous analysis — session standing methodology for this
+> feature set; the one open question, cross-version graceful degradation, is
+> deferred to `agent-mode-write-streaming`'s own concurrent DESIGN wave, not
+> re-derived here)
+> ADRs: `adr-059-agent-mode-list-collection-ids-rpc-and-shared-query-primitive.md`
+> (originally drafted as adr-056, renumbered after a collision with two
+> concurrently-running sibling DESIGN waves)
+> (new unary RPC on `storage_agent.proto`; confirms zero SQL duplication —
+> the agent binary already holds `Arc<PostgresBackendAdapter>`, so the new
+> handler calls the non-agent path's own already-shipped
+> `list_collection_ids` method directly; designs `AgentBackendAdapter`'s own
+> page-flattening loop, the one genuinely new mechanism, verified correct at
+> the exact 100/101-item pagination boundary the client-facing path already
+> exercises). Does not amend `adr-051-list-collection-ids-query-primitive-and-agent-mode-deferral.md`
+> — ADR-051's own trait signature, default-error body, and SQL (§ Decisions
+> 1-2) are reused unchanged; only § Decision 3's own deferral is now acted
+> on, by a new ADR, not a rewrite of the old one (ADRs are immutable). Does
+> not amend `adr-002-bounded-contexts.md` — BC-2's own ubiquitous language is
+> unchanged, no new domain concept.
+
+Full DESIGN content (Reading Confirmation, Escalation Resolutions, Component
+Decomposition, Reuse Analysis, Driving/Driven Ports, C4 System
+Context/Container diagrams, Technology Choices, Enforcement, Quality
+Validation, Handoff sequencing) lives in
+`docs/feature/agent-mode-list-collection-ids/feature-delta.md` §§ Wave:
+DESIGN — the single narrative file per the lean output convention. Summary
+below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context — this
+feature adds a transport/adapter layer around an already-designed query
+primitive, not a new domain concept.
+
+**The one confirmed finding that shrinks this feature below ADR-051's own
+estimate**: `crates/embyr-agent` already depends on `embyr-pg-storage`
+(unconditional workspace dependency) and `StorageAgentService` already holds
+`Arc<PostgresBackendAdapter>` as a field, used by every existing handler.
+The new agent-side `list_collection_ids` handler therefore calls
+`self.storage.list_collection_ids(...)` directly — the IDENTICAL method and
+`split_part`-based SQL the non-agent path already uses (ADR-051 §
+Decision 2, unchanged). **Zero SQL duplication, zero new query logic.**
+This confirms the hypothesis the feature was commissioned to test and is a
+stronger outcome than ADR-051's own follow-up sketch anticipated (which
+assumed a duplicate agent-binary SQL handler would be needed). ADR-059 §
+Context, § Decision 2.
+
+**The one genuinely new mechanism**: `BackendAdapter::list_collection_ids`
+is a single call (`limit`/`offset`, no page token); the new agent wire RPC
+is itself paginated and defensively caps each response at 100 items
+(matching `list_documents`'s own existing clamp). Callers request `limit`
+values both ≤101 (the client-facing path's own `page_size + 1`) and
+`i32::MAX` (`handle_list_documents`'s own unpaginated `collection_id`-empty
+fan-out, backend-mode-agnostic and pre-existing — this feature is the first
+time `backend_mode=agent` can satisfy it, since the trait's default-error
+body previously rejected it). **`AgentBackendAdapter::list_collection_ids`
+loops the agent's own paginated RPC internally**, accumulating results
+until the caller's `limit` is satisfied or the agent signals exhaustion.
+Verified correct, step by step, at the exact 100/101-item boundary the
+client-facing path already exercises daily — the naive single-round-trip
+alternative was demonstrated INCORRECT at that exact boundary (silently
+caps at 100 even when more exist) and rejected. ADR-059 § Decision 3, §
+Alternatives A/B.
+
+**Component decomposition**: one new unary RPC + message pair on
+`storage_agent.proto` (field shape mirrors the client-facing
+`google.firestore.v1` messages field-for-field), one new agent-side handler
+(thin — parses, clamps, delegates), one small behavior-preserving refactor
+(`parent_prefix` extracted from the existing `build_collection_path`,
+removing an in-file duplication), and one new `AgentBackendAdapter`
+trait-method override (the page-flattening loop). Zero client-facing proto
+or handler change — `handle_list_collection_ids` (`firestore-list-rpcs`)
+already calls the trait method uniformly; it now resolves to a real
+implementation for `backend_mode=agent` instead of the inherited
+default-error body, with zero new `backend_mode` branching anywhere.
+
+**Reuse**: `PostgresBackendAdapter::list_collection_ids` (unchanged, new
+caller), the fetch-one-extra-to-detect-more-pages pagination technique
+(agent-side, extended from `list_documents`'s own proven shape),
+`embyr_core::pagination`'s shared hex-offset encode/decode (unchanged, new
+caller inside `AgentBackendAdapter`), `core_error_to_status`/`grpc_err`
+(both unchanged), `domain_path_to_agent_parent`'s own string-building shape
+(mirrored, not copied, for the new `CollectionPath`-as-prefix sibling
+function) — all REUSED. Zero new `CoreError` variant, zero new domain type,
+zero new crate dependency.
+
+**Positive side effect, named not hidden**: `handle_list_documents`'s own
+`collection_id`-empty fan-out (pre-existing, backend-mode-agnostic) now also
+works for `backend_mode=agent` for the first time, since it calls the same
+trait method this feature gives a real `AgentBackendAdapter` override. Not
+covered by this feature's own UAT scenarios (which target `ListCollectionIds`
+directly) — named as a residual capability gain, not a DESIGN-time blocker.
+ADR-059 § Consequences.
+
+**Cross-version graceful degradation**: explicitly deferred, not
+re-litigated — resolved once, across all wire-touching sibling features, by
+`agent-mode-write-streaming`'s own DESIGN wave. This feature's own failure
+mode under the unresolved state is already clean by construction: an
+old-version agent's `Unimplemented` response maps through the existing
+`grpc_err`/`core_error_to_status` chain, unchanged, no new defensive code
+required regardless of the sibling's eventual conclusion.
+
+**External integrations**: none new — both the agent's own Postgres
+connection and the SaaS↔agent mTLS channel are pre-existing,
+already-`probe()`-covered dependencies, unaffected by this feature.
+
+**Peer review**: not performed — session standing methodology for this
+feature set (per orchestrator instruction) has the orchestrator independently
+verify DESIGN output directly against the code, rather than dispatching a
+`solution-architect-reviewer` sub-agent.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-059, and
+`docs/feature/agent-mode-list-collection-ids/feature-delta.md` §§ Wave: DESIGN.
+
 ## Application Architecture — agent-mode-field-transforms
 
 > Updated: 2026-08-31

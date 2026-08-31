@@ -295,3 +295,391 @@ Same open question as `agent-mode-write-streaming`'s own Escalation 2 (full deta
 ### Handoff Confirmation
 
 Next step (NOT performed by this agent): orchestrator dispatches `nw-solution-architect` for the DESIGN wave — full rigor with ADRs (at minimum: proto message/RPC design; the distinct-child-collection query shape and whether it's shared with the non-agent implementation) and Reuse Analysis.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Agent**: Morgan (nw-solution-architect) | **Date**: 2026-08-31 | **Mode**: Propose (autonomous analysis — session standing methodology for this feature set states DESIGN runs full-rigor without a passed interaction mode; the one open question, cross-version graceful degradation, is explicitly deferred to a sibling feature's own DESIGN wave rather than elicited here, leaving nothing that needs a Guide-mode conversation)
+
+✓ This file (full, 297 lines pre-DESIGN) and `docs/feature/agent-mode-list-collection-ids/slices/slice-01-enumerate-subcollections.md`
+(full) — re-read directly, not trusted from the Handoff Package summary
+alone.
+✓ `docs/product/architecture/adr-051-list-collection-ids-query-primitive-and-agent-mode-deferral.md`
+(full, 235 lines) — re-read directly. Confirms the non-agent
+`list_collection_ids` trait method's exact signature
+(`&CollectionPath, limit: i32, offset: i32) -> Result<Vec<String>, CoreError>`),
+its default-error body (`FailedPrecondition`, reused unmodified by
+`AgentBackendAdapter` until this feature), the `split_part`-based SQL (§
+Decision 2), and its own named follow-up sketch for agent-mode support (§
+Decision 3) — which this feature builds, with one correction (§ ADR-059
+Context: zero SQL duplication needed, ADR-051's own sketch assumed a
+duplicate agent-binary SQL handler would be required).
+✓ `proto/embyr/agent/v1/storage_agent.proto` (full, 372 lines) — re-read
+directly. Confirms no `ListCollectionIds` RPC or message exists (matches
+DISCUSS's own Reading Confirmation); confirms `ListDocumentsRequest`/`Response`'s
+own field numbering (`parent=1, collection_id=2, page_size=3, page_token=4`
+/ `documents=1, next_page_token=2`) as the field-numbering precedent to
+mirror, adapted to the client-facing (non-agent) `ListCollectionIdsRequest`/`Response`
+shape instead, since `ListCollectionIds` has no `collection_id` field at
+all on either proto family.
+✓ `proto/google/firestore/v1/firestore.proto` lines 154-175 — re-read
+directly. Confirms the exact client-facing message shape
+(`ListCollectionIdsRequest{ parent=1, page_size=2, page_token=3 }` /
+`ListCollectionIdsResponse{ collection_ids=1, next_page_token=2 }`) this
+feature's own new agent-side messages mirror field-for-field.
+✓ `crates/embyr-agent/src/server.rs` (full, 860 lines) — re-read directly at
+current line numbers. Confirms `list_documents`'s own now-correct
+`build_collection_path` usage (lines 549, using the fix landed earlier this
+session in `firestore-list-rpcs` DESIGN); confirms `build_collection_path`
+itself (lines 758-773) inlines a "find `databases/(default)/documents`, take
+the suffix, trim leading `/`" block that is EXACTLY the prefix-extraction
+logic this feature's own new handler needs, before it appends `collection_id`
+— extracting a shared `parent_prefix` helper (ADR-059 § Decision 2) removes
+this duplication rather than adding a third copy; confirms
+`encode_page_token`/`decode_page_token` (lines 52-63) are reusable unchanged;
+confirms `StorageAgentService` already holds `storage: Arc<PostgresBackendAdapter>`
+(line 68) and `BackendAdapter` is already imported (line 19) — the new
+handler can call `self.storage.list_collection_ids(...)` directly with zero
+new import for that call.
+✓ `crates/embyr-agent/Cargo.toml` (full, 65 lines) — re-read directly.
+Confirms `embyr-pg-storage.workspace = true` is an unconditional (not
+dev-only) dependency (line 18) — the load-bearing fact behind this feature's
+own "zero SQL duplication" finding (ADR-059 § Context).
+✓ `crates/embyr-pg-storage/src/backend_adapter.rs` lines 842-895 — re-read
+directly. Confirms `PostgresBackendAdapter::list_collection_ids` is
+ALREADY IMPLEMENTED (not merely documented in ADR-051 — the real Rust/SQL
+matches ADR-051 § Decision 2 verbatim), reusable unchanged by the agent's
+own new handler.
+✓ `crates/embyr-core/src/storage/backend_adapter.rs` (full, 209 lines) —
+re-read directly. Confirms the trait method's default-provided body (§
+Decision 1 of ADR-051) is exactly what `AgentBackendAdapter` inherits today
+— this feature adds the first real override for it outside
+`PostgresBackendAdapter`.
+✓ `crates/embyr-server/src/adapters/agent_backend.rs` (full, 627 lines) —
+re-read directly. Confirms `AgentBackendAdapter` has no `list_collection_ids`
+override (inherits the default-error body, matching ADR-051 § Decision 3);
+confirms the exact `grpc_err`/domain↔agent-proto translation idiom every
+other method uses (`domain_path_to_agent_parent`, `precondition_to_agent`,
+`fields_to_agent_map`) as the shape the new
+`domain_collection_prefix_to_agent_parent` helper mirrors; confirms
+`probe()`'s own existing sentinel-`GetDocument` shape needs no change — this
+feature adds no new external dependency, only a new call shape over the
+already-`probe()`-covered mTLS channel.
+✓ `crates/embyr-server/src/grpc/handler.rs` lines 1638-1687
+(`handle_list_collection_ids`) — re-read directly at current line numbers.
+Confirms the EXACT `limit = page_size + 1` (client `page_size` clamped
+≤100) contract every `BackendAdapter::list_collection_ids` implementor must
+honor, and confirms `handle_list_documents`'s own `collection_id`-empty
+fan-out (lines 1497-1512) calls the SAME trait method with `limit = i32::MAX`
+— both call shapes are the exact boundary conditions ADR-059 § Decision 3's
+own page-flattening loop is designed and verified against.
+✓ `crates/embyr-core/src/pagination.rs` (full, 65 lines) — re-read directly.
+Confirms `encode_page_token`/`decode_page_token` are pure, already used by
+the non-agent path; reused unchanged by `AgentBackendAdapter`'s own new loop
+(§ Component Decomposition) — the first consumer of this module from within
+`AgentBackendAdapter` specifically, still entirely inside `embyr-server`,
+not a new cross-binary dependency.
+
+No contradictions found between this feature's scope and prior evidence.
+The one open question named at DISCUSS handoff (cross-version graceful
+degradation) is deferred per the orchestrator's own standing instruction for
+this feature set — see § Escalation Resolutions below, not re-derived here.
+
+---
+
+## Wave: DESIGN / [REF] Escalation Resolutions
+
+### Escalation 1 — Cross-version graceful degradation (deferred to sibling DESIGN wave)
+
+Per the orchestrator's own standing instruction for this session: this
+question is being resolved once, in full, by the concurrently-running
+`agent-mode-write-streaming` DESIGN wave — not re-derived here. **This
+feature inherits whatever conclusion that sibling reaches.** This feature's
+own failure mode under today's (unresolved) state is identical to every
+other wire-touching sibling: an `embyr-agent` binary predating this RPC
+returns a clean gRPC `Unimplemented` for `ListCollectionIds` — a correct,
+already-honest gRPC behavior requiring no defensive code in this feature
+regardless of which version-skew UX policy the sibling feature lands on
+(ADR-059 § Consequences, Residual).
+
+### Named-not-escalated 1 — the distinct-child-collection query's shape for agent mode
+
+DISCUSS named the open question ("agent-local or shared with the non-agent
+implementation") and left it to DESIGN. **Resolved: shared, with zero SQL
+duplication** — `crates/embyr-agent`'s own `StorageAgentService` already
+holds `Arc<PostgresBackendAdapter>` (confirmed, § Reading Confirmation); the
+new agent handler calls `self.storage.list_collection_ids(...)` directly,
+the IDENTICAL method and SQL the non-agent path already uses (ADR-051 §
+Decision 2, unchanged). This is a stronger outcome than ADR-051's own
+follow-up sketch anticipated (which assumed a duplicate agent-binary SQL
+handler would be needed) — full reasoning: **ADR-059 § Context, § Decision 2**.
+
+### Named-not-escalated 2 — pagination shape across the agent mTLS boundary
+
+Not named as an open question by DISCUSS (which assumed reusing the
+existing pagination helpers unchanged would be sufficient), but surfaced
+during DESIGN's own re-reading of `handle_list_collection_ids`'s exact
+`limit = page_size + 1` calling contract and `handle_list_documents`'s own
+`limit = i32::MAX` internal call: the agent's own new RPC is
+per-call-paginated (≤100 items, matching `list_documents`'s existing
+defensive clamp) while the `BackendAdapter` trait method is a single call
+with no page-token concept. **Resolved: `AgentBackendAdapter::list_collection_ids`
+loops the agent's own paginated RPC internally, accumulating results until
+either the caller's own `limit` is satisfied or the agent signals
+exhaustion.** Verified correct at the exact 100/101-item boundary the
+client-facing path already exercises. Full reasoning, alternatives
+considered (including the naive single-round-trip approach, demonstrated
+incorrect), and the worked correctness proof: **ADR-059 § Decision 3**.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component | Path | Action | Notes |
+|---|---|---|---|
+| `rpc ListCollectionIds` declaration | `proto/embyr/agent/v1/storage_agent.proto` | MODIFY | Inserted immediately after `ListDocuments`, before `Subscribe` — unary-before-streaming, matches this file's own existing ordering |
+| `ListCollectionIdsRequest`/`ListCollectionIdsResponse` messages | `proto/embyr/agent/v1/storage_agent.proto` | CREATE | Field shape mirrors the client-facing `google.firestore.v1` messages field-for-field (`parent=1, page_size=2, page_token=3` / `collection_ids=1, next_page_token=2`) — ADR-059 § Decision 1 |
+| `parent_prefix` helper (extracted from `build_collection_path`) | `crates/embyr-agent/src/server.rs` | MODIFY (small in-file refactor) | Behavior-preserving extraction; `build_collection_path` becomes a two-line wrapper calling it then appending `collection_id` — ADR-059 § Decision 2 |
+| `list_collection_ids` handler | `crates/embyr-agent/src/server.rs` | CREATE | Calls `self.storage.list_collection_ids(...)` directly — zero new SQL, same fetch-one-extra pagination technique `list_documents` (same file) already uses — ADR-059 § Decision 2 |
+| `domain_collection_prefix_to_agent_parent` helper | `crates/embyr-server/src/adapters/agent_backend.rs` | CREATE | Mirrors `domain_path_to_agent_parent`'s own shape for a `CollectionPath`-as-parent-prefix semantic (ADR-051's own documented overload) — ADR-059 § Decision 3 |
+| `AgentBackendAdapter::list_collection_ids` (real trait override) | `crates/embyr-server/src/adapters/agent_backend.rs` | CREATE (trait override) | Page-flattening loop over the agent's own ≤100-per-call RPC — the one genuinely new mechanism this feature adds — ADR-059 § Decision 3 |
+
+No proto/handler/adapter change is needed on the CLIENT-facing side
+(`google.firestore.v1.Firestore/ListCollectionIds`,
+`handle_list_collection_ids`) — those already exist (`firestore-list-rpcs`)
+and are entirely unaware of `backend_mode`; they call
+`BackendAdapter::list_collection_ids` through the trait, which now resolves
+to a real implementation for `backend_mode=agent` instead of the inherited
+default-error body, with zero handler-level change.
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Mechanism | Source | Action | Rationale |
+|---|---|---|---|
+| `PostgresBackendAdapter::list_collection_ids` (SQL + method) | `crates/embyr-pg-storage/src/backend_adapter.rs:844-895`, unchanged | REUSE UNCHANGED, NEW CALLER | The agent binary already holds this exact struct (`Arc<PostgresBackendAdapter>`); zero SQL duplication (ADR-059 § Context, corrects ADR-051's own follow-up sketch) |
+| `BackendAdapter::list_collection_ids` trait method signature | `crates/embyr-core/src/storage/backend_adapter.rs`, unchanged | REUSE UNCHANGED | `AgentBackendAdapter` now supplies its first real override; signature and default-error body (for any future non-overriding adapter) untouched |
+| Fetch-one-extra-to-detect-more-pages pagination technique | `list_documents`'s own proven shape (same file) / `handle_list_collection_ids`'s own shape (non-agent) | REUSE (technique, new call site) | The agent's own new handler applies the SAME `page_size+1`/truncate/has_more idiom |
+| `encode_page_token`/`decode_page_token` (agent-local copy) | `crates/embyr-agent/src/server.rs:52-63`, unchanged | REUSE UNCHANGED | New handler's own page-token encode/decode |
+| `embyr_core::pagination::encode_page_token`/`decode_page_token` (shared copy) | `crates/embyr-core/src/pagination.rs`, unchanged | REUSE UNCHANGED, NEW CALLER | `AgentBackendAdapter`'s own new loop — first use from within `AgentBackendAdapter` specifically, still entirely inside `embyr-server` |
+| `core_error_to_status` (agent-side) | `crates/embyr-agent/src/server.rs`, unchanged | REUSE UNCHANGED | New handler's own error mapping — `list_collection_ids`'s only error case (`BackendUnavailable`, from SQL failure) already has a match arm |
+| `grpc_err` (server-side) | `crates/embyr-server/src/adapters/agent_backend.rs`, unchanged | REUSE UNCHANGED | `AgentBackendAdapter`'s own new loop, every RPC error in the loop |
+| `domain_path_to_agent_parent`'s own shape | `crates/embyr-server/src/adapters/agent_backend.rs`, unchanged | REUSE (shape, new sibling function) | `domain_collection_prefix_to_agent_parent` mirrors its string-building pattern for a `CollectionPath` instead of a `DocumentPath` |
+| `BackendAdapter` trait import | `crates/embyr-agent/src/server.rs:19`, unchanged | REUSE UNCHANGED | Already imported; new handler's `self.storage.list_collection_ids(...)` call resolves through it with no new import |
+| `build_collection_path`'s own marker-finding logic | `crates/embyr-agent/src/server.rs:758-773` | EXTEND (small refactor into `parent_prefix`) | Removes an in-file duplication rather than adding a third copy; behavior-preserving (ADR-059 § Decision 2) |
+| `AgentBackendAdapter` page-flattening loop | — | CREATE NEW | The one genuinely new mechanism — no existing precedent in this codebase for flattening a remote paginated RPC into a single bounded-`limit` driven-port call (ADR-059 § Decision 3) |
+
+**8 REUSE (7 unchanged, 1 shape-only/new sibling function), 1 EXTEND (small
+behavior-preserving refactor), 1 CREATE NEW (the page-flattening loop) —
+plus the new proto RPC/message pair and the new agent handler, both thin
+wrappers over entirely reused machinery.**
+
+---
+
+## Wave: DESIGN / [REF] Driving/Driven Ports
+
+**Driving port**: no new driving port. The client-facing
+`google.firestore.v1.Firestore/ListCollectionIds` RPC (existing,
+`firestore-list-rpcs`) is unchanged — this feature makes its EXISTING call
+into `BackendAdapter::list_collection_ids` resolve correctly for
+`backend_mode=agent` for the first time, with zero handler-level
+`backend_mode` branching (matching ADR-050/051's own discipline).
+
+**Driven ports**: `StorageAgent/ListCollectionIds` (NEW unary RPC on the
+existing agent mTLS driving port, agent-side) and
+`BackendAdapter::list_collection_ids`'s first real `AgentBackendAdapter`
+override (NEW, this feature's own genuinely new driven-port surface,
+`crates/embyr-server`-side). Both sit entirely within the existing,
+already-`probe()`-covered mTLS channel between `embyr-server` and
+`embyr-agent` — no new external integration, no new third-party dependency.
+
+**External integrations**: none new. Both the agent's own Postgres
+connection (already `probe()`-covered at agent startup) and the SaaS↔agent
+mTLS channel (already `probe()`-covered via `AgentBackendAdapter::probe()`'s
+sentinel `GetDocument`) are pre-existing, unaffected by this feature.
+
+**Earned Trust note (principle 12, applied)**: this feature adds no new
+fallible EXTERNAL boundary requiring its own `probe()` — the new RPC and
+the new `AgentBackendAdapter` override both fail through already-structured,
+already-non-panicking paths: a SQL failure inside the agent's own handler
+maps to `CoreError::BackendUnavailable` → `Status::internal` via
+`core_error_to_status` (agent-side, existing); any gRPC failure in
+`AgentBackendAdapter`'s own loop (including `Unimplemented` from an
+old-version agent, § Escalation Resolutions) maps through the existing
+`grpc_err` → `CoreError::BackendUnavailable` (server-side, existing). No
+new panic surface, no new silent-empty-result path — the loop's own
+termination is bounded by the agent's own finite, `LIMIT`-bounded SQL result
+set on every iteration (ADR-059 § Decision 3, Alternative B).
+
+---
+
+## Wave: DESIGN / [REF] C4 Diagrams
+
+### System Context (L1) — delta only; full system context unchanged from `brief.md`'s own System Architecture section
+
+```mermaid
+C4Context
+  title System Context — agent-mode-list-collection-ids (delta)
+  Person(alex, "Alex", "SDK Developer, P1, Meridian Health")
+  System_Ext(sdk, "Firebase SDK", "Opens ListCollectionIds internally for docRef.listCollections()")
+  System(embyr, "embyr-rs SaaS", "Firestore-protocol-compatible server")
+  System_Ext(agent, "embyr-agent", "Customer-VPC-deployed binary, backend_mode=agent")
+  Rel(alex, sdk, "Calls docRef.listCollections()")
+  Rel(sdk, embyr, "Sends ListCollectionIdsRequest (google.firestore.v1)")
+  Rel(embyr, agent, "Forwards as StorageAgent/ListCollectionIds over mTLS (NEW)")
+```
+
+### Container (L2)
+
+```mermaid
+C4Container
+  title Container Diagram — agent-mode ListCollectionIds RPC path (delta)
+  Container(grpc, "FirestoreGrpcHandler", "Tonic gRPC :8080", "Existing handle_list_collection_ids — UNCHANGED, zero backend_mode branching")
+  Container(core, "embyr-core::storage", "Rust, no IO", "Existing BackendAdapter trait — list_collection_ids default body now has a real AgentBackendAdapter override")
+  Container(adapter, "AgentBackendAdapter", "Rust, embyr-server", "NEW list_collection_ids override — page-flattening loop over the agent's own paginated RPC")
+  Container(agentSvc, "StorageAgentService", "Rust / tonic, mTLS, customer VPC", "NEW list_collection_ids handler — calls self.storage.list_collection_ids() directly")
+  ContainerDb(pg, "Customer Postgres (agent-managed)", "PostgreSQL", "documents table — UNCHANGED schema, SAME SELECT DISTINCT split_part(...) query as the non-agent path")
+  Rel(grpc, core, "Calls list_collection_ids() through the BackendAdapter trait, backend-mode-agnostic")
+  Rel(core, adapter, "Dispatches to AgentBackendAdapter for backend_mode=agent")
+  Rel(adapter, agentSvc, "Calls StorageAgent/ListCollectionIds over mTLS, looping page_token until exhausted or limit satisfied (NEW)")
+  Rel(agentSvc, pg, "Reads via the SAME Arc<PostgresBackendAdapter>::list_collection_ids the non-agent path uses — zero SQL duplication")
+```
+
+Component (L3) omitted — neither new handler's own internal shape meets the
+5+-component threshold, matching `firestore-list-rpcs`'s own identical L3
+omission precedent for the same RPC class.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new dependency, no new crate. Reuses `sqlx::QueryBuilder` (already a
+transitive dependency via `embyr-pg-storage`, already linked into
+`embyr-agent`), `tonic`/`prost` (already dependencies of both `embyr-agent`
+and `embyr-server`), and every existing domain/port type. Zero OSS
+evaluation needed, nothing new to select.
+
+---
+
+## Wave: DESIGN / [REF] Enforcement
+
+**`list_collection_ids`'s own default-provided-body pattern** (ADR-051 §
+Decision 1, unchanged) — Rust's trait-default mechanism continues to ensure
+any FUTURE `BackendAdapter` implementor that doesn't override the method
+gets the safe, structured `FailedPrecondition` rejection automatically.
+`AgentBackendAdapter` is now one of the adapters WITH a real override; its
+own correctness (the page-flattening loop's boundary behavior, ADR-059 §
+Decision 3) is enforced by the acceptance test suite Slice 01's own
+AC-03 (pagination completeness) and AC-04 (sibling-parent scoping) drive —
+run against the real `embyr-agent` binary and real Postgres (per this
+feature's own WS Strategy B), the same test-coverage-based enforcement
+discipline `firestore-list-rpcs` already established for this exact query
+class (no new static tooling proposed).
+
+**No new IO-boundary rule needed**: neither new component (the agent
+handler, `AgentBackendAdapter`'s loop) touches `embyr-core` — `deny.toml`'s
+existing NO-IO enforcement is unaffected, nothing new to enforce there.
+
+---
+
+## Wave: DESIGN / [REF] Quality Validation
+
+- [x] Requirements traced: all 5 AC bullets under US-01 map to a named
+  component above (query correctness/scoping → ADR-059 § Decision 2, zero
+  SQL duplication; empty-result → same SQL, `DISTINCT` over zero rows;
+  pagination completeness → ADR-059 § Decision 3, worked boundary proof;
+  real-binary/real-Postgres exercise → WS Strategy B, unchanged from
+  DISCUSS).
+- [x] Component boundaries: the agent's own handler owns request
+  parsing/pagination-clamping only, delegating all query logic to
+  `PostgresBackendAdapter` (unchanged); `AgentBackendAdapter` owns ONLY the
+  wire-pagination-flattening translation, no query logic of its own;
+  `BackendAdapter` port is the sole boundary between `embyr-core`'s
+  backend-agnostic callers and both concrete adapters.
+- [x] Technology choices: zero new deps (documented above).
+- [x] Quality attributes: correctness (page-flattening loop verified at the
+  exact 100/101 boundary the client-facing path already exercises, ADR-059 §
+  Decision 3); reliability (every new failure path is structured, non-panicking,
+  bounded-loop-terminating, § Driven Ports Earned Trust note); maintainability
+  (zero SQL duplication — one query, one implementation, two callers;
+  `parent_prefix` extraction removes an in-file duplication rather than
+  adding a third copy); performance (no numeric latency target set, matching
+  `firestore-list-rpcs`'s own precedent; the page-flattening loop's own
+  worst-case round-trip cost is named explicitly, not hidden, ADR-059 §
+  Consequences).
+- [x] Dependency-inversion compliance: `handle_list_collection_ids` (client-facing)
+  depends on `BackendAdapter` trait only, unchanged, zero new
+  `backend_mode` branching anywhere in `embyr-server`'s own handler layer —
+  the agent-mode dispatch is entirely inside the existing adapter-selection
+  mechanism.
+- [x] C4 diagrams: L1 delta + L2 provided above.
+- [x] Integration patterns: unary gRPC over the existing mTLS channel — no
+  new external integration, no new integration PATTERN (pagination-loop
+  wrapping a paginated wire RPC into a single bounded-limit call is a
+  pattern already implicit in every Firestore SDK's own client-side
+  pagination consumer, not a novel one for this codebase to invent from
+  scratch).
+- [x] OSS preference: N/A, zero new dependencies.
+- [x] AC behavioral, not implementation-coupled: unchanged from DISCUSS.
+- [x] External integrations: none new; both the agent's own Postgres
+  connection and the SaaS↔agent mTLS channel are pre-existing,
+  already-`probe()`-covered, unaffected by this feature (§ Driven Ports
+  Earned Trust note).
+- [x] Enforcement tooling: named above (trait-default mechanism for the
+  IO-boundary/unimplemented-backend rule; test-coverage-based enforcement
+  for the new loop's own boundary correctness).
+- [ ] Peer review: not performed this session — session standing methodology
+  (per orchestrator instruction) has the orchestrator independently verify
+  DESIGN output directly against the code, not a dispatched
+  `solution-architect-reviewer` sub-agent, for this feature set.
+
+---
+
+## Wave: DESIGN / [REF] Handoff to DELIVER
+
+**Single slice, no sequencing decision needed** (per DISCUSS § Prioritization,
+unchanged) — Slice 01 (WS) is the entire feature. Suggested build order
+within the slice, smallest-safe-increment first:
+
+1. Proto: add `ListCollectionIdsRequest`/`ListCollectionIdsResponse`
+   messages and the `rpc ListCollectionIds` declaration to
+   `proto/embyr/agent/v1/storage_agent.proto` (ADR-059 § Decision 1).
+   Regenerate `embyr-proto`'s agent module.
+2. `crates/embyr-agent/src/server.rs`: extract `parent_prefix` from
+   `build_collection_path` (behavior-preserving refactor — verify
+   `build_collection_path`'s own existing callers/tests are unaffected
+   before adding new code), then add the `list_collection_ids` handler
+   calling `self.storage.list_collection_ids(...)` directly (ADR-059 §
+   Decision 2).
+3. `crates/embyr-server/src/adapters/agent_backend.rs`: add
+   `domain_collection_prefix_to_agent_parent` and the real
+   `list_collection_ids` override with its page-flattening loop (ADR-059 §
+   Decision 3). This is the one component with genuinely new logic — the
+   crafter should write the boundary-case test (>100 children, page_size
+   exactly 100) FIRST, mirroring the worked proof in ADR-059 § Decision 3,
+   before the happy-path/empty/sibling-isolation tests that more directly
+   mirror `firestore-list-rpcs`'s own already-proven non-agent test shape.
+
+**Two things the crafter must not rediscover the hard way**:
+
+1. Do NOT write new SQL or a new `PostgresBackendAdapter`-alike struct
+   inside `crates/embyr-agent/`. The agent's own handler must call
+   `self.storage.list_collection_ids(...)` on the EXISTING
+   `Arc<PostgresBackendAdapter>` field directly — `BackendAdapter` is
+   already imported in that file (line 19). Writing separate SQL would
+   silently reintroduce the exact "two copies drift apart" risk ADR-059 §
+   Alternatives C rejects.
+2. Do NOT forward the driven-port `limit` parameter directly as the agent
+   wire RPC's own `page_size` in a single round trip. This is demonstrably
+   incorrect at `page_size=100` (the single most common client page size in
+   this codebase) once more than 100 children exist for a parent — worked
+   proof and the correct loop-based alternative: ADR-059 § Decision 3 /
+   Alternatives A.
+
+**Reference class**: `firestore-list-rpcs` Slice 02 (non-agent
+`ListCollectionIds`, ADR-051) — same query class, same AC shape, this
+feature's own agent-side handler and adapter are the wire-transport
+translation layer around that already-proven query, not a reimplementation
+of it.
