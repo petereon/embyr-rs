@@ -700,6 +700,10 @@ name = "firestore_field_transforms_ft01_server_timestamp"
 path = "../../tests/firestore_field_transforms/acceptance/ft01_server_timestamp.rs"
 
 [[test]]
+name = "firestore_field_transforms_ft02_numeric_counters"
+path = "../../tests/firestore_field_transforms/acceptance/ft02_numeric_counters.rs"
+
+[[test]]
 name = "customer_db_transaction_sweeper_us01_reclaim_orphaned_transactions"
 path = "../../tests/customer_db_transaction_sweeper/acceptance/us01_reclaim_orphaned_transactions.rs"
 

@@ -695,11 +695,13 @@ impl FirestoreService {
     ///
     /// Slice 01 gives `set_to_server_value` its real translation (AC-01-05:
     /// anything other than `REQUEST_TIME` is `InvalidArgument`, document
-    /// unmodified). The other 5 oneof kinds are not yet wired at the
-    /// translation layer — Slice 02/03 extend this match, not a new
-    /// function — so they are rejected here with `InvalidArgument` rather
-    /// than silently discarded (this feature's whole purpose is to stop
-    /// silently discarding transforms).
+    /// unmodified). Slice 02 (ADR-052 § Decision 4) adds `increment`/
+    /// `maximum`/`minimum`: operand decoded via `proto_value_to_field_value`
+    /// (reused unchanged), rejected with `InvalidArgument` here — before any
+    /// Postgres round trip — unless it is `Integer`/`Double`. Array kinds
+    /// remain Slice 03's own scope — rejected here with `InvalidArgument`
+    /// rather than silently discarded (this feature's whole purpose is to
+    /// stop silently discarding transforms).
     fn translate_field_transforms(
         field_transforms: &[embyr_proto::firestore::document_transform::FieldTransform],
     ) -> Result<Vec<FieldTransform>, Status> {
@@ -717,11 +719,17 @@ impl FirestoreService {
                         ))
                     }
                 }
+                Some(TransformType::Increment(v)) => Self::translate_numeric_operand(v)
+                    .map(|value| FieldTransform::Increment(ft.field_path.clone(), value))
+                    .ok_or_else(|| Status::invalid_argument("increment delta must be numeric")),
+                Some(TransformType::Maximum(v)) => Self::translate_numeric_operand(v)
+                    .map(|value| FieldTransform::Maximum(ft.field_path.clone(), value))
+                    .ok_or_else(|| Status::invalid_argument("maximum comparand must be numeric")),
+                Some(TransformType::Minimum(v)) => Self::translate_numeric_operand(v)
+                    .map(|value| FieldTransform::Minimum(ft.field_path.clone(), value))
+                    .ok_or_else(|| Status::invalid_argument("minimum comparand must be numeric")),
                 Some(
-                    TransformType::Increment(_)
-                    | TransformType::Maximum(_)
-                    | TransformType::Minimum(_)
-                    | TransformType::AppendMissingElements(_)
+                    TransformType::AppendMissingElements(_)
                     | TransformType::RemoveAllFromArray(_),
                 ) => Err(Status::invalid_argument(
                     "this field transform kind is not yet supported",
@@ -731,6 +739,17 @@ impl FirestoreService {
                 )),
             })
             .collect()
+    }
+
+    /// Decodes an `increment`/`maximum`/`minimum` operand (ADR-052 §
+    /// Decision 4) — reuses `proto_value_to_field_value` unchanged, then
+    /// filters to `Integer`/`Double` (SPEC.md's own documented non-numeric-
+    /// delta rule, extended by direct analogy to `maximum`/`minimum`).
+    /// `None` on decode failure OR non-numeric result — the caller turns
+    /// either case into the same `InvalidArgument`.
+    fn translate_numeric_operand(v: &embyr_proto::firestore::Value) -> Option<FieldValue> {
+        crate::encoding::firestore_proto::proto_value_to_field_value(v)
+            .filter(|fv| matches!(fv, FieldValue::Integer(_) | FieldValue::Double(_)))
     }
 
     async fn translate_one_write_for_commit(

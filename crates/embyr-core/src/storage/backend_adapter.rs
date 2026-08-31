@@ -26,10 +26,11 @@ pub enum WritePrecondition {
 
 /// Field-level server-side transform to apply at commit time.
 ///
-/// 6 variants (ADR-052 § Decision 1) — Slice 01 (firestore-field-transforms)
-/// implements real `apply_field_transform` logic for `ServerTimestamp` only;
-/// the other 5 exist so the enum/translation shape is complete, but fail
-/// closed at apply time until Slice 02/03 extend them.
+/// 6 variants (ADR-052 § Decision 1) — Slice 01/02 (firestore-field-transforms)
+/// implement real `apply_field_transform` logic for `ServerTimestamp`/
+/// `Increment`/`Maximum`/`Minimum`; the remaining 2 (`AppendMissingElements`/
+/// `RemoveAllFromArray`) exist so the enum/translation shape is complete,
+/// but fail closed at apply time until Slice 03 extends them.
 #[derive(Debug, Clone)]
 pub enum FieldTransform {
     /// Write the server's current timestamp to the named field path.

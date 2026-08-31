@@ -74,3 +74,49 @@ pub fn update_write_with_transforms(
         })),
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 02 (US-02, ADR-052/053) — `increment`/`maximum`/`minimum` builders,
+// plus integer/double value constructors this slice's numeric scenarios need
+// (`string_field` above already covers the non-numeric-existing-value case).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// An integer-valued proto `Value` — the delta/comparand shape for numeric
+/// transform scenarios that must preserve `FieldValue::Integer`.
+pub fn int_field(value: i64) -> embyr_proto::firestore::Value {
+    embyr_proto::firestore::Value {
+        value_type: Some(embyr_proto::firestore::value::ValueType::IntegerValue(value)),
+    }
+}
+
+/// A double-valued proto `Value` — the delta/comparand shape for numeric
+/// transform scenarios that must promote to `FieldValue::Double`.
+pub fn double_field(value: f64) -> embyr_proto::firestore::Value {
+    embyr_proto::firestore::Value {
+        value_type: Some(embyr_proto::firestore::value::ValueType::DoubleValue(value)),
+    }
+}
+
+/// An `increment: <value>` field transform (AC-02-01/02/03/05).
+pub fn increment_transform(field_path: &str, delta: embyr_proto::firestore::Value) -> FieldTransform {
+    FieldTransform {
+        field_path: field_path.to_string(),
+        transform_type: Some(TransformType::Increment(delta)),
+    }
+}
+
+/// A `maximum: <value>` field transform (AC-02-04).
+pub fn maximum_transform(field_path: &str, value: embyr_proto::firestore::Value) -> FieldTransform {
+    FieldTransform {
+        field_path: field_path.to_string(),
+        transform_type: Some(TransformType::Maximum(value)),
+    }
+}
+
+/// A `minimum: <value>` field transform (AC-02-04).
+pub fn minimum_transform(field_path: &str, value: embyr_proto::firestore::Value) -> FieldTransform {
+    FieldTransform {
+        field_path: field_path.to_string(),
+        transform_type: Some(TransformType::Minimum(value)),
+    }
+}
