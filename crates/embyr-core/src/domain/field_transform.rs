@@ -1,4 +1,4 @@
-//! firestore-field-transforms (Slice 01/02, ADR-052 § Decision 5a): the
+//! firestore-field-transforms (Slice 01/02/03, ADR-052 § Decision 5a): the
 //! pure, IO-free compute function every field-transform application
 //! (standalone `Write::Transform` and combined `Write::Update.transforms`)
 //! runs through.
@@ -6,10 +6,11 @@
 //! Slice 02 adds real `Increment`/`Maximum`/`Minimum` arithmetic
 //! (type-preserving per `docs/SPEC.md`'s promotion rule, `checked_add` ->
 //! `InvalidArgument` on `i64` overflow per ADR-053 Escalation 1). Slice 03
-//! still owns `AppendMissingElements`/`RemoveAllFromArray`, which continue
-//! to fail closed with `CoreError::InvalidArgument` rather than mutating
-//! `fields` — unreachable from translation until that slice extends
-//! `translate_field_transforms`.
+//! adds real `AppendMissingElements`/`RemoveAllFromArray` (structural
+//! equality via `FieldValue::PartialEq`, zero new equality logic) — both
+//! array-kind transforms always return `Ok(None)` on success, NEVER
+//! contributing a `WriteResult.transform_results` entry (ADR-053 Escalation
+//! 2 Resolution), distinct from every other kind in this module.
 
 use std::collections::BTreeMap;
 
@@ -49,12 +50,68 @@ pub fn apply_field_transform(
             fields.insert(field_path.clone(), value.clone());
             Ok(Some(value))
         }
-        FieldTransform::AppendMissingElements(..) | FieldTransform::RemoveAllFromArray(..) => {
-            Err(CoreError::InvalidArgument(format!(
-                "{} transform is not yet implemented",
-                transform.kind_name()
-            )))
+        FieldTransform::AppendMissingElements(field_path, values) => {
+            append_missing_elements(fields, field_path, values)?;
+            Ok(None)
         }
+        FieldTransform::RemoveAllFromArray(field_path, values) => {
+            remove_all_from_array(fields, field_path, values)?;
+            Ok(None)
+        }
+    }
+}
+
+/// `appendMissingElements` (ADR-052 § Decision 5a): missing field ->
+/// created as `values` given, in order; existing `Array` -> append each of
+/// `values` not already present (`FieldValue::PartialEq`, already derived —
+/// zero new equality logic), preserving `values`'s own order for the
+/// appended tail and deduping duplicates within `values` itself; existing
+/// non-array -> `InvalidArgument` (residual, by analogy to the numeric
+/// non-numeric-target rule). Never contributes a `transform_results` entry.
+fn append_missing_elements(
+    fields: &mut BTreeMap<String, FieldValue>,
+    field_path: &str,
+    values: &[FieldValue],
+) -> Result<(), CoreError> {
+    let mut merged = match fields.get(field_path) {
+        None => Vec::new(),
+        Some(FieldValue::Array(existing)) => existing.clone(),
+        Some(_) => {
+            return Err(CoreError::InvalidArgument(
+                "appendMissingElements target is not an array".into(),
+            ))
+        }
+    };
+    for value in values {
+        if !merged.contains(value) {
+            merged.push(value.clone());
+        }
+    }
+    fields.insert(field_path.to_string(), FieldValue::Array(merged));
+    Ok(())
+}
+
+/// `removeAllFromArray` (ADR-052 § Decision 5a): missing field -> true
+/// no-op, field NOT created; existing `Array` -> retain only elements not
+/// structurally equal to any of `values`, removing ALL matching occurrences;
+/// existing non-array -> `InvalidArgument`. Never contributes a
+/// `transform_results` entry.
+fn remove_all_from_array(
+    fields: &mut BTreeMap<String, FieldValue>,
+    field_path: &str,
+    values: &[FieldValue],
+) -> Result<(), CoreError> {
+    match fields.get(field_path) {
+        None => Ok(()),
+        Some(FieldValue::Array(existing)) => {
+            let retained: Vec<FieldValue> =
+                existing.iter().filter(|item| !values.contains(item)).cloned().collect();
+            fields.insert(field_path.to_string(), FieldValue::Array(retained));
+            Ok(())
+        }
+        Some(_) => Err(CoreError::InvalidArgument(
+            "removeAllFromArray target is not an array".into(),
+        )),
     }
 }
 
@@ -183,25 +240,6 @@ mod tests {
                 Some(&FieldValue::Timestamp(now.0, now.1))
             );
         }
-    }
-
-    /// Slice-02 scope guard: an array-kind transform Slice 03 will implement
-    /// later fails closed today — `InvalidArgument`, `fields` untouched —
-    /// rather than silently no-op-ing or panicking. (`Increment` moved to
-    /// Slice 02's own real-implementation tests below — it is no longer an
-    /// unimplemented kind.)
-    #[test]
-    fn unimplemented_array_transform_kinds_fail_closed_without_mutating_fields() {
-        let now = (1_700_000_000_i64, 0);
-        let mut fields = BTreeMap::new();
-        let transform =
-            FieldTransform::AppendMissingElements("sharedWithUserIds".to_string(), vec![FieldValue::String("u-diego".to_string())]);
-
-        let err = apply_field_transform(&mut fields, &transform, now)
-            .expect_err("appendMissingElements is not implemented until Slice 03");
-
-        assert!(matches!(err, CoreError::InvalidArgument(_)));
-        assert!(fields.is_empty());
     }
 
     // Slice 02 (US-02, ADR-052 § Decision 5a, ADR-053 Escalation 1) —
@@ -398,6 +436,156 @@ mod tests {
                 .expect_err("minimum against a non-numeric target must be rejected");
             prop_assert!(matches!(min_err, CoreError::InvalidArgument(_)));
             prop_assert_eq!(min_fields.get("promoBoostCount"), Some(&existing));
+        }
+
+        // Slice 03 (US-03, ADR-052 § Decision 5a, ADR-053 Escalation 2) —
+        // `appendMissingElements`/`removeAllFromArray`. Test Budget: 6
+        // behaviors x 2 = 12 unit tests max; 6 written (one per behavior).
+        // Every behavior below also asserts `result == None` inline — array
+        // transforms never populate `transform_results` — rather than a
+        // separate 7th test duplicating that single fact.
+
+        /// Behavior 1 (AC-03-01/AC-03-02): `appendMissingElements` against an
+        /// existing array appends only the genuinely-new incoming values, in
+        /// order, deduping both against the existing array AND within the
+        /// incoming values themselves. Reference oracle: an independently
+        /// implemented `HashSet`-tracked fold, not the production `Vec::contains`
+        /// scan.
+        #[test]
+        fn append_missing_elements_appends_only_genuinely_new_values_in_order(
+            existing in prop::collection::vec("[a-c]", 0..5),
+            incoming in prop::collection::vec("[a-c]", 0..5),
+        ) {
+            let existing_values: Vec<FieldValue> = existing.iter().cloned().map(FieldValue::String).collect();
+            let incoming_values: Vec<FieldValue> = incoming.iter().cloned().map(FieldValue::String).collect();
+
+            let mut fields = BTreeMap::from([(
+                "sharedWithUserIds".to_string(),
+                FieldValue::Array(existing_values.clone()),
+            )]);
+            let transform =
+                FieldTransform::AppendMissingElements("sharedWithUserIds".to_string(), incoming_values.clone());
+            let result = apply_field_transform(&mut fields, &transform, (0, 0))
+                .expect("appendMissingElements on an array field never fails");
+            prop_assert_eq!(result, None, "array transforms never populate transform_results");
+
+            let mut seen: std::collections::HashSet<String> = existing.iter().cloned().collect();
+            let mut expected = existing_values;
+            for (raw, value) in incoming.iter().zip(incoming_values.iter()) {
+                if seen.insert(raw.clone()) {
+                    expected.push(value.clone());
+                }
+            }
+            prop_assert_eq!(fields.get("sharedWithUserIds"), Some(&FieldValue::Array(expected)));
+        }
+
+        /// Behavior 2 (AC-03-04): `appendMissingElements` against a MISSING
+        /// field creates it as the incoming values (still deduped/ordered per
+        /// Behavior 1's own rule, applied from an empty base).
+        #[test]
+        fn append_missing_elements_against_missing_field_creates_it_as_given(
+            incoming in prop::collection::vec("[a-c]", 1..5),
+        ) {
+            let incoming_values: Vec<FieldValue> = incoming.iter().cloned().map(FieldValue::String).collect();
+            let mut fields: BTreeMap<String, FieldValue> = BTreeMap::new();
+            let transform =
+                FieldTransform::AppendMissingElements("sharedWithUserIds".to_string(), incoming_values.clone());
+            let result = apply_field_transform(&mut fields, &transform, (0, 0))
+                .expect("appendMissingElements against a missing field never fails");
+            prop_assert_eq!(result, None);
+
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut expected = Vec::new();
+            for (raw, value) in incoming.iter().zip(incoming_values.iter()) {
+                if seen.insert(raw.clone()) {
+                    expected.push(value.clone());
+                }
+            }
+            prop_assert_eq!(fields.get("sharedWithUserIds"), Some(&FieldValue::Array(expected)));
+        }
+
+        /// Behavior 3 (residual, ADR-052 § Consequences): `appendMissingElements`
+        /// against an existing NON-array field is `InvalidArgument`, field
+        /// left completely unchanged.
+        #[test]
+        fn append_missing_elements_against_non_array_existing_value_is_invalid_argument_and_unchanged(
+            s in "[a-z]{0,10}",
+        ) {
+            let existing = FieldValue::String(s);
+            let mut fields = BTreeMap::from([("sharedWithUserIds".to_string(), existing.clone())]);
+            let transform = FieldTransform::AppendMissingElements(
+                "sharedWithUserIds".to_string(),
+                vec![FieldValue::String("u-diego".to_string())],
+            );
+
+            let err = apply_field_transform(&mut fields, &transform, (0, 0))
+                .expect_err("appendMissingElements against a non-array target must be rejected");
+
+            prop_assert!(matches!(err, CoreError::InvalidArgument(_)));
+            prop_assert_eq!(fields.get("sharedWithUserIds"), Some(&existing));
+        }
+
+        /// Behavior 4 (AC-03-03): `removeAllFromArray` removes ALL matching
+        /// occurrences of every given value, not just the first.
+        #[test]
+        fn remove_all_from_array_removes_all_matching_occurrences(
+            existing in prop::collection::vec("[a-c]", 0..8),
+            to_remove in prop::collection::vec("[a-c]", 0..4),
+        ) {
+            let existing_values: Vec<FieldValue> = existing.iter().cloned().map(FieldValue::String).collect();
+            let remove_values: Vec<FieldValue> = to_remove.iter().cloned().map(FieldValue::String).collect();
+            let remove_set: std::collections::HashSet<&String> = to_remove.iter().collect();
+
+            let mut fields =
+                BTreeMap::from([("sharedWithUserIds".to_string(), FieldValue::Array(existing_values))]);
+            let transform = FieldTransform::RemoveAllFromArray("sharedWithUserIds".to_string(), remove_values);
+            let result = apply_field_transform(&mut fields, &transform, (0, 0))
+                .expect("removeAllFromArray on an array field never fails");
+            prop_assert_eq!(result, None);
+
+            let expected: Vec<FieldValue> = existing
+                .iter()
+                .filter(|v| !remove_set.contains(v))
+                .cloned()
+                .map(FieldValue::String)
+                .collect();
+            prop_assert_eq!(fields.get("sharedWithUserIds"), Some(&FieldValue::Array(expected)));
+        }
+
+        /// Behavior 5 (AC-03-05): `removeAllFromArray` against a MISSING field
+        /// is a true no-op — the field is NOT created.
+        #[test]
+        fn remove_all_from_array_against_missing_field_is_a_no_op_and_does_not_create_it(
+            to_remove in prop::collection::vec("[a-c]", 0..4),
+        ) {
+            let remove_values: Vec<FieldValue> = to_remove.iter().cloned().map(FieldValue::String).collect();
+            let mut fields: BTreeMap<String, FieldValue> = BTreeMap::new();
+            let transform = FieldTransform::RemoveAllFromArray("sharedWithUserIds".to_string(), remove_values);
+            let result = apply_field_transform(&mut fields, &transform, (0, 0))
+                .expect("removeAllFromArray against a missing field never fails");
+            prop_assert_eq!(result, None);
+            prop_assert!(fields.is_empty(), "a no-op must not create the field");
+        }
+
+        /// Behavior 6 (residual, ADR-052 § Consequences): `removeAllFromArray`
+        /// against an existing NON-array field is `InvalidArgument`, field
+        /// left completely unchanged.
+        #[test]
+        fn remove_all_from_array_against_non_array_existing_value_is_invalid_argument_and_unchanged(
+            s in "[a-z]{0,10}",
+        ) {
+            let existing = FieldValue::String(s);
+            let mut fields = BTreeMap::from([("sharedWithUserIds".to_string(), existing.clone())]);
+            let transform = FieldTransform::RemoveAllFromArray(
+                "sharedWithUserIds".to_string(),
+                vec![FieldValue::String("u-diego".to_string())],
+            );
+
+            let err = apply_field_transform(&mut fields, &transform, (0, 0))
+                .expect_err("removeAllFromArray against a non-array target must be rejected");
+
+            prop_assert!(matches!(err, CoreError::InvalidArgument(_)));
+            prop_assert_eq!(fields.get("sharedWithUserIds"), Some(&existing));
         }
     }
 }

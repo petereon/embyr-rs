@@ -698,10 +698,11 @@ impl FirestoreService {
     /// unmodified). Slice 02 (ADR-052 § Decision 4) adds `increment`/
     /// `maximum`/`minimum`: operand decoded via `proto_value_to_field_value`
     /// (reused unchanged), rejected with `InvalidArgument` here — before any
-    /// Postgres round trip — unless it is `Integer`/`Double`. Array kinds
-    /// remain Slice 03's own scope — rejected here with `InvalidArgument`
-    /// rather than silently discarded (this feature's whole purpose is to
-    /// stop silently discarding transforms).
+    /// Postgres round trip — unless it is `Integer`/`Double`. Slice 03 adds
+    /// `appendMissingElements`/`removeAllFromArray`: each `ArrayValue.values`
+    /// entry decoded via the same `proto_value_to_field_value`; any decode
+    /// failure -> `InvalidArgument` (matches `proto_fields_to_domain`'s own
+    /// existing error message for the identical failure mode).
     fn translate_field_transforms(
         field_transforms: &[embyr_proto::firestore::document_transform::FieldTransform],
     ) -> Result<Vec<FieldTransform>, Status> {
@@ -728,12 +729,12 @@ impl FirestoreService {
                 Some(TransformType::Minimum(v)) => Self::translate_numeric_operand(v)
                     .map(|value| FieldTransform::Minimum(ft.field_path.clone(), value))
                     .ok_or_else(|| Status::invalid_argument("minimum comparand must be numeric")),
-                Some(
-                    TransformType::AppendMissingElements(_)
-                    | TransformType::RemoveAllFromArray(_),
-                ) => Err(Status::invalid_argument(
-                    "this field transform kind is not yet supported",
-                )),
+                Some(TransformType::AppendMissingElements(arr)) => Self::translate_array_operand(arr)
+                    .map(|values| FieldTransform::AppendMissingElements(ft.field_path.clone(), values))
+                    .ok_or_else(|| Status::invalid_argument("invalid field value in write")),
+                Some(TransformType::RemoveAllFromArray(arr)) => Self::translate_array_operand(arr)
+                    .map(|values| FieldTransform::RemoveAllFromArray(ft.field_path.clone(), values))
+                    .ok_or_else(|| Status::invalid_argument("invalid field value in write")),
                 None => Err(Status::invalid_argument(
                     "field transform missing transform_type",
                 )),
@@ -750,6 +751,17 @@ impl FirestoreService {
     fn translate_numeric_operand(v: &embyr_proto::firestore::Value) -> Option<FieldValue> {
         crate::encoding::firestore_proto::proto_value_to_field_value(v)
             .filter(|fv| matches!(fv, FieldValue::Integer(_) | FieldValue::Double(_)))
+    }
+
+    /// Decodes an `appendMissingElements`/`removeAllFromArray` operand
+    /// (ADR-052 § Decision 4) — each `ArrayValue.values` entry via
+    /// `proto_value_to_field_value` (reused unchanged). `None` if any
+    /// element fails to decode.
+    fn translate_array_operand(arr: &embyr_proto::firestore::ArrayValue) -> Option<Vec<FieldValue>> {
+        arr.values
+            .iter()
+            .map(crate::encoding::firestore_proto::proto_value_to_field_value)
+            .collect()
     }
 
     async fn translate_one_write_for_commit(

@@ -120,3 +120,48 @@ pub fn minimum_transform(field_path: &str, value: embyr_proto::firestore::Value)
         transform_type: Some(TransformType::Minimum(value)),
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 03 (US-03, ADR-052/053) — `appendMissingElements`/`removeAllFromArray`
+// builders, plus a string-array `Value` constructor for seeding array fields.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A string-array-valued proto `Value` — the `sharedWithUserIds`-style seed
+/// shape for array-membership scenarios.
+pub fn string_array_field(values: &[&str]) -> embyr_proto::firestore::Value {
+    embyr_proto::firestore::Value {
+        value_type: Some(embyr_proto::firestore::value::ValueType::ArrayValue(
+            embyr_proto::firestore::ArrayValue {
+                values: values.iter().map(|s| string_field(s)).collect(),
+            },
+        )),
+    }
+}
+
+/// An `appendMissingElements: <array>` field transform (`arrayUnion`,
+/// AC-03-01/02/04).
+pub fn append_missing_elements_transform(
+    field_path: &str,
+    values: Vec<embyr_proto::firestore::Value>,
+) -> FieldTransform {
+    FieldTransform {
+        field_path: field_path.to_string(),
+        transform_type: Some(TransformType::AppendMissingElements(
+            embyr_proto::firestore::ArrayValue { values },
+        )),
+    }
+}
+
+/// A `removeAllFromArray: <array>` field transform (`arrayRemove`,
+/// AC-03-03/05).
+pub fn remove_all_from_array_transform(
+    field_path: &str,
+    values: Vec<embyr_proto::firestore::Value>,
+) -> FieldTransform {
+    FieldTransform {
+        field_path: field_path.to_string(),
+        transform_type: Some(TransformType::RemoveAllFromArray(
+            embyr_proto::firestore::ArrayValue { values },
+        )),
+    }
+}
