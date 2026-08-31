@@ -406,11 +406,27 @@ pub async fn seed_signed_in_session(
 
 /// Wraps a spawned `embyr-server` subprocess with its port allocation.
 /// Independent copy of `tests/production_readiness/common/mod.rs::ServerProcess`.
+///
+/// `stdout`/`stderr` are drained continuously by background threads into
+/// `output_buf` from the moment the process is spawned (real bug, found
+/// 2026-08-31: `Stdio::piped()` pipes have a bounded OS buffer — typically
+/// 64KB on Linux. `RUST_LOG=debug` produces easily that much output during
+/// this codebase's own (now sizeable, still-growing) migration set alone.
+/// If nobody reads the pipe while `wait_for_healthy` only polls `/healthz`,
+/// the child blocks on its own `write()` syscall the moment the buffer
+/// fills — a classic subprocess pipe deadlock, not a slow-startup timing
+/// issue. The child can NEVER become healthy in that state no matter how
+/// long the caller waits, which is why bumping `wait_for_healthy`'s timeout
+/// made the failure rate worse, not better: longer-blocked children just
+/// compounded resource contention for everyone else. Draining continuously,
+/// from spawn time, is the actual fix — a longer timeout was treating the
+/// symptom.
 pub struct ServerProcess {
     pub child: Child,
     pub grpc_port: u16,
     pub rest_port: u16,
     pub admin_port: u16,
+    output_buf: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl ServerProcess {
@@ -462,26 +478,78 @@ impl ServerProcess {
             cmd.env(key, val);
         }
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn embyr-server at {bin:?}: {e}"));
+
+        // Drain stdout/stderr continuously from a background thread each,
+        // from spawn time — see ServerProcess's own doc comment for why
+        // this is load-bearing, not cosmetic: an unread `Stdio::piped()`
+        // pipe has a bounded OS buffer, and RUST_LOG=debug can fill it
+        // during this codebase's own migration set alone, deadlocking the
+        // child on its own write() before it ever reaches /healthz.
+        let output_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        for pipe in [
+            child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+            child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let buf = std::sync::Arc::clone(&output_buf);
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+                let reader = BufReader::new(pipe);
+                for line in reader.lines().map_while(Result::ok) {
+                    if let Ok(mut guard) = buf.lock() {
+                        guard.push_str(&line);
+                        guard.push('\n');
+                    }
+                }
+            });
+        }
 
         ServerProcess {
             child,
             grpc_port,
             rest_port,
             admin_port,
+            output_buf,
         }
     }
 
     /// Poll `GET /healthz` on the admin port until HTTP 200 or timeout.
-    pub async fn wait_for_healthy(&self, timeout: Duration) -> bool {
+    ///
+    /// Fails fast (rather than waiting out the full timeout) if the child
+    /// process has already exited — a startup-time config/connectivity
+    /// error (e.g. a LocalStack/AWS SDK call failing) makes the process
+    /// exit almost immediately, so waiting the full timeout just to report
+    /// a generic "server must start" failure hides the REAL error and
+    /// wastes the whole timeout window for no reason. Prints the child's
+    /// captured stdout/stderr on either exit path so a real startup failure
+    /// is diagnosable from the test output directly, not just "false".
+    pub async fn wait_for_healthy(&mut self, timeout: Duration) -> bool {
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{}/healthz", self.admin_port);
         let deadline = tokio::time::Instant::now() + timeout;
 
         loop {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                eprintln!(
+                    "ServerProcess::wait_for_healthy: child exited early with {status:?} \
+                     before becoming healthy — capturing output:"
+                );
+                self.dump_output();
+                return false;
+            }
             if tokio::time::Instant::now() >= deadline {
+                eprintln!(
+                    "ServerProcess::wait_for_healthy: timed out after {timeout:?} waiting for \
+                     /healthz — killing child and capturing whatever it printed:"
+                );
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                self.dump_output();
                 return false;
             }
             match client.get(&url).send().await {
@@ -490,6 +558,15 @@ impl ServerProcess {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// Print whatever the background drain threads have captured so far —
+    /// used by `wait_for_healthy` to make a startup failure diagnosable.
+    /// Reads the shared buffer, not the pipes directly (those are owned by
+    /// the drain threads now, not `self.child` — see `spawn_with`).
+    fn dump_output(&self) {
+        let buf = self.output_buf.lock().map(|g| g.clone()).unwrap_or_default();
+        eprintln!("--- child stdout+stderr (interleaved) ---\n{buf}\n--- end child output ---");
     }
 
     /// Send SIGTERM to the child process (Unix); falls back to SIGKILL elsewhere.
@@ -524,14 +601,13 @@ impl ServerProcess {
         }
     }
 
-    /// Consume stderr output. Call after the process has exited (or after
-    /// enough time has passed for the relevant lines to be flushed).
+    /// Return the child's captured stdout+stderr (interleaved) so far. Call
+    /// after the process has exited (or after enough time has passed for
+    /// the relevant lines to be flushed) — reads the shared buffer the
+    /// background drain threads write to (see `spawn_with`), not the pipes
+    /// directly (those are owned by the drain threads now, not `self.child`).
     pub fn drain_stderr(&mut self) -> String {
-        use std::io::Read;
-        let mut stderr = self.child.stderr.take().expect("stderr not piped");
-        let mut buf = String::new();
-        let _ = stderr.read_to_string(&mut buf);
-        buf
+        self.output_buf.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Check whether the given TCP port currently accepts connections.

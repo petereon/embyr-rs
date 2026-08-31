@@ -105,11 +105,49 @@ pub async fn start_postgres_container() -> (ContainerAsync<Postgres>, String) {
 /// The child process is killed (SIGKILL) on `Drop`. For graceful-shutdown
 /// tests, call `sigterm()` explicitly and then `wait_for_exit()` before the
 /// struct is dropped.
+///
+/// `stdout`/`stderr` are drained continuously by background threads into
+/// `output_buf` from spawn time — a real bug found 2026-08-31 in this
+/// struct's own sibling copy (`tests/secrets_management/common/mod.rs`):
+/// `Stdio::piped()` pipes have a bounded OS buffer (~64KB on Linux);
+/// `RUST_LOG=debug` output from this codebase's own (large, still-growing)
+/// migration set can fill it before the process ever reaches `/healthz`,
+/// deadlocking the child on its own `write()` if nobody drains the pipe
+/// concurrently. Not yet observed failing here, but the same latent
+/// deadlock — fixed proactively rather than waiting for it to flake too.
 pub struct ServerProcess {
     pub child: Child,
     pub grpc_port: u16,
     pub rest_port: u16,
     pub admin_port: u16,
+    output_buf: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+/// Spawn stdout+stderr drain threads for a freshly-spawned child, taking
+/// ownership of both pipes so they're never left unread. Shared by `start`
+/// and `start_env_only`.
+fn spawn_output_drain(child: &mut Child) -> std::sync::Arc<std::sync::Mutex<String>> {
+    let output_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    for pipe in [
+        child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let buf = std::sync::Arc::clone(&output_buf);
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(pipe);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(mut guard) = buf.lock() {
+                    guard.push_str(&line);
+                    guard.push('\n');
+                }
+            }
+        });
+    }
+    output_buf
 }
 
 /// 64-hex-char test encryption key (32 bytes, used across tests requiring
@@ -145,15 +183,17 @@ impl ServerProcess {
             cmd.env(key, val);
         }
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn embyr-server at {bin:?}: {e}"));
+        let output_buf = spawn_output_drain(&mut child);
 
         ServerProcess {
             child,
             grpc_port,
             rest_port,
             admin_port,
+            output_buf,
         }
     }
 
@@ -181,15 +221,17 @@ impl ServerProcess {
             cmd.env(key, val);
         }
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn embyr-server at {bin:?}: {e}"));
+        let output_buf = spawn_output_drain(&mut child);
 
         ServerProcess {
             child,
             grpc_port,
             rest_port,
             admin_port,
+            output_buf,
         }
     }
 
@@ -251,16 +293,12 @@ impl ServerProcess {
         }
     }
 
-    /// Consume stderr output. Call after the process has exited.
-    ///
-    /// # Panics
-    /// Panics if stderr was not piped (use `Stdio::piped()` on spawn).
+    /// Return the child's captured stdout+stderr (interleaved) so far. Call
+    /// after the process has exited for a complete capture — the background
+    /// drain threads (see `spawn_output_drain`) finish writing to the shared
+    /// buffer once the pipes hit EOF at process exit.
     pub fn drain_stderr(&mut self) -> String {
-        use std::io::Read;
-        let mut stderr = self.child.stderr.take().expect("stderr not piped");
-        let mut buf = String::new();
-        let _ = stderr.read_to_string(&mut buf);
-        buf
+        self.output_buf.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Check whether the given TCP port currently accepts connections.
