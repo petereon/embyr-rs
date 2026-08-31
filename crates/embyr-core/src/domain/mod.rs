@@ -1,4 +1,5 @@
 pub mod document;
+pub mod field_transform;
 pub mod field_value;
 pub mod project;
 pub mod query;

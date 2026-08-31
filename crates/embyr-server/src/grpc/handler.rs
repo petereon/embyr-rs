@@ -22,7 +22,7 @@ use embyr_core::{
         transaction::TransactionOptions,
     },
     error::CoreError,
-    storage::backend_adapter::{Write as DomainWrite, WritePrecondition},
+    storage::backend_adapter::{FieldTransform, Write as DomainWrite, WritePrecondition},
 };
 use embyr_proto::firestore::{
     firestore_server::Firestore, precondition::ConditionType, AggregationResult,
@@ -58,7 +58,9 @@ use crate::{
         postgres_notify_listener::{notify_channel, PostgresNotifyListener},
         system_db::SystemDb,
     },
-    encoding::firestore_proto::{document_to_proto, fields_to_proto, proto_fields_to_domain},
+    encoding::firestore_proto::{
+        document_to_proto, field_value_to_proto, fields_to_proto, proto_fields_to_domain,
+    },
     middleware::{obs_helpers, rate_limit::RateLimiter},
     realtime::listen_registry::ListenRegistry,
 };
@@ -684,6 +686,53 @@ impl FirestoreService {
     /// nothing to `domain_writes` rather than erroring. Preserved exactly so
     /// `translate_writes_for_commit`'s own external behavior (used by
     /// `handle_commit`/`write_stream.rs`) is unchanged by this extraction.
+    /// firestore-field-transforms (Slice 01, ADR-052 § Decision 4): the
+    /// shared proto→domain `FieldTransform` translation helper, called from
+    /// BOTH the `Update` arm (for `proto_write.update_transforms`) and the
+    /// `Transform` arm (for `dt.field_transforms`) — zero write-semantics
+    /// logic duplicated, mirroring `translate_one_write_for_commit`'s own
+    /// established shared-helper discipline.
+    ///
+    /// Slice 01 gives `set_to_server_value` its real translation (AC-01-05:
+    /// anything other than `REQUEST_TIME` is `InvalidArgument`, document
+    /// unmodified). The other 5 oneof kinds are not yet wired at the
+    /// translation layer — Slice 02/03 extend this match, not a new
+    /// function — so they are rejected here with `InvalidArgument` rather
+    /// than silently discarded (this feature's whole purpose is to stop
+    /// silently discarding transforms).
+    fn translate_field_transforms(
+        field_transforms: &[embyr_proto::firestore::document_transform::FieldTransform],
+    ) -> Result<Vec<FieldTransform>, Status> {
+        use embyr_proto::firestore::document_transform::{field_transform::TransformType, ServerValue};
+
+        field_transforms
+            .iter()
+            .map(|ft| match &ft.transform_type {
+                Some(TransformType::SetToServerValue(raw)) => {
+                    if *raw == ServerValue::RequestTime as i32 {
+                        Ok(FieldTransform::ServerTimestamp(ft.field_path.clone()))
+                    } else {
+                        Err(Status::invalid_argument(
+                            "unsupported ServerValue in field transform",
+                        ))
+                    }
+                }
+                Some(
+                    TransformType::Increment(_)
+                    | TransformType::Maximum(_)
+                    | TransformType::Minimum(_)
+                    | TransformType::AppendMissingElements(_)
+                    | TransformType::RemoveAllFromArray(_),
+                ) => Err(Status::invalid_argument(
+                    "this field transform kind is not yet supported",
+                )),
+                None => Err(Status::invalid_argument(
+                    "field transform missing transform_type",
+                )),
+            })
+            .collect()
+    }
+
     async fn translate_one_write_for_commit(
         system_db: &SystemDb,
         adapter: &SharedBackendAdapter,
@@ -697,6 +746,15 @@ impl FirestoreService {
                 let path = Self::parse_document_path(&doc.name)?;
                 let fields = proto_fields_to_domain(&doc.fields)
                     .ok_or_else(|| Status::invalid_argument("invalid field value in write"))?;
+                // firestore-field-transforms (Slice 01, ADR-052 § Decision
+                // 2): `update_transforms` (field 7) — "the transforms to
+                // perform after update" — attached to the SAME `Write`
+                // message as a regular `update`. Previously never read at
+                // all; translates to ONE `DomainWrite::Update` with a
+                // non-empty `transforms`, preserving the 1:1
+                // `Vec<Write> -> Vec<WriteResult>` invariant `Commit`/`Write`/
+                // `BatchWrite` all depend on.
+                let transforms = Self::translate_field_transforms(&proto_write.update_transforms)?;
 
                 Self::evaluate_write_rule_for_commit(
                     system_db,
@@ -713,6 +771,7 @@ impl FirestoreService {
                     fields,
                     version: None,
                     precondition,
+                    transforms,
                 }))
             }
             Some(embyr_proto::firestore::write::Operation::Delete(doc_name)) => {
@@ -742,15 +801,18 @@ impl FirestoreService {
             Some(embyr_proto::firestore::write::Operation::Transform(dt)) => {
                 let path = Self::parse_document_path(&dt.document)?;
 
-                // `field_transforms` are discarded elsewhere in this
-                // codebase (pre-existing, separately-tracked gap — out
-                // of scope for this fix). No proposed-fields shape is
-                // modeled for a transform, so `request_resource_fields`
-                // mirrors the CURRENT document (`None` — see
-                // `evaluate_write_rule_for_commit`'s own doc comment).
-                // This still evaluates the write rule for the
-                // transform's own document path/collection rather than
-                // silently skipping it.
+                // firestore-field-transforms (Slice 01, ADR-052 § Decision
+                // 4): `field_transforms` are now actually translated (were
+                // unconditionally discarded into `vec![]` before this
+                // feature). No proposed-fields shape is modeled for a
+                // transform, so `request_resource_fields` mirrors the
+                // CURRENT document (`None` — see
+                // `evaluate_write_rule_for_commit`'s own doc comment). This
+                // still evaluates the write rule for the transform's own
+                // document path/collection rather than silently skipping
+                // it.
+                let transforms = Self::translate_field_transforms(&dt.field_transforms)?;
+
                 Self::evaluate_write_rule_for_commit(
                     system_db,
                     adapter,
@@ -761,10 +823,7 @@ impl FirestoreService {
                 )
                 .await?;
 
-                Ok(Some(DomainWrite::Transform {
-                    path,
-                    transforms: vec![],
-                }))
+                Ok(Some(DomainWrite::Transform { path, transforms }))
             }
             None => Ok(None),
         }
@@ -1853,7 +1912,7 @@ impl FirestoreService {
                     seconds: wr.update_time.0,
                     nanos: wr.update_time.1,
                 }),
-                transform_results: vec![],
+                transform_results: wr.transform_results.iter().map(field_value_to_proto).collect(),
             })
             .collect();
 
@@ -1982,13 +2041,14 @@ impl FirestoreService {
                     let wr = results.pop().unwrap_or(embyr_core::domain::document::WriteResult {
                         update_time: (0, 0),
                         create_time: None,
+                        transform_results: vec![],
                     });
                     write_results.push(embyr_proto::firestore::WriteResult {
                         update_time: Some(Timestamp {
                             seconds: wr.update_time.0,
                             nanos: wr.update_time.1,
                         }),
-                        transform_results: vec![],
+                        transform_results: wr.transform_results.iter().map(field_value_to_proto).collect(),
                     });
                     statuses.push(embyr_proto::rpc::Status {
                         code: 0,

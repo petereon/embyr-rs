@@ -167,7 +167,11 @@ pub(crate) async fn run_write_session(
                     seconds: wr.update_time.0,
                     nanos: wr.update_time.1,
                 }),
-                transform_results: vec![],
+                transform_results: wr
+                    .transform_results
+                    .iter()
+                    .map(crate::encoding::firestore_proto::field_value_to_proto)
+                    .collect(),
             })
             .collect();
 

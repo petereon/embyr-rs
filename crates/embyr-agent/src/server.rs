@@ -198,7 +198,7 @@ fn proto_write_to_domain(w: embyr_proto::agent::Write, project_id_str: &str) -> 
         Some(Operation::Update(doc)) => {
             let path = parse_document_name(&doc.name, project_id_str)?;
             let fields = proto_fields_to_domain(doc.fields);
-            Ok(DomainWrite::Update { path, fields, version: None, precondition })
+            Ok(DomainWrite::Update { path, fields, version: None, precondition, transforms: vec![] })
         }
         Some(Operation::Delete(name)) => {
             let path = parse_document_name(&name, project_id_str)?;

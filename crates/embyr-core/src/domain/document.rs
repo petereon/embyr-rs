@@ -37,4 +37,10 @@ pub struct WriteResult {
     pub update_time: (i64, i32),
     /// (seconds, nanos) creation timestamp — Some for create operations, None for updates.
     pub create_time: Option<(i64, i32)>,
+    /// Computed values for value-producing field transforms (ServerTimestamp/
+    /// Increment/Maximum/Minimum), in the order those kinds appeared in the
+    /// write's own transform list. Array-kind transforms never contribute an
+    /// entry (ADR-053 § Escalation 2 Resolution). Empty for every
+    /// transform-free write.
+    pub transform_results: Vec<FieldValue>,
 }

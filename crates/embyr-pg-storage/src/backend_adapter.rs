@@ -9,6 +9,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use embyr_core::{
     domain::{
         document::{CollectionPath, DocumentPath, FirestoreDocument, WriteResult},
+        field_transform::apply_field_transform,
         field_value::FieldValue,
         project::ProjectId,
         query::{AggregateValue, AggregationKind, AggregationQuery, StructuredQuery},
@@ -319,6 +320,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                 Ok(WriteResult {
                     update_time: from_datetime(update_time),
                     create_time: Some(from_datetime(create_time)),
+                    transform_results: vec![],
                 })
             }
             Err(sqlx::Error::Database(db_err))
@@ -366,7 +368,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                     .try_get("update_time")
                     .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
                 self.send_notify(path).await;
-                Ok(WriteResult { update_time: from_datetime(update_time), create_time: None })
+                Ok(WriteResult { update_time: from_datetime(update_time), create_time: None, transform_results: vec![] })
             }
 
             Some(WritePrecondition::UpdateTime(s, n)) => {
@@ -400,6 +402,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                     return Ok(WriteResult {
                         update_time: from_datetime(update_time),
                         create_time: None,
+                        transform_results: vec![],
                     });
                 }
 
@@ -454,6 +457,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                         Ok(WriteResult {
                             update_time: from_datetime(update_time),
                             create_time: None,
+                            transform_results: vec![],
                         })
                     }
                     None => Err(CoreError::DocumentNotFound(path.document_id.clone())),
@@ -484,6 +488,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                         Ok(WriteResult {
                             update_time: from_datetime(update_time),
                             create_time: None,
+                            transform_results: vec![],
                         })
                     }
                     Err(sqlx::Error::Database(db_err))
@@ -1054,13 +1059,86 @@ impl BackendAdapter for PostgresBackendAdapter {
         )
         .await?;
 
+        // firestore-field-transforms (Slice 01, ADR-052 § Decision 5b/5c):
+        // lock and read the PERSISTED `fields` for every write that carries
+        // a transform — a standalone `Write::Transform` (genuine partial
+        // merge onto the persisted document) or a `Write::Update` with
+        // non-empty `transforms` (transforms read against the PRE-existing
+        // persisted value, never the write's own `fields` map — getting
+        // this backwards would treat an already-populated counter as
+        // always-missing). Same `FOR UPDATE` idiom as the precondition
+        // loops above, one column wider (`fields`, not just
+        // existence/`update_time`) — the ONE new SQL statement this feature
+        // adds; everything else reuses the existing `INSERT ... ON
+        // CONFLICT` apply shape unchanged.
+        let mut locked_fields: Vec<Option<BTreeMap<String, FieldValue>>> =
+            Vec::with_capacity(writes.len());
+        for write in &writes {
+            let path = match write {
+                Write::Transform { path, .. } => path,
+                Write::Update { path, transforms, .. } if !transforms.is_empty() => path,
+                _ => {
+                    locked_fields.push(None);
+                    continue;
+                }
+            };
+
+            let row: Option<(serde_json::Value,)> = sqlx::query_as(
+                "SELECT fields FROM documents \
+                 WHERE project_id = $1 \
+                   AND collection_path = $2 \
+                   AND document_id = $3 \
+                   AND NOT deleted \
+                 FOR UPDATE",
+            )
+            .bind(path.project_id.as_str())
+            .bind(&path.collection_path)
+            .bind(&path.document_id)
+            .fetch_optional(&mut *pg_txn)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+            let fields = match row {
+                Some((json,)) => crate::encoding::field_value::json_to_fields(&json).ok_or_else(
+                    || CoreError::BackendUnavailable("failed to decode fields JSON".into()),
+                )?,
+                None => BTreeMap::new(),
+            };
+            locked_fields.push(Some(fields));
+        }
+
         let now = Utc::now();
+        let now_tuple = from_datetime(now);
         let mut results = Vec::with_capacity(writes.len());
 
-        for write in &writes {
+        for (i, write) in writes.iter().enumerate() {
             match write {
-                Write::Update { path, fields, .. } => {
-                    let fields_json = crate::encoding::field_value::fields_to_json(fields);
+                Write::Update { path, fields, transforms, .. } => {
+                    let mut transform_results = Vec::new();
+                    let final_fields: BTreeMap<String, FieldValue> = if transforms.is_empty() {
+                        fields.clone()
+                    } else {
+                        // ADR-052 § Decision 5c: start from the regular
+                        // update's own full-replacement map; for each
+                        // transformed path NOT already covered by that map,
+                        // seed it from the locked PERSISTED value first, so
+                        // e.g. `increment` sees the real prior counter, not
+                        // "missing".
+                        let mut merged = fields.clone();
+                        let locked = locked_fields[i].clone().unwrap_or_default();
+                        for t in transforms {
+                            if !merged.contains_key(t.field_path()) {
+                                if let Some(v) = locked.get(t.field_path()) {
+                                    merged.insert(t.field_path().to_string(), v.clone());
+                                }
+                            }
+                            if let Some(v) = apply_field_transform(&mut merged, t, now_tuple)? {
+                                transform_results.push(v);
+                            }
+                        }
+                        merged
+                    };
+                    let fields_json = crate::encoding::field_value::fields_to_json(&final_fields);
                     sqlx::query(
                         "INSERT INTO documents \
                          (project_id, collection_path, document_id, fields, version, \
@@ -1081,6 +1159,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                     results.push(WriteResult {
                         update_time: from_datetime(now),
                         create_time: None,
+                        transform_results,
                     });
                 }
                 Write::Delete { path, .. } => {
@@ -1098,11 +1177,50 @@ impl BackendAdapter for PostgresBackendAdapter {
                     .execute(&mut *pg_txn)
                     .await
                     .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-                    results.push(WriteResult { update_time: from_datetime(now), create_time: None });
+                    results.push(WriteResult {
+                        update_time: from_datetime(now),
+                        create_time: None,
+                        transform_results: vec![],
+                    });
                 }
-                Write::Transform { .. } => {
-                    // ServerTimestamp transforms are handled as timestamp write
-                    results.push(WriteResult { update_time: from_datetime(now), create_time: None });
+                Write::Transform { path, transforms } => {
+                    // ADR-052 § Decision 5b: standalone transform-only write
+                    // — a genuine partial merge onto the locked persisted
+                    // document (untouched fields survive), reusing the SAME
+                    // upsert statement `Write::Update` uses above. Against a
+                    // nonexistent document this creates it, identical to
+                    // `Write::Update`'s own existing behavior for a new
+                    // document.
+                    let mut base = locked_fields[i].clone().unwrap_or_default();
+                    let mut transform_results = Vec::new();
+                    for t in transforms {
+                        if let Some(v) = apply_field_transform(&mut base, t, now_tuple)? {
+                            transform_results.push(v);
+                        }
+                    }
+                    let fields_json = crate::encoding::field_value::fields_to_json(&base);
+                    sqlx::query(
+                        "INSERT INTO documents \
+                         (project_id, collection_path, document_id, fields, version, \
+                          create_time, update_time, deleted) \
+                         VALUES ($1, $2, $3, $4::jsonb, 1, $5, $5, false) \
+                         ON CONFLICT (project_id, collection_path, document_id) DO UPDATE \
+                         SET fields = $4::jsonb, version = documents.version + 1, \
+                             update_time = $5, deleted = false",
+                    )
+                    .bind(path.project_id.as_str())
+                    .bind(&path.collection_path)
+                    .bind(&path.document_id)
+                    .bind(&fields_json)
+                    .bind(now)
+                    .execute(&mut *pg_txn)
+                    .await
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                    results.push(WriteResult {
+                        update_time: from_datetime(now),
+                        create_time: None,
+                        transform_results,
+                    });
                 }
             }
         }

@@ -25,10 +25,54 @@ pub enum WritePrecondition {
 }
 
 /// Field-level server-side transform to apply at commit time.
+///
+/// 6 variants (ADR-052 § Decision 1) — Slice 01 (firestore-field-transforms)
+/// implements real `apply_field_transform` logic for `ServerTimestamp` only;
+/// the other 5 exist so the enum/translation shape is complete, but fail
+/// closed at apply time until Slice 02/03 extend them.
 #[derive(Debug, Clone)]
 pub enum FieldTransform {
     /// Write the server's current timestamp to the named field path.
     ServerTimestamp(String),
+    /// Add `FieldValue` (Integer or Double) to the field's current value.
+    Increment(String, FieldValue),
+    /// Set the field to the greater of its current value and the given value.
+    Maximum(String, FieldValue),
+    /// Set the field to the lesser of its current value and the given value.
+    Minimum(String, FieldValue),
+    /// Append the given elements, skipping any already present.
+    AppendMissingElements(String, Vec<FieldValue>),
+    /// Remove every element matching any of the given values.
+    RemoveAllFromArray(String, Vec<FieldValue>),
+}
+
+impl FieldTransform {
+    /// The field path this transform targets — one accessor, one match arm
+    /// per variant (ADR-052 § Decision 5c, "field_path() is a small
+    /// accessor... trivial, not worth a separate ADR decision").
+    pub fn field_path(&self) -> &str {
+        match self {
+            FieldTransform::ServerTimestamp(p)
+            | FieldTransform::Increment(p, _)
+            | FieldTransform::Maximum(p, _)
+            | FieldTransform::Minimum(p, _)
+            | FieldTransform::AppendMissingElements(p, _)
+            | FieldTransform::RemoveAllFromArray(p, _) => p,
+        }
+    }
+
+    /// Human-readable kind name for error messages (unimplemented-kind
+    /// rejection in `apply_field_transform`, Slice 01).
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            FieldTransform::ServerTimestamp(_) => "serverTimestamp",
+            FieldTransform::Increment(..) => "increment",
+            FieldTransform::Maximum(..) => "maximum",
+            FieldTransform::Minimum(..) => "minimum",
+            FieldTransform::AppendMissingElements(..) => "appendMissingElements",
+            FieldTransform::RemoveAllFromArray(..) => "removeAllFromArray",
+        }
+    }
 }
 
 /// A single mutation in a transaction commit batch.
@@ -41,6 +85,10 @@ pub enum Write {
         version: Option<i64>,
         /// Optional precondition for the write (e.g. UpdateTime for OCC).
         precondition: Option<WritePrecondition>,
+        /// Transforms to apply after the regular field update, read against
+        /// the PRE-existing persisted value (ADR-052 § Decision 5c) — empty
+        /// for every pre-existing/transform-free write.
+        transforms: Vec<FieldTransform>,
     },
     Delete {
         path: DocumentPath,

@@ -344,6 +344,7 @@ impl BackendAdapter for AgentBackendAdapter {
         Ok(WriteResult {
             update_time,
             create_time,
+            transform_results: vec![],
         })
     }
 
@@ -375,6 +376,7 @@ impl BackendAdapter for AgentBackendAdapter {
         Ok(WriteResult {
             update_time,
             create_time,
+            transform_results: vec![],
         })
     }
 
@@ -578,6 +580,11 @@ impl BackendAdapter for AgentBackendAdapter {
                     .map(|ts| (ts.seconds, ts.nanos))
                     .unwrap_or((0, 0)),
                 create_time: None,
+                // Agent-mode has no transform wire representation at all
+                // (backend_mode=agent is out of v1 scope, ADR-052 §
+                // Alternatives Considered) — permanently empty, not a
+                // temporary placeholder.
+                transform_results: vec![],
             })
             .collect();
         Ok(results)

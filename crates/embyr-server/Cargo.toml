@@ -695,6 +695,10 @@ path = "../../tests/firestore_batch_write/acceptance/bw01_all_writes_succeed.rs"
 name = "firestore_batch_write_bw02_partial_failure_isolation"
 path = "../../tests/firestore_batch_write/acceptance/bw02_partial_failure_isolation.rs"
 
+[[test]]
+name = "firestore_field_transforms_ft01_server_timestamp"
+path = "../../tests/firestore_field_transforms/acceptance/ft01_server_timestamp.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
