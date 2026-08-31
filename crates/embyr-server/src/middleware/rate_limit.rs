@@ -15,6 +15,14 @@ use std::{
     time::Instant,
 };
 
+use axum::{
+    body::Body,
+    extract::{Path, State},
+    http::{HeaderValue, Request, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+    Json,
+};
 use embyr_core::rate_limit::RateLimitInfo;
 
 /// Hard cap on Postgres round-trip for distributed rate-limit enforcement.
@@ -301,4 +309,74 @@ impl RateLimiter {
             Err(RateLimitInfo { remaining: bucket.tokens, limit: capacity, reset_ms })
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// REST axum middleware — closes the gRPC-only enforcement gap (ADR-043
+// Decision 7: `grep` across `crates/embyr-server/src/rest/` for
+// `RateLimiter` returned zero matches; every gRPC handler method gates via
+// `rate_limiter.check()`, but no REST route did).
+// ---------------------------------------------------------------------------
+
+/// Axum middleware enforcing the per-project rate limit on REST routes that
+/// carry a `:project_id` path parameter — today, the `accounts:<verb>`
+/// identity-bridge route (`accounts_bridge_dispatch` in `lib.rs`).
+///
+/// Mounted via `Router::route_layer` (applied AFTER path matching, so
+/// `Path` extraction succeeds) so it runs once, uniformly, before every
+/// dispatched handler — mirroring `FirestoreService::handle_get_document`'s
+/// own single `rate_limiter.check()` call site, instead of duplicating the
+/// check inside each REST handler. Uses the SAME `Arc<RateLimiter>` the
+/// caller passes in (the gRPC side's own instance — see `lib.rs::spawn_all_servers`),
+/// never a second bucket.
+///
+/// gRPC-Web requests are NOT routed through this middleware — they dispatch
+/// to the tonic `FirestoreServer` (see `rest/grpc_web.rs::HybridService`),
+/// which reuses the SAME per-RPC `rate_limiter.check()` calls the native
+/// gRPC port already has. Only the plain-HTTP axum routes needed this gate.
+pub async fn rest_rate_limit_middleware(
+    State(rate_limiter): State<Arc<RateLimiter>>,
+    Path(params): Path<HashMap<String, String>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let Some(project_id) = params.get("project_id") else {
+        // This middleware is only mounted on routes that declare
+        // `:project_id` — nothing to gate on if it's ever absent.
+        return next.run(request).await;
+    };
+
+    match rate_limiter.check(project_id).await {
+        Ok(_info) => next.run(request).await,
+        Err(info) => rest_rate_limit_rejection(project_id, &info),
+    }
+}
+
+/// Build the HTTP 429 rejection response.
+///
+/// Body shape is `docs/SPEC.md`'s § Rate Limiting documented REST
+/// convention: `{"error":{"code":429,"message":"rate limit exceeded: <resource_name>","status":"RESOURCE_EXHAUSTED"}}`.
+/// Also attaches `x-ratelimit-*`/`retry-after-ms` headers, mirroring
+/// `FirestoreService::rate_limit_rejection`'s gRPC trailing-metadata shape.
+fn rest_rate_limit_rejection(project_id: &str, info: &RateLimitInfo) -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "code": 429,
+            "message": format!("rate limit exceeded: {project_id}"),
+            "status": "RESOURCE_EXHAUSTED",
+        }
+    });
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    let headers = response.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(&info.limit.to_string()) {
+        headers.insert("x-ratelimit-limit", v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&(info.remaining.floor() as i64).to_string()) {
+        headers.insert("x-ratelimit-remaining", v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&info.reset_ms.to_string()) {
+        headers.insert("x-ratelimit-reset", v.clone());
+        headers.insert("retry-after-ms", v);
+    }
+    response
 }

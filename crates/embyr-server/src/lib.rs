@@ -399,11 +399,20 @@ pub fn spawn_all_servers(
         oauth_provider: oauth_provider_state,
         anonymous_identity: anonymous_identity_state,
     };
+    // Rate-limit gate (ADR-043 Decision 7 fix): same shared `Arc<RateLimiter>`
+    // the gRPC side uses, applied via `route_layer` so it runs AFTER path
+    // matching (i.e. `:project_id` is available to the middleware) but
+    // BEFORE `accounts_bridge_dispatch` — mirrors `admin/router.rs`'s own
+    // `route_layer(from_fn_with_state(...))` precedent for auth middleware.
     let accounts_bridge_app = axum::Router::new()
         .route(
             "/v1/projects/:project_id/accounts:action",
             axum::routing::post(accounts_bridge_dispatch),
         )
+        .route_layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&service.rate_limiter),
+            middleware::rate_limit::rest_rate_limit_middleware,
+        ))
         .with_state(accounts_bridge_state);
     let axum_app = axum_app.merge(accounts_bridge_app);
 

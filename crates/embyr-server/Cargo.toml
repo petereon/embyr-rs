@@ -669,6 +669,12 @@ path = "../../tests/firestore_write_streaming/acceptance/ws04_termination_condit
 name = "firestore_write_streaming_ws03_stream_token_rejection"
 path = "../../tests/firestore_write_streaming/acceptance/ws03_stream_token_rejection.rs"
 
+# rest-rate-limiting-gap-fix acceptance tests — every REST-port endpoint
+# with a :project_id path param gated by the shared RateLimiter.
+[[test]]
+name = "rest_rate_limiting_rest_calls_are_rate_limited"
+path = "../../tests/rest_rate_limiting/acceptance/rest_calls_are_rate_limited.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
