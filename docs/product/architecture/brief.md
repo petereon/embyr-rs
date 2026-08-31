@@ -4873,3 +4873,153 @@ Full alternatives-considered analysis and the C4 diagrams: ADR-046, ADR-047,
 and `docs/feature/firestore-write-streaming/feature-delta.md` §§ Wave:
 DESIGN.
 
+## Application Architecture — firestore-batch-write
+
+> Updated: 2026-08-31
+> Feature: firestore-batch-write (JOB-01 — completes the third and last
+> undeclared write RPC the Firebase SDK's `db.bulkWriter()` routes through,
+> after `Write`/`firestore-write-streaming` closed the bidi-streaming gap)
+> Mode: Propose (autonomous analysis per Decision 1 — not passed explicitly;
+> the single escalation's shape favored autonomous options-with-reasoning)
+> ADRs: `adr-048-batch-write-per-write-transaction-loop-and-wire-contract.md`
+> (main — proto wire contract, per-write transaction-loop design, the
+> translate-and-catch shared-helper refactor, the `Status{code:0}`
+> disambiguation of SPEC.md's own "null" shorthand, the transaction-row
+> hygiene finding), `adr-049-batch-write-agent-mode-included-uniform-cap.md`
+> (Escalation 1 — includes agent-mode in v1, no backend-mode-specific
+> threshold, opposite conclusion from `Write`'s own ADR-047 deferral for a
+> structurally different reason). Does not amend `adr-002-bounded-contexts.md`
+> — BC-2's own ubiquitous language already named `Mutation`/`Transaction`/
+> `Version`; `BatchWrite` is a new per-write CONTROL-FLOW shape around
+> already-named vocabulary, not a new domain concept. Does not amend
+> `adr-030-write-path-grammar-storage-and-composition.md` — write-path
+> access-rule evaluation is confirmed current (not stale) and reused
+> unchanged, not modified. Does not amend `adr-041-agent-mode-aggregation-scope.md`
+> — ADR-049 applies that ADR's own anti-leaky-abstraction precedent to a new
+> decision, it does not change ADR-041 itself.
+
+Full DESIGN content (Reading Confirmation, Escalation Resolutions, Component
+Decomposition per slice, Reuse Analysis, Driving/Driven Ports, C4 System
+Context/Container diagrams, Technology Choices, Enforcement, Quality
+Validation, Handoff sequencing) lives in
+`docs/feature/firestore-batch-write/feature-delta.md` §§ Wave: DESIGN — the
+single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context — a new
+per-write CONTROL-FLOW shape (catch instead of short-circuit) around BC-2's
+own already-shipped mutation-apply primitive, not a new domain concept.
+
+**One escalation, resolved with fresh ground-truth verification, opposite
+outcome from its closest precedent**: agent-mode `BatchWrite` inclusion
+(DISCUSS Resolution 2). Unlike `Write`'s own agent-mode deferral (ADR-047 — a
+hard capability wall, zero streaming RPC existed anywhere on `StorageAgent`'s
+proto), DESIGN's own re-verification confirms `BatchWrite`'s own per-write
+mechanism (`begin_transaction`+`commit_transaction`, both unary) is
+**structurally feasible today** — `AgentBackendAdapter` already implements
+both, unchanged, identically to `PostgresBackendAdapter`. **Decision: INCLUDE
+in v1, unmodified, no backend-mode-specific threshold** — relying on the same
+general 500-write-per-call cap (mirroring real Firestore's own documented
+limit, and this codebase's own `documents.len() > 1000` precedent for
+`BatchGetDocuments`) as the sole mitigation, uniformly across every backend
+mode. A backend-mode-specific threshold was considered and rejected: it would
+require handler-level `backend_mode` branching before adapter dispatch — the
+exact leaky-abstraction shape this codebase's own ADR-041 (Alternative 3)
+already rejected in an analogous decision — and would require inventing an
+unevidenced number, directly contradicted by DISCUSS's own explicit
+instruction not to guess one. The real, accepted cost (up to 1000 sequential
+mTLS round trips for a 500-write batch against `backend_mode=agent`) is named
+explicitly as a Consequence, not hidden, with a concrete evidence-gated
+follow-up path (production telemetry once shipped). Full reasoning,
+verification trail, and alternatives considered: ADR-049.
+
+**Two findings this DESIGN pass surfaced beyond DISCUSS's own Reading
+Confirmation, both confirmed by ground-truth code reading, not assumption**:
+1. A failed `commit_transaction` call leaves its synthetic `transactions` row
+   at `status = 'active'` indefinitely — the status-update-to-`'committed'`
+   lives inside the same Postgres transaction a precondition failure rolls
+   back, so it never runs on failure, and the 60-second expiry check never
+   fires for a synthetic, once-used, never-returned-to-any-caller per-write
+   transaction ID. Confirmed pre-existing (identical for `Commit`/`Write`'s
+   own failure paths), now exercised at up to 500x frequency per
+   `BatchWrite` call instead of at-most-1x. Named as a candidate follow-up
+   (a `transactions`-table sweeper), not fixed here, not blocking. ADR-048 §
+   Context finding 2, § Decision 6.
+2. No plain-REST-JSON transcoding layer exists for ANY Firestore
+   document/write RPC in this codebase today — `Commit` itself, DISCUSS's own
+   named REST precedent, has zero REST route. `BatchWrite` therefore needs no
+   new REST work; DISCUSS's own "exact REST path/verb is DESIGN's own call"
+   framing resolves to "nothing to design," not a silently-dropped
+   requirement — confirmed by direct reading of `rest/mod.rs` (22 lines) and
+   `rest/grpc_web.rs` (150 lines), both read in full.
+
+**Per-write transaction-loop design** (confirms DISCUSS's own central
+architectural conclusion, adds the exact mechanism): one
+`begin_transaction()`+`commit_transaction()` pair PER WRITE, single-element
+`writes` vec each time — never once for the whole batch (ground-truth
+re-confirmed at current line numbers, `crates/embyr-pg-storage/src/backend_adapter.rs:834-849`/
+`851-1065`, unchanged from DISCUSS's own citation). The per-write loop body
+never uses `?`/early-return for a write-specific failure — translation
+failure, rule denial, `begin_transaction` failure, and `commit_transaction`
+failure (including a precondition violation) all become that write's own
+`status[i]`/`write_results[i]` entry, and the loop continues; only pre-loop
+call-level validation (auth, rate limit, suspension, the new 500-write cap)
+may produce a top-level `Err`. A successful write's `status[i]` is
+`Status{code: 0}` (OK), not a literal `null`/absent wire entry —
+`docs/SPEC.md`'s own "`null`" wording is the SDK-level projection after
+decode, disambiguated explicitly here since proto3 cannot represent a sparse
+`repeated message` field. ADR-048.
+
+**Translate-and-catch variant**: `translate_writes_for_commit`'s own current
+per-write match body is extracted, not duplicated, into a new shared helper
+(`translate_one_write_for_commit`, returns `Result<DomainWrite, Status>` for
+ONE write). The EXISTING `translate_writes_for_commit` becomes a thin
+`?`-based loop over the helper — its own external signature and behavior, for
+its existing callers (`handle_commit`, `write_stream.rs`), are completely
+unchanged. A new, purely additive sibling (`translate_writes_catching`)
+loops the same helper without `?`, returning `Vec<Result<DomainWrite, Status>>`
+— one entry per input write, positionally aligned, never short-circuiting.
+Mirrors the identical extraction discipline this codebase already applied
+once before (`translate_writes_for_commit` was itself extracted from
+`handle_commit`'s own inline body during `firestore-write-streaming` so
+`Write` could share it, ADR-046 § Decision 3) — a continuation of an
+established pattern. ADR-048 § Decision 4.
+
+**Component decomposition**: one proto addition (`BatchWriteRequest`/
+`BatchWriteResponse` in `write.proto` + the `rpc BatchWrite` declaration in
+`firestore.proto`), one new handler function (`handle_batch_write`, mirroring
+`handle_commit`'s own call-level sequence, unary not a spawned session), one
+small refactor (extracting `translate_writes_for_commit`'s own body into a
+shared helper) plus one new additive sibling function, and one new small
+helper (`status_to_proto`, the first real producer of a populated
+`google.rpc.Status` value in this codebase — confirmed by grep, zero prior
+assignment sites). Slice 02 adds zero new files (pure composition against a
+new input shape).
+
+**Reuse**: per-write translation body (`translate_writes_for_commit`'s own
+match arms), write-path access-rule evaluation (confirmed current, not
+stale), atomic single-write apply and transaction-begin (`BackendAdapter`
+port, unchanged), error mapping (`core_error_to_status`, unchanged),
+auth/rate-limit/suspension sequence (`handle_commit`'s own shape),
+per-call resource-consumption bound shape (`documents.len() > 1000`
+precedent, `BatchGetDocuments`), agent-mode backend selection
+(`authenticate()`'s own existing mechanism) — all REUSED. Zero new
+dependencies, zero new `CoreError` variant, zero new `BackendAdapter` trait
+method, zero handler-level `backend_mode` branching.
+
+**External integrations**: none new — Postgres and the agent's mTLS gRPC
+channel are both pre-existing, already-`probe()`-covered dependencies; this
+feature adds zero new port methods, calling `begin_transaction`/
+`commit_transaction` N times per call instead of once, uniformly across every
+backend mode (Earned Trust principle applied: confirmed, not assumed, per §
+Reading Confirmation).
+
+**Peer review**: not performed — session standing methodology for this
+feature set (per orchestrator instruction) has the orchestrator independently
+verify DESIGN output directly against the code, rather than dispatching a
+`solution-architect-reviewer` sub-agent.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-048, ADR-049,
+and `docs/feature/firestore-batch-write/feature-delta.md` §§ Wave: DESIGN.
+

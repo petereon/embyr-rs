@@ -107,6 +107,49 @@ jobs:
     # follow-up ships. See
     # docs/feature/firestore-write-streaming/feature-delta.md § Job
     # Discovery Framing Resolution and § Handoff Package.
+    # NOTE (firestore-batch-write DISCUSS, 2026-08-31): this job's own
+    # functional dimension is now also realized for the SDK's own
+    # non-transactional bulk-write surface (db.bulkWriter(), used for "best
+    # effort, tell me what succeeded" bulk operations — distinct from
+    # db.batch().commit(), which already routes through Commit/handle_commit)
+    # via this feature — same job, same persona (P1 Alex), not a new job (the
+    # "make it real"/close-the-remaining-gap pattern, same as
+    # aggregation-queries -> JOB-01, batch-get-documents -> JOB-01,
+    # firestore-write-streaming -> JOB-01). A distinct gap category from
+    # firestore-write-streaming's own: BatchWrite is unary (one request, one
+    # response, no stream/session lifecycle) but, like Write, is net-new proto
+    # (BatchWriteRequest/BatchWriteResponse do not exist in the vendored
+    # google.firestore.v1 tree) with a complete wire contract already
+    # documented locally in docs/SPEC.md §BatchWrite before this DISCUSS ran.
+    # `handle_commit`'s own write-translation/access-rule-evaluation logic is
+    # a REUSE TARGET, not reused verbatim: unlike Write (which reuses
+    # translate_writes_for_commit() unchanged, since a single WriteRequest
+    # batch is still all-or-nothing per SPEC.md), BatchWrite's own
+    # per-write-independent-failure contract requires a NEW per-write
+    # translate-and-catch-without-aborting variant, since
+    # translate_writes_for_commit() itself aborts the whole call on the first
+    # write-rule denial. The central architectural question was confirmed
+    # directly in code, not by assumption: embyr-pg-storage's own
+    # commit_transaction is genuinely all-or-nothing PER CALL (one Postgres
+    # transaction, one failed precondition rolls back every write passed to
+    # that call) — so per-write isolation requires calling
+    # begin_transaction()+commit_transaction() ONCE PER WRITE (a
+    # single-element writes Vec each time), not once for the whole batch. This
+    # is a straightforward reuse of TWO already-existing BackendAdapter trait
+    # methods in a loop, corroborated by firestore-write-streaming's own
+    # ADR-046 finding (which needed the identical
+    # begin_transaction-before-commit_transaction synthesis, at a coarser
+    # per-WriteRequest-batch granularity) — NOT a new trait method, NOT a new
+    # mechanism class. One genuine judgment call is explicitly escalated to
+    # DESIGN, not decided here: unlike firestore-write-streaming (whose
+    # agent-mode gap was a total proto-surface absence), backend_mode=agent
+    # BatchWrite is structurally FEASIBLE today — StorageAgent's own proto
+    # already has BeginTransaction/Commit/Rollback RPCs the same per-write
+    # loop can reuse — but doing so means N sequential mTLS round trips per
+    # BatchWrite call instead of one local Postgres transaction; DESIGN must
+    # decide whether that trade-off is acceptable for v1 or should be
+    # deferred. See docs/feature/firestore-batch-write/feature-delta.md § Job
+    # Discovery Framing Resolution and § Handoff Package.
 
   - id: JOB-02
     name: tenant-provision
