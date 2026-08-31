@@ -20,12 +20,20 @@
 # dependency tree needs 1.88+, and the aws-sdk-secretsmanager stack needs
 # 1.91.1+. Keep in lockstep with the toolchain used for local `cargo build`.
 #
-# `-bookworm` suffix pinned explicitly: the untagged `rust:1.93-slim` now
+# `-bookworm` suffix pinned explicitly: the untagged `rust:1.95-slim` now
 # resolves to Debian trixie, whose glibc is newer than debian:bookworm-slim
 # (the runtime stage below) — a binary built on trixie fails to run on
 # bookworm with "GLIBC_2.38 not found". Builder and runtime must share a
 # Debian release.
-FROM rust:1.93-slim-bookworm AS chef
+#
+# 1.95, matching rust-toolchain.toml's own pin exactly (drifted to 1.93 here
+# previously — found 2026-08-31 when a transitive aws-smithy-* bump required
+# rustc 1.94.1, which this stage's then-1.93 toolchain couldn't satisfy;
+# cargo-chef panicked on `cargo chef cook` before any real compile started).
+# Keep in lockstep with `rust-toolchain.toml` going forward — this stage has
+# no independent reason to pin an older toolchain than local `cargo build`
+# and CI's own test/lint jobs already use.
+FROM rust:1.95-slim-bookworm AS chef
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 
