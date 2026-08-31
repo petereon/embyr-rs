@@ -707,6 +707,10 @@ path = "../../tests/firestore_field_transforms/acceptance/ft02_numeric_counters.
 name = "customer_db_transaction_sweeper_us01_reclaim_orphaned_transactions"
 path = "../../tests/customer_db_transaction_sweeper/acceptance/us01_reclaim_orphaned_transactions.rs"
 
+[[test]]
+name = "customer_db_transaction_sweeper_us02_purge_terminal_transactions"
+path = "../../tests/customer_db_transaction_sweeper/acceptance/us02_purge_terminal_transactions.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

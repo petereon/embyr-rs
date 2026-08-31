@@ -112,6 +112,10 @@ pub struct ServerConfig {
     /// `EMBYR_TRANSACTION_SWEEP_INTERVAL_SECS` — `TransactionSweeper`
     /// background task interval (ADR-054 § D7); default 300s (5 minutes).
     pub transaction_sweep_interval_secs: u64,
+    /// `EMBYR_TRANSACTION_RETENTION_DAYS` — `TransactionSweeper` purge
+    /// retention window (ADR-054 § D2/D7, Slice 02); default 30 days,
+    /// mirroring `SessionCleaner`'s own documented 30-day precedent.
+    pub transaction_retention_days: i64,
 }
 
 /// Configuration parse error.
@@ -260,6 +264,10 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(300);
+        let transaction_retention_days = std::env::var("EMBYR_TRANSACTION_RETENTION_DAYS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(30);
 
         Ok(ServerConfig {
             db_url: db_url_opt.unwrap(),
@@ -277,6 +285,7 @@ impl ServerConfig {
             stripe_publishable_key,
             cap_check_interval_secs,
             transaction_sweep_interval_secs,
+            transaction_retention_days,
         })
     }
 }

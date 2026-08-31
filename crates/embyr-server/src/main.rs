@@ -233,16 +233,17 @@ async fn main() {
         std::time::Duration::from_secs(cfg.cap_check_interval_secs),
     );
 
-    // customer-db-transaction-sweeper (ADR-054): background reclaim of
-    // abandoned 'active' transactions rows across every PG-reachable
-    // customer database. `aws_secret_fetcher`/`gcp_secret_fetcher` are
-    // `None` here, mirroring the pre-existing gap ADR-054 § D7 names
-    // explicitly: `FirestoreService`'s own live gRPC request-serving path
-    // (above) already hardcodes the same `None, None` for
-    // aws_secret/gcp_secret DSN resolution today — this sweeper's wiring is
-    // independent and does not worsen that gap. Any deployment with these
-    // fetchers unconfigured sees the sweeper silently skip every
-    // aws_secret/gcp_secret project via its own continue-on-error path.
+    // customer-db-transaction-sweeper (ADR-054): background reclaim +
+    // purge of abandoned/terminal transactions rows across every
+    // PG-reachable customer database (Slice 01 reclaim, Slice 02 purge).
+    // `aws_secret_fetcher`/`gcp_secret_fetcher` are `None` here, mirroring
+    // the pre-existing gap ADR-054 § D7 names explicitly: `FirestoreService`'s
+    // own live gRPC request-serving path (above) already hardcodes the same
+    // `None, None` for aws_secret/gcp_secret DSN resolution today — this
+    // sweeper's wiring is independent and does not worsen that gap. Any
+    // deployment with these fetchers unconfigured sees the sweeper silently
+    // skip every aws_secret/gcp_secret project via its own continue-on-error
+    // path.
     let _transaction_sweeper = embyr_server::sweepers::transaction_sweeper::spawn(
         Arc::clone(&system_db),
         None,
@@ -250,6 +251,7 @@ async fn main() {
         cfg.encryption_key,
         cfg.encryption_key_previous,
         std::time::Duration::from_secs(cfg.transaction_sweep_interval_secs),
+        cfg.transaction_retention_days,
     );
 
     // ── Step 11: spawn gRPC + REST + admin servers ────────────────────────
