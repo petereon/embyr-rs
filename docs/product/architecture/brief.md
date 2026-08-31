@@ -5023,6 +5023,136 @@ verify DESIGN output directly against the code, rather than dispatching a
 Full alternatives-considered analysis and the C4 diagrams: ADR-048, ADR-049,
 and `docs/feature/firestore-batch-write/feature-delta.md` §§ Wave: DESIGN.
 
+---
+
+## Application Architecture — customer-db-transaction-sweeper
+
+> Updated: 2026-08-31
+> Feature: customer-db-transaction-sweeper (JOB-12 — observability, extends;
+> builds `TransactionSweeper`, a component this brief's own ORIGINAL
+> greenfield Application Architecture already planned at line 890 and never
+> built — see `AD-A05`, line ~1570, for the pre-existing agent-mode exclusion
+> rationale this feature's own DESIGN reconfirms rather than invents)
+> Mode: Propose (autonomous analysis — both DISCUSS escalations were bounded,
+> evidence-resolvable trade-offs with clear existing-precedent answers)
+> ADRs: `adr-054-transaction-sweeper-raw-access-and-sweep-sql.md` (raw
+> customer-DB access mechanism, sweep SQL for both slices, cycle/advisory-lock
+> shape, composition-root wiring), `adr-055-transaction-sweeper-backend-pg-dsn-enc-coverage-gap.md`
+> (accept-as-documented-scope decision, matching `adr-014`'s own already-shipped
+> precedent for the identical root cause). Does not amend `adr-002-bounded-contexts.md`
+> — no new bounded context, no new ubiquitous-language term. Does not amend
+> `adr-041-agent-mode-aggregation-scope.md` — its own "default trait body"
+> precedent was evaluated and found not to transfer (§ ADR-054 Alternatives
+> Considered), not changed.
+
+Full DESIGN content (Reading Confirmation, Escalation Resolutions, Component
+Decomposition per slice, Reuse Analysis, Driving/Driven Ports, C4 System
+Context/Container diagrams, Technology Choices, Enforcement, Quality
+Validation, Handoff sequencing) lives in
+`docs/feature/customer-db-transaction-sweeper/feature-delta.md` §§ Wave:
+DESIGN — the single narrative file per the lean output convention. Summary
+below.
+
+### Summary
+
+**Bounded context**: BC-1 (Tenant Management, `projects` enumeration) +
+BC-2 (Document Storage, `transactions` table cleanup) — infrastructure,
+confirmed by DISCUSS, unchanged.
+
+**Escalation 1 (raw customer-DB SQL access), resolved with a near-identical
+existing precedent DISCUSS's own Reading Confirmation had not cited**:
+`crates/embyr-server/src/adapters/project_auth.rs::resolve_customer_db_adapter`
+(client-auth-hosted-identity feature) already builds a concrete
+`Arc<PostgresBackendAdapter>` and exposes its `.pool()` accessor specifically
+to run raw SQL against a table outside `BackendAdapter`'s document-CRUD
+surface (`hosted_identity_accounts` there, `transactions` here) — and
+`PostgresBackendAdapter::pool()` itself already exists, already used by
+`PostgresNotifyListener`. **Decision: reuse this pattern verbatim (Option
+a)** — zero new `BackendAdapter` trait method, zero `AgentBackendAdapter`
+change of any kind (verifiable via empty `git diff`), since the sweeper's own
+enumeration query excludes `backend_mode=agent` before any adapter is
+constructed at all. The alternative (trait methods with an ADR-041-style
+default body) was evaluated and rejected: ADR-041's own precedent applies to
+genuine per-request runtime polymorphism across `dyn BackendAdapter`, which
+this sweeper's enumeration-time filtering never exercises — a default trait
+body here would be permanently dead surface on `AgentBackendAdapter` for zero
+benefit. Full reasoning: ADR-054.
+
+**Escalation 2 (`backend_pg_dsn_enc IS NULL` coverage gap), resolved by
+independently re-verifying DISCUSS's own claimed precedent rather than
+trusting it**: `adr-014-sdk-key-ecies-integration.md`'s own "Known
+limitation — pre-existing projects" section, re-read in full, confirms the
+identical root cause and an already-shipped accept-the-gap resolution for a
+different consumer (SDK key rotation). **Decision: accept as documented
+scope, matching precedent exactly** — no backfill, no forced re-submission
+flow built now. A named follow-up (one admin-facing remediation action
+covering both this feature's gap and ADR-014's own gap, since they share the
+identical root cause) is recorded, not built. Full reasoning: ADR-055.
+
+**Sweep SQL, locked**: reclaim uses the identical 60-second literal
+`commit_transaction`'s own existing reactive-expiry check already uses
+(`chrono::Duration::seconds(60)`, confirmed not invented) — implemented as a
+compile-time constant, deliberately NOT an env var, to prevent configuration
+drift from that sibling value. Purge uses a configurable retention window
+(`EMBYR_TRANSACTION_RETENTION_DAYS`, default 30, mirroring `SessionCleaner`'s
+own documented precedent) bound as a query parameter. **No new migration**:
+`started_at` (the only existing timestamp) is an accepted purge anchor — the
+skew between `started_at` and true terminal time is bounded in the tens of
+seconds to low minutes, five orders of magnitude smaller than the retention
+window; a dedicated `completed_at` column was considered and rejected as
+unrequested schema risk for an immaterial skew.
+
+**Cycle shape**: ONE cycle-level Postgres advisory lock (mirrors
+`CapUsageRefresher` exactly — not per-project locks, since the reclaim/purge
+SQL is naturally idempotent and the only real race is Prometheus
+double-counting, which one lock already prevents), sequential (not
+concurrent) per-project iteration — directly satisfying DISCUSS's own "never
+a full concurrent fan-out" constraint as a consequence of not reaching for a
+concurrency combinator, not an extra guard. Connect-per-project-per-cycle, no
+connection caching (the sweeper structurally cannot use `CredentialCache`,
+which requires an api_key-derived cache key this feature's own central
+constraint forbids it from holding).
+
+**Component decomposition**: one new sweeper module
+(`crates/embyr-server/src/sweepers/transaction_sweeper.rs` — `spawn`,
+`run_cycle`, `sweep_one_project`, `resolve_dsn_without_api_key`), one new
+`SystemDb` enumeration query + row type, two new config env vars, one small
+refactor (extracting `cap_usage_refresher.rs`'s own private advisory-lock-key
+helper to a shared `sweepers::mod` function on second use), and two new
+label-free Prometheus counters on the already-installed recorder. Slice 02
+adds zero new files — one additional SQL statement inside the existing
+per-project sweep function.
+
+**Reuse**: `PostgresBackendAdapter::new`/`.pool()` (unchanged),
+`AwsSecretFetcher`/`GcpSecretFetcher::get_dsn` (unchanged, already
+TTL-caching), `decrypt_with_rotation` (unchanged, first live caller for
+`backend_pg_dsn_enc`), the `'expired'` status value (unchanged, same
+semantic `commit_transaction`'s own reactive check already writes),
+`SessionCleaner`'s own hard-delete-past-retention shape, the
+`metrics::counter!` no-label convention (`rate_limit.rs`'s own precedent) —
+all REUSED. Zero new dependency, zero new `CoreError` variant, zero new
+`BackendAdapter` trait method.
+
+**Finding beyond DISCUSS's own scope, named not hidden**: `main.rs`'s own
+`FirestoreService` construction hardcodes `aws_secret_fetcher: None,
+gcp_secret_fetcher: None` today — `aws_secret`/`gcp_secret` DSN resolution is
+not actually wired for the live gRPC request-serving path in production
+either, a pre-existing gap this feature's own sweeper wiring is independent
+of (separate, freshly-constructed fetcher instances) and does not worsen.
+
+**External integrations**: none new — AWS/GCP Secrets Manager calls and
+customer Postgres connections both reuse already-shipped, already-`probe()`-covered
+adapters.
+
+**Peer review**: not performed — session standing methodology for this
+feature (per orchestrator instruction) has the orchestrator independently
+verify DESIGN output directly against the code, rather than dispatching a
+`solution-architect-reviewer` sub-agent.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-054, ADR-055,
+and `docs/feature/customer-db-transaction-sweeper/feature-delta.md` §§ Wave:
+DESIGN.
+
 ## Application Architecture — firestore-list-rpcs
 
 > Updated: 2026-08-31

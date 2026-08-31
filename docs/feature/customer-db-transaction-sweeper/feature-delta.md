@@ -509,3 +509,162 @@ Any `direct_pg` project that has never had its DSN explicitly re-submitted via `
 - **Exact abandonment-threshold/retention-window/sweep-interval numeric defaults** — deferred to DESIGN/DEVOPS tuning, mirroring OQ-CP-3's own precedent.
 - **Backfilling `backend_pg_dsn_enc` for pre-existing `direct_pg` projects** — out of scope; see § Handoff Package Escalation 2.
 - **Real Firestore's own actual abandoned-transaction timeout/GC behavior** — this agent does NOT have confident, citable recall of the exact mechanism or timeout values real Firestore uses server-side for abandoned transactions, and is explicitly NOT asserting one as a design input, matching this session's own established discipline for un-cited recall (see e.g. OQ-AGG-01's own precedent for the same discipline). If DESIGN wants to align abandonment/retention windows with real Firestore's own behavior, that requires independent verification this DISCUSS did not have tooling to perform.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Agent**: Morgan (nw-solution-architect) | **Date**: 2026-08-31 | **Mode**: Propose (autonomous analysis — both escalations are bounded, evidence-resolvable trade-offs with a clear existing-precedent answer, not open stakeholder preferences; mirrors `firestore-batch-write`'s own DESIGN-mode choice for the identical reason)
+
+✓ This file (full, 511 lines pre-DESIGN) and both slice briefs (`docs/feature/customer-db-transaction-sweeper/slices/slice-0{1,2}-*.md`, each full) — re-read directly, not trusted from the Handoff Package summary alone.
+✓ `crates/embyr-server/src/sweepers/cap_usage_refresher.rs` (full, 225 lines) and `crates/embyr-server/src/sweepers/mod.rs` (full) — re-confirmed unchanged from DISCUSS's own citation: interval loop, ONE cycle-level `pg_try_advisory_lock`/`pg_advisory_unlock` pair held on a single borrowed `PoolConnection`, `run_cycle`'s own queries borrowing the pool independently, per-row `continue`-on-error.
+✓ `crates/embyr-pg-storage/src/backend_adapter.rs::begin_transaction`/`::commit_transaction` (current lines 894-1065) — re-confirmed at today's line numbers (drifted slightly from DISCUSS's own citation, unchanged content): the 60-second literal is `chrono::Duration::seconds(60)` at line 937, and the reactive expiry `UPDATE` at lines 938-944 writes the identical `'expired'` value this sweeper's own proactive reclaim reuses.
+✓ **`crates/embyr-server/src/adapters/project_auth.rs::resolve_customer_db_adapter` (full, 174 lines) — re-read in full; NOT cited by DISCUSS's own Reading Confirmation, and the single most load-bearing find of this DESIGN pass.** It already resolves a project's DSN across all three PG-reachable `backend_mode`s and returns a CONCRETE `Arc<PostgresBackendAdapter>` (not `Arc<dyn BackendAdapter>`) specifically so its own caller can run raw SQL against `hosted_identity_accounts` — a table outside `BackendAdapter`'s document-CRUD surface, structurally the same class of problem `transactions` maintenance SQL presents here. Its own `direct_pg` branch uses `ecies::decrypt(api_key.as_bytes(), ...)` (line 144) — confirms DISCUSS's own finding that this exact function cannot be reused unchanged (it requires a live api_key this sweeper never has) — but its OVERALL SHAPE (dispatch by `backend_mode`, build concrete `PostgresBackendAdapter`, expose `.pool()`) is the direct template `resolve_dsn_without_api_key` (ADR-054 § D3) follows.
+✓ **`crates/embyr-pg-storage/src/backend_adapter.rs:86-88` — `PostgresBackendAdapter::pool()` already exists**, doc-commented "Expose the internal pool for use by `PostgresNotifyListener`" — a second pre-existing raw-pool consumer, also not cited by DISCUSS. Confirms Escalation 1's Option (a) requires zero new code on the adapter side.
+✓ **`docs/product/architecture/brief.md`'s own ORIGINAL greenfield Application Architecture (lines 890, 1297-1309, 1560-1580) — not cited by DISCUSS's own Reading Confirmation**, which read only the later admin-api-v2 `QueryLogSweeper`/`SessionCleaner` sections (lines 2152-2224). The day-one design already named `TransactionSweeper` as a planned `embyr-server::sweepers` component (line 890, alongside never-built `TombstoneSweeper`/`DeletedProjectSweeper`) and its agent-side counterpart `AgentTransactionSweeper` (line 1308), with AD-A05 already stating verbatim: "Embyr SaaS cannot sweep agent-local transactions (it has no direct Postgres access to the customer VPC DB)." This feature builds an already-planned component; the agent-mode exclusion was architected in from day one, not discovered during this feature's own DISCUSS.
+✓ `docs/product/architecture/adr-014-sdk-key-ecies-integration.md` (full) and `docs/evolution/2026-08-07-admin-api-v2.md` (§ Retrospective item 5) — re-read directly to verify, not trust, DISCUSS's own claim of an identical already-accepted precedent for Escalation 2. Confirmed precisely — see ADR-055.
+✓ `crates/embyr-server/src/adapters/system_db.rs::get_project_for_auth`/`::pool()` (lines 212-271) — re-confirmed `get_project_for_auth`'s own SELECT list omits `backend_pg_dsn_enc` (DISCUSS's own finding, unchanged); `pool()`'s own doc comment ("expose sparingly, prefer typed methods") is the established precedent this ADR's own `PostgresBackendAdapter::pool()` reuse mirrors.
+✓ `crates/embyr-server/src/adapters/{aws_secret_fetcher,gcp_secret_fetcher}.rs` (both full) — confirmed both already internally TTL-cache DSNs per ARN/resource-name (default via `ttl_secs` param), a detail DISCUSS's own citation did not surface — a beneficial, free consequence of reusing one long-lived fetcher instance across sweep cycles, not something this feature needs to build.
+✓ **`crates/embyr-server/src/main.rs` (composition root, lines 130-260) — finding beyond DISCUSS's own Reading Confirmation**: `FirestoreService`'s own construction (lines 156-167) hardcodes `aws_secret_fetcher: None, gcp_secret_fetcher: None` today. `aws_secret`/`gcp_secret` backend_mode DSN resolution is not actually wired for the live gRPC request-serving path in production either — a pre-existing gap, confirmed by direct reading, unrelated to and out of scope for this feature. Named explicitly in ADR-054 § D7 so DELIVER is not surprised by silent aws_secret/gcp_secret skip behavior in an unconfigured deployment.
+✓ `crates/embyr-server/src/config.rs` (`cap_check_interval_secs` field/parsing, lines 95-112, 252) and `crates/embyr-server/src/main.rs:226-234` (`CapUsageRefresher::spawn` call site) — read directly to confirm the exact env-var-to-composition-root wiring pattern this feature's own two new env vars (ADR-054 § D7) must mirror.
+✓ `docs/product/architecture/adr-041-agent-mode-aggregation-scope.md` (full) — re-read per the orchestrator's own explicit pointer, to evaluate whether its "default-provided trait body" precedent transfers to Escalation 1's Option (b). Found NOT to transfer — see ADR-054 § Alternatives Considered (the precedent applies to genuine per-request runtime polymorphism across `dyn BackendAdapter`, which this sweeper's own enumeration-time `backend_mode` filtering never exercises).
+✓ `docs/feature/firestore-batch-write/feature-delta.md` §§ Wave: DESIGN (full) — read directly as the format/rigor template this session's standing methodology names explicitly.
+
+No contradictions found between this feature's DISCUSS scope and DESIGN's own re-verification. Two findings materially sharpen DISCUSS's own framing without changing its conclusions: (1) `resolve_customer_db_adapter` and `PostgresBackendAdapter::pool()` together make Escalation 1's Option (a) not just "leaning" but a near-zero-new-code reuse of an already-established pattern; (2) `brief.md`'s own original architecture already planned this exact component and its agent-mode exclusion, confirming DISCUSS's own framing was correct, not merely reasonable.
+
+---
+
+## Wave: DESIGN / [REF] Escalation Resolutions
+
+### Escalation 1 — Raw customer-DB SQL access path
+
+**Resolved: Option (a).** The sweeper builds a concrete `Arc<PostgresBackendAdapter>` per project (via the existing `PostgresBackendAdapter::new(&dsn)` constructor, identical call `resolve_customer_db_adapter` already makes) and issues raw SQL directly against its existing `.pool()` accessor (`crates/embyr-pg-storage/src/backend_adapter.rs:86-88`, already used today by `PostgresNotifyListener` — a second pre-existing consumer, not new). Zero `BackendAdapter` trait change; zero `AgentBackendAdapter` change of any kind, verifiable via `git diff` showing nothing — stronger than "the new methods go unused," because no new methods exist and `AgentBackendAdapter` is never constructed by the sweeper at all (backend_mode=agent excluded at the `SystemDb` enumeration query, not per-adapter). Full reasoning, the ADR-041 "default trait body" precedent evaluated and found not to transfer, and the two rejected alternatives (per-project advisory locks; connection caching): **ADR-054**.
+
+### Escalation 2 — `backend_pg_dsn_enc IS NULL` coverage gap
+
+**Resolved: Accept as documented scope**, matching this codebase's own already-shipped ADR-014 precedent (SDK-key-rotation's identical gap) exactly, re-verified directly (not trusted from DISCUSS's own claim) against ADR-014's own "Known limitation — pre-existing projects" section and `docs/evolution/2026-08-07-admin-api-v2.md`'s own retrospective. No backfill, no forced DSN-resubmission flow built in this feature. A named follow-up (a single admin-facing report/remediation action covering BOTH this feature's gap and ADR-014's own SDK-key-rotation gap, since both share the identical root cause) is recorded, not built. Full reasoning and alternatives considered: **ADR-055**.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition (per Slice)
+
+| Slice | Component | Path | Action | Notes |
+|---|---|---|---|---|
+| 01 | `TransactionSweeper::spawn` + `run_cycle` | `crates/embyr-server/src/sweepers/transaction_sweeper.rs` | CREATE | Interval loop + cycle-level advisory lock, shape copied from `CapUsageRefresher`; ADR-054 § D5 |
+| 01 | `advisory_lock_key` (FNV1a helper) | `crates/embyr-server/src/sweepers/mod.rs` | EXTEND (small refactor) | Extracted from `cap_usage_refresher.rs`'s own private copy on second use (mirrors this session's own "extract on second use" discipline, e.g. `translate_writes_for_commit`'s own extraction, ADR-048 § Decision 4); `cap_usage_refresher.rs` updated to call the shared function, zero behavior change |
+| 01 | `sweep_one_project` (connect, reclaim, drop) | `crates/embyr-server/src/sweepers/transaction_sweeper.rs` | CREATE | Builds `PostgresBackendAdapter::new(&dsn)`, runs the reclaim `UPDATE` against `.pool()`, increments `embyr_transaction_sweeper_reclaimed_total` by `rows_affected()`; ADR-054 § D1, D2, D6 |
+| 01 | `resolve_dsn_without_api_key` | `crates/embyr-server/src/sweepers/transaction_sweeper.rs` | CREATE | Dispatch by `backend_mode`, template mirrored from `resolve_customer_db_adapter`'s own shape (minus api_key); ADR-054 § D3 |
+| 01 | `SweeperProjectRow` + `SystemDb::list_pg_reachable_projects` | `crates/embyr-server/src/adapters/system_db.rs` | EXTEND | New row type + query, `backend_mode IN (...)`, no status filter; ADR-054 § D4 |
+| 01 | `EMBYR_TRANSACTION_SWEEP_INTERVAL_SECS`, `EMBYR_TRANSACTION_RETENTION_DAYS` | `crates/embyr-server/src/config.rs` | EXTEND | Mirrors `EMBYR_CAP_CHECK_INTERVAL_SECS`'s exact parsing pattern; ADR-054 § D7 |
+| 01 | `_transaction_sweeper` spawn call + `AwsSecretFetcher`/`GcpSecretFetcher` construction | `crates/embyr-server/src/main.rs` | EXTEND | Placed immediately after `_cap_usage_refresher`; fetcher construction mirrors `config.rs::fetch_from_secret_manager`'s own pattern; ADR-054 § D7 |
+| 01 | Two Prometheus counters (`embyr_transaction_sweeper_reclaimed_total`, `embyr_transaction_sweeper_purged_total`) | `crates/embyr-server/src/sweepers/transaction_sweeper.rs` | CREATE | Both registered (first-use-registers, matching `rate_limit.rs`'s own `metrics::counter!` convention — no `describe_counter!` call exists anywhere in this codebase to mirror) in Slice 01; `_purged_total` incremented starting Slice 02 only |
+| 02 | Purge `DELETE` statement added to `sweep_one_project` | `crates/embyr-server/src/sweepers/transaction_sweeper.rs` | EXTEND | Second statement, same customer-DB pool, run after Slice 01's own reclaim statement; increments `embyr_transaction_sweeper_purged_total`; ADR-054 § D2 |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Mechanism | Source | Action | Rationale |
+|---|---|---|---|
+| Interval-loop + cycle-level advisory-lock shape | `CapUsageRefresher::spawn` | REUSE (shape) | Direct structural precedent; only the loop body's inner work changes (per-project connect instead of SystemDb-only query) |
+| FNV1a advisory-lock-key helper | `cap_usage_refresher.rs`'s own private `advisory_lock_key` | EXTEND (extract to `sweepers::mod`, second-use extraction) | Zero new hashing logic; avoids a second private copy |
+| Concrete `PostgresBackendAdapter` + `.pool()` raw-SQL pattern | `resolve_customer_db_adapter` (`project_auth.rs`) + `PostgresBackendAdapter::pool()` (`backend_adapter.rs:86-88`) | REUSE (pattern + accessor, both unchanged) | Near-identical existing precedent for "raw SQL against a table outside `BackendAdapter`'s surface"; zero new adapter-side code |
+| `aws_secret`/`gcp_secret` DSN resolution | `AwsSecretFetcher`/`GcpSecretFetcher::get_dsn`, unchanged | REUSE UNCHANGED | Zero api_key involved either way, already TTL-caching |
+| `direct_pg` DSN resolution | `backend_pg_dsn_enc` (column) + `decrypt_with_rotation` (`encryption.rs`), unchanged | REUSE UNCHANGED, NEW CALLER | First live read call site for `backend_pg_dsn_enc`, per DISCUSS's own finding; function itself untouched |
+| Reclaim semantic value (`'expired'`) | `commit_transaction`'s own reactive-check status write | REUSE (value, unchanged) | Same status string, same semantic — proactive generalization, not a new state |
+| Retention pattern | `SessionCleaner`'s own documented 30-day hard-delete precedent (`brief.md`, admin-api-v2) | REUSE (shape + default value) | Identical "hard delete, no soft-delete needed, purely operational bookkeeping" reasoning |
+| Prometheus counter convention | `embyr_rate_limit_pg_timeout_total`/`embyr_rate_limit_requests_total` (`rate_limit.rs`) | REUSE (macro pattern, no labels) | Same `metrics::counter!` macro shape; deliberately no `project_id` label, mirrors documented high-cardinality caution |
+| Per-account/per-project `continue`-on-error discipline | `CapUsageRefresher::run_cycle` | REUSE (shape) | Identical discipline, now applied per-project instead of per-account |
+
+**7 REUSE (5 unchanged, 2 shape/pattern-only), 1 small EXTEND (advisory-lock-key extraction, zero behavior change), 5 CREATE NEW (sweeper module, enumeration query, two config vars, composition-root wiring — all small/additive, zero new external dependency).**
+
+---
+
+## Wave: DESIGN / [REF] Driving/Driven Ports
+
+**Driving port**: none (unchanged from DISCUSS — `tokio::time::interval` tick is the only trigger, `GET :9090/metrics` is the only observable surface, both pre-existing mechanisms this feature adds no new route to).
+
+**Driven ports**: none new. `PostgresBackendAdapter::new`/`.pool()` (unchanged, new caller), `AwsSecretFetcher`/`GcpSecretFetcher::get_dsn` (unchanged, new caller), `decrypt_with_rotation` (unchanged, first live caller for `backend_pg_dsn_enc`), `SystemDb::pool()` (unchanged, new caller for the enumeration query). No new `BackendAdapter` trait method (ADR-054 § D1).
+
+**External integrations**: none new. AWS/GCP Secrets Manager calls reuse the already-shipped `AwsSecretFetcher`/`GcpSecretFetcher` (each already `probe()`-covered elsewhere in this codebase for their existing use); customer Postgres connections reuse the already-shipped `PostgresBackendAdapter` connection path. No third-party API is newly introduced by this feature — no new contract-testing annotation needed for platform-architect.
+
+---
+
+## Wave: DESIGN / [REF] C4 Diagrams
+
+### System Context (L1) — delta only; full system context unchanged from `brief.md`'s own System Architecture section
+
+```mermaid
+C4Context
+  title System Context — customer-db-transaction-sweeper (delta)
+  Person(sam, "Sam Chen", "Service Operator, P2")
+  System(embyr, "embyr-rs", "Firestore-protocol-compatible server")
+  SystemDb_Ext(customerDb, "Customer Postgres DB(s)", "One per project, direct_pg/aws_secret/gcp_secret")
+  Rel(embyr, customerDb, "Sweeps orphaned/terminal transactions rows in, every sweep interval")
+  Rel(sam, embyr, "Queries GET :9090/metrics to observe reclaim/purge activity")
+```
+
+### Container (L2)
+
+```mermaid
+C4Container
+  title Container Diagram — TransactionSweeper (delta)
+  Container(sweeper, "TransactionSweeper", "Tokio background task, embyr-server::sweepers", "Interval loop, cycle-level advisory lock, per-project sequential sweep — NEW")
+  ContainerDb(systemDb, "System Postgres", "PostgreSQL", "projects table — enumeration query, UNCHANGED schema")
+  ContainerDb(customerDb, "Customer Postgres", "PostgreSQL", "transactions table — reclaim UPDATE / purge DELETE, UNCHANGED schema")
+  Container(secretFetchers, "AwsSecretFetcher / GcpSecretFetcher", "Rust adapters", "Existing, unchanged — DSN resolution for aws_secret/gcp_secret")
+  Container(metrics, "Prometheus recorder", "metrics-exporter-prometheus", "Existing, already installed — GET :9090/metrics")
+  Rel(sweeper, systemDb, "Enumerates PG-reachable projects from, acquires/releases advisory lock on")
+  Rel(sweeper, secretFetchers, "Resolves DSN via, for aws_secret/gcp_secret projects")
+  Rel(sweeper, customerDb, "Connects to (PostgresBackendAdapter.pool()) and sweeps transactions rows in")
+  Rel(sweeper, metrics, "Increments reclaimed/purged counters on")
+```
+
+Component (L3) omitted — the sweeper's own internal shape (`spawn`, `run_cycle`, `sweep_one_project`, `resolve_dsn_without_api_key`) is 4 functions, below the 5+-component threshold, mirroring `firestore-batch-write`'s own identical L3-omission precedent.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new dependency, no new crate. Reuses `sqlx` (already a workspace dep, raw `sqlx::query`/`query_scalar` calls against an existing `PgPool`), the `metrics` crate's existing `counter!` macro, and every existing adapter (`PostgresBackendAdapter`, `AwsSecretFetcher`, `GcpSecretFetcher`, `decrypt_with_rotation`). Zero OSS evaluation needed.
+
+---
+
+## Wave: DESIGN / [REF] Enforcement
+
+No new static enforcement tooling. `embyr-core`'s existing `deny.toml` IO-import ban is unaffected (this feature adds zero code to `embyr-core`). The two behavioral invariants this feature introduces — (1) the sweeper never modifies a transaction row younger than the 60s abandonment threshold, (2) a `direct_pg` project with `backend_pg_dsn_enc IS NULL` never aborts the cycle — are enforced by acceptance-test coverage (both slices' own AC), matching `firestore-batch-write`'s own identical "test-coverage-based, no new CI tooling" precedent (this codebase has no static enforcement for per-sweeper SQL predicate correctness, and inventing one for a single feature would be disproportionate).
+
+---
+
+## Wave: DESIGN / [REF] Quality Validation
+
+- [x] Requirements traced: every AC (US-01/US-02, both slice briefs) maps to a named component above or an explicit ADR-054/055 decision.
+- [x] Component boundaries: `TransactionSweeper` owns enumeration + cycle orchestration; `resolve_dsn_without_api_key` owns DSN dispatch exclusively; `PostgresBackendAdapter`/`BackendAdapter` trait untouched.
+- [x] Technology choices: zero new deps (documented above).
+- [x] Quality attributes: reliability (per-project continue-on-error, never aborts the cycle, ADR-054 § D5); security (sweeper never holds a live api_key, by construction — `direct_pg` path never touches `ecies_encrypted_dsn`, ADR-054 § D3); maintainability (advisory-lock-key extraction removes an emerging duplicate, small refactor); performance (sequential-not-concurrent loop satisfies the documented connection-ceiling constraint without extra guard code, ADR-054 § D5).
+- [x] Dependency-inversion compliance: zero new `BackendAdapter` trait method (ADR-054 § D1); the one deliberate exception — bypassing the trait entirely for raw maintenance SQL — is justified in ADR-054, not silently done.
+- [x] C4 diagrams: L1 delta + L2 provided above.
+- [x] Integration patterns: interval-triggered, in-process (Postgres) — no new external integration.
+- [x] OSS preference: N/A, zero new dependencies.
+- [x] AC behavioral, not implementation-coupled: unchanged from DISCUSS.
+- [x] External integrations: none new; AWS/GCP secret fetchers already `probe()`-covered elsewhere, unaffected by this feature.
+- [x] Enforcement tooling: named above (test-coverage-based, no new CI job).
+- [ ] Peer review: not performed this session — session standing methodology (per orchestrator instruction) does not use a dispatched `solution-architect-reviewer` sub-agent for this feature; the orchestrator verifies DESIGN output directly.
+
+---
+
+## Wave: DESIGN / [REF] Handoff to DELIVER
+
+**Slice sequencing** (per DISCUSS § Prioritization, unchanged — Slice 02 depends structurally on Slice 01's own DSN-resolution dispatch and connection path existing first):
+
+1. **Slice 01** (WS) — must ship first. Introduces `transaction_sweeper.rs` in full (`spawn`, `run_cycle`, `sweep_one_project` with the reclaim statement only, `resolve_dsn_without_api_key`), the `SystemDb` enumeration query, the two new config env vars, the composition-root wiring, both Prometheus counters registered (only `_reclaimed_total` incremented).
+2. **Slice 02** — depends on Slice 01 only. Adds the purge `DELETE` statement to the SAME `sweep_one_project` function (after the reclaim statement, same customer-DB pool, same connection — no new connect), increments `_purged_total`. Zero new files.
+
+**Five things the crafter must not rediscover the hard way**:
+
+1. The abandonment threshold (60s) is a compile-time Rust constant, `const ABANDONMENT_THRESHOLD_SECS: i64 = 60`, baked as a literal into the reclaim SQL (`interval '60 seconds'`) — **never** an env var. This is deliberate (ADR-054 § D2): it must stay in permanent lockstep with `commit_transaction`'s own hardcoded `chrono::Duration::seconds(60)` (`crates/embyr-pg-storage/src/backend_adapter.rs:937`). The retention window (`EMBYR_TRANSACTION_RETENTION_DAYS`, default 30), by contrast, IS a runtime-configurable bound parameter — it has no sibling constant to drift out of sync with.
+2. Both Prometheus counters must increment by the SQL statement's own `PgQueryResult::rows_affected()` — never a flat `+1` per project swept. "Increments once per row actually transitioned" (both slices' AC) is exact, not approximate.
+3. The `SystemDb::list_pg_reachable_projects()` enumeration query has **no `status` filter** (ADR-054 § D4, deliberate) — do not add one. A suspended/deleted project's customer DB, if torn down, fails to connect and is skipped via the existing continue-on-error path; adding a status branch would be redundant, unrequested complexity.
+4. `resolve_dsn_without_api_key`'s `direct_pg` branch must read `backend_pg_dsn_enc` via `decrypt_with_rotation` — **never** `ecies_encrypted_dsn` via `ecies::decrypt` (that path requires a live api_key, structurally unavailable here; `resolve_customer_db_adapter`'s own `direct_pg` branch is the WRONG one to copy verbatim — copy its overall dispatch SHAPE only, substituting the decrypt call, per ADR-054 § D3).
+5. The advisory lock is ONE cycle-level lock (key `embyr_transaction_sweep`), held across the WHOLE cycle (enumerate + every project's sequential sweep) on a single borrowed `PoolConnection` from `SystemDb`'s own pool — never a per-project lock, and never the SAME connection used for the enumeration query or any customer-DB connection (mirrors `CapUsageRefresher`'s own session-affinity discipline exactly, ADR-054 § D5).
+
