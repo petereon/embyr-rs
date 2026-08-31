@@ -270,6 +270,100 @@ async fn listing_documents_returns_pages_of_at_most_one_hundred() {
     drop(handle);
 }
 
+/// Regression test for a real bug (found 2026-08-31, firestore-list-rpcs
+/// DESIGN wave): `list_documents` used to build its `collection_path`
+/// directly from `collection_id` alone, silently discarding `parent`'s own
+/// nested-document path prefix — a query against `orders` under a specific
+/// customer's document would incorrectly match every `orders` collection
+/// under EVERY document project-wide, or (depending on storage layout) none
+/// at all, rather than the one nested collection the caller actually asked
+/// for.
+///
+/// @driving_port @us_a03 @real_io
+#[tokio::test]
+async fn listing_documents_under_a_nested_parent_only_returns_that_subcollection() {
+    let (handle, mut client) = start_test_agent("finops-prod").await;
+
+    // Two DIFFERENT customers, each with their own "orders" subcollection —
+    // same collection_id, different nested parent paths. If the parent
+    // prefix is discarded, listing customer-a's orders would also return
+    // customer-b's (collection_path collisions), which is exactly the bug
+    // this test would have caught before the fix.
+    sqlx::query(
+        "INSERT INTO documents (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+         VALUES ($1,$2,$3,$4::jsonb,1,NOW(),NOW())",
+    )
+    .bind("finops-prod")
+    .bind("customers/customer-a/orders")
+    .bind("ord-a1")
+    .bind(r#"{"v":{"t":"I","v":1}}"#)
+    .execute(&handle.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO documents (project_id, collection_path, document_id, fields, version, create_time, update_time) \
+         VALUES ($1,$2,$3,$4::jsonb,1,NOW(),NOW())",
+    )
+    .bind("finops-prod")
+    .bind("customers/customer-b/orders")
+    .bind("ord-b1")
+    .bind(r#"{"v":{"t":"I","v":1}}"#)
+    .execute(&handle.pool)
+    .await
+    .unwrap();
+
+    use embyr_proto::agent::ListDocumentsRequest;
+    let req = ListDocumentsRequest {
+        parent: "projects/finops-prod/databases/(default)/documents/customers/customer-a"
+            .to_string(),
+        collection_id: "orders".to_string(),
+        page_size: 0,
+        page_token: "".to_string(),
+    };
+    let resp = client
+        .list_documents(tonic::Request::new(req))
+        .await
+        .expect("list_documents under nested parent")
+        .into_inner();
+
+    assert_eq!(
+        resp.documents.len(),
+        1,
+        "must return only customer-a's own order, not customer-b's"
+    );
+    assert!(
+        resp.documents[0].name.contains("ord-a1"),
+        "expected customer-a's document, got: {:?}",
+        resp.documents[0].name
+    );
+    drop(handle);
+}
+
+/// Regression test: an empty `collection_id` (real Firestore's own "list
+/// documents across every collection under parent" contract) must fail
+/// loudly, not silently succeed with zero/wrong results, since this RPC
+/// does not implement that fan-out.
+///
+/// @driving_port @us_a03 @real_io @error
+#[tokio::test]
+async fn listing_documents_with_empty_collection_id_fails_loudly_not_silently() {
+    let (_handle, mut client) = start_test_agent("finops-prod").await;
+
+    use embyr_proto::agent::ListDocumentsRequest;
+    let req = ListDocumentsRequest {
+        parent: "projects/finops-prod/databases/(default)/documents".to_string(),
+        collection_id: "".to_string(),
+        page_size: 0,
+        page_token: "".to_string(),
+    };
+    let status = client
+        .list_documents(tonic::Request::new(req))
+        .await
+        .expect_err("empty collection_id must be rejected, not silently return zero results");
+
+    assert_eq!(status.code(), tonic::Code::Unimplemented);
+}
+
 /// @driving_port @us_a03 @real_io
 ///
 /// Feature: Query excluding a field value omits documents missing that field

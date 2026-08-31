@@ -520,9 +520,36 @@ impl StorageAgent for StorageAgentService {
         let offset = decode_page_token(&req.page_token)?;
         let pid = ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(format!("{e}")))?;
+        // Bug fix (found 2026-08-31, firestore-list-rpcs DESIGN wave): this
+        // previously set collection_path directly from collection_id,
+        // silently discarding parent's own nested-document path prefix —
+        // wrong for any parent below database root. build_collection_path
+        // (already used correctly by sibling handlers in this file) is the
+        // single source of truth for combining the two; use it here too.
+        //
+        // The collection_id-empty case ("list documents in every collection
+        // under parent", per docs/SPEC.md's own ListDocuments contract) is
+        // NOT implemented here — it would require the same child-collection
+        // enumeration + per-collection fan-out embyr-server's own
+        // handle_list_documents already builds (firestore-list-rpcs,
+        // ADR-050/051), and this RPC has zero live callers today
+        // (AgentBackendAdapter routes ListDocuments through run_query
+        // instead, ADR-050 Escalation 1) — not worth duplicating that logic
+        // into an unused code path. Fail loud instead of silently matching
+        // zero rows, so a future caller gets a clear signal, not silent
+        // data loss.
+        if req.collection_id.is_empty() {
+            return Err(Status::unimplemented(
+                "ListDocuments with an empty collection_id (list documents across every \
+                 collection under parent) is not implemented on the agent's own dedicated \
+                 RPC — embyr-server does not call this RPC for that case either (see \
+                 ADR-050 Escalation 1); pass an explicit collection_id",
+            ));
+        }
+        let collection_path = build_collection_path(&req.parent, &req.collection_id)?;
         let collection = CollectionPath {
             project_id: pid,
-            collection_path: req.collection_id.clone(),
+            collection_path,
         };
         let query = DomainStructuredQuery {
             collection_id: req.collection_id,
