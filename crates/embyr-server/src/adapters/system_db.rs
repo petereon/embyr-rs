@@ -161,6 +161,20 @@ pub struct GroupAccessRuleHistoryRow {
     pub captured_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// customer-db-transaction-sweeper (ADR-054 § D4): one PG-reachable
+/// project row, as returned by [`SystemDb::list_pg_reachable_projects`].
+/// Mirrors [`ProjectAuthRow`]'s shape minus the auth-only fields
+/// (`api_key_hash_*`, `ecies_encrypted_dsn`, agent fields) — the sweeper
+/// never holds or verifies an api_key (ADR-054 § D3).
+#[derive(Debug, Clone)]
+pub struct SweeperProjectRow {
+    pub id: String,
+    pub backend_mode: String,
+    pub backend_secret_arn: Option<String>,
+    pub backend_secret_gcp: Option<String>,
+    pub backend_pg_dsn_enc: Option<Vec<u8>>,
+}
+
 /// Project row returned for credential verification.
 #[derive(Debug)]
 pub struct ProjectAuthRow {
@@ -1260,6 +1274,51 @@ impl SystemDb {
                 .try_get("updated_at")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
+    }
+
+    // -----------------------------------------------------------------------
+    // customer-db-transaction-sweeper (ADR-054) — sweeper project enumeration.
+    // -----------------------------------------------------------------------
+
+    /// Enumerate every project whose `backend_mode` the sweeper can reach
+    /// directly over Postgres without a live api_key (ADR-054 § D4):
+    /// `direct_pg`, `aws_secret`, `gcp_secret`. `backend_mode = 'agent'` is
+    /// excluded here, at the SQL level — the sweeper never constructs an
+    /// `AgentBackendAdapter` (DISCUSS § System Constraints, ADR-054 § D1).
+    ///
+    /// Deliberately no `status` filter — a `suspended`/`deleted` project's
+    /// customer DB, if already torn down, simply fails to connect and is
+    /// skipped via the caller's own continue-on-error path (ADR-054 § D4).
+    pub async fn list_pg_reachable_projects(&self) -> Result<Vec<SweeperProjectRow>, CoreError> {
+        let rows = sqlx::query(
+            "SELECT id, backend_mode, backend_secret_arn, backend_secret_gcp, backend_pg_dsn_enc \
+             FROM projects WHERE backend_mode IN ('direct_pg', 'aws_secret', 'gcp_secret')",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|r| {
+                Ok(SweeperProjectRow {
+                    id: r
+                        .try_get("id")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    backend_mode: r
+                        .try_get("backend_mode")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    backend_secret_arn: r
+                        .try_get::<Option<String>, _>("backend_secret_arn")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    backend_secret_gcp: r
+                        .try_get::<Option<String>, _>("backend_secret_gcp")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    backend_pg_dsn_enc: r
+                        .try_get::<Option<Vec<u8>>, _>("backend_pg_dsn_enc")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                })
+            })
+            .collect()
     }
 }
 
