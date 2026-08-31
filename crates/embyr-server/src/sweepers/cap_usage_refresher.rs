@@ -19,22 +19,7 @@ use crate::adapters::cap_status_cache::CapStatusCache;
 use crate::adapters::system_db::SystemDb;
 use crate::admin::handlers::lifecycle::{self, LifecycleDeps};
 
-/// FNV-1a hash of the literal string `"embyr_cap_check"`, used as the
-/// `pg_try_advisory_lock` key (ADR-020). Computed once, at compile time
-/// would be ideal but FNV-1a-64 has no const-fn stdlib implementation
-/// available here — computed inline via the same algorithm every cycle
-/// (cheap, no allocation, negligible cost relative to the DB round-trip it
-/// guards).
-fn advisory_lock_key(s: &str) -> i64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET_BASIS;
-    for byte in s.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash as i64
-}
+use super::advisory_lock_key;
 
 /// Spawn the `CapUsageRefresher` background task. Returns a `JoinHandle` the
 /// composition root should hold for the process lifetime (not awaited —
@@ -202,23 +187,3 @@ async fn run_cycle(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn advisory_lock_key_is_deterministic() {
-        assert_eq!(
-            advisory_lock_key("embyr_cap_check"),
-            advisory_lock_key("embyr_cap_check")
-        );
-    }
-
-    #[test]
-    fn advisory_lock_key_differs_for_different_input() {
-        assert_ne!(
-            advisory_lock_key("embyr_cap_check"),
-            advisory_lock_key("something_else")
-        );
-    }
-}

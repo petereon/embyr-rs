@@ -699,6 +699,10 @@ path = "../../tests/firestore_batch_write/acceptance/bw02_partial_failure_isolat
 name = "firestore_field_transforms_ft01_server_timestamp"
 path = "../../tests/firestore_field_transforms/acceptance/ft01_server_timestamp.rs"
 
+[[test]]
+name = "customer_db_transaction_sweeper_us01_reclaim_orphaned_transactions"
+path = "../../tests/customer_db_transaction_sweeper/acceptance/us01_reclaim_orphaned_transactions.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -109,6 +109,9 @@ pub struct ServerConfig {
     /// `EMBYR_CAP_CHECK_INTERVAL_SECS` — cumulative cap-check background
     /// task interval (ADR-020); default 30s.
     pub cap_check_interval_secs: u64,
+    /// `EMBYR_TRANSACTION_SWEEP_INTERVAL_SECS` — `TransactionSweeper`
+    /// background task interval (ADR-054 § D7); default 300s (5 minutes).
+    pub transaction_sweep_interval_secs: u64,
 }
 
 /// Configuration parse error.
@@ -253,6 +256,10 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30);
+        let transaction_sweep_interval_secs = std::env::var("EMBYR_TRANSACTION_SWEEP_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
 
         Ok(ServerConfig {
             db_url: db_url_opt.unwrap(),
@@ -269,6 +276,7 @@ impl ServerConfig {
             stripe_webhook_signing_secret,
             stripe_publishable_key,
             cap_check_interval_secs,
+            transaction_sweep_interval_secs,
         })
     }
 }
