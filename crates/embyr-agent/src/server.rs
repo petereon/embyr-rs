@@ -830,6 +830,7 @@ pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + 
     let sweeper = AgentTransactionSweeper::new(
         pool,
         60,
+        config.transaction_retention_days,
         std::time::Duration::from_secs(30),
     );
     let _sweep_handle = sweeper.spawn();

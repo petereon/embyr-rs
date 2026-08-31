@@ -24,6 +24,8 @@ pub struct AgentConfig {
     pub log_level: String,
     /// Graceful-shutdown drain timeout in seconds (default: 30).
     pub shutdown_timeout_secs: u64,
+    /// Terminal transaction row retention window in days (default: 30).
+    pub transaction_retention_days: i64,
 }
 
 impl AgentConfig {
@@ -47,6 +49,8 @@ impl AgentConfig {
         let max_conns = parse_optional_u32("EMBYR_AGENT_MAX_CONNS", 25)?;
         let shutdown_timeout_secs =
             parse_optional_u64("EMBYR_AGENT_SHUTDOWN_TIMEOUT_SECS", 30)?;
+        let transaction_retention_days =
+            parse_optional_i64("EMBYR_AGENT_TRANSACTION_RETENTION_DAYS", 30)?;
 
         Ok(AgentConfig {
             db_dsn: db_dsn.unwrap(),
@@ -60,6 +64,7 @@ impl AgentConfig {
             log_level: std::env::var("EMBYR_AGENT_LOG_LEVEL")
                 .unwrap_or_else(|_| "info".to_string()),
             shutdown_timeout_secs,
+            transaction_retention_days,
         })
     }
 }
@@ -91,6 +96,15 @@ fn parse_optional_u64(name: &str, default: u64) -> Result<u64, String> {
         Err(_) => Ok(default),
         Ok(v) => v
             .parse::<u64>()
+            .map_err(|_| format!("invalid value for {name}: {v}")),
+    }
+}
+
+fn parse_optional_i64(name: &str, default: i64) -> Result<i64, String> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(v) => v
+            .parse::<i64>()
             .map_err(|_| format!("invalid value for {name}: {v}")),
     }
 }

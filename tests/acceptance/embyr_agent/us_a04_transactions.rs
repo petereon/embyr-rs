@@ -297,6 +297,7 @@ async fn expired_transactions_are_removed_by_sweep() {
     let sweeper = embyr_agent::sweeper::AgentTransactionSweeper::new(
         handle.pool.clone(),
         60,
+        30,
         std::time::Duration::from_millis(100),
     );
     sweeper.sweep_once().await.expect("sweep_once must not error");
@@ -334,6 +335,169 @@ async fn expired_transactions_are_removed_by_sweep() {
         result.unwrap_err().code(),
         tonic::Code::NotFound,
         "commit of swept transaction must return NOT_FOUND"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// agent-mode-transaction-purge — US-01 (ADR-058)
+// ---------------------------------------------------------------------------
+
+/// @driving_port @us_a04 @real_io
+///
+/// Feature: Terminal-status transaction rows past the retention window are purged
+///   Given committed, expired, and rolled_back rows with started_at 45 days ago
+///   And   the retention window is 30 days
+///   When  the next sweep cycle's purge step runs
+///   Then  all three rows no longer exist in the transactions table
+#[tokio::test]
+async fn terminal_status_rows_past_retention_are_purged() {
+    let (handle, _client) = start_test_agent("finops-prod").await;
+
+    let mut txn_ids = Vec::new();
+    for status in ["committed", "expired", "rolled_back"] {
+        let txn_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO transactions (transaction_id, project_id, status, started_at) \
+             VALUES ($1, $2, $3, NOW() - INTERVAL '45 days')",
+        )
+        .bind(txn_id)
+        .bind("finops-prod")
+        .bind(status)
+        .execute(&handle.pool)
+        .await
+        .expect("seed terminal-status row past retention");
+        txn_ids.push(txn_id);
+    }
+
+    let sweeper = embyr_agent::sweeper::AgentTransactionSweeper::new(
+        handle.pool.clone(),
+        60,
+        30,
+        std::time::Duration::from_millis(100),
+    );
+    sweeper.sweep_once().await.expect("sweep_once must not error");
+
+    let count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM transactions WHERE transaction_id = ANY($1)")
+            .bind(&txn_ids[..])
+            .fetch_one(&handle.pool)
+            .await
+            .expect("count purged rows");
+    assert_eq!(
+        count.0, 0,
+        "committed, expired, and rolled_back rows past the retention window must be purged"
+    );
+}
+
+/// @driving_port @us_a04 @real_io
+///
+/// Feature: A committed transaction row within the retention window is left untouched
+///   Given a committed row with started_at 10 days ago
+///   And   the retention window is 30 days
+///   When  the next sweep cycle's purge step runs
+///   Then  that transaction row still exists
+#[tokio::test]
+async fn committed_row_within_retention_window_is_not_purged() {
+    let (handle, _client) = start_test_agent("finops-prod").await;
+
+    let txn_id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO transactions (transaction_id, project_id, status, started_at) \
+         VALUES ($1, $2, 'committed', NOW() - INTERVAL '10 days')",
+    )
+    .bind(txn_id)
+    .bind("finops-prod")
+    .execute(&handle.pool)
+    .await
+    .expect("seed committed row within retention window");
+
+    let sweeper = embyr_agent::sweeper::AgentTransactionSweeper::new(
+        handle.pool.clone(),
+        60,
+        30,
+        std::time::Duration::from_millis(100),
+    );
+    sweeper.sweep_once().await.expect("sweep_once must not error");
+
+    let count: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM transactions WHERE transaction_id = $1")
+            .bind(txn_id)
+            .fetch_one(&handle.pool)
+            .await
+            .expect("count row within retention window");
+    assert_eq!(count.0, 1, "a committed row within the retention window must not be purged");
+}
+
+/// @driving_port @us_a04 @real_io
+///
+/// Feature: A transaction committing concurrently with a running sweep cycle is not disturbed
+///   Given a transaction is actively being committed via a real commit() call
+///   When  the sweep cycle's purge step runs concurrently
+///   Then  the in-flight commit completes normally
+///   And   the newly-committed row is not purged in the same cycle
+#[tokio::test]
+async fn concurrent_commit_is_not_disturbed_by_sweep_purge_step() {
+    let (handle, mut client) = start_test_agent("finops-prod").await;
+
+    let project_id = "finops-prod";
+    let doc_name = "projects/finops-prod/databases/(default)/documents/orders/ord-txn-06";
+
+    let mut fields = HashMap::new();
+    fields.insert("status".to_string(), str_val("processing"));
+    let doc = create_doc(&mut client, project_id, "orders", "ord-txn-06", fields).await;
+    let update_time = doc.update_time.expect("update_time present");
+
+    let txn_resp = client
+        .begin_transaction(BeginTransactionRequest { ..Default::default() })
+        .await
+        .expect("begin_transaction")
+        .into_inner();
+    let txn_uuid = uuid::Uuid::from_slice(&txn_resp.transaction)
+        .expect("transaction token must be a valid UUID");
+
+    let mut commit_fields = HashMap::new();
+    commit_fields.insert("status".to_string(), str_val("complete"));
+    let write = Write {
+        operation: Some(Operation::Update(Document {
+            name: doc_name.to_string(),
+            fields: commit_fields,
+            ..Default::default()
+        })),
+        current_document: Some(Precondition {
+            condition_type: Some(ConditionType::UpdateTime(update_time)),
+        }),
+        ..Default::default()
+    };
+
+    let sweeper = embyr_agent::sweeper::AgentTransactionSweeper::new(
+        handle.pool.clone(),
+        60,
+        30,
+        std::time::Duration::from_millis(100),
+    );
+
+    let (commit_result, sweep_result) = tokio::join!(
+        client.commit(CommitRequest {
+            transaction: txn_resp.transaction.clone(),
+            writes: vec![write],
+            ..Default::default()
+        }),
+        sweeper.sweep_once(),
+    );
+
+    commit_result.expect("concurrent commit must succeed despite a running sweep cycle");
+    sweep_result.expect("sweep_once must not error");
+
+    let count: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM transactions WHERE transaction_id = $1 AND status = 'committed'",
+    )
+    .bind(txn_uuid)
+    .fetch_one(&handle.pool)
+    .await
+    .expect("count newly committed row");
+    assert_eq!(
+        count.0, 1,
+        "the newly-committed row must not be purged in the same sweep cycle"
     );
 }
 
