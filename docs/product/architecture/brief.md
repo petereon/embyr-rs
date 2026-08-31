@@ -1305,7 +1305,7 @@ embyr-admin
 | `GracefulShutdown` | `crates/embyr-agent/src/server.rs` | SIGTERM handler. Calls `tonic::transport::Server::graceful_shutdown()`. Waits up to `EMBYR_AGENT_SHUTDOWN_TIMEOUT_SECS` (default 30s). Emits `{"msg":"shutdown complete"}` on clean exit. Cancels in-flight RPCs after timeout with `Unavailable` status. | Cross-cutting (lifecycle) |
 | `PostgresBackendAdapter` | `crates/embyr-pg-storage/src/backend_adapter.rs` | Moved from `embyr-server::adapters::postgres_backend`. Implements `BackendAdapter` trait for all document CRUD, query, OCC, tombstone, and transaction operations. Used by both embyr-server and embyr-agent. `probe()` implementation: `SELECT 1` + table existence check. | BC-2 (driven adapter) |
 | `PostgresNotifyListener` | `crates/embyr-pg-storage/src/notify_listener.rs` | Moved from `embyr-server::adapters::postgres_notify_listener`. Dedicated `sqlx::PgListener` connection. `notify_channel()` BLAKE3 function. Used by both embyr-server (via ListenRegistry fan-out) and embyr-agent (via AgentNotifyBridge). | BC-3 (infrastructure) |
-| `AgentTransactionSweeper` | `crates/embyr-agent/src/sweeper.rs` | Background tokio task. Sweeps expired transactions from the customer DB every 30s (same interval as embyr-server `TransactionSweeper`). Failure is logged and retried next cycle. Shares SQL logic with embyr-pg-storage. | BC-2 (infrastructure) |
+| `AgentTransactionSweeper` | `crates/embyr-agent/src/sweeper.rs` | Background tokio task. Sweeps expired transactions from the customer DB every 30s (same interval as embyr-server `TransactionSweeper`). Failure is logged and retried next cycle. Shares SQL logic with embyr-pg-storage. Also purges `'committed'`/`'expired'`/`'rolled_back'` rows past a configurable retention window (`agent-mode-transaction-purge`, ADR-058). | BC-2 (infrastructure) |
 
 ---
 
@@ -1349,6 +1349,7 @@ All new env vars follow the existing `EMBYR_AGENT_*` prefix convention.
 | `EMBYR_AGENT_LOG_LEVEL` | No | `info` | tracing LevelFilter | Log verbosity. Accepted values: `trace`, `debug`, `info`, `warn`, `error`. |
 | `EMBYR_AGENT_SHUTDOWN_TIMEOUT_SECS` | No | `30` | u64 | Seconds to drain in-flight RPCs after SIGTERM before forceful cancellation. |
 | `EMBYR_AGENT_SWEEP_INTERVAL_SECS` | No | `30` | u64 | Interval between `AgentTransactionSweeper` runs. Operational tuning only; default matches embyr-server TransactionSweeper. |
+| `EMBYR_AGENT_TRANSACTION_RETENTION_DAYS` | No | `30` | i64 | Retention window for `AgentTransactionSweeper`'s purge step (`'committed'`/`'expired'`/`'rolled_back'` rows). Mirrors `EMBYR_TRANSACTION_RETENTION_DAYS`'s default (non-agent sibling), `EMBYR_AGENT_*`-prefixed per this file's own convention. See ADR-058. |
 
 **DSN invariant**: `EMBYR_AGENT_DB_DSN` is read once into `AgentConfig.db_dsn` and passed to `PgPoolOptions::connect()`. It is never cloned into any `tracing::` field, never formatted into a log message, and never written to any file. The CI acceptance test for US-A06 uses a sentinel DSN and greps all log output to verify absence.
 
@@ -5420,4 +5421,223 @@ verify DESIGN output directly against the code, rather than dispatching a
 
 Full alternatives-considered analysis and the C4 diagrams: ADR-052, ADR-053,
 and `docs/feature/firestore-field-transforms/feature-delta.md` §§ Wave: DESIGN.
+
+## Application Architecture — agent-mode-field-transforms
+
+> Updated: 2026-08-31
+> Feature: agent-mode-field-transforms (JOB-01 — closes the `backend_mode=agent`
+> follow-up `firestore-field-transforms` named but deferred: `serverTimestamp()`/
+> `increment()`/`maximum()`/`minimum()`/`arrayUnion()`/`arrayRemove()` currently
+> reach the agent's own `commit()` handler and are silently dropped before any
+> compute happens)
+> Mode: Propose (autonomous analysis — by direct analogy to
+> `firestore-field-transforms`'s own DESIGN-mode choice; the one open
+> question this feature carries is explicitly deferred to a sibling
+> feature's own DESIGN wave, not decided here)
+> ADRs: `adr-057-agent-mode-field-transform-wire-representation.md` (main —
+> the `Transform`/`FieldTransform`/`ServerValue` wire addition to
+> `storage_agent.proto`, the two translation functions, confirmation that
+> `apply_field_transform`/`commit_transaction` need zero changes). Does not
+> amend `adr-052-field-transform-domain-model-and-atomicity.md` — the domain
+> model (`Write::Update.transforms`, `FieldTransform` 6-variant enum,
+> `WriteResult.transform_results`) is reused unchanged; this feature adds a
+> wire path to it, not a new shape. Does not amend
+> `adr-053-field-transform-overflow-and-spec-corrections.md` — compute
+> semantics (overflow handling, `docs/SPEC.md`'s own corrections) are
+> reused unchanged, exercised identically for agent-mode as for `direct_pg`
+> since both call the same `apply_field_transform`.
+
+Full DESIGN content (Reading Confirmation, Reuse Analysis, Component
+Decomposition, C4 System Context/Container diagrams, Enforcement, Quality
+Validation, Handoff) lives in
+`docs/feature/agent-mode-field-transforms/feature-delta.md` §§ Wave:
+DESIGN — the single narrative file per the lean output convention. Summary
+below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context — a
+wire-representation addition to the already-shipped agent-mode write path,
+not a new domain concept. Zero new `BackendAdapter` trait method.
+
+**The one architecturally consequential finding, confirmed not assumed**:
+`crates/embyr-agent/src/server.rs::commit` already calls
+`self.storage.commit_transaction(...)` on `Arc<PostgresBackendAdapter>` —
+the identical adapter type (not a lookalike) `direct_pg` uses, and that
+adapter's own `commit_transaction` already has live match arms for
+`Write::Transform` and transform-carrying `Write::Update` (ADR-052's
+delivered shape, re-confirmed present in the working tree by direct
+grep, not trusted from the feature's own DISCUSS citation). **This feature
+therefore adds zero compute logic** — it is a wire-representation feature:
+2 new proto messages + 1 enum + 1 oneof variant + 1 repeated field on
+`storage_agent.proto` (mirroring `google.firestore.v1.DocumentTransform`'s
+own shape, authored fresh per this proto's own no-cross-proto-import
+convention), and one new translation function per direction
+(`translate_field_transforms` decoding in `embyr-agent`,
+`field_transform_to_agent` encoding in `embyr-server`'s
+`AgentBackendAdapter`). ADR-057 § Decision.
+
+**One correction to DISCUSS's own sizing language**: DISCUSS characterized
+the `embyr-server`-side edit as "removing the `.filter_map` drop," which
+undersold it — that `.filter_map` discards two things, not one:
+`Write::Transform { .. } => None` (the site DISCUSS named) AND
+`Write::Update`'s own `..`-destructure, which silently drops the
+`transforms` field ADR-052 already added to that variant. Fixing both
+requires a real new encode function, not a deletion. The "wire-only, no new
+compute logic" characterization survives intact; "trivial one-line diff"
+does not, for 2 of the 3 identified edit sites. ADR-057 § Context.
+
+**A second, unscoped finding, flagged not fixed**: `embyr-agent`'s own
+`commit()` handler discards `commit_transaction`'s return value today —
+`write_results`/`transform_results` are never populated on the agent's own
+`CommitResponse`, for any write kind, transform or not. Pre-existing,
+orthogonal to this feature. Does not block Slice 01's own AC (every AC
+verifies transform effects via a subsequent read, not the immediate commit
+response). Named as a candidate follow-up in ADR-057 § Consequences, same
+treatment as ADR-052's own flagged residuals.
+
+**Cross-version graceful degradation — deferred, not re-derived**: this
+feature inherits whatever conclusion `agent-mode-write-streaming`'s own
+DESIGN wave reaches (confirmed, as of this DESIGN pass, still running — that
+feature's own feature-delta.md is still `Wave: DISCUSS`). This feature's own
+risk on that axis is confirmed genuinely lower than its two wire-touching
+siblings: an unrecognized future `Write.operation` oneof variant already has
+a safe existing fallback, `proto_write_to_domain`'s own
+`None => Err(Status::invalid_argument(...))` (`server.rs:207`, unchanged by
+this feature) — no new code needed for that case. What remains open (an
+older/newer `embyr-agent` binary skew scenario) is explicitly left to the
+sibling's own resolution. ADR-057 § Consequences.
+
+**Component decomposition**: extends the existing agent-mode write path
+between two already-existing boundaries
+(`AgentBackendAdapter::commit_transaction` ↔ `StorageAgentService::commit`)
+— zero new adapter, zero new port, zero new RPC, zero new SQL statement
+(the locked-read SQL ADR-052 added is already exercised identically, since
+`embyr-agent` calls the same adapter instance type).
+
+**Reuse**: `apply_field_transform` (unchanged), `PostgresBackendAdapter::commit_transaction`
+(unchanged — literal type reuse, not reimplementation),
+`field_value_to_agent_value`/`proto_value_to_field_value` (both already
+existing, reused unchanged for transform-operand encoding in both
+directions), `CoreError::InvalidArgument` (unchanged) — all REUSED.
+
+**External integrations**: none new — this feature touches only the
+existing agent-mode mTLS gRPC boundary (`storage_agent.proto`) and the
+customer's own Postgres via the existing `BackendAdapter` port.
+
+**Peer review**: not performed — session standing methodology for this
+feature set (per orchestrator instruction) has the orchestrator
+independently verify DESIGN output directly against the code, rather than
+dispatching a `solution-architect-reviewer` sub-agent.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-057 and
+`docs/feature/agent-mode-field-transforms/feature-delta.md` §§ Wave: DESIGN.
+
+## Application Architecture — agent-mode-transaction-purge
+
+> Updated: 2026-08-31
+> Feature: agent-mode-transaction-purge (JOB-12 — observability, extends;
+> closes the agent-mode counterpart of the gap `customer-db-transaction-sweeper`
+> US-02 closed for `direct_pg`/`aws_secret`/`gcp_secret` — see AD-A05, line
+> ~1570, for `AgentTransactionSweeper`'s own original rationale, reconfirmed
+> not invented)
+> Mode: Propose (autonomous analysis — DISCUSS reported zero escalations;
+> DESIGN's own task was confirming the exact SQL and its interaction with the
+> existing reclaim query in the same sweep cycle)
+> ADRs: `adr-058-agent-transaction-sweeper-purge-sql-and-retention-config.md`
+> (purge SQL, status-vocabulary correction, retention-window config
+> mechanism). Does not amend `adr-054-transaction-sweeper-raw-access-and-sweep-sql.md`
+> — that ADR governs the non-agent sweeper in a different crate; this feature
+> mirrors its purge PATTERN, not its code or its own scope. Does not amend
+> `adr-002-bounded-contexts.md` — no new bounded context, no new
+> ubiquitous-language term.
+
+Full DESIGN content (Reading Confirmation, Reuse Analysis, Architecture
+Decision) lives in `docs/feature/agent-mode-transaction-purge/feature-delta.md`
+§§ Wave: DESIGN — the single narrative file per the lean output convention.
+Summary below.
+
+### Summary
+
+**Bounded context**: BC-2 (Document Storage, agent-local `transactions`
+table cleanup) — infrastructure, confirmed by DISCUSS, unchanged.
+
+**Purge SQL, locked** (second `DELETE` statement inside the existing
+`AgentTransactionSweeper::sweep_once`, kept separate from the existing
+reclaim `DELETE` per `adr-054`'s own two-statement-per-cycle precedent):
+
+```sql
+DELETE FROM transactions
+WHERE status IN ('committed', 'expired', 'rolled_back')
+  AND started_at < NOW() - $1 * INTERVAL '1 day'
+```
+
+`$1` binds `retention_days: i64`. SQL-side interval arithmetic, matching
+this exact file's own existing reclaim-query idiom (`$1 * INTERVAL '1
+second'`) rather than `adr-054`'s Rust-side `chrono` computation style used
+in a different crate.
+
+**Correction to DISCUSS's own scope, found not assumed**: DISCUSS's own
+System Constraints stated "Purge targets the existing `'committed'` value
+only." Direct re-verification of `PostgresBackendAdapter`
+(`crates/embyr-pg-storage/src/backend_adapter.rs`, shared verbatim between
+`direct_pg` and `embyr-agent`) shows `'expired'` (via `commit_transaction`'s
+own reactive 60s-window check) and `'rolled_back'` (via
+`rollback_transaction`) are also existing, reachable, currently-never-purged
+terminal statuses in agent-mode's own `transactions` table — not new values,
+just under-scoped in DISCUSS's own Reading Confirmation, which cited only
+`commit_transaction`'s success path. The purge query covers all three
+terminal statuses; `'active'` remains exclusively owned by the unchanged
+reclaim step. Full reasoning: ADR-058 (Context + D2 + Alternatives
+Considered, D2 alternative).
+
+**Retention config**: new `retention_days: i64` parameter on
+`AgentTransactionSweeper::new` (breaking constructor change; two in-repo
+call sites updated: `server.rs`, `tests/acceptance/embyr_agent/us_a04_transactions.rs`),
+sourced from a new `AgentConfig.transaction_retention_days: i64` field, env
+var `EMBYR_AGENT_TRANSACTION_RETENTION_DAYS` (optional, default `30`) —
+`EMBYR_AGENT_*` prefix matching this crate's own 100%-consistent existing
+convention, deliberately not reusing the non-agent sibling's bare
+`EMBYR_TRANSACTION_RETENTION_DAYS` name (different crate, different config
+namespace). Default value mirrors the sibling's for cross-backend-mode
+parity.
+
+**Cycle/race safety**: satisfied structurally — the purge `WHERE` clause's
+`started_at` bound keeps any row that transitions to a terminal status
+during the current cycle (at most tens of seconds old, bounded by the 60s
+TTL/commit window) five-plus orders of magnitude inside the default 30-day
+retention window. No new lock or transaction isolation required, same
+reasoning `adr-054`'s own D2 already established for the non-agent
+sibling's identical concurrent-commit boundary case.
+
+**Component decomposition**: zero new files. Extends
+`crates/embyr-agent/src/sweeper.rs` (`AgentTransactionSweeper` — new field,
+new constructor param, second `DELETE` statement in `sweep_once`, combined
+`reclaimed + purged` return count), `crates/embyr-agent/src/config.rs`
+(`AgentConfig` — new field, new env var, new `parse_optional_i64` helper),
+and `crates/embyr-agent/src/server.rs` (one call-site update).
+
+**Reuse**: entirely EXTEND, zero new component — the only existing sweeper
+for this table in this crate is `AgentTransactionSweeper` itself. `chrono`
+(already a workspace dependency of `embyr-agent`) not newly added, and not
+used by this change either (SQL-side arithmetic chosen instead). Retention-window
+purge PATTERN (not code) mirrors `customer-db-transaction-sweeper` US-02 /
+ADR-054 D2 one level down — agent-local pool, no DSN resolution.
+
+**Deferred, not built**: a Prometheus counter for purged rows (DISCUSS's own
+Handoff Package flagged this as optional/DESIGN's call) — `embyr-agent`
+exposes no metrics endpoint today (verified: no metrics crate dependency, no
+`/metrics` route); building one is a materially larger, unscoped change.
+Named as a follow-up in ADR-058, not built speculatively (YAGNI).
+
+**External integrations**: none. Agent-local Postgres only, already-probed
+(`crates/embyr-agent/src/probe.rs`, unchanged).
+
+**Peer review**: not performed — session standing methodology for this
+feature set (per orchestrator instruction) has the orchestrator independently
+verify DESIGN output directly against the code, rather than dispatching a
+`solution-architect-reviewer` sub-agent.
+
+Full alternatives-considered analysis: ADR-058, and
+`docs/feature/agent-mode-transaction-purge/feature-delta.md` §§ Wave: DESIGN.
 

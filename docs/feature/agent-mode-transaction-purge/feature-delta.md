@@ -297,3 +297,76 @@ No escalations. This is the only one of the 4 sibling `backend_mode=agent` featu
 ### Handoff Confirmation
 
 Next step (NOT performed by this agent): orchestrator dispatches `nw-solution-architect` for the DESIGN wave — lighter-weight than the other 3 sibling features given zero escalations; primary DESIGN task is confirming the exact SQL statement and its interaction with the existing reclaim query in the same sweep cycle.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ `crates/embyr-agent/src/sweeper.rs` (full, 53 lines) — re-confirmed as read by DISCUSS: `AgentTransactionSweeper::sweep_once` runs one `DELETE FROM transactions WHERE started_at < NOW() - $1 * INTERVAL '1 second' AND status = 'active'`, bound to `ttl_secs: i64`. `spawn()` loops on `interval`, logs and continues on error. `new(pool, ttl_secs, interval)` — three params today.
+✓ `crates/embyr-agent/src/server.rs::run` (lines 809-838, targeted) — confirmed spawn wiring: `AgentTransactionSweeper::new(pool, 60, Duration::from_secs(30))` at lines 830-834, right after `StorageAgentService::new(config.project_id, storage, bridge)` moves `config.project_id` out of `config` at line 826. `config.listen_addr` is still read (by reference) at line 837, confirming partial-move-then-later-field-read is already the established pattern in this function — the new `config.transaction_retention_days` read at the sweeper-construction site is not a new risk.
+✓ `crates/embyr-agent/src/config.rs` (full, 97 lines) — confirmed `AgentConfig` exists with an `EMBYR_AGENT_*`-prefixed env var convention, `parse_optional_u32`/`parse_optional_u64` helpers already established (`EMBYR_AGENT_MAX_CONNS`, `EMBYR_AGENT_SHUTDOWN_TIMEOUT_SECS`). No retention-window-equivalent var exists yet. This is the extension point for the new config value — a new `parse_optional_i64` helper is needed (existing helpers are `u32`/`u64` only).
+✓ `docs/product/architecture/adr-054-transaction-sweeper-raw-access-and-sweep-sql.md` (full) — direct precedent for the purge SQL shape (`DELETE ... WHERE status IN (...) AND started_at < $cutoff`, retention window as a runtime-bound parameter, reclaim/purge kept as two separate statements per cycle, not merged). Its own D2 explicitly derives the `'expired'` status value from `commit_transaction`'s own reactive-expiry branch — see the finding below, which extends that same derivation one step further than ADR-054 itself did.
+✓ `crates/embyr-pg-storage/src/backend_adapter.rs` (targeted, lines 900-1260) — **independently re-verified rather than trusted from DISCUSS's own citation**. `PostgresBackendAdapter` (shared verbatim between `direct_pg` and `embyr-agent`) writes FOUR distinct `transactions.status` values, not two: `'active'` (insert default, line ~906), `'expired'` (`commit_transaction` reactive 60s-window check, line 944 — fires when a client calls `Commit` after the TTL has elapsed but before the sweeper's own next tick reclaims the row), `'committed'` (`commit_transaction` success path, line 1230), `'rolled_back'` (`rollback_transaction`, lines 1253-1254). **Correction to DISCUSS's own System Constraints** ("Purge targets the existing `'committed'` value only"): `'expired'` and `'rolled_back'` are also existing, reachable, currently-never-purged status values in agent-mode's own `transactions` table — DISCUSS's own Reading Confirmation cited `commit_transaction`'s success path only, not its reactive-expiry branch or `rollback_transaction`. Full reasoning: ADR-058.
+✓ `tests/acceptance/embyr_agent/us_a04_transactions.rs` (targeted, lines 290-310) — confirmed the only other call site of `AgentTransactionSweeper::new`/`sweep_once`. It constructs its own sweeper instance directly and only asserts `sweep_once().await.expect(...)` does not error — never inspects the numeric return value. Confirms a combined reclaim+purge row count return is safe (no existing assertion depends on the value's composition), and confirms the constructor signature change (new `retention_days` param) has exactly one other call site to update.
+✓ `crates/embyr-agent/Cargo.toml` (full) — confirmed `chrono` is already a workspace dependency of `embyr-agent` (both `[dependencies]` and `[dev-dependencies]`), and no metrics/prometheus crate is present — relevant to two DESIGN decisions (SQL-side vs. Rust-side date arithmetic; deferring the optional Prometheus counter). See ADR-058.
+
+No contradictions with DISCUSS's own scope decisions beyond the status-vocabulary correction above, which is a data-fact correction (verified against shared code), not a re-litigation of any DISCUSS judgment call.
+
+---
+
+## Wave: DESIGN / [WHY] Escalations — None, One Correction
+
+DISCUSS's own Handoff Package states zero open design questions. This DESIGN wave confirms that holds for every judgment call (extension point, SQL shape, cycle interaction, config mechanism) **except one correction, not an escalation**: the purge SQL's status vocabulary must cover `'committed'`, `'expired'`, and `'rolled_back'` — not `'committed'` alone — because the latter two are reachable via the identical shared `PostgresBackendAdapter` code DISCUSS itself cited for the `'committed'` path, and leaving them un-purged would not meet the feature's own stated Outcome KPI (bounded `transactions` table growth). This is resolved directly (§ ADR-058), not escalated to the user, because it is a verifiable fact about existing code, not a trade-off requiring a decision among options.
+
+---
+
+## Wave: DESIGN / [WHY] Reuse Analysis
+
+| Component | Reuse or New | Rationale |
+|---|---|---|
+| `AgentTransactionSweeper` (`crates/embyr-agent/src/sweeper.rs`) | **EXTEND** | Add `retention_days: i64` field + constructor param; add a second `DELETE` statement to `sweep_once`. No new struct, no new module. |
+| `AgentConfig` (`crates/embyr-agent/src/config.rs`) | **EXTEND** | Add `transaction_retention_days: i64` field, read from a new env var; add one new `parse_optional_i64` helper alongside the existing `u32`/`u64` ones (same pattern, new numeric width). |
+| `server::run` (`crates/embyr-agent/src/server.rs`) | **EXTEND** | Update the one existing `AgentTransactionSweeper::new(...)` call site to pass `config.transaction_retention_days`. |
+| `chrono` dependency | **REUSE, unchanged** | Already present in `embyr-agent`'s `Cargo.toml`; not newly added, and not used by this change either (SQL-side arithmetic chosen instead — § ADR-058 D1). |
+| Prometheus counter | **NOT BUILT (deferred)** | `embyr-agent` exposes no metrics endpoint today (verified: no metrics crate dependency, no `/metrics` route). Out of this feature's own confirmed scope per DISCUSS's own Handoff Package note; named as a follow-up in ADR-058, not built speculatively. |
+| Retention-window purge PATTERN (`DELETE ... WHERE status IN (...) AND started_at < cutoff`) | **REUSE (pattern, not code)** | Mirrors `customer-db-transaction-sweeper` US-02 / ADR-054 D2 one level down — agent-local pool, no DSN resolution, no cross-project enumeration. |
+
+Verdict: **entirely EXTEND**, as DISCUSS's own Scope Assessment predicted ("no existing alternative" bar trivially met — the only existing sweeper for this table in this crate is `AgentTransactionSweeper` itself). Zero new files, zero new component.
+
+---
+
+## Wave: DESIGN / [WHY] Architecture Decision — Purge SQL, Status Vocabulary, and Retention Config
+
+Full decision, verification, and alternatives analysis: `docs/product/architecture/adr-058-agent-transaction-sweeper-purge-sql-and-retention-config.md`. Summary:
+
+**Purge SQL** (second statement inside `sweep_once`, kept separate from the existing reclaim `DELETE` per ADR-054's own two-statement precedent):
+
+```sql
+DELETE FROM transactions
+WHERE status IN ('committed', 'expired', 'rolled_back')
+  AND started_at < NOW() - $1 * INTERVAL '1 day'
+```
+
+`$1` binds `retention_days: i64`. SQL-side interval arithmetic (matching the existing reclaim query's own idiom in this file), not Rust-side `chrono` computation (ADR-054's own sibling-crate style, evaluated and not carried over — see ADR-058 D1 for why).
+
+**Status vocabulary**: `'committed'`, `'expired'`, `'rolled_back'` — corrected up from DISCUSS's own `'committed'`-only framing after direct re-verification of `PostgresBackendAdapter` (shared with `direct_pg`) showed all three are reachable, existing, currently-unpurged terminal states in agent-mode. `'active'` remains exclusively owned by the unchanged reclaim step.
+
+**Retention config**: new `retention_days: i64` parameter on `AgentTransactionSweeper::new` (breaking constructor change, two in-repo call sites to update: `server.rs`, `tests/acceptance/embyr_agent/us_a04_transactions.rs`), sourced from a new `AgentConfig.transaction_retention_days: i64` field, env var `EMBYR_AGENT_TRANSACTION_RETENTION_DAYS` (optional, default `30`) — `EMBYR_AGENT_*` prefix to match this file's own 100%-consistent existing convention (deliberately not reusing the non-agent sibling's bare `EMBYR_TRANSACTION_RETENTION_DAYS` name — different crate, different config namespace, zero operational benefit to matching it literally). Default value `30` mirrors the sibling's default for cross-backend-mode behavioral parity.
+
+**`sweep_once` return value**: signature unchanged (`Result<u64, sqlx::Error>`); now returns `reclaimed_rows + purged_rows` summed. Verified safe against both existing call sites (neither inspects the numeric value).
+
+**Cycle/race safety** (AC 3, "a transaction committing concurrently with a running sweep cycle is not disturbed"): satisfied structurally, not by new guard code — the purge `WHERE` clause matches on `started_at < NOW() - retention_days * INTERVAL '1 day'`, and any row transitioning to a terminal status during the current cycle has a `started_at` at most tens of seconds old (bounded by the 60s TTL/commit window), five-plus orders of magnitude inside the retention window (default 30 days). No explicit lock or transaction isolation is needed for this property — same reasoning ADR-054 D2 already established for the non-agent sibling's identical concurrent-commit boundary case.
+
+**Component list for the crafter**:
+1. `crates/embyr-agent/src/sweeper.rs` — extend `AgentTransactionSweeper` (new field, new constructor param, second `DELETE` in `sweep_once`).
+2. `crates/embyr-agent/src/config.rs` — extend `AgentConfig` (new field, new env var, new `parse_optional_i64` helper).
+3. `crates/embyr-agent/src/server.rs` — update the one `AgentTransactionSweeper::new(...)` call site.
+4. `tests/acceptance/embyr_agent/us_a04_transactions.rs` — update the one other `AgentTransactionSweeper::new(...)` call site (compile-fix; DISTILL/DELIVER owns whether/how to extend this file's own assertions or add a new acceptance test file for this feature's own AC).
+
+No proto change, no new crate, no new file beyond the two docs this DESIGN wave adds (this ADR, this section).
+
+**External integrations**: none. Agent-local Postgres only, already-probed (`crates/embyr-agent/src/probe.rs`, unchanged).
+
+**Peer review**: not performed — session standing methodology for this feature (per orchestrator instruction) skips the `solution-architect-reviewer` sub-agent dispatch for these 4 sibling features; the orchestrator verifies DESIGN output directly against the code.
+
+**Next**: orchestrator dispatches `nw-software-crafter` directly for delivery (single slice, no DISTILL, no roadmap.json, no execution-log.json, per session standing methodology).

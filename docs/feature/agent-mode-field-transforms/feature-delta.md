@@ -295,3 +295,257 @@ Same open question as `agent-mode-write-streaming`'s own Escalation 2 (full deta
 ### Handoff Confirmation
 
 Next step (NOT performed by this agent): orchestrator dispatches `nw-solution-architect` for the DESIGN wave — full rigor with ADRs (at minimum: the `Transform`/`FieldTransform` wire message shape, confirming exact reuse of `apply_field_transform` with no semantic drift) and Reuse Analysis.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+Re-verified directly, not trusted from DISCUSS's own citation alone:
+
+- `crates/embyr-agent/src/server.rs::commit` (line 613) calls
+  `self.storage.commit_transaction(&pid, &txn_id, writes)` where
+  `self.storage: Arc<PostgresBackendAdapter>` — literally the same
+  `embyr_pg_storage::backend_adapter::PostgresBackendAdapter` type
+  `direct_pg` uses server-side (`server.rs:20` imports it directly). Not a
+  parallel implementation.
+- `PostgresBackendAdapter::commit_transaction`
+  (`crates/embyr-pg-storage/src/backend_adapter.rs:1064-1230`) has live
+  match arms for `Write::Transform` (line 1186) and `Write::Update` with
+  non-empty `transforms` (line 1116) — grepped directly, both present and
+  calling `apply_field_transform`/populating `transform_results`. ADR-052's
+  delivered shape is confirmed in the working tree, not merely documented.
+- **DISCUSS's claim confirmed: the compute path is already reachable from
+  the agent's own `commit()` handler, unchanged. This feature is
+  wire-representation work.**
+- **One correction to DISCUSS's own Technical Notes**: `crates/embyr-server/src/adapters/agent_backend.rs::commit_transaction`'s
+  `.filter_map` (lines 535-561) discards TWO things, not one —
+  `Write::Transform { .. } => None` (the site DISCUSS named) AND
+  `Write::Update { path, fields, precondition, .. }`'s `..`, which silently
+  drops `transforms` too (the field ADR-052 added to `Write::Update`,
+  confirmed present in the domain type). DISCUSS's own framing ("removing
+  the `.filter_map` drop") undersold this as a near-one-line change; fixing
+  it requires a genuine new encode function
+  (`FieldTransform` → agent proto `FieldTransform`), not a deletion. See
+  ADR-057 § Context for full detail.
+- **A second, unscoped finding**: `embyr-agent`'s own `commit()` handler
+  discards `commit_transaction`'s return value —
+  `Ok(_results) => Ok(Response::new(CommitResponse { commit_time: ..., ..Default::default() }))`
+  (`server.rs:614-620`). `write_results`/`transform_results` are never
+  populated on the agent's own `CommitResponse`, for any write kind,
+  transform or not — pre-existing, orthogonal to this feature. Does not
+  block this feature: every AC in Slice 01 verifies transform effects via a
+  subsequent read, not the immediate commit response. Flagged as a
+  candidate follow-up in ADR-057, not fixed here.
+- `proto/embyr/agent/v1/storage_agent.proto`'s `Write` message (lines
+  318-325) confirmed unchanged since DISCUSS's own reading: exactly
+  `oneof operation { Document update = 1; string delete = 2; }`, no
+  transform shape.
+- `proto/google/firestore/v1/document.proto:90-152` (`Write`/
+  `DocumentTransform`/`DocumentTransform.FieldTransform`/`ServerValue`) read
+  in full as the shape to mirror — confirmed the exact oneof/field-number
+  layout ADR-057 § Decision 1 adapts.
+- `crates/embyr-agent/src/encoding.rs::proto_value_to_field_value` (decode)
+  and `crates/embyr-server/src/adapters/agent_backend.rs::field_value_to_agent_value`
+  (encode) read in full: both already handle every `FieldValue` variant a
+  transform operand needs (`Integer`/`Double`/`Array`) — zero new
+  value-encoding logic required, confirmed by direct reading of both
+  functions.
+- `proto_write_to_domain`'s own `None => Err(Status::invalid_argument("write
+  operation required"))` (`server.rs:207`) re-confirmed as the safe existing
+  fallback for an unrecognized future oneof tag — unchanged by this
+  feature's proto edit, since the new `Transform` variant is added, not
+  substituted, and `prost`'s generated enum still routes any unknown tag to
+  `None`.
+
+No contradictions found. DISCUSS's sizing claim (smallest of the 4 sibling
+features) holds, with the one correction above (two translation functions,
+not a one-line deletion).
+
+---
+
+## Wave: DESIGN / [WHY] Interaction Mode
+
+**Mode: Propose** (autonomous analysis) — not explicitly passed by the
+orchestrator's Decision 1. Chosen by direct analogy to `firestore-field-transforms`'s
+own DESIGN-mode choice (its own brief.md entry, `## Application Architecture
+— firestore-field-transforms`): the escalation this feature carries
+(cross-version degradation) is explicitly deferred to a sibling feature's
+own DESIGN wave, not decided here, and the remaining scope (a proto
+addition mirroring an already-established client-facing shape, plus two
+translation functions) is a bounded, resolvable design with no open
+trade-off requiring user judgment calls.
+
+---
+
+## Wave: DESIGN / [WHY] Cross-Version Graceful Degradation — Deferred, Not Re-Derived
+
+Per the orchestrator's own framing (not re-litigated here): this feature
+inherits whatever conclusion `agent-mode-write-streaming`'s own DESIGN wave
+reaches for the shared cross-version degradation question (that feature's
+own Escalation 2). Confirmed directly, not assumed: as of this DESIGN pass,
+`docs/feature/agent-mode-write-streaming/feature-delta.md` has not yet
+completed its own DESIGN wave (still `Wave: DISCUSS` at its own § Status
+line) — the sibling resolution genuinely does not exist yet. This feature
+therefore builds NO version-degradation mechanism of its own.
+
+**This feature's own risk on that axis, confirmed lower, as DISCUSS
+claimed**: an unrecognized future `Write.operation` oneof variant already
+has a safe existing fallback in `proto_write_to_domain`
+(`server.rs:207`, `None => Err(Status::invalid_argument(...))`) — no new
+code needed for that specific case. What remains genuinely open (not
+covered by this fallback, and not this feature's to resolve): an OLDER
+`embyr-server` talking to a NEWER `embyr-agent` binary (the new `Transform`
+oneof variant/`update_transforms` field are simply never sent — silently
+inert, not a fallback that needs building), and a NEWER `embyr-server`
+sending `update_transforms`/`Transform` writes to an OLDER `embyr-agent`
+binary that has not yet been redeployed past this feature (the OLDER
+binary's own `prost`-generated `Write` type does not have these fields at
+all — the request fails at gRPC deserialization, not inside application
+logic, the SAME `Unimplemented`-adjacent failure mode `agent-mode-write-streaming`
+names for its own analogous case). Whether that failure mode should be
+surfaced more clearly is exactly the shared question deferred to the
+sibling's own DESIGN wave; not decided here.
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Component | Action | Rationale |
+|---|---|---|
+| `embyr-core::domain::field_transform::apply_field_transform` | REUSE UNCHANGED | Pure compute, zero IO, already delivered by `firestore-field-transforms` (ADR-052 § Decision 5a). Confirmed present and unchanged. |
+| `embyr-core::storage::backend_adapter::FieldTransform` (domain enum, 6 variants) | REUSE UNCHANGED | Same domain type both `direct_pg` and agent-mode target. |
+| `embyr_pg_storage::backend_adapter::PostgresBackendAdapter::commit_transaction` | REUSE UNCHANGED | Literally the same struct instance type `embyr-agent`'s own `commit()` handler already calls — confirmed by import, not inferred. |
+| `crates/embyr-server/src/adapters/agent_backend.rs::field_value_to_agent_value` | REUSE UNCHANGED | Already handles every `FieldValue` variant a transform operand needs; reused for `Increment`/`Maximum`/`Minimum`/array-kind operand encoding. |
+| `crates/embyr-agent/src/encoding.rs::proto_value_to_field_value` | REUSE UNCHANGED | Same, decode direction. |
+| `proto/embyr/agent/v1/storage_agent.proto` — `Write` message | EXTEND | Add `Transform transform = 5` oneof variant, `repeated FieldTransform update_transforms = 6`. No existing field renumbered or removed. |
+| `proto/embyr/agent/v1/storage_agent.proto` — new `FieldTransform`/`Transform`/`ServerValue` messages | CREATE NEW | No existing agent-proto message carries transform semantics; mirrors `document.proto`'s own `DocumentTransform`/`FieldTransform`/`ServerValue` shape (ADR-057 § Decision 1). Justification: no existing alternative — the client-facing proto cannot be imported (no-cross-proto-import convention), and no local equivalent exists today. |
+| `crates/embyr-agent/src/server.rs::proto_write_to_domain` | EXTEND | New `Operation::Transform` match arm; `Write::Update` arm now threads `update_transforms` instead of hardcoding `transforms: vec![]`. |
+| `crates/embyr-agent/src/server.rs::translate_field_transforms` (new fn) | CREATE NEW | No existing agent-side transform-validation helper; mirrors `handler.rs`'s own established shared-helper pattern (ADR-048 § Decision 4), adapted for `embyr-agent`'s infallible `proto_value_to_field_value`. Justification: no existing alternative in this crate. |
+| `crates/embyr-server/src/adapters/agent_backend.rs::commit_transaction` | EXTEND | `.filter_map` → `.map`; new `Write::Transform` arm; `Write::Update` arm now encodes `transforms` into `update_transforms`. |
+| `crates/embyr-server/src/adapters/agent_backend.rs::field_transform_to_agent` (new fn) | CREATE NEW | No existing domain-`FieldTransform`-to-agent-proto encoder; symmetric counterpart to the new decode-side helper. Justification: no existing alternative. |
+| `embyr_core::storage::backend_adapter::BackendAdapter` trait | REUSE UNCHANGED | Zero new trait method — `commit_transaction`'s existing signature already carries `Vec<Write>` end to end. |
+| `embyr_core::error::CoreError` | REUSE UNCHANGED | `InvalidArgument` already covers every new validation-failure case (ADR-052 § Consequences precedent). |
+
+**Net new code**: 2 proto messages + 1 enum + 1 oneof variant + 1 repeated
+field (proto only, no new RPC), 2 Rust functions (one per translation
+direction), both under 20-30 lines each by direct analogy to their
+`handler.rs`/`agent_backend.rs`-existing-Update-arm precedents. Zero new
+adapters, zero new ports, zero new SQL, zero new crate dependency.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+Single bounded context (BC-2 Document Storage), no new component. Extends
+the existing agent-mode write path:
+
+```
+SDK → embyr-server (translate_one_write_for_commit, unchanged, ADR-052)
+    → AgentBackendAdapter::commit_transaction (EXTEND: encode transforms)
+    → mTLS gRPC (storage_agent.proto, EXTEND: wire shape)
+    → embyr-agent StorageAgentService::commit (EXTEND: decode transforms)
+    → PostgresBackendAdapter::commit_transaction (REUSE UNCHANGED, ADR-052)
+    → apply_field_transform (REUSE UNCHANGED, ADR-052)
+```
+
+Every box above the `mTLS gRPC` line already exists and is unchanged for
+non-agent modes; every box below the `PostgresBackendAdapter::commit_transaction`
+line already exists and is unchanged for this feature. The feature's own
+surface is exactly the two EXTEND boxes plus the wire-shape addition.
+
+---
+
+## Wave: DESIGN / [REF] C4 — System Context (unchanged from SSOT, included for completeness)
+
+```mermaid
+C4Context
+  title System Context — agent-mode-field-transforms (delta view)
+  Person(alex, "Alex", "SDK Developer, Meridian Health, backend_mode=agent")
+  System(embyr, "embyr-rs SaaS", "Multi-tenant Firestore-compatible gRPC/REST server")
+  System_Ext(agent, "embyr-agent", "Customer-VPC binary, mTLS gRPC, owns the customer's Postgres")
+  Rel(alex, embyr, "Sends FieldValue.serverTimestamp()/increment()/arrayUnion() writes via Firestore SDK")
+  Rel(embyr, agent, "Proxies Commit (now carrying Transform/update_transforms) over mTLS gRPC")
+  Rel(agent, agent, "Computes and persists via apply_field_transform, in the customer's own Postgres")
+```
+
+## Wave: DESIGN / [REF] C4 — Container (delta view)
+
+```mermaid
+C4Container
+  title Container Diagram — agent-mode-field-transforms (delta view)
+  Container(server, "embyr-server", "Rust/tonic", "Translates Firestore wire writes to domain Writes")
+  Container(adapter, "AgentBackendAdapter", "Rust", "EXTEND: encodes domain FieldTransform to agent-proto FieldTransform")
+  Container(agentsvc, "StorageAgentService", "Rust/tonic, customer VPC", "EXTEND: decodes agent-proto FieldTransform to domain FieldTransform")
+  Container(pgadapter, "PostgresBackendAdapter", "Rust", "REUSE UNCHANGED: apply_field_transform + locked read-compute-write")
+  ContainerDb(pg, "Customer Postgres", "Postgres", "Stores documents; FOR UPDATE row lock during transform apply")
+  Rel(server, adapter, "Calls commit_transaction with Vec<Write>")
+  Rel(adapter, agentsvc, "Sends CommitRequest over mTLS gRPC (Write.transform / update_transforms)")
+  Rel(agentsvc, pgadapter, "Calls commit_transaction (same adapter type direct_pg uses)")
+  Rel(pgadapter, pg, "SELECT ... FOR UPDATE, then INSERT ... ON CONFLICT")
+```
+
+---
+
+## Wave: DESIGN / [REF] Enforcement
+
+No new architectural rule needed beyond what ADR-052/§ CLAUDE.md already
+enforce: `embyr-core` remains IO-free (`deny.toml`), `apply_field_transform`
+is called, never reimplemented, by both backend adapters. No new adapter,
+no new port — nothing new for `dependency-cruiser`-equivalent
+(Rust: `deny.toml` + compiler) enforcement to cover.
+
+---
+
+## Wave: DESIGN / [REF] Quality Validation
+
+- **Protocol fidelity** (SSOT § System Quality Attributes, Rank 1): agent-mode
+  transform behavior now matches `direct_pg` exactly, since both paths call
+  the identical `apply_field_transform` through the identical
+  `PostgresBackendAdapter::commit_transaction`. Zero semantic drift by
+  construction (same function, same struct), not by parallel-implementation
+  discipline.
+- **Testability**: `translate_field_transforms`/`field_transform_to_agent`
+  are pure translation functions, unit-testable without a live agent
+  process; Slice 01's own AC additionally require exercise against a real
+  `embyr-agent` binary + real Postgres (no mocked storage layer), matching
+  this feature's own WS Strategy B.
+- **Maintainability**: two new functions mirror two already-existing,
+  already-reviewed precedents (`translate_one_write_for_commit`'s
+  `translate_field_transforms` in `handler.rs`; the existing `Write::Update`/
+  `Write::Delete` arms in `agent_backend.rs`'s own `commit_transaction`) —
+  no novel pattern introduced.
+- **Simplest solution first**: no new adapter, no new port, no new RPC, no
+  new SQL — confirmed the smallest possible change that closes the gap;
+  rejected alternatives (§ ADR-057 Alternatives Considered) were all
+  smaller-looking but structurally ambiguous or inconsistent with local
+  convention, not simpler in substance.
+
+---
+
+## Wave: DESIGN / [REF] Handoff to `nw-software-crafter`
+
+**Component list** (implementation order, matching the data flow):
+
+1. `proto/embyr/agent/v1/storage_agent.proto` — add `FieldTransform`,
+   `ServerValue`, `Transform` messages; extend `Write` (oneof variant +
+   `update_transforms` field). Regenerate `embyr-proto` codegen.
+2. `crates/embyr-agent/src/server.rs` — add `translate_field_transforms`;
+   extend `proto_write_to_domain` (new `Transform` arm, thread
+   `update_transforms` into the `Update` arm).
+3. `crates/embyr-server/src/adapters/agent_backend.rs` — add
+   `field_transform_to_agent`; change `commit_transaction`'s `.filter_map`
+   to `.map`, add the `Write::Transform` arm, thread `transforms` into the
+   `Write::Update` arm's `update_transforms`.
+4. Slice 01's own scenarios (real `embyr-agent` + real Postgres, no mocked
+   storage layer, per WS Strategy B) — exercise all 5 transform types
+   listed in the slice's own IN Scope.
+
+**No DISTILL wave, no roadmap.json, no execution-log.json, no DES markers**
+— per this session's standing methodology. `nw-software-crafter` implements
+directly from this feature-delta.md + ADR-057 + the slice brief.
+
+**External integrations**: none new.
+
+**Peer review**: not performed — session standing methodology has the
+orchestrator independently verify DESIGN output against the code, per the
+sibling `firestore-field-transforms` precedent.
