@@ -16,7 +16,9 @@ use std::sync::Arc;
 use embyr_core::domain::{document::DocumentPath, field_value::FieldValue, project::ProjectId};
 use embyr_core::domain::transaction::{TransactionId, TransactionOptions};
 use embyr_core::error::CoreError;
-use embyr_core::storage::backend_adapter::{BackendAdapter, Write as DomainWrite, WritePrecondition};
+use embyr_core::storage::backend_adapter::{
+    BackendAdapter, FieldTransform as CoreFieldTransform, Write as DomainWrite, WritePrecondition,
+};
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
 use embyr_core::domain::{document::CollectionPath, query::{FieldFilter, FilterOp, QueryFilter, StructuredQuery as DomainStructuredQuery}};
 use embyr_proto::agent::{
@@ -191,18 +193,87 @@ fn proto_fields_to_domain(
         .collect()
 }
 
+/// Translate agent-proto `FieldTransform`s into domain `FieldTransform`s.
+///
+/// agent-mode-field-transforms (Slice 01, ADR-057 § Decision 2): mirrors
+/// `handler.rs`'s own established `translate_field_transforms` shared-helper
+/// discipline (ADR-052 § Decision 4), adapted for `embyr-agent`'s own
+/// infallible `proto_value_to_field_value` (no `Option`/`Result` — the type
+/// check happens post-hoc by matching the decoded `FieldValue` variant).
+fn translate_field_transforms(
+    field_transforms: &[embyr_proto::agent::FieldTransform],
+) -> Result<Vec<CoreFieldTransform>, Status> {
+    use embyr_proto::agent::{field_transform::TransformType, ServerValue};
+
+    field_transforms
+        .iter()
+        .map(|ft| match &ft.transform_type {
+            Some(TransformType::SetToServerValue(raw)) => {
+                if *raw == ServerValue::RequestTime as i32 {
+                    Ok(CoreFieldTransform::ServerTimestamp(ft.field_path.clone()))
+                } else {
+                    Err(Status::invalid_argument(
+                        "unsupported ServerValue in field transform",
+                    ))
+                }
+            }
+            Some(TransformType::Increment(v)) => {
+                match proto_value_to_field_value(v) {
+                    fv @ (FieldValue::Integer(_) | FieldValue::Double(_)) => {
+                        Ok(CoreFieldTransform::Increment(ft.field_path.clone(), fv))
+                    }
+                    _ => Err(Status::invalid_argument("increment delta must be numeric")),
+                }
+            }
+            Some(TransformType::Maximum(v)) => {
+                match proto_value_to_field_value(v) {
+                    fv @ (FieldValue::Integer(_) | FieldValue::Double(_)) => {
+                        Ok(CoreFieldTransform::Maximum(ft.field_path.clone(), fv))
+                    }
+                    _ => Err(Status::invalid_argument("maximum comparand must be numeric")),
+                }
+            }
+            Some(TransformType::Minimum(v)) => {
+                match proto_value_to_field_value(v) {
+                    fv @ (FieldValue::Integer(_) | FieldValue::Double(_)) => {
+                        Ok(CoreFieldTransform::Minimum(ft.field_path.clone(), fv))
+                    }
+                    _ => Err(Status::invalid_argument("minimum comparand must be numeric")),
+                }
+            }
+            Some(TransformType::AppendMissingElements(arr)) => {
+                let values = arr.values.iter().map(proto_value_to_field_value).collect();
+                Ok(CoreFieldTransform::AppendMissingElements(ft.field_path.clone(), values))
+            }
+            Some(TransformType::RemoveAllFromArray(arr)) => {
+                let values = arr.values.iter().map(proto_value_to_field_value).collect();
+                Ok(CoreFieldTransform::RemoveAllFromArray(ft.field_path.clone(), values))
+            }
+            None => Err(Status::invalid_argument(
+                "field transform missing transform_type",
+            )),
+        })
+        .collect()
+}
+
 /// Translate a proto `Write` message to a domain `Write` variant.
 fn proto_write_to_domain(w: embyr_proto::agent::Write, project_id_str: &str) -> Result<DomainWrite, Status> {
     let precondition = parse_precondition(w.current_document);
+    let update_transforms = translate_field_transforms(&w.update_transforms)?;
     match w.operation {
         Some(Operation::Update(doc)) => {
             let path = parse_document_name(&doc.name, project_id_str)?;
             let fields = proto_fields_to_domain(doc.fields);
-            Ok(DomainWrite::Update { path, fields, version: None, precondition, transforms: vec![] })
+            Ok(DomainWrite::Update { path, fields, version: None, precondition, transforms: update_transforms })
         }
         Some(Operation::Delete(name)) => {
             let path = parse_document_name(&name, project_id_str)?;
             Ok(DomainWrite::Delete { path, version: None, precondition })
+        }
+        Some(Operation::Transform(t)) => {
+            let path = parse_document_name(&t.document, project_id_str)?;
+            let transforms = translate_field_transforms(&t.field_transforms)?;
+            Ok(DomainWrite::Transform { path, transforms })
         }
         None => Err(Status::invalid_argument("write operation required")),
     }

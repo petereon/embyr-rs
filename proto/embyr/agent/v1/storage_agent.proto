@@ -314,14 +314,46 @@ message BeginTransactionResponse {
   bytes transaction = 1;
 }
 
+// A transformation of a single field, computed server-side. Mirrors
+// google.firestore.v1.DocumentTransform.FieldTransform's own oneof shape,
+// authored fresh per this proto's own no-cross-proto-import convention
+// (ADR-057 § Decision 1).
+message FieldTransform {
+  string field_path = 1;
+
+  oneof transform_type {
+    ServerValue set_to_server_value = 2;
+    Value increment = 3;
+    Value maximum = 4;
+    Value minimum = 5;
+    ArrayValue append_missing_elements = 6;
+    ArrayValue remove_all_from_array = 7;
+  }
+}
+
+// A value that is calculated by the server.
+enum ServerValue {
+  SERVER_VALUE_UNSPECIFIED = 0;
+  REQUEST_TIME = 1;
+}
+
+// A standalone transform-only write on a document — no accompanying field
+// update. Mirrors google.firestore.v1.DocumentTransform's role.
+message Transform {
+  string document = 1;
+  repeated FieldTransform field_transforms = 2;
+}
+
 // A write operation on a document.
 message Write {
   oneof operation {
     Document update = 1;
     string delete = 2;
+    Transform transform = 5;
   }
   DocumentMask update_mask = 3;
   Precondition current_document = 4;
+  repeated FieldTransform update_transforms = 6;
 }
 
 // A request to commit a transaction.

@@ -16,7 +16,9 @@ use embyr_core::{
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
-    storage::backend_adapter::{BackendAdapter, Write, WritePrecondition},
+    storage::backend_adapter::{
+        BackendAdapter, FieldTransform as CoreFieldTransform, Write, WritePrecondition,
+    },
 };
 use embyr_proto::agent::{
     filter::FilterType as AgentFilterType,
@@ -24,8 +26,9 @@ use embyr_proto::agent::{
     BeginTransactionRequest, CommitRequest, CompositeFilterOp as AgentCompositeFilterOp,
     CompositeFilterProto as AgentCompositeFilterProto, CreateDocumentRequest,
     DeleteDocumentRequest, Document as AgentDocument, FieldFilterOp as AgentFieldFilterOp,
-    FieldFilterProto as AgentFieldFilterProto, Filter as AgentFilter, GetDocumentRequest,
-    RollbackRequest, UpdateDocumentRequest, Value as AgentValue, Write as AgentWrite,
+    FieldFilterProto as AgentFieldFilterProto, FieldTransform as AgentFieldTransform,
+    Filter as AgentFilter, GetDocumentRequest, RollbackRequest, ServerValue as AgentServerValue,
+    Transform as AgentTransform, UpdateDocumentRequest, Value as AgentValue, Write as AgentWrite,
     Precondition as AgentPrecondition,
 };
 use prost_types::Timestamp;
@@ -105,6 +108,42 @@ fn field_value_to_agent_value(fv: &FieldValue) -> AgentValue {
     AgentValue {
         value_type: Some(value_type),
     }
+}
+
+/// Translate a domain `FieldTransform` into the agent proto's own
+/// `FieldTransform` — the encode-side symmetric counterpart to
+/// `embyr-agent`'s own `translate_field_transforms` (ADR-057 § Decision 3).
+/// Reuses `field_value_to_agent_value` unchanged for every operand.
+fn field_transform_to_agent(t: &CoreFieldTransform) -> AgentFieldTransform {
+    use embyr_proto::agent::{field_transform::TransformType, ArrayValue as AgentArrayValue};
+    let (field_path, transform_type) = match t {
+        CoreFieldTransform::ServerTimestamp(p) => (
+            p.clone(),
+            TransformType::SetToServerValue(AgentServerValue::RequestTime as i32),
+        ),
+        CoreFieldTransform::Increment(p, v) => {
+            (p.clone(), TransformType::Increment(field_value_to_agent_value(v)))
+        }
+        CoreFieldTransform::Maximum(p, v) => {
+            (p.clone(), TransformType::Maximum(field_value_to_agent_value(v)))
+        }
+        CoreFieldTransform::Minimum(p, v) => {
+            (p.clone(), TransformType::Minimum(field_value_to_agent_value(v)))
+        }
+        CoreFieldTransform::AppendMissingElements(p, values) => (
+            p.clone(),
+            TransformType::AppendMissingElements(AgentArrayValue {
+                values: values.iter().map(field_value_to_agent_value).collect(),
+            }),
+        ),
+        CoreFieldTransform::RemoveAllFromArray(p, values) => (
+            p.clone(),
+            TransformType::RemoveAllFromArray(AgentArrayValue {
+                values: values.iter().map(field_value_to_agent_value).collect(),
+            }),
+        ),
+    };
+    AgentFieldTransform { field_path, transform_type: Some(transform_type) }
 }
 
 fn agent_value_to_field_value(v: &AgentValue) -> Option<FieldValue> {
@@ -534,29 +573,43 @@ impl BackendAdapter for AgentBackendAdapter {
     ) -> Result<Vec<WriteResult>, CoreError> {
         let agent_writes: Vec<AgentWrite> = writes
             .into_iter()
-            .filter_map(|w| match w {
-                Write::Update { path, fields, precondition, .. } => {
+            .map(|w| match w {
+                Write::Update { path, fields, precondition, transforms, .. } => {
                     let name = domain_path_to_agent_name(&path);
                     let doc = AgentDocument {
                         name,
                         fields: fields_to_agent_map(&fields),
                         ..Default::default()
                     };
-                    Some(AgentWrite {
+                    AgentWrite {
                         operation: Some(embyr_proto::agent::write::Operation::Update(doc)),
                         current_document: precondition.as_ref().map(precondition_to_agent),
+                        update_transforms: transforms.iter().map(field_transform_to_agent).collect(),
                         ..Default::default()
-                    })
+                    }
                 }
                 Write::Delete { path, precondition, .. } => {
                     let name = domain_path_to_agent_name(&path);
-                    Some(AgentWrite {
+                    AgentWrite {
                         operation: Some(embyr_proto::agent::write::Operation::Delete(name)),
                         current_document: precondition.as_ref().map(precondition_to_agent),
                         ..Default::default()
-                    })
+                    }
                 }
-                Write::Transform { .. } => None,
+                Write::Transform { path, transforms } => {
+                    let name = domain_path_to_agent_name(&path);
+                    AgentWrite {
+                        operation: Some(embyr_proto::agent::write::Operation::Transform(AgentTransform {
+                            document: name,
+                            field_transforms: transforms.iter().map(field_transform_to_agent).collect(),
+                        })),
+                        // Write::Transform has no precondition field of its own —
+                        // pre-existing gap, ADR-052 § Consequences, not this
+                        // feature's scope.
+                        current_document: None,
+                        ..Default::default()
+                    }
+                }
             })
             .collect();
 

@@ -34,3 +34,6 @@ mod us_a05_subscribe;
 
 #[path = "embyr_agent/us_a06_lifecycle.rs"]
 mod us_a06_lifecycle;
+
+#[path = "embyr_agent/us_a07_field_transforms.rs"]
+mod us_a07_field_transforms;
