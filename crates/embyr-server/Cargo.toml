@@ -650,6 +650,12 @@ path = "../../tests/batch_get_documents/acceptance/bg01_batch_resolution_and_per
 name = "firestore_list_rpcs_ld01_list_documents"
 path = "../../tests/firestore_list_rpcs/acceptance/ld01_list_documents.rs"
 
+# firestore-list-rpcs acceptance tests (Slice 02, LAST slice, US-02,
+# ADR-051).
+[[test]]
+name = "firestore_list_rpcs_ld02_list_collection_ids"
+path = "../../tests/firestore_list_rpcs/acceptance/ld02_list_collection_ids.rs"
+
 # firestore-write-streaming acceptance tests (Slice 01, Walking Skeleton,
 # US-01, ADR-046).
 [[test]]

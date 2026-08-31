@@ -29,6 +29,7 @@ use embyr_proto::firestore::{
     BatchGetDocumentsRequest, BatchGetDocumentsResponse, BatchWriteRequest, BatchWriteResponse,
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
+    ListCollectionIdsRequest, ListCollectionIdsResponse,
     ListDocumentsRequest, ListDocumentsResponse, ListenRequest,
     ListenResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
     RunQueryRequest, RunQueryResponse, UpdateDocumentRequest, WriteRequest, WriteResponse,
@@ -1536,6 +1537,65 @@ impl FirestoreService {
         Ok(response)
     }
 
+    /// firestore-list-rpcs (Slice 02, US-02, ADR-051): `ListCollectionIds` —
+    /// same auth/rate-limit/suspension sequence as `handle_list_documents`,
+    /// no per-document access-rule evaluation (this RPC only exposes
+    /// collection NAMES, never document contents, so there is nothing for
+    /// `security-rules-query-path`'s own per-document rule engine to filter).
+    /// Reuses the shared `list_collection_ids` primitive with the SAME
+    /// fetch-one-extra-to-detect-more-pages pagination technique
+    /// `handle_list_documents`/`run_query` already use.
+    async fn handle_list_collection_ids(
+        &self,
+        request: Request<ListCollectionIdsRequest>,
+    ) -> Result<Response<ListCollectionIdsResponse>, Status> {
+        let req = request.get_ref();
+        let (project_id_str, prefix) = Self::parse_parent_prefix(&req.parent)?;
+        let api_key = Self::extract_api_key(&request)?;
+
+        let rate_info = match self.rate_limiter.check(&project_id_str).await {
+            Ok(info) => info,
+            Err(info) => return Err(Self::rate_limit_rejection(&info)),
+        };
+
+        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        if status_str == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let page_size = if req.page_size <= 0 { 100i32 } else { req.page_size.min(100) };
+        let offset = embyr_core::pagination::decode_page_token(&req.page_token)
+            .map_err(core_error_to_status)?;
+
+        let parent = CollectionPath { project_id, collection_path: prefix };
+
+        // Fetch-one-extra-to-detect-more-pages, same technique `run_query`'s
+        // own LIMIT/OFFSET provides — `list_collection_ids`'s own SQL
+        // (ADR-051 § Decision 2) already applies LIMIT/OFFSET server-side.
+        let mut ids = adapter
+            .list_collection_ids(&parent, page_size + 1, offset as i32)
+            .await
+            .map_err(core_error_to_status)?;
+
+        let has_more = ids.len() > page_size as usize;
+        if has_more {
+            ids.truncate(page_size as usize);
+        }
+        let next_page_token = if has_more {
+            embyr_core::pagination::encode_page_token(offset + page_size as u32)
+        } else {
+            String::new()
+        };
+
+        let mut response =
+            Response::new(ListCollectionIdsResponse { collection_ids: ids, next_page_token });
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
+    }
+
     async fn handle_batch_get_documents(
         &self,
         request: Request<BatchGetDocumentsRequest>,
@@ -2743,6 +2803,16 @@ impl Firestore for FirestoreService {
         let obs_start = std::time::Instant::now();
         let result = self.handle_list_documents(request).await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_LIST_DOCUMENTS, &result, obs_start);
+        result
+    }
+
+    async fn list_collection_ids(
+        &self,
+        request: Request<ListCollectionIdsRequest>,
+    ) -> Result<Response<ListCollectionIdsResponse>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = self.handle_list_collection_ids(request).await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_LIST_COLLECTION_IDS, &result, obs_start);
         result
     }
 

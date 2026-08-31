@@ -18,7 +18,8 @@ pub use security_rules_write_path_common::{
 };
 
 use embyr_proto::firestore::{
-    firestore_client::FirestoreClient, ListDocumentsRequest, ListDocumentsResponse,
+    firestore_client::FirestoreClient, ListCollectionIdsRequest, ListCollectionIdsResponse,
+    ListDocumentsRequest, ListDocumentsResponse,
 };
 
 /// Real gRPC `ListDocuments` call — driving port entry (Pillar 3), mirroring
@@ -57,6 +58,34 @@ pub async fn list_documents(
     }
 
     Ok(client.list_documents(request).await?.into_inner())
+}
+
+/// Real gRPC `ListCollectionIds` call — driving port entry (Pillar 3),
+/// mirroring `list_documents`'s own shape (Slice 02, US-02, ADR-051).
+pub async fn list_collection_ids(
+    ctx: &SecurityRulesFullContext,
+    parent: &str,
+    page_size: i32,
+    page_token: &str,
+) -> Result<ListCollectionIdsResponse, tonic::Status> {
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let mut request = tonic::Request::new(ListCollectionIdsRequest {
+        parent: parent.to_string(),
+        page_size,
+        page_token: page_token.to_string(),
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+
+    Ok(client.list_collection_ids(request).await?.into_inner())
 }
 
 /// The database-root `parent` resource name (no trailing document path).

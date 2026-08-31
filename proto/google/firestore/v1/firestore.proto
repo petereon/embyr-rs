@@ -30,6 +30,9 @@ service Firestore {
   // Lists documents.
   rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
 
+  // Lists all the collection IDs underneath a document.
+  rpc ListCollectionIds(ListCollectionIdsRequest) returns (ListCollectionIdsResponse);
+
   // Gets multiple documents.
   rpc BatchGetDocuments(BatchGetDocumentsRequest) returns (stream BatchGetDocumentsResponse);
 
@@ -145,6 +148,29 @@ message ListDocumentsResponse {
 
   // A token to retrieve the next page of results, empty when this is the
   // last page.
+  string next_page_token = 2;
+}
+
+// A request for [Firestore.ListCollectionIds][google.firestore.v1.Firestore.ListCollectionIds].
+message ListCollectionIdsRequest {
+  // Required. The parent document. In the format:
+  // `projects/{project_id}/databases/{database_id}/documents/{document_path}`.
+  // For example: `projects/my-project/databases/my-database/documents/chatrooms/my-chatroom`.
+  string parent = 1;
+
+  // Optional. The maximum number of results to return.
+  int32 page_size = 2;
+
+  // Optional. A page token, received from a previous `ListCollectionIds` call.
+  string page_token = 3;
+}
+
+// The response from [Firestore.ListCollectionIds][google.firestore.v1.Firestore.ListCollectionIds].
+message ListCollectionIdsResponse {
+  // The collection ids.
+  repeated string collection_ids = 1;
+
+  // A page token that may be used to continue the list.
   string next_page_token = 2;
 }
 
