@@ -33,6 +33,25 @@ use common::{sign_stripe_payload, CpbTestContext};
 
 const WEBHOOK_SECRET: &str = "whsec_cpb03_test_signing_secret";
 
+/// `embyr_stripe_webhook_dispatch_total` is recorded through
+/// `observability::get_or_install_prometheus_handle()`, a process-global
+/// `OnceLock` singleton (one Prometheus registry per TEST BINARY, not per
+/// test) — every `#[tokio::test]` in this file that dispatches a
+/// `customer.subscription.updated` webhook increments the SAME counter.
+/// `concurrent_redelivery_of_same_event_dispatches_exactly_once` below reads
+/// a before/after delta of that counter; without serialization, a
+/// concurrently-scheduled sibling test in this same binary (`cargo test`'s
+/// default parallel execution) can increment it inside that test's own
+/// measurement window, producing a false delta of 2 — this is exactly the
+/// intermittent CI failure this guard fixes (confirmed via direct log read,
+/// not assumed: the production dedupe logic itself, INSERT ... ON CONFLICT
+/// DO NOTHING + rows_affected(), is already atomic and race-free; the
+/// flakiness was in this test file's own use of shared global state, not a
+/// product bug). Every test in this file that dispatches
+/// `customer.subscription.updated` holds this lock for its dispatch+verify
+/// section so no two ever race on the shared counter.
+static DISPATCH_METRIC_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AC-203-04: a valid subscription-updated event syncs the local record
 // ─────────────────────────────────────────────────────────────────────────────
@@ -83,6 +102,11 @@ async fn valid_subscription_updated_event_syncs_local_record() {
     .to_string();
     let signature = sign_stripe_payload(&payload, WEBHOOK_SECRET);
 
+    // See DISPATCH_METRIC_GUARD's own doc comment: this dispatches
+    // customer.subscription.updated, incrementing the same process-global
+    // Prometheus counter concurrent_redelivery_of_same_event_dispatches_exactly_once
+    // measures a delta of — held for the dispatch call only.
+    let _dispatch_guard = DISPATCH_METRIC_GUARD.lock().await;
     let resp = ctx
         .client
         .post(ctx.url("/admin/v1/webhooks/stripe"))
@@ -92,6 +116,7 @@ async fn valid_subscription_updated_event_syncs_local_record() {
         .send()
         .await
         .expect("webhook POST failed");
+    drop(_dispatch_guard);
 
     assert_eq!(
         resp.status().as_u16(),
@@ -186,6 +211,8 @@ async fn duplicate_event_delivery_is_a_no_op() {
 
     for _ in 0..2 {
         let signature = sign_stripe_payload(&payload, WEBHOOK_SECRET);
+        // See DISPATCH_METRIC_GUARD's own doc comment.
+        let _dispatch_guard = DISPATCH_METRIC_GUARD.lock().await;
         let resp = ctx
             .client
             .post(ctx.url("/admin/v1/webhooks/stripe"))
@@ -195,6 +222,7 @@ async fn duplicate_event_delivery_is_a_no_op() {
             .send()
             .await
             .expect("webhook POST failed");
+        drop(_dispatch_guard);
         assert_eq!(
             resp.status().as_u16(),
             200,
@@ -269,6 +297,12 @@ async fn concurrent_redelivery_of_same_event_dispatches_exactly_once() {
     })
     .to_string();
     let signature = sign_stripe_payload(&payload, WEBHOOK_SECRET);
+
+    // See DISPATCH_METRIC_GUARD's own doc comment: held across the WHOLE
+    // before-count -> concurrent dispatch -> after-count window, so neither
+    // sibling test in this file can slip an increment into the delta this
+    // test measures.
+    let _dispatch_guard = DISPATCH_METRIC_GUARD.lock().await;
 
     let dispatches_before = ctx
         .stripe_webhook_dispatch_count("customer.subscription.updated")
