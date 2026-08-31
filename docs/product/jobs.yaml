@@ -150,6 +150,34 @@ jobs:
     # decide whether that trade-off is acceptable for v1 or should be
     # deferred. See docs/feature/firestore-batch-write/feature-delta.md § Job
     # Discovery Framing Resolution and § Handoff Package.
+    # NOTE (firestore-list-rpcs DISCUSS, 2026-08-31): this job's own
+    # functional dimension is now also realized for the SDK's own basic
+    # enumeration surface (collectionRef.listDocuments(),
+    # docRef.listCollections()) via this feature — same job, same persona
+    # (P1 Alex), not a new job (the "make it real"/close-the-remaining-gap
+    # pattern, same as every other RPC-completion feature this session).
+    # These are the last two undeclared unary RPCs in docs/SPEC.md's own
+    # ### Unary RPCs section. Investigation found the two RPCs share a single
+    # underlying query primitive ("find the immediate children of a path")
+    # and an already-proven pagination mechanism (a hex-encoded-offset
+    # page_token, already implemented once in
+    # crates/embyr-agent/src/server.rs::list_documents) — stronger evidence
+    # for bundling them into one feature than mere superficial similarity.
+    # ListDocuments requires zero new BackendAdapter trait method (reuses
+    # run_query, already backend-agnostic); ListCollectionIds needs one
+    # genuinely new query primitive (distinct immediate-child collection
+    # names under a path prefix) nothing in this codebase does today.
+    # Agent-mode ListCollectionIds is deferred (StorageAgent's own proto has
+    # no such RPC — a hard wall mirroring Write's own original ADR-047 gap).
+    # One judgment call is explicitly escalated to DESIGN, not decided here:
+    # ListDocuments' own agent-mode routing — reuse run_query uniformly
+    # (leaving the agent binary's own already-implemented, never-called
+    # ListDocuments RPC orphaned) vs. special-casing AgentBackendAdapter to
+    # call that existing RPC directly (more efficient, but requires
+    # reconciling its own narrower collection_id-is-already-a-full-path
+    # assumption against docs/SPEC.md's parent+collection_id convention).
+    # See docs/feature/firestore-list-rpcs/feature-delta.md § Bundle-vs-Split
+    # Verdict and § Handoff Package.
 
   - id: JOB-02
     name: tenant-provision

@@ -5023,3 +5023,128 @@ verify DESIGN output directly against the code, rather than dispatching a
 Full alternatives-considered analysis and the C4 diagrams: ADR-048, ADR-049,
 and `docs/feature/firestore-batch-write/feature-delta.md` §§ Wave: DESIGN.
 
+## Application Architecture — firestore-list-rpcs
+
+> Updated: 2026-08-31
+> Feature: firestore-list-rpcs (JOB-01 — completes the last two undeclared
+> unary RPCs, `ListDocuments`/`ListCollectionIds`, closing the proto-surface
+> gap list after `BatchGetDocuments`, `RunAggregationQuery`, `Write`, and
+> `BatchWrite`)
+> Mode: Propose (autonomous analysis per Decision 1 — not passed explicitly;
+> the single escalation's shape favored autonomous options-with-reasoning,
+> mirroring `firestore-batch-write`'s own DESIGN-mode choice)
+> ADRs: `adr-050-list-documents-agent-mode-routing-and-shared-child-primitive.md`
+> (Escalation 1 — `ListDocuments` agent-mode routing, built uniformly on
+> `BackendAdapter::run_query`; confirms `StorageAgent`'s own dedicated
+> `ListDocuments` RPC is not merely orphaned but functionally buggy for
+> nested `parent` and incapable of the `collection_id`-empty case),
+> `adr-051-list-collection-ids-query-primitive-and-agent-mode-deferral.md`
+> (new `BackendAdapter::list_collection_ids` trait method, `split_part`-based
+> Postgres SQL, agent-mode deferred mirroring `Write`'s own ADR-047
+> precedent). Does not amend `adr-002-bounded-contexts.md` — BC-2's own
+> ubiquitous language is unchanged, no new domain concept, only a new query
+> primitive over `CollectionPath`/`DocumentPath`. Does not amend
+> `adr-041-agent-mode-aggregation-scope.md` — ADR-051 applies that ADR's own
+> default-provided-body precedent to a new trait method, it does not change
+> ADR-041 itself.
+
+Full DESIGN content (Reading Confirmation, Escalation Resolutions, Component
+Decomposition per slice, Reuse Analysis, Driving/Driven Ports, C4 System
+Context/Container diagrams, Technology Choices, Enforcement, Quality
+Validation, Handoff sequencing) lives in
+`docs/feature/firestore-list-rpcs/feature-delta.md` §§ Wave: DESIGN — the
+single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context — both
+RPCs are new query PROJECTIONS over already-named vocabulary
+(`CollectionPath`, `DocumentPath`), not a new domain concept.
+
+**One escalation, resolved with fresh ground-truth verification that
+sharpened DISCUSS's own suspected divergence into two confirmed bugs**:
+US-01's agent-mode `ListDocuments` routing. DISCUSS had no basis to prefer
+building on `BackendAdapter::run_query` uniformly vs. special-casing
+`AgentBackendAdapter` to call `StorageAgent`'s own already-implemented,
+orphaned `ListDocuments` RPC. DESIGN's own re-reading of
+`crates/embyr-agent/src/server.rs::list_documents` found it (1) discards a
+nested `parent`'s own document-path prefix — a confirmed functional bug, not
+a suspected one — and (2) has no working code path for the
+`collection_id`-empty case (AC-01-03) at all, since its own empty-`collection_id`
+query resolves to `WHERE collection_path = ''`, matching zero rows.
+**Decision: build `handle_list_documents` uniformly on
+`BackendAdapter::run_query` for every `backend_mode`, including `agent` —
+`AgentBackendAdapter`'s own existing, unaffected `run_query` proxy handles
+agent-mode correctly with zero new agent-binary work.** The agent's own
+dedicated `ListDocuments` RPC is now confirmed dead AND broken, named as a
+cleanup/fix candidate for a future feature, not touched by this one.
+Full verification and alternatives considered: ADR-050.
+
+**The one genuinely new query primitive**: `BackendAdapter::list_collection_ids`
+(new trait method, default-error body mirroring `run_aggregation_query`'s own
+ADR-041 precedent — every existing adapter compiles unmodified).
+`PostgresBackendAdapter`'s own override is a single `SELECT DISTINCT
+split_part(...) ... LIMIT/OFFSET` query that collapses arbitrary nesting
+depth down to the immediate child name by construction (no separate
+"exclude grandchildren" guard needed) — reused by BOTH `ListCollectionIds`
+directly and `ListDocuments`'s own `collection_id`-empty branch (an
+internal, unpaginated enumeration call followed by a per-child `run_query`
+fan-out, merged and paginated in Rust). Exact SQL: ADR-051 § Decision 2.
+
+**Agent-mode `ListCollectionIds`**: deferred, mirroring `Write`'s own ADR-047
+precedent exactly — `StorageAgent`'s proto has zero `ListCollectionIds` RPC
+of any kind, a hard proto-surface wall, not a latency/threshold question like
+`BatchWrite`'s (ADR-049). Default-error trait body applies uniformly; no
+`AgentBackendAdapter` override, zero new agent-binary work. ADR-051 §
+Decision 3.
+
+**Shared `page_token` mechanism**: extracted (not duplicated) into a new pure
+module, `crates/embyr-core/src/pagination.rs` — one hex-offset
+encode/decode pair, reused by both new `embyr-server` handlers, satisfying
+this feature's own KPI #4 (zero pagination divergence between the two RPCs)
+by construction. The agent binary's own existing private copy is left
+untouched — it has no live caller after the agent-mode routing decision above,
+and `crates/embyr-agent/` is out of scope for this feature to touch or clean
+up.
+
+**Component decomposition**: two proto message pairs + two `rpc` declarations
+in `firestore.proto` (mirroring `docs/SPEC.md`'s own field shapes and the
+agent's own already-declared `ListDocumentsRequest`/`Response` field
+numbering), two new unary handlers (`handle_list_documents`,
+`handle_list_collection_ids`, both mirroring `handle_get_document`'s own
+auth/rate-limit/suspension sequence), one new small parsing helper
+(`parse_parent_prefix`, structurally distinct from the existing
+`parse_document_path` — no trailing document_id to pop), the new
+`pagination.rs` module, and the new `list_collection_ids` trait method + its
+one real `PostgresBackendAdapter` override.
+
+**Reuse**: `BackendAdapter::run_query` (unchanged, new callers), the
+fetch-one-extra-to-detect-more-pages pagination technique (extended from the
+agent's own proven shape), the `QueryBuilder`/`try_get`/`BackendUnavailable`
+SQL idiom, `CollectionPath` (reused for a new "parent prefix" semantic, no
+new domain type), `CoreError::InvalidArgument` (zero new variant),
+`run_aggregation_query`'s own default-provided-body pattern,
+auth/rate-limit/suspension/identity sequence shape, `obs_helpers::record_grpc_call`
+OBS wrapper shape (two new `METHOD_*` constants), `core_error_to_status`
+(unchanged, no new local error mapper needed — unlike ADR-041's own
+`aggregation_error_to_status`, since `docs/SPEC.md` documents no
+operator-specific status contract here) — all REUSED. One new
+`BackendAdapter` trait method (`list_collection_ids`), zero new `CoreError`
+variant, zero handler-level `backend_mode` branching anywhere.
+
+**External integrations**: none new — Postgres and the agent's mTLS gRPC
+channel are both pre-existing, already-`probe()`-covered dependencies;
+`list_collection_ids`'s own default-error body fails loud and structured for
+any backend that doesn't implement it (never a silent empty result), the same
+"refuse cleanly, don't lie" discipline `probe()` embodies at startup, applied
+here at call time (Earned Trust principle 12, applied — not a new probe, an
+existing discipline extended to a new fallible boundary).
+
+**Peer review**: not performed — session standing methodology for this
+feature set (per orchestrator instruction) has the orchestrator independently
+verify DESIGN output directly against the code, rather than dispatching a
+`solution-architect-reviewer` sub-agent.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-050, ADR-051,
+and `docs/feature/firestore-list-rpcs/feature-delta.md` §§ Wave: DESIGN.
+
