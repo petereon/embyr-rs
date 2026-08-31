@@ -475,3 +475,178 @@ Next step (NOT performed by this agent): orchestrator dispatches `nw-solution-ar
 ## Wave: DISCUSS / [REF] SSOT Updates
 
 - `docs/product/jobs.yaml` — NOTE appended to JOB-01 documenting this feature's realization (extends, not a new job; distinct gap-category framing — silently-discarded computation on already-shipped RPCs, not an undeclared RPC). See § Job Discovery Framing, and the NOTE text itself for the exact basis.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Agent**: Morgan (nw-solution-architect) | **Date**: 2026-08-31 | **Mode**: Propose (autonomous analysis — orchestrator did not pass an explicit interaction mode; both escalations and the flagged domain-model decision are bounded, resolvable trade-offs with no genuine stakeholder preference to elicit, mirroring `firestore-batch-write`'s own DESIGN-mode choice)
+
+✓ This file (full, pre-DESIGN 478 lines) and all 3 slice briefs (`docs/feature/firestore-field-transforms/slices/slice-0{1,2,3}-*.md`, each full) — re-read directly.
+✓ `docs/product/architecture/brief.md` and `docs/SPEC.md` § Field Transforms (lines 770-783) and § Transactions (786-819) — re-read directly; confirms DISCUSS's own excerpt and both flagged gaps (missing `maximum`/`minimum` rows, the `removeAllFromArray`/`appendMissingElements` `transform_results` asymmetry).
+✓ `crates/embyr-server/src/grpc/handler.rs::translate_one_write_for_commit` (full, current lines 687-771, unchanged from DISCUSS's own citation) — re-confirmed directly: `Update` arm (696-717) never reads `proto_write.update_transforms`; `Transform` arm (742-768) unconditionally discards `dt.field_transforms` into `vec![]`.
+✓ `crates/embyr-core/src/storage/backend_adapter.rs` (full, 160 lines) — confirms `FieldTransform::ServerTimestamp(String)` (1 variant, dead code) and `Write::Transform { path, transforms }` (structurally separate from `Update`), exactly as DISCUSS found.
+✓ `crates/embyr-core/src/domain/document.rs::WriteResult` (full) — confirms exactly 2 fields (`update_time`, `create_time`), no transform-result carrier, as DISCUSS found.
+✓ `crates/embyr-pg-storage/src/backend_adapter.rs::commit_transaction` (full apply loop, current lines 1009-1108) and `crates/embyr-pg-storage/src/transactions/occ.rs::verify_versions` (full, 49 lines) — re-confirmed: `Write::Update`'s own apply (1062-1085) is a full-document-overwrite `INSERT ... ON CONFLICT DO UPDATE SET fields = $4::jsonb`, not a partial merge; `Write::Transform`'s own apply (1103-1106) is a pure no-op `WriteResult` push; `verify_versions` proves the exact `SELECT ... FOR UPDATE` idiom this feature extends, reading `version` only today.
+✓ **New finding beyond DISCUSS's own Reading Confirmation**: `WriteResult` (`embyr_core::domain::document::WriteResult`) is constructed at **9 domain-layer call sites**, not just the 3 inside `commit_transaction` — `crates/embyr-pg-storage/src/backend_adapter.rs:319,369,400,454,484` (single-document `create_document`/`update_document`, used by `CreateDocument`/`UpdateDocument`/`SetDocument`, which carry no transform wire representation at all) and `crates/embyr-server/src/adapters/agent_backend.rs:344,375,575` (the agent adapter's own equivalents). All 9 need `transform_results` added; 6 mechanically (`vec![]`, zero behavior change), 3 with real computed values (`commit_transaction`'s own `Write::Update`/`Write::Transform` arms).
+✓ **Second new finding**: the proto-response `transform_results: vec![]` hardcode exists at **6 call sites, not the 5 DISCUSS found** — `crates/embyr-server/src/grpc/write_stream.rs:165` (the `Write` RPC's own streaming response) has the identical hardcode DISCUSS's own grep of `handler.rs` alone missed. Corrected here, folded into ADR-052 § Decision 3.
+✓ `crates/embyr-server/src/encoding/firestore_proto.rs` (full, 105 lines) — confirms `proto_value_to_field_value`/`field_value_to_proto`/`fields_to_proto`/`proto_fields_to_domain` already exist and are the exact reuse targets for translating `FieldTransform` operands in and `transform_results` values out — zero new proto↔domain translation logic needed at the wire-shape layer, a reuse opportunity DISCUSS's own Technical Notes did not name explicitly.
+✓ `crates/embyr-pg-storage/src/encoding/field_value.rs` (full, 112 lines) — confirms `fields_to_json`/`json_to_fields`/`json_to_field_value` already exist (the JSON↔`FieldValue` encoding boundary DISCUSS's own § Atomicity Mechanism Investigation named) — direct reuse for the new locked read's own decode step.
+✓ `crates/embyr-server/src/adapters/agent_backend.rs::commit_transaction` (lines 527-559) and `crates/embyr-agent/src/server.rs` (lines 198-207, its own local `AgentWrite` → `DomainWrite` translation) — re-confirmed: both construct `DomainWrite::Update`/`Write::Transform` today; both need a mechanical `transforms: vec![]`/`transform_results: vec![]` addition to keep compiling once the domain model grows — zero functional change on either path, since the internal agent proto has no transform message shape (confirmed, DISCUSS's own finding) and agent-mode is out of v1 scope for this feature.
+✓ `proto/google/firestore/v1/document.proto` lines 89-152 (`Write`, `DocumentTransform`, `DocumentTransform.FieldTransform`, `ServerValue`) — re-read directly, confirms the exact oneof shape and field numbers DISCUSS's own citation used, unchanged.
+✓ `crates/embyr-core/src/error.rs` (full, `CoreError`) — confirms `InvalidArgument(String)` already exists; every new error case this feature introduces (unsupported `ServerValue`, non-numeric delta/target, overflow) reuses it — zero new `CoreError` variant, zero new `core_error_to_status` match arm.
+
+No contradictions found between DISCUSS's own findings and this DESIGN pass's re-read. Two findings sharpen DISCUSS's own count without changing its scope (9 `WriteResult` construction sites, not 3; 6 proto-response call sites, not 5) — both folded into ADR-052, not silently left at DISCUSS's own lower count.
+
+---
+
+## Wave: DESIGN / [REF] Escalation Resolutions
+
+### Escalation 1 — integer overflow on `increment`
+
+**Resolved: `checked_add` → `InvalidArgument`, DISCUSS's own recommendation adopted.** Never silently wrap or saturate. Full reasoning (this feature's own trustworthiness purpose, reuse of the existing `InvalidArgument` category, genuine rarity/reversibility, symmetry with `maximum`/`minimum`'s own non-numeric rejection): **ADR-053 § Escalation 1 Resolution**.
+
+### Escalation 2 — `transform_results` for array ops, and `docs/SPEC.md`'s own missing `maximum`/`minimum` rows
+
+**Resolved: array-transform kinds (`appendMissingElements`/`removeAllFromArray`) NEVER populate `transform_results`**, confirming DISCUSS's own moderate-confidence recall. `docs/SPEC.md` § Field Transforms corrected as part of this DESIGN wave's own deliverable (not deferred) — `maximum`/`minimum` rows added (missing-field semantics: set directly to the given value, not compared against 0), the `removeAllFromArray` row's incorrect "returns empty array as transform result" claim removed, and an explicit `transform_results`-population column added so the rule is stated once, unambiguously. Full reasoning and the exact corrected table: **ADR-053 § Escalation 2 Resolution**. Applied directly to `docs/SPEC.md` § Field Transforms (this session, same commit as this DESIGN pass).
+
+### Flagged (not a numbered escalation) — the combined update+transform domain-model shape
+
+**Resolved: `Write::Update` gains a `transforms: Vec<FieldTransform>` field** (default empty for every existing/transform-free write); `Write::Transform` unchanged in shape. This is the single decision every other DESIGN decision in this feature depends on — full reasoning, the two rejected alternatives (splitting into two `DomainWrite`s; unifying `Update`/`Transform` into one variant), and the exact atomicity-mechanism shape built on top of it: **ADR-052**.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition (per Slice)
+
+| Slice | Component | Path | Action | Notes |
+|---|---|---|---|---|
+| 01 | `FieldTransform` enum (6 variants) | `crates/embyr-core/src/storage/backend_adapter.rs` | EXTEND | 1 variant → 6; ADR-052 § Decision 1 |
+| 01 | `Write::Update.transforms` field | `crates/embyr-core/src/storage/backend_adapter.rs` | EXTEND | New field, default empty; ADR-052 § Decision 2 |
+| 01 | `WriteResult.transform_results` field | `crates/embyr-core/src/domain/document.rs` | EXTEND | New field; ADR-052 § Decision 3 |
+| 01 | `apply_field_transform` (pure compute) | `crates/embyr-core/src/domain/field_transform.rs` | CREATE | New module, zero IO; ADR-052 § Decision 5a. Covers `ServerTimestamp`/`Increment`/`Maximum`/`Minimum`/`AppendMissingElements`/`RemoveAllFromArray` match arms for THIS slice's own `ServerTimestamp` arm only — Slice 02/03 extend the same function's other arms, not a new function |
+| 01 | `translate_field_transforms` (shared proto→domain helper) | `crates/embyr-server/src/grpc/handler.rs` | CREATE | Called from both `Update` and `Transform` arms; ADR-052 § Decision 4 |
+| 01 | `translate_one_write_for_commit` `Update` arm | `crates/embyr-server/src/grpc/handler.rs` | EXTEND | Reads `proto_write.update_transforms` via the new helper (currently absent entirely) |
+| 01 | `translate_one_write_for_commit` `Transform` arm | `crates/embyr-server/src/grpc/handler.rs` | EXTEND | Reads `dt.field_transforms` via the new helper (currently `vec![]`); remove the now-inaccurate "discarded elsewhere... out of scope" comment (lines 745-753) |
+| 01 | Locked `fields` read (`SELECT ... FOR UPDATE`) | `crates/embyr-pg-storage/src/backend_adapter.rs` (inside `commit_transaction`, alongside the existing precondition-lock loop) | CREATE | The one genuinely new SQL statement this feature adds; ADR-052 § Decision 5b/5c |
+| 01 | `Write::Transform` apply arm | `crates/embyr-pg-storage/src/backend_adapter.rs` | EXTEND | No-op → genuine partial-merge upsert via `apply_field_transform` + existing `INSERT ... ON CONFLICT`; ADR-052 § Decision 5b |
+| 01 | `Write::Update` apply arm | `crates/embyr-pg-storage/src/backend_adapter.rs` | EXTEND | Non-empty `transforms` path computes `final_fields` before the existing `INSERT ... ON CONFLICT`; ADR-052 § Decision 5c |
+| 01 | 9 domain `WriteResult` construction sites | `crates/embyr-pg-storage/src/backend_adapter.rs:319,369,400,454,484,1081,1101,1105`, `crates/embyr-server/src/adapters/agent_backend.rs:344,375,575` | EXTEND (mechanical, 6 sites) / EXTEND (real values, 3 sites) | ADR-052 § Decision 3 |
+| 01 | 6 proto `WriteResult` response call sites | `crates/embyr-server/src/grpc/handler.rs:1851-56,1949-51,1968-70,1982-2002` (4 sites), `crates/embyr-server/src/grpc/write_stream.rs:165` | EXTEND | `transform_results: vec![]` → `wr.transform_results.iter().map(field_value_to_proto).collect()`; ADR-052 § Decision 3 |
+| 01 | `Write::Update` construction, agent binary's own translation | `crates/embyr-agent/src/server.rs:198-201` | EXTEND (mechanical) | `transforms: vec![]` — agent proto has no transform shape, permanent not temporary |
+| 02 | `apply_field_transform` `Increment`/`Maximum`/`Minimum` arms | `crates/embyr-core/src/domain/field_transform.rs` | EXTEND | Same function Slice 01 creates; type-preserving arithmetic/comparison, overflow → `InvalidArgument` (ADR-053) |
+| 02 | `translate_field_transforms` `increment`/`maximum`/`minimum` arms | `crates/embyr-server/src/grpc/handler.rs` | EXTEND | Operand-type validation (non-numeric delta → `InvalidArgument`), reusing `proto_value_to_field_value` |
+| 02 | (none — locked-read/apply-loop shape) | — | — | Slice 02 reuses Slice 01's own locked-read and apply-arm shape unchanged; zero new SQL, zero new files beyond the `apply_field_transform` extension above |
+| 03 | `apply_field_transform` `AppendMissingElements`/`RemoveAllFromArray` arms | `crates/embyr-core/src/domain/field_transform.rs` | EXTEND | Reuses `FieldValue::PartialEq` unchanged, zero new equality logic |
+| 03 | `translate_field_transforms` array-transform arms | `crates/embyr-server/src/grpc/handler.rs` | EXTEND | Operand decode via `proto_value_to_field_value` per element |
+| 03 | (none — locked-read/apply-loop shape) | — | — | Reuses Slice 02's own read-under-lock shape unchanged |
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Mechanism | Source | Action | Rationale |
+|---|---|---|---|
+| `FOR UPDATE` row-locking idiom | `verify_versions` (`crates/embyr-pg-storage/src/transactions/occ.rs`) | REUSE (extended to read `fields`, not just `version`) | Identical idiom, one column wider; ADR-052 § Decision 5b |
+| `INSERT ... ON CONFLICT` upsert | `Write::Update`'s own existing apply arm | REUSE UNCHANGED (new caller: `Write::Transform`'s apply arm; new payload: Rust-computed `final_fields` for `Write::Update` with transforms) | Zero new SQL statement shape; ADR-052 § Decision 5b/5c |
+| JSON↔`FieldValue` encoding | `fields_to_json`/`json_to_fields`/`json_to_field_value` (`crates/embyr-pg-storage/src/encoding/field_value.rs`) | REUSE UNCHANGED | Direct reuse for the new locked read's own decode step |
+| Proto↔domain value translation | `proto_value_to_field_value`/`field_value_to_proto` (`crates/embyr-server/src/encoding/firestore_proto.rs`) | REUSE UNCHANGED | Zero new translation logic for `FieldTransform` operands in, `transform_results` values out |
+| Structural equality for array ops | `FieldValue: PartialEq` (`crates/embyr-core/src/domain/field_value.rs`, already derived) | REUSE UNCHANGED | Zero new equality logic (DISCUSS's own confirmed finding) |
+| Per-write translation shared helper | `translate_one_write_for_commit` (ADR-048 § Decision 4) | EXTEND (both `Update`/`Transform` arms grow a call to the new `translate_field_transforms` helper) | Zero write-semantics logic duplicated between `Commit`/`Write`/`BatchWrite` — fixing the shared primitive fixes all three, per DISCUSS's own confirmed finding |
+| Error → `Status` mapping | `core_error_to_status` | REUSE UNCHANGED | Zero new `CoreError` variant; `InvalidArgument` already covers every new failure case |
+| Write-path access-rule evaluation | `evaluate_write_rule_for_commit` | REUSE UNCHANGED | Transform writes already route through it (standalone case); combined writes route through the existing `Update` arm's own call, unaffected by the new `transforms` field |
+
+**8 REUSE (6 unchanged, 2 extended-shape), 3 CREATE NEW** (`apply_field_transform` pure-compute module; `translate_field_transforms` shared proto→domain helper; the one new `SELECT ... FOR UPDATE` locked-read statement), **remainder EXTEND** (mechanical field/construction-site additions across 9+6+1 call sites, zero new logic at those sites). Zero new `BackendAdapter` trait method, zero new `CoreError` variant, zero new crate dependency.
+
+---
+
+## Wave: DESIGN / [REF] Driving/Driven Ports
+
+**Driving ports**: `google.firestore.v1.Firestore/{Commit,Write,BatchWrite}` (gRPC `:8080`, gRPC-Web `:8081` via the existing generic `tonic-web` wrap) — all three already-declared, already-implemented RPCs; this feature changes only their shared internal translation/apply logic (`translate_one_write_for_commit`, `commit_transaction`), not any RPC declaration. Zero new driving port.
+
+**Driven ports**: `BackendAdapter::commit_transaction` (unchanged signature, extended internal logic for `PostgresBackendAdapter` only) — zero new trait method. `AgentBackendAdapter`'s own `commit_transaction` requires only the mechanical `transform_results: vec![]`/`transforms: vec![]` compile-fix additions named above (§ Component Decomposition); its actual transform-handling logic is unchanged (agent-mode out of v1 scope, confirmed unreachable via the agent's own proto, which has no transform message shape).
+
+**External integrations**: none new. This feature touches only the existing Customer DB (BC-2, Postgres) via the existing `BackendAdapter` port — no third-party API, no contract-testing annotation needed.
+
+---
+
+## Wave: DESIGN / [REF] C4 Diagrams
+
+### System Context (L1) — delta only; full system context unchanged from `brief.md`'s own System Architecture section
+
+```mermaid
+C4Context
+  title System Context — firestore-field-transforms (delta)
+  Person(alex, "Alex", "SDK Developer, P1")
+  System_Ext(sdk, "Firebase SDK", "Compiles FieldValue.serverTimestamp()/.increment()/.arrayUnion()/.arrayRemove()/.maximum()/.minimum() into Write.update_transforms or a standalone Write.transform")
+  System(embyr, "embyr-rs", "Firestore-protocol-compatible server")
+  Rel(alex, sdk, "Calls set()/update()/create() with a FieldValue sentinel")
+  Rel(sdk, embyr, "Sends Commit/Write/BatchWrite carrying field_transforms or update_transforms")
+```
+
+### Container (L2)
+
+```mermaid
+C4Container
+  title Container Diagram — field-transform apply path (delta)
+  Container(grpc, "FirestoreGrpcHandler", "Tonic gRPC :8080/:8081", "translate_one_write_for_commit now actually reads field_transforms/update_transforms via translate_field_transforms")
+  Container(core, "embyr-core::domain::field_transform", "Rust, no IO", "NEW: apply_field_transform — pure type-preservation/structural-equality compute")
+  Container(pg_adapter, "PostgresBackendAdapter::commit_transaction", "Rust / sqlx", "Extends the FOR UPDATE lock loop to read fields; calls apply_field_transform under lock")
+  ContainerDb(pg, "Customer Postgres", "PostgreSQL", "documents.fields JSONB — now actually written for transform writes, not no-op'd")
+  Rel(grpc, pg_adapter, "Calls commit_transaction() with Write::Update{transforms}/Write::Transform, unchanged signature")
+  Rel(pg_adapter, core, "Calls apply_field_transform() per transform, under the same FOR UPDATE lock verify_versions already proves")
+  Rel(pg_adapter, pg, "SELECT ... FOR UPDATE (new) then INSERT ... ON CONFLICT (existing, reused)")
+```
+
+Component (L3) omitted — `apply_field_transform`'s own internal shape (6 match arms on one enum, no sub-collaborators) does not meet the 5+-component threshold for a dedicated diagram, mirroring `firestore-batch-write`'s own identical L3-omission precedent.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new dependency, no new crate. Reuses `sqlx` (already a dependency, `crates/embyr-pg-storage/Cargo.toml`), `serde_json` (already used by the existing JSON↔`FieldValue` encoding boundary), and every existing proto/domain translation helper named above. Zero OSS evaluation needed — nothing new to select.
+
+---
+
+## Wave: DESIGN / [REF] Enforcement
+
+**This feature's own new architectural rule** ("transform-carrying writes must acquire the locked `fields` read BEFORE computing, inside the SAME `pg_txn` `commit_transaction` already opens — never a separate, unlocked round trip") is enforced by test coverage, not static tooling, matching `firestore-batch-write`'s own identical precedent (this codebase has no existing static enforcement for per-adapter locking discipline, unlike `embyr-core`'s IO-import ban via `deny.toml`). Recommended enforcement: US-02's own dedicated concurrency test (AC-02-02, two concurrent `increment` calls, asserting no lost update) is the primary guard — a future refactor that accidentally moves the read outside the lock, or outside the transaction, fails this test under real concurrent load, not just under a single-threaded happy path. No new CI tooling proposed.
+
+`apply_field_transform`'s own placement in `embyr-core` (zero IO) is enforced by the EXISTING `deny.toml` IO-crate ban — no new enforcement mechanism needed, the pre-existing one already covers this feature's own new module by construction.
+
+---
+
+## Wave: DESIGN / [REF] Quality Validation
+
+- [x] Requirements traced: every AC (US-01/02/03) maps to a named component above or an explicit ADR-052/053 decision.
+- [x] Component boundaries: `apply_field_transform` (pure compute, `embyr-core`) owns type-preservation/structural-equality logic exclusively; `commit_transaction` (`embyr-pg-storage`) owns the locked read and the SQL apply; `translate_field_transforms`/`translate_one_write_for_commit` (`embyr-server`) own wire-shape translation exclusively — no logic duplicated across layers.
+- [x] Technology choices: zero new deps (documented above).
+- [x] Quality attributes: reliability (no lost updates under concurrency, ADR-052 § Decision 5d; never-silently-wrong overflow handling, ADR-053); maintainability (pure compute function independently unit-testable without a Postgres fixture, ADR-052 § Decision Driver 4); correctness (combined update+transform base-value semantics kept honest with `Write::Update`'s own existing narrower behavior rather than silently widened, ADR-052 § Decision Driver 2); security (write-path access-rule evaluation unchanged, reused not modified).
+- [x] Dependency-inversion compliance: `apply_field_transform` has zero IO dependency; `commit_transaction` depends on the `BackendAdapter` port's own existing shape, zero new trait method.
+- [x] C4 diagrams: L1 delta + L2 provided above.
+- [x] Integration patterns: unary gRPC/gRPC-Web, in-process Postgres — pre-existing, no new external integration.
+- [x] OSS preference: N/A, zero new dependencies.
+- [x] AC behavioral, not implementation-coupled: unchanged from DISCUSS.
+- [x] External integrations: none new.
+- [x] Enforcement tooling: named above (test-coverage-based for the locking discipline; existing `deny.toml` for the IO boundary).
+- [ ] Peer review: not performed this session — session standing methodology (per orchestrator instruction) is that the orchestrator independently verifies DESIGN output directly against the code, not a dispatched reviewer sub-agent, for this feature set.
+
+---
+
+## Wave: DESIGN / [REF] Handoff to DELIVER
+
+**Slice sequencing** (per DISCUSS § Prioritization, unchanged — Slice 02/03 depend structurally, not just by value-preference, on Slice 01's own plumbing existing first):
+
+1. **Slice 01** (WS) — must ship first. Introduces `FieldTransform`'s 6-variant shape (though only `ServerTimestamp` gets a real `apply_field_transform` arm this slice — the other 5 variants exist but are unreachable from translation until Slice 02/03 wire their own `translate_field_transforms` arms), `Write::Update.transforms`, `WriteResult.transform_results`, both wire-shape translations, the new locked `SELECT ... FOR UPDATE` read, and all 16 mechanical/real `WriteResult` call-site updates (9 domain + 6 proto + the agent binary's own construction site).
+2. **Slice 02** — depends on Slice 01's own plumbing. Adds `Increment`/`Maximum`/`Minimum` arms to the SAME `apply_field_transform` function and the SAME `translate_field_transforms` helper Slice 01 created — zero new files, zero new SQL, zero new locking mechanism (reuses Slice 01's own locked-read shape unchanged).
+3. **Slice 03** — depends on Slice 01/02. Adds `AppendMissingElements`/`RemoveAllFromArray` arms to the same two functions. Zero new files, zero new SQL.
+
+**Six things the crafter must not rediscover the hard way**:
+
+1. **The domain-model shape is `Write::Update.transforms`, not two `DomainWrite`s** — splitting a combined write into two domain writes breaks the `Vec<Write> → Vec<WriteResult>` positional invariant `Commit`/`BatchWrite`/`Write` all depend on. See ADR-052 § Decision 2, § Alternatives Considered (Alternative A, rejected outright).
+2. **A combined update+transform write's "current value" for a transform reads against the PRE-existing PERSISTED value (the new locked read), not against the write's own `fields` map** — getting this backwards silently breaks `increment` against any already-populated counter (would treat `viewCount:41` as missing, producing `1` instead of `42`). See ADR-052 § Decision 5c, with the exact worked example.
+3. **Standalone `Write::Transform` is a genuine partial merge onto the persisted document (preserves untouched fields); `Write::Update` (with or without transforms) remains a full-document overwrite for its own `fields`** — these are two different base semantics reusing the SAME `apply_field_transform` function and the SAME `INSERT ... ON CONFLICT` SQL shape, but starting from different Rust-side base maps. See ADR-052 § Decision 5b vs 5c.
+4. **Array-transform kinds (`appendMissingElements`/`removeAllFromArray`) NEVER push onto `transform_results`, even when they change the array** — `apply_field_transform` returns `None` for these two variants unconditionally; do not special-case "did the array actually change" into a conditional push. See ADR-053 § Escalation 2 Resolution.
+5. **Overflow on `increment` is `checked_add` → `InvalidArgument`, never `wrapping_add`/`saturating_add`** — reuses the existing `CoreError::InvalidArgument` variant, no new variant needed. See ADR-053 § Escalation 1 Resolution.
+6. **9 domain `WriteResult` construction sites and 6 proto-response call sites need `transform_results` added** (not the 3+5 DISCUSS's own count implied) — the full list, with exact current line numbers, is in § Component Decomposition above. Most are mechanical (`vec![]`); only `commit_transaction`'s own `Write::Update`/`Write::Transform` apply arms carry real computed values.
+
+**Two pre-existing, deliberately-deferred findings, named so the crafter does not treat them as this feature's own bugs**: `Write::Transform` has no `precondition` field (a `must_exist`/`update_time` precondition on a standalone transform write is silently discarded, unchanged by this feature — ADR-052 § Consequences); `Write::Update`'s own lack of `update_mask`-driven partial merge is a pre-existing, out-of-scope gap this feature builds on top of honestly, not one it closes (ADR-052 § Decision Driver 2, § Consequences).

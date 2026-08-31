@@ -506,6 +506,36 @@ jobs:
         so existing dashboards and alert rules work without modification
     opportunity_score: 13
     priority: high
+    # NOTE (customer-db-transaction-sweeper DISCUSS, 2026-08-31): this job's
+    # own metrics surface (the already-installed Prometheus recorder on
+    # GET :9090/metrics) is now also realized for a second background-
+    # reliability signal — embyr_transaction_sweeper_reclaimed_total /
+    # embyr_transaction_sweeper_purged_total, counting a periodic sweep's
+    # own reclaim (mark abandoned 'active' transaction rows 'expired') and
+    # purge (hard-delete terminal-state rows past a retention window)
+    # activity against every reachable customer database's own
+    # `transactions` bookkeeping table — same job, same persona (P2 Sam
+    # Chen), not a new job (the "make it real"/close-the-remaining-gap
+    # pattern, same as admin-api-v2 -> JOB-10 and card-payments-backend ->
+    # JOB-14). Investigated rather than assumed whether the infrastructure-
+    # only escape valve applied instead (Decision 4 option 2): it does NOT,
+    # because this feature adds a real operator-observable surface (the two
+    # counters above), not zero user-visible behavior change — the same
+    # threshold this job's own "diagnose the problem before the customer
+    # escalates" functional dimension already names. Central architectural
+    # finding: no enumerable, always-current collection of "every currently-
+    # known customer DB connection" exists anywhere in this codebase
+    # (CredentialCache is a bounded, api_key-keyed LRU, not an authoritative
+    # registry) — the sweeper enumerates System DB's own `projects` table
+    # directly, and resolves each project's DSN without ever holding a live
+    # api_key: AwsSecretFetcher/GcpSecretFetcher for aws_secret/gcp_secret
+    # (unchanged, ARN-only), and the previously-unread `backend_pg_dsn_enc`
+    # column (admin-api-v2, AES-256-GCM under EMBYR_ENCRYPTION_KEY) for
+    # direct_pg — its first live read call site in this codebase.
+    # backend_mode=agent is excluded at enumeration (embyr-server has no
+    # connection model to reach an agent-mode customer DB). See
+    # docs/feature/customer-db-transaction-sweeper/feature-delta.md § Job
+    # Discovery Framing Resolution and § Handoff Package.
 
   - id: JOB-13
     name: production-deployment

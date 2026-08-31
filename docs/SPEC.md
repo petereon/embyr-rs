@@ -769,17 +769,38 @@ A `WriteResult{update_time: commit_time}` is always appended to satisfy the leng
 
 ## Field Transforms
 
-Applied via `update_transforms` in a write. One `transformResults` entry is returned per transform, in input order, included in `WriteResult.transform_results`.
+Applied via `update_transforms` in a write (or a standalone `Write.transform`).
+`transform_results` is populated ONLY for value-producing kinds
+(`setToServerValue`/`increment`/`maximum`/`minimum`) — one entry per
+value-producing transform, in input order, included in
+`WriteResult.transform_results`. Array-transform kinds
+(`appendMissingElements`/`removeAllFromArray`) NEVER populate
+`transform_results`, regardless of whether the array actually changed —
+array membership is fully client-known (the client sent the exact elements),
+so there is nothing for the server to report back the client doesn't already
+have. (Corrected 2026-08-31, `firestore-field-transforms`, ADR-053 §
+Escalation 2 Resolution — this table previously stated the opposite for
+`removeAllFromArray` specifically; that was wrong.)
 
-| Transform | Behavior | On missing field |
-|---|---|---|
-| `setToServerValue: REQUEST_TIME` | Sets field to current server UTC timestamp. | Creates the field. |
-| `setToServerValue: <anything else>` | Returns `InvalidArgument`. Field is not modified. | — |
-| `increment: <integer delta>` | Adds integer delta to existing integer value. Result is integer. | Treats missing as 0. |
-| `increment: <double delta>` | Adds double delta to existing numeric value (promotes integer to double). Result is double. | Treats missing as 0.0. |
-| `increment: <non-numeric delta>` | Returns `InvalidArgument`. | — |
-| `appendMissingElements: <array>` | Merges incoming values into the current array, skipping values already present (proto structural equality). | Creates the field as the incoming array. |
-| `removeAllFromArray: <array>` | Removes all elements matching any value in the input (proto structural equality). | No-op; does not create the field. Returns empty array as transform result. |
+| Transform | Behavior | On missing field | Populates `transform_results`? |
+|---|---|---|---|
+| `setToServerValue: REQUEST_TIME` | Sets field to current server UTC timestamp. | Creates the field. | Yes — the computed timestamp. |
+| `setToServerValue: <anything else>` | Returns `InvalidArgument`. Field is not modified. | — | — |
+| `increment: <integer delta>` | Adds integer delta to existing integer value. Result is integer. `i64` overflow returns `InvalidArgument` (never wraps or saturates — ADR-053 § Escalation 1 Resolution). | Treats missing as 0. | Yes — the resulting value. |
+| `increment: <double delta>` | Adds double delta to existing numeric value (promotes integer to double). Result is double. | Treats missing as 0.0. | Yes — the resulting value. |
+| `increment: <non-numeric delta>` | Returns `InvalidArgument`. | — | — |
+| `increment` against a non-numeric existing value | Returns `InvalidArgument`. Field is not modified. | — | — |
+| `maximum: <value>` | Sets field to the greater of its current value and the given value, type-preserved (promotes to double if either side is double). | Sets the field directly to the given value (NOT compared against an assumed 0 baseline — unlike `increment`). | Yes — the resulting value. |
+| `minimum: <value>` | Sets field to the lesser of its current value and the given value, type-preserved (promotes to double if either side is double). | Sets the field directly to the given value (NOT compared against an assumed 0 baseline — unlike `increment`). | Yes — the resulting value. |
+| `maximum`/`minimum` against a non-numeric existing value | Returns `InvalidArgument`. Field is not modified. | — | — |
+| `appendMissingElements: <array>` | Merges incoming values into the current array, skipping values already present (proto structural equality). | Creates the field as the incoming array. | **No.** |
+| `removeAllFromArray: <array>` | Removes all elements matching any value in the input (proto structural equality). | No-op; does not create the field. | **No.** |
+
+`maximum`/`minimum` rows added and the `removeAllFromArray`/`appendMissingElements`
+`transform_results` inconsistency resolved by `firestore-field-transforms`
+DESIGN (ADR-053) — previously this table had zero rows for `maximum`/`minimum`
+and was internally inconsistent about whether array-transform kinds populate
+`transform_results`.
 
 ---
 

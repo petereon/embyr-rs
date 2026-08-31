@@ -5148,3 +5148,146 @@ verify DESIGN output directly against the code, rather than dispatching a
 Full alternatives-considered analysis and the C4 diagrams: ADR-050, ADR-051,
 and `docs/feature/firestore-list-rpcs/feature-delta.md` §§ Wave: DESIGN.
 
+## Application Architecture — firestore-field-transforms
+
+> Updated: 2026-08-31
+> Feature: firestore-field-transforms (JOB-01 — bug fix restoring
+> field-transform computation across `Commit`/`Write`/`BatchWrite`;
+> `serverTimestamp()`/`increment()`/`maximum()`/`minimum()`/`arrayUnion()`/
+> `arrayRemove()` are currently silently discarded)
+> Mode: Propose (autonomous analysis — not passed explicitly; both
+> escalations and the flagged domain-model decision were bounded,
+> resolvable trade-offs, mirroring `firestore-batch-write`'s own DESIGN-mode
+> choice)
+> ADRs: `adr-052-field-transform-domain-model-and-atomicity.md` (main — the
+> `Write::Update.transforms`/`FieldTransform` 6-variant/`WriteResult.transform_results`
+> domain-model shape, the standalone-vs-combined-write atomicity mechanism,
+> the `apply_field_transform` pure-compute-function placement),
+> `adr-053-field-transform-overflow-and-spec-corrections.md` (both DISCUSS
+> escalations — `increment` overflow default, `docs/SPEC.md`'s own
+> `transform_results`-for-array-ops correction and `maximum`/`minimum`
+> row addition). Does not amend `adr-048-batch-write-per-write-transaction-loop-and-wire-contract.md`
+> — `translate_one_write_for_commit`'s own per-write translation shape
+> (extracted by ADR-048) is extended, not restructured; `Commit`/`Write`/
+> `BatchWrite` all keep their own unchanged external behavior for
+> transform-free writes. Does not amend `adr-002-bounded-contexts.md` — BC-2's
+> own ubiquitous language already named `FieldTransform`/`transform_results`
+> (vendored proto, `docs/SPEC.md`); this feature implements already-named
+> concepts, introduces none new.
+
+Full DESIGN content (Reading Confirmation, Escalation Resolutions, Component
+Decomposition per slice, Reuse Analysis, Driving/Driven Ports, C4 System
+Context/Container diagrams, Technology Choices, Enforcement, Quality
+Validation, Handoff sequencing) lives in
+`docs/feature/firestore-field-transforms/feature-delta.md` §§ Wave: DESIGN —
+the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context — a
+computation fix inside BC-2's own already-shipped mutation-apply primitive
+(`translate_one_write_for_commit` → `commit_transaction`), not a new domain
+concept.
+
+**The one architecturally consequential decision**: how a `Write` message
+carrying BOTH a regular `update` AND `update_transforms` (the more-common
+real wire shape, per DISCUSS's own Reading Confirmation) is represented in
+the domain model. **Decision: `Write::Update` gains a `transforms:
+Vec<FieldTransform>` field** (default empty for every existing/transform-free
+write); the standalone `Write::Transform { path, transforms }` variant is
+unchanged. Rejected alternative: splitting one `Write` into two
+`DomainWrite`s (an `Update` plus a `Transform`) — this would break the
+`Vec<Write> → Vec<WriteResult>` positional 1:1 invariant `Commit`'s own
+per-transaction result list and `BatchWrite`'s own `write_results[i]`/`status[i]`
+pairing both depend on (ADR-048 § Decision Driver 2, reused here), not a
+viable design regardless of any other merit. ADR-052 § Decision 2.
+
+**Atomicity mechanism — confirms DISCUSS's own recommendation, adds the exact
+shape**: extends `verify_versions`'s own already-proven `SELECT ... FOR
+UPDATE` row-locking idiom to read the `fields` JSONB column (not just
+`version`), inside `commit_transaction`'s existing single `pg_txn`. A
+standalone `Write::Transform` performs a genuine partial merge onto the
+locked, persisted document (untouched fields preserved) before reusing the
+SAME `INSERT ... ON CONFLICT` upsert `Write::Update` already has. A combined
+`Write::Update` with attached `transforms` reads each transform's own
+"current value" from the SAME locked, persisted state — NOT from the
+write's own `fields` map — since the realistic case (`docRef.update({viewCount:
+FieldValue.increment(1)})`) has no literal sentinel value in `fields` at all;
+getting this backwards would silently treat an already-populated counter as
+always-missing. Both cases cost exactly one new SQL statement (the locked
+read) — the eventual write is still a single, existing-shape `INSERT ... ON
+CONFLICT`, reused not duplicated. ADR-052 § Decision 5.
+
+**Pure-compute placement**: all type-preservation arithmetic (`increment`/
+`maximum`/`minimum`) and structural-equality filtering (`appendMissingElements`/
+`removeAllFromArray`, reusing `FieldValue`'s already-derived `PartialEq`
+unchanged) lives in a new zero-IO function, `apply_field_transform`, placed in
+`embyr-core::domain::field_transform` — not in the IO-bearing
+`embyr-pg-storage` crate — so it is independently unit-testable without a
+Postgres fixture and stays inside `embyr-core`'s own existing, `deny.toml`-enforced
+IO ban (this project's own "functional-where-practical" paradigm, CLAUDE.md).
+ADR-052 § Decision Driver 4, § Decision 5a.
+
+**Two escalations, both resolved with reasoning, not re-guessed**:
+1. **`increment` integer overflow**: `i64::checked_add` → `InvalidArgument`,
+   never silently wraps or saturates — DISCUSS's own recommendation adopted,
+   reasoned from this feature's own trustworthiness purpose (a silently
+   wrapped counter is a WORSE failure than the silent no-op this feature
+   fixes) and reuse of the already-existing `CoreError::InvalidArgument`
+   category. ADR-053 § Escalation 1 Resolution.
+2. **`transform_results` for array-transform kinds**: `appendMissingElements`/
+   `removeAllFromArray` NEVER populate `transform_results`, confirming
+   DISCUSS's own moderate-confidence recall — array membership is fully
+   client-known, nothing for the server to report back. `docs/SPEC.md` §
+   Field Transforms corrected as part of this DESIGN wave's own deliverable
+   (not deferred): `maximum`/`minimum` rows added (missing-field semantics:
+   set directly to the given value, not compared against 0), the
+   `removeAllFromArray` row's incorrect "returns empty array as transform
+   result" claim removed, an explicit `transform_results`-population column
+   added. ADR-053 § Escalation 2 Resolution; `docs/SPEC.md` edited directly,
+   same session.
+
+**Two findings this DESIGN pass surfaced beyond DISCUSS's own Reading
+Confirmation, both confirmed by ground-truth re-reading, not assumption**:
+1. `WriteResult` (`embyr_core::domain::document::WriteResult`) is constructed
+   at 9 domain-layer call sites, not just the 3 inside `commit_transaction` —
+   6 single-document `create_document`/`update_document` sites (across
+   `embyr-pg-storage` and the agent adapter) need only a mechanical
+   `transform_results: vec![]` addition, since those RPCs carry no transform
+   wire representation at all.
+2. The proto-response `transform_results: vec![]` hardcode exists at 6 call
+   sites, not the 5 DISCUSS found — `write_stream.rs:165` (the `Write` RPC's
+   own streaming response) has the identical hardcode DISCUSS's own
+   `handler.rs`-scoped grep missed.
+
+**Component decomposition**: one new pure-compute module
+(`embyr-core::domain::field_transform::apply_field_transform`, 6 match arms,
+built incrementally across the 3 slices), one new shared translation helper
+(`translate_field_transforms`, called from both the `Update` and `Transform`
+arms of the existing `translate_one_write_for_commit`), one new SQL statement
+(the locked `fields` read), and 16 call-site updates (9 domain `WriteResult`
+constructions, 6 proto-response constructions, 1 agent-binary construction)
+— the large majority mechanical, zero new logic. Zero new `BackendAdapter`
+trait method, zero new `CoreError` variant, zero new crate dependency.
+
+**Reuse**: `verify_versions`'s own row-locking idiom (extended, not
+replaced), the existing `INSERT ... ON CONFLICT` upsert (new caller, same
+shape), the JSON↔`FieldValue` encoding boundary (`fields_to_json`/
+`json_to_fields`), the proto↔domain value translation
+(`proto_value_to_field_value`/`field_value_to_proto`, both already existing
+and previously unused for this purpose), `FieldValue`'s own derived
+`PartialEq`, `translate_one_write_for_commit`'s own shared per-write
+translation helper (ADR-048 § Decision 4), and `core_error_to_status`
+(unchanged) — all REUSED.
+
+**External integrations**: none new — this feature touches only the existing
+Customer DB (BC-2, Postgres) via the existing `BackendAdapter` port.
+
+**Peer review**: not performed — session standing methodology for this
+feature set (per orchestrator instruction) has the orchestrator independently
+verify DESIGN output directly against the code, rather than dispatching a
+`solution-architect-reviewer` sub-agent.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-052, ADR-053,
+and `docs/feature/firestore-field-transforms/feature-delta.md` §§ Wave: DESIGN.
+
