@@ -178,6 +178,36 @@ jobs:
     # assumption against docs/SPEC.md's parent+collection_id convention).
     # See docs/feature/firestore-list-rpcs/feature-delta.md § Bundle-vs-Split
     # Verdict and § Handoff Package.
+    # NOTE (firestore-field-transforms DISCUSS, 2026-08-31): this job's own
+    # functional dimension is now also realized for the SDK's field-transform
+    # sentinels (FieldValue.serverTimestamp()/.increment()/.arrayUnion()/
+    # .arrayRemove(), plus the less-common maximum/minimum pair) via this
+    # feature — same job, same persona (P1 Alex), not a new job (the "make it
+    # real"/close-the-remaining-gap pattern, same as every other RPC/gap-
+    # completion feature this session). Distinct gap category from every
+    # prior JOB-01 realization: this is NOT an undeclared RPC — Commit/Write/
+    # BatchWrite already exist and already parse DocumentTransform off the
+    # wire — it is a silently-discarded computation. `translate_one_write_
+    # for_commit`'s own Transform arm (crates/embyr-server/src/grpc/
+    # handler.rs) always produces `DomainWrite::Transform { transforms:
+    # vec![] }` regardless of what the client sent; embyr-core's own
+    # `FieldTransform` enum (crates/embyr-core/src/storage/backend_adapter.rs)
+    # models only 1 of 6 real transform kinds (ServerTimestamp); the domain
+    # `WriteResult` struct has no field at all to carry transform_results
+    # back to the client, and every proto-response call site hardcodes
+    # `transform_results: vec![]`. Confirmed silent data loss (write accepted
+    # 200/OK, no field actually set/incremented/modified), not a clean error
+    # — the highest real-world-impact gap remaining in this codebase's
+    # Firestore parity (serverTimestamp()/increment() are among the most
+    # common real SDK calls: auto-timestamps, counters, inventory). Two
+    # genuine judgment calls escalated to DESIGN, not decided here: (1)
+    # integer-overflow behavior for `increment` is unspecified by both
+    # docs/SPEC.md and this DISCUSS's own evidence; (2) docs/SPEC.md's own
+    # § Field Transforms table is internally inconsistent about whether
+    # array-transform kinds populate `transform_results` at all, and omits
+    # `maximum`/`minimum` entirely. See docs/feature/firestore-field-
+    # transforms/feature-delta.md § Reading Confirmation and § Handoff
+    # Package.
 
   - id: JOB-02
     name: tenant-provision
