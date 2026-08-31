@@ -55,10 +55,9 @@ pub const LOCK_KEY_NAME: &str = "embyr_transaction_sweep";
 /// the composition root should hold for the process lifetime (mirrors
 /// `cap_usage_refresher::spawn`'s exact fire-and-forget shape).
 ///
-/// Registers (but never increments here) `embyr_transaction_sweeper_purged_total`
-/// — Slice 01's own scope is reclaim only; the purge counter is registered
-/// now so it always appears on `/metrics` from process start, incremented
-/// starting in Slice 02.
+/// `retention_days` (Slice 02, ADR-054 § D2/D7) bounds the purge step: any
+/// terminal-state (`'committed'`/`'expired'`) row older than this many days
+/// is hard-deleted every cycle, after the reclaim step.
 pub fn spawn(
     system_db: Arc<SystemDb>,
     aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
@@ -66,9 +65,8 @@ pub fn spawn(
     encryption_key: [u8; 32],
     encryption_key_previous: Option<[u8; 32]>,
     interval: Duration,
+    retention_days: i64,
 ) -> tokio::task::JoinHandle<()> {
-    metrics::counter!("embyr_transaction_sweeper_purged_total").increment(0);
-
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
         loop {
@@ -100,6 +98,7 @@ pub fn spawn(
                 gcp_secret_fetcher.as_deref(),
                 &encryption_key,
                 encryption_key_previous.as_ref(),
+                retention_days,
             )
             .await;
 
@@ -131,6 +130,7 @@ pub async fn run_cycle(
     gcp_secret_fetcher: Option<&GcpSecretFetcher>,
     encryption_key: &[u8; 32],
     encryption_key_previous: Option<&[u8; 32]>,
+    retention_days: i64,
 ) {
     let projects = system_db
         .list_pg_reachable_projects()
@@ -147,6 +147,7 @@ pub async fn run_cycle(
             gcp_secret_fetcher,
             encryption_key,
             encryption_key_previous,
+            retention_days,
         )
         .await;
     }
@@ -163,6 +164,7 @@ async fn sweep_one_project(
     gcp_secret_fetcher: Option<&GcpSecretFetcher>,
     encryption_key: &[u8; 32],
     encryption_key_previous: Option<&[u8; 32]>,
+    retention_days: i64,
 ) {
     let Some(dsn) = resolve_dsn_without_api_key(
         project,
@@ -211,6 +213,34 @@ async fn sweep_one_project(
                 project_id = %project.id,
                 error = %e,
                 "TransactionSweeper: reclaim query failed"
+            );
+        }
+    }
+
+    // Slice 02 (ADR-054 § D2): second, distinct statement, same customer-DB
+    // pool, run after the reclaim step above. Retention window IS a runtime
+    // bind parameter (unlike the abandonment threshold) — it has no sibling
+    // constant elsewhere to drift out of sync with.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days);
+    let purge_result = sqlx::query(
+        "DELETE FROM transactions WHERE status IN ('committed', 'expired') AND started_at < $1",
+    )
+    .bind(cutoff)
+    .execute(adapter.pool())
+    .await;
+
+    match purge_result {
+        Ok(query_result) => {
+            let purged = query_result.rows_affected();
+            if purged > 0 {
+                metrics::counter!("embyr_transaction_sweeper_purged_total").increment(purged);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                project_id = %project.id,
+                error = %e,
+                "TransactionSweeper: purge query failed"
             );
         }
     }

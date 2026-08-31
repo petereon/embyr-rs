@@ -217,6 +217,7 @@ async fn direct_pg_orphaned_transaction_is_reclaimed_via_spawn_and_counter_incre
         ENCRYPTION_KEY,
         None,
         std::time::Duration::from_millis(50),
+        30,
     );
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -318,7 +319,7 @@ async fn gcp_secret_orphaned_transaction_is_reclaimed_without_api_key() {
         300,
     ));
 
-    transaction_sweeper::run_cycle(&system_db, None, Some(&gcp_fetcher), &ENCRYPTION_KEY, None)
+    transaction_sweeper::run_cycle(&system_db, None, Some(&gcp_fetcher), &ENCRYPTION_KEY, None, 30)
         .await;
 
     assert_eq!(transaction_status(&cust_pool, txn_id).await, "expired");
@@ -340,7 +341,7 @@ async fn transaction_within_abandonment_threshold_is_left_untouched() {
 
     let txn_id = insert_transaction(&cust_pool, "trailmark-prod", "active", 10).await;
 
-    transaction_sweeper::run_cycle(&system_db, None, None, &ENCRYPTION_KEY, None).await;
+    transaction_sweeper::run_cycle(&system_db, None, None, &ENCRYPTION_KEY, None, 30).await;
 
     assert_eq!(transaction_status(&cust_pool, txn_id).await, "active");
 }
@@ -365,7 +366,7 @@ async fn direct_pg_project_with_null_dsn_enc_is_skipped_without_aborting_cycle()
     let txn_id = insert_transaction(&cust_pool, "trailmark-prod", "active", 20 * 60).await;
 
     // Must not panic/error despite acme-legacy being unreachable.
-    transaction_sweeper::run_cycle(&system_db, None, None, &ENCRYPTION_KEY, None).await;
+    transaction_sweeper::run_cycle(&system_db, None, None, &ENCRYPTION_KEY, None, 30).await;
 
     assert_eq!(transaction_status(&cust_pool, txn_id).await, "expired");
 }
