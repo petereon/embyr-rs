@@ -208,6 +208,26 @@ jobs:
     # `maximum`/`minimum` entirely. See docs/feature/firestore-field-
     # transforms/feature-delta.md § Reading Confirmation and § Handoff
     # Package.
+    # NOTE (agent-mode-write-streaming / agent-mode-list-collection-ids /
+    # agent-mode-field-transforms DISCUSS, 2026-08-31): three further JOB-01
+    # realizations, all `backend_mode=agent` extensions of gaps already closed
+    # for direct_pg/aws_secret/gcp_secret by firestore-write-streaming,
+    # firestore-list-rpcs, and firestore-field-transforms respectively — same
+    # job, same persona (P1 Alex, this time at Meridian Health, a healthcare
+    # company using backend_mode=agent for HIPAA data-residency control, a
+    # direct realization of this job's own "feel in control of data
+    # residency" emotional dimension). Investigated as a candidate single
+    # bundled feature and explicitly SPLIT into 4 independent features
+    # (including agent-mode-transaction-purge, filed under JOB-12 not JOB-01
+    # — see that job's own NOTE below) after confirming no shared proto-
+    # versioning mechanism would be built that the others could reuse — see
+    # docs/feature/agent-mode-write-streaming/feature-delta.md § Bundle-vs-
+    # Split Note. Cross-cutting finding shared by all 3 of these features:
+    # docs/SPEC.md line 503 documents "the agent binary version must match
+    # the embyr SaaS major version" as POLICY, with no runtime enforcement
+    # mechanism (Ping carries no version field) — escalated to DESIGN once,
+    # referenced not re-litigated in the 2 smaller sibling features. See each
+    # feature's own § Handoff Package.
 
   - id: JOB-02
     name: tenant-provision
@@ -536,6 +556,21 @@ jobs:
     # connection model to reach an agent-mode customer DB). See
     # docs/feature/customer-db-transaction-sweeper/feature-delta.md § Job
     # Discovery Framing Resolution and § Handoff Package.
+    # NOTE (agent-mode-transaction-purge DISCUSS, 2026-08-31): closes the
+    # backend_mode=agent exclusion named above — same job, same persona (Sam
+    # Chen), narrower than the sweeper feature above: investigation found
+    # crates/embyr-agent/src/sweeper.rs (AgentTransactionSweeper) already
+    # exists and already ships in production, already hard-deleting abandoned
+    # 'active' rows (stronger than the mark-then-purge design above — no
+    # two-phase step). The orchestrator's own initial framing ("embyr-agent
+    # has zero sweeper code") did not hold; the real, narrower gap is that
+    # 'committed' rows are never purged in agent-mode's own local Postgres,
+    # identical to the gap this job's own sweeper feature closed for the
+    # other three backend modes. Zero proto/wire-protocol change — entirely
+    # agent-local, unlike the 3 sibling backend_mode=agent JOB-01 features
+    # filed the same day (see JOB-01's own NOTE above). See
+    # docs/feature/agent-mode-transaction-purge/feature-delta.md § Reading
+    # Confirmation.
 
   - id: JOB-13
     name: production-deployment
