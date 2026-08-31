@@ -5761,3 +5761,137 @@ verify DESIGN output directly against the code, rather than dispatching a
 Full alternatives-considered analysis: ADR-058, and
 `docs/feature/agent-mode-transaction-purge/feature-delta.md` §§ Wave: DESIGN.
 
+## Application Architecture — agent-mode-write-streaming
+
+> Updated: 2026-08-31
+> Feature: agent-mode-write-streaming (JOB-01 — closes the `backend_mode=agent`
+> gap ADR-047 deferred: the Firebase SDK's default persistent `Write`
+> bidi-streaming RPC, shipped for `direct_pg`/`aws_secret`/`gcp_secret` by
+> `firestore-write-streaming`, ADR-046)
+> Mode: Propose (autonomous analysis — not passed explicitly; both
+> escalations were bounded, resolvable trade-offs, mirroring this session's
+> other recent agent-mode features' own DESIGN-mode choice)
+> ADRs: `adr-060-agent-mode-write-streaming-reuses-existing-unary-rpcs.md`
+> (main — corrects ADR-047's own capability-gap claim: zero new proto
+> surface needed, one pre-existing bug fixed), `adr-061-agent-mode-write-streaming-cross-version-degradation-deferred.md`
+> (Escalation 2 — the GROUP decision for all 3 wire-touching agent-mode
+> features this session: no version-negotiation machinery built, named as an
+> evidence-gated follow-up). **Numbering note**: both originally drafted as
+> `adr-056`/`adr-057`, renumbered after a collision with two
+> concurrently-running sibling DESIGN waves (`agent-mode-list-collection-ids`,
+> `agent-mode-field-transforms`) — the stray `adr-056`/`adr-057` files under
+> this feature's own original numbers have been overwritten with redirect
+> stubs, not left as silent duplicates. Does not amend
+> `adr-046-write-stream-wire-contract-and-session-lifecycle.md` — its own
+> wire contract, session lifecycle, and error/termination model are reused
+> completely unchanged; this feature does not modify `write_stream.rs`.
+> Supersedes ADR-047's own "new proto/binary/adapter work required" framing
+> with a ground-truth correction (ADR-047 itself is not rewritten — ADRs are
+> immutable — but its conclusion is no longer current practice).
+
+Full DESIGN content (Reading Confirmation, Escalation Resolutions, Component
+Decomposition per slice, Reuse Analysis, Driving/Driven Ports, C4 System
+Context/Container diagrams, Technology Choices, Enforcement, Quality
+Validation, Handoff sequencing) lives in
+`docs/feature/agent-mode-write-streaming/feature-delta.md` §§ Wave: DESIGN —
+the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**Bounded context**: confirms BC-2 Document Storage, no new context — this
+feature reuses `firestore-write-streaming`'s own already-shipped transport
+mechanism unchanged; no new domain concept.
+
+**The one architecturally consequential finding, overturning both DISCUSS's
+own framing and ADR-047's own prior conclusion**: `write_stream.rs`'s own
+per-`WriteRequest` loop (ADR-046) depends only on the already-existing,
+already-unary `BackendAdapter::begin_transaction`/`commit_transaction`
+methods — never a streaming-shaped port call. `AgentBackendAdapter` already
+implements both fully (proven working for agent-mode by `firestore-batch-write`'s
+own ADR-049, a structurally identical "N independent begin+commit pairs
+driven by a loop" mechanism). **Zero new RPC, message, or field on
+`storage_agent.proto`. Zero new `embyr-agent` handler. Zero new
+`AgentBackendAdapter` method.** ADR-047's own claim — that a new bidi RPC,
+client stub, and adapter method were required — is corrected: it cited the
+same `agent_backend.rs` evidence this DESIGN pass did, but did not connect it
+to ADR-046's own actual per-message-independent-atomic-apply design (same
+DESIGN wave, not cross-referenced). ADR-060 § Verification.
+
+**The one genuine, load-bearing bug this DESIGN pass found via ground-truth
+reading**: `crates/embyr-agent/src/server.rs::commit` discards its own
+successful `commit_transaction` result, so `CommitResponse.write_results` is
+always empty — blocking this feature's own AC-01 ("acknowledged with a
+populated `updateTime`") AND silently affecting the EXISTING, already-shipped
+unary agent-mode `Commit` RPC today. Fixed as a five-line, additive
+correction (map domain `WriteResult` → proto `WriteResult{update_time}`),
+which is this feature's ENTIRE production-code footprint. ADR-060 §
+Decision 2.
+
+**Two corrections to DISCUSS's own AC/Domain-Example framing for this
+sibling feature**, both because agent-mode `Write` reuses `write_stream.rs`
+verbatim and is therefore structurally incapable of differing from non-agent
+`Write`: (1) a precondition violation or malformed write TERMINATES THE WHOLE
+STREAM (`Status::failed_precondition`/`Status::invalid_argument`), not a
+"scoped rejection, stream stays open" as DISCUSS's own US-01 Domain Example 2
+and AC items describe — `docs/SPEC.md`'s own termination taxonomy for
+`Write` is exhaustive, that shape belongs exclusively to the separate,
+out-of-scope `BatchWrite` RPC (identical reasoning ADR-046 itself already
+applied to the non-agent version of the same question). (2) the Slice 02
+"idle stream times out" AC is satisfied by the ABSENCE of any idle-triggered
+error path (confirmed: `firestore-write-streaming` never built one either,
+grep for "idle"/"timeout" across its own full `feature-delta.md`: zero
+matches) — not by new idle-reaping logic. ADR-060 § Decision 6-7.
+
+**A third correction, for accuracy only, no code change**: `handler.rs::translate_one_write_for_commit`
+(shared by `handle_commit` and `write_stream.rs`) now calls
+`evaluate_write_rule_for_commit` for every write — added same-day as ADR-046
+by an unrelated `security-rules-write-path` bug fix, making ADR-046 § Decision
+2's own "write-path access-rule enforcement not added" claim stale.
+Write-path access-rule enforcement already applies uniformly to `Commit` and
+`Write`, for every `backend_mode` including `agent` — no security-equivalence
+gap. ADR-060 § Decision 5.
+
+**Escalation 2 (cross-version graceful degradation) — resolved as the GROUP
+decision, not a per-feature one**: two concurrent sibling DESIGN waves
+(`agent-mode-list-collection-ids`, `agent-mode-field-transforms`) explicitly
+deferred this exact question to this feature's own DESIGN wave. Resolved: no
+new version-negotiation machinery (no `protocol_version` field on `Ping`, no
+proactive detection) is built by ANY of the 3 wire-touching features. Today's
+implicit behavior — a clean `Unimplemented`/`InvalidArgument` bubbling to the
+SDK caller for a version-skewed RPC/field — is accepted as sufficient for v1,
+for all three, absent any evidence (telemetry, support tickets) that real
+customers are confused by it. Named as an evidence-gated follow-up candidate,
+not built speculatively. `agent-mode-write-streaming` itself carries zero
+version-skew exposure regardless (§ finding above — no new wire surface).
+ADR-061.
+
+**Component decomposition**: one bug fix (`crates/embyr-agent/src/server.rs::commit`),
+two new integration test files (Slice 01 walking-skeleton single-write test;
+Slice 02 multi-write/disconnect test) — zero new files in `proto/`, zero new
+files in `crates/embyr-server/src/`. The smallest production-code footprint
+of any feature in this session's own agent-mode-parity group.
+
+**Reuse**: `handle_write`/`write_stream.rs` (ADR-046, 100% unchanged),
+`AgentBackendAdapter::begin_transaction`/`commit_transaction` (already
+proven for agent-mode by ADR-049, 100% unchanged), `translate_one_write_for_commit`/
+`evaluate_write_rule_for_commit` (unchanged), `core_error_to_status` (both
+embyr-server's and embyr-agent's own copies, unchanged),
+`AgentBackendAdapter::probe()` (pre-existing, already covers the reused
+methods' shared mTLS-channel dependency — no new probe needed, Earned Trust
+satisfied by inheritance). Zero new `BackendAdapter` trait method, zero new
+`CoreError` variant, zero new proto message or RPC, zero new dependency.
+
+**External integrations**: `embyr-agent` is this codebase's own second
+deployment artifact (customer-VPC), not a third-party vendor API — not a
+Pact-style contract-testing candidate; the real cross-process risk
+(deployed-binary version skew) is addressed by ADR-061 (found: no new
+mechanism needed for this feature).
+
+**Peer review**: not performed — session standing methodology for this
+feature set (per orchestrator instruction) has the orchestrator independently
+verify DESIGN output directly against the code, rather than dispatching a
+`solution-architect-reviewer` sub-agent.
+
+Full alternatives-considered analysis and the C4 diagrams: ADR-060, ADR-061,
+and `docs/feature/agent-mode-write-streaming/feature-delta.md` §§ Wave: DESIGN.
+

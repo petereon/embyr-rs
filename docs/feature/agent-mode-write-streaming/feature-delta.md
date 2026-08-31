@@ -427,3 +427,353 @@ No existing bidi-streaming or client-streaming-input precedent exists anywhere i
 ### Handoff Confirmation
 
 Next step (NOT performed by this agent): orchestrator dispatches `nw-solution-architect` for the DESIGN wave — full rigor with ADRs (at minimum: bidi RPC/message design per Escalation 1; the cross-version degradation mechanism per Escalation 2, ideally decided once and referenced by the 2 sibling features) and Reuse Analysis, per the standing session practice.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Agent**: Morgan (nw-solution-architect) | **Date**: 2026-08-31 | **Mode**:
+Propose (autonomous analysis — not passed explicitly by the orchestrator; the
+size/shape of both escalations favors options-with-reasoning over a live Q&A,
+mirroring `firestore-write-streaming`'s own DESIGN-mode choice)
+
+✓ This file (full, 429 lines pre-DESIGN) and both slice briefs
+(`docs/feature/agent-mode-write-streaming/slices/slice-0{1,2}-*.md`, each
+full) — re-read directly.
+✓ `docs/product/architecture/adr-046-write-stream-wire-contract-and-session-lifecycle.md`
+(full) — re-read directly, not trusted from this feature's own DISCUSS
+excerpt alone. **Load-bearing finding**: `write_stream.rs`'s own per-message
+loop (§ Decision 3) calls exactly two `BackendAdapter` trait methods —
+`begin_transaction` then `commit_transaction`, both already-existing, unary,
+dependency-inverted — never a streaming-shaped port method. The client-facing
+bidi stream is a property of `handle_write`'s own handshake/spawn scaffold
+only, not of anything the backend adapter must implement.
+✓ `proto/embyr/agent/v1/storage_agent.proto` (full, 372 lines) — re-read
+directly; confirms `service StorageAgent` declares 12 RPCs (not the "15"
+DISCUSS's own Reading Confirmation counted — a minor DISCUSS-level
+miscount, immaterial to this feature's own scope): `GetDocument`,
+`CreateDocument`, `UpdateDocument`, `DeleteDocument`, `RunQuery`,
+`BeginTransaction`, `Commit`, `Rollback`, `Ping`, `RunAggregationQuery`,
+`ListDocuments` (10 unary + `RunQuery`), `Subscribe` (server-streaming). Zero
+bidi/client-streaming — confirmed, unchanged from DISCUSS's own finding.
+✓ `crates/embyr-server/src/adapters/agent_backend.rs` (full, 627 lines,
+targeted re-read: `begin_transaction`/`commit_transaction`, lines 512-591) —
+**both already fully implemented**, proxying `StorageAgent`'s existing unary
+`BeginTransaction`/`Commit` RPCs, already used unchanged by `handle_commit`
+(`Commit`, unary) and by `handle_batch_write` (`BatchWrite`, ADR-049) for
+`backend_mode=agent` today.
+✓ `docs/product/architecture/adr-047-write-stream-agent-mode-out-of-scope.md`
+(full) — re-read directly, not trusted at face value (this session's own
+"ground-truth over inherited claims" discipline, applied to a PRIOR wave's
+own ADR, not just to DISCUSS). ADR-047's own Verification section cites the
+SAME `agent_backend.rs` line range (527-580) as this DESIGN pass, and
+correctly observes "no streaming client method exists" — but incorrectly
+concludes this means new proto/binary/adapter work is required. It does not:
+`write_stream.rs` (ADR-046, same DESIGN wave as ADR-047, but not
+cross-referenced by it) never needed a streaming client method in the first
+place. See ADR-060 § Verification for the full correction.
+✓ `docs/product/architecture/adr-049-batch-write-agent-mode-included-uniform-cap.md`
+(full) — re-read directly. Independently establishes, for `BatchWrite`'s own
+structurally identical "N independent `begin_transaction`+`commit_transaction`
+pairs, driven by a loop, dispatched through `SharedBackendAdapter`" mechanism,
+that agent-mode requires zero new code. ADR-049 contrasts itself against
+ADR-047's own framing without generalizing the insight back onto `Write` —
+this DESIGN pass closes that gap. See ADR-060.
+✓ `crates/embyr-agent/src/server.rs` (full, targeted: `commit`, lines
+598-629; `begin_transaction`, lines 586-596) — **surfaces a genuine,
+load-bearing bug not caught by any prior wave**: `commit`'s own handler
+discards its own successful `commit_transaction` result
+(`Ok(_results) => Ok(Response::new(CommitResponse { commit_time: Some(...),
+..Default::default() }))`), so `CommitResponse.write_results` is always
+empty. This already silently affects the shipped, unary, agent-mode `Commit`
+RPC today, and would block this feature's own Slice 01 AC-01 ("acknowledged
+with a populated `updateTime`") for `Write` too, since both reuse the
+identical `commit_transaction` port call. See ADR-060 § Decision 2 for the
+fix.
+✓ `crates/embyr-server/src/grpc/handler.rs::authenticate` (lines 196-361) —
+re-read directly; confirms the uniform, RPC-agnostic backend-mode-resolution
+mechanism every RPC (including `handle_write`) already uses. No
+`Write`-specific or agent-specific branching exists or is needed here.
+✓ `crates/embyr-server/src/grpc/handler.rs::translate_one_write_for_commit`
+(lines 767-861, the shared translation function `handle_commit` and
+`write_stream.rs` both call) — **surfaces a second correction**: it now calls
+`Self::evaluate_write_rule_for_commit` for every write (added same-day as
+ADR-046, per the `handler.rs::handle_commit` comment "security-rules-write-path
+bug fix (2026-08-30)"), meaning ADR-046 § Decision 2's own "not added" claim
+about write-path access-rule enforcement is now stale. Current ground truth:
+enforcement already applies uniformly to `Commit` and `Write`, for every
+`backend_mode` including `agent`. No security-equivalence gap exists. No code
+change needed; noted for accuracy only. See ADR-060 § Decision 5.
+✓ `docs/feature/firestore-write-streaming/feature-delta.md` (full, targeted
+grep for "idle"/"timeout": zero matches) — confirms no idle-stream-timeout
+mechanism was ever built for non-agent `Write`; this feature's own Slice 02
+AC on the same topic is satisfied by the same absence, not new logic. See
+ADR-060 § Decision 7.
+
+**Contradiction found and corrected, not silently absorbed**: DISCUSS's own
+US-01 Domain Example 2/3, UAT scenarios, and AC items (and Slice 01's own
+IN-Scope bullet, "Precondition-failure and malformed-write scoped-error
+handling — does not close the stream") describe "scoped rejection, stream
+stays open" behavior for a precondition violation or malformed write. This
+directly contradicts ADR-046's own already-shipped, already-decided
+whole-stream-termination mechanism (§ Decision 4 there) — which agent-mode
+`Write` inherits completely unchanged, since it reuses `write_stream.rs`
+verbatim (ADR-060 § Decision 4). DISCUSS, for this sibling feature, appears
+to have re-derived the "scoped rejection" framing from its own Domain
+Example language rather than from ADR-046's own actual, already-locked
+resolution of the identical question for `firestore-write-streaming`. See
+ADR-060 § Decision 6 for the correction DELIVER must implement against.
+
+---
+
+## Wave: DESIGN / [REF] Escalation Resolutions
+
+### Escalation 1 — bidi RPC/message shape on the agent proto
+
+**Resolved: no new RPC, message, or field is added to `storage_agent.proto`.
+No new `embyr-agent` binary handler (beyond one bug fix). No new
+`AgentBackendAdapter` method.** `write_stream.rs`'s own per-`WriteRequest`
+loop (ADR-046) already depends only on `BackendAdapter::begin_transaction`/
+`commit_transaction` — both already fully implemented by `AgentBackendAdapter`,
+already proven for `backend_mode=agent` by `firestore-batch-write`'s own
+ADR-049. The client-facing stream never required a streaming-shaped backend
+call; ADR-047's own contrary conclusion is corrected. `stream_id`/
+`stream_token` generation is unchanged, backend-agnostic, already-shipped
+(ADR-046) — no new agent-mode-specific scheme needed. The ONE genuine gap
+found is unrelated to streaming shape: `embyr-agent::commit` discards its own
+`write_results`, blocking `updateTime` population for both `Commit`
+(pre-existing bug) and `Write` (this feature's own AC-01). Fixed as a
+five-line, additive correction. Routing: `Write` does NOT gain a new
+`BackendAdapter` trait method (streaming or otherwise) — it reuses the
+EXISTING unary `begin_transaction`/`commit_transaction` methods, identical to
+how non-agent `Write` already routes through them (ADR-046) and how
+`BatchWrite` already routes through them for agent-mode (ADR-049). Full
+verification, alternatives, and the exact bug fix: **ADR-060**.
+
+### Escalation 2 — cross-version graceful degradation
+
+**Resolved: not applicable to this feature; no new machinery built here.**
+Since this feature adds zero new wire surface (§ Escalation 1), there is no
+scenario in which an old `embyr-agent` binary could be missing an RPC this
+feature depends on — `BeginTransaction`/`Commit` predate this feature and are
+already relied upon by the shipped `Commit` and `BatchWrite` RPCs. The
+broader cross-cutting `protocol_version`-on-`Ping` question DISCUSS raises
+remains genuinely open but belongs to whichever of the two wire-surface-adding
+siblings (`agent-mode-list-collection-ids`, `agent-mode-field-transforms`)
+reaches DESIGN with an actual new-RPC/new-field need to drive its shape — not
+invented here against a feature that has none. Full reasoning and
+alternatives: **ADR-061**.
+
+### DISCUSS's own precondition-violation/malformed-write termination framing
+
+**Resolved: whole-stream termination, inherited unchanged from ADR-046 —
+corrects DISCUSS's own "scoped, stream stays open" AC/Domain-Example wording
+for this sibling feature.** Because agent-mode `Write` reuses `write_stream.rs`
+verbatim, it is structurally incapable of differing from non-agent `Write` on
+this axis. `docs/SPEC.md`'s own termination taxonomy for `Write` is
+exhaustive (3 cases; no fourth "reject-and-stay-open" shape); that shape
+belongs exclusively to the separate, out-of-scope `BatchWrite` RPC. DELIVER
+must implement and test against ADR-046's real behavior, not DISCUSS's own AC
+text for this feature. Full reasoning: **ADR-060 § Decision 6**.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition (per Slice)
+
+| Slice | Component | Path | Action | Notes |
+|---|---|---|---|---|
+| 01 | `commit()` — populate `CommitResponse.write_results` | `crates/embyr-agent/src/server.rs` | **FIX (bug)** | Currently discards `_results`, always returns empty `write_results` — blocks AC-01 for `Write` AND the pre-existing unary `Commit` RPC. ADR-060 § Decision 2 |
+| 01 | Walking-skeleton integration test — single write, real `embyr-agent`, real Postgres, real `Write` stream | new test file (location: DELIVER's own call, mirroring this codebase's existing agent-mode integration test conventions, e.g. `tests/client_auth_hosted_identity/`'s own harness-`serve()` pattern) | CREATE (test only) | First-ever exercise of `Firestore.Write` against a real `backend_mode=agent` deployment — proves an ALREADY-EXISTING composition, not a new mechanism |
+| 01 | Precondition/malformed-write scoped-error AC (as literally written in the Slice 01 brief) | — | **DO NOT IMPLEMENT AS WRITTEN** | Corrected to whole-stream termination, matching ADR-046 — ADR-060 § Decision 6 |
+| 02 | (none — pure test composition) | new test file(s) | CREATE (test only) | 3+ writes in one session, disconnect after partial acknowledgment, reopened-stream continuation, same-document-double-write ordering — all already structurally guaranteed by Slice 01's own per-message-independent-commit property; this slice adds coverage, not mechanism |
+| 02 | Idle-stream-timeout AC (as literally written) | — | **SATISFIED BY ABSENCE** | No idle-triggered error path exists anywhere in the reused loop, for any backend — ADR-060 § Decision 7 |
+
+**Zero new files in `proto/`, zero new files in `crates/embyr-agent/src/` (one
+existing file fixed), zero new files in `crates/embyr-server/src/adapters/`,
+zero new files in `crates/embyr-server/src/grpc/`.** The entire production
+code footprint of this feature is a 5-10 line fix to one existing function.
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Mechanism | Source | Action | Rationale |
+|---|---|---|---|
+| Client-facing bidi-stream scaffold (`handle_write`, handshake + spawn) | `firestore-write-streaming`, ADR-046 | REUSE UNCHANGED | Already backend-agnostic; `authenticate()`'s own uniform resolution already selects `AgentBackendAdapter` for `backend_mode=agent` |
+| Per-message loop, `stream_id`/`stream_token` generation | `crates/embyr-server/src/grpc/write_stream.rs`, ADR-046 | REUSE UNCHANGED | Depends only on `BackendAdapter` trait methods, never a concrete adapter — dependency-inversion doing its job |
+| `begin_transaction`/`commit_transaction` proxy-over-mTLS | `AgentBackendAdapter`, already shipped (proven by `firestore-batch-write`/ADR-049) | REUSE UNCHANGED | Identical trait signature to `PostgresBackendAdapter`; no `Write`-specific behavior needed or added |
+| Write-path translation + access-rule evaluation | `translate_one_write_for_commit`/`evaluate_write_rule_for_commit`, `handler.rs` | REUSE UNCHANGED | Backend-agnostic, runs before adapter dispatch; already enforces uniformly (§ Reading Confirmation correction) |
+| Error → `Status` mapping (embyr-server side) | `core_error_to_status`, `handler.rs` | REUSE UNCHANGED | Same function, all backends |
+| Error → `Status` mapping (embyr-agent side) | `core_error_to_status`, `crates/embyr-agent/src/server.rs` | REUSE UNCHANGED | Pre-existing, correct; not touched by the `write_results` fix |
+| `CommitResponse.write_results` population | `crates/embyr-agent/src/server.rs::commit` | **FIX** | Existing function, existing field, currently discarded value — additive correction, not new logic |
+| Agent-mode transform-write handling | `AgentBackendAdapter::commit_transaction`'s own `Write::Transform => None` filter, ADR-052 | REUSE UNCHANGED (inherited gap, named) | Already-accepted v1 limitation for all agent-mode mutation RPCs; `Write` inherits it automatically |
+
+**7 REUSE UNCHANGED, 1 FIX (bug, additive). Zero CREATE for production code.
+Zero new `BackendAdapter` trait method. Zero new `CoreError` variant. Zero
+new proto message or RPC.**
+
+---
+
+## Wave: DESIGN / [REF] Driving/Driven Ports
+
+**Driving port**: `google.firestore.v1.Firestore/Write` (already shipped,
+service-wide, `firestore-write-streaming`) — no new driving port. This
+feature closes the LAST gap in that port's own backend-mode coverage.
+
+**Driven ports**: `BackendAdapter::begin_transaction`,
+`BackendAdapter::commit_transaction` (both unchanged) — no new driven port,
+no new trait method. `AgentBackendAdapter`'s own existing `probe()` (already
+implemented, `agent_backend.rs` lines 610-625: sentinel `GetDocument`,
+tolerating `NotFound`/`Unimplemented`, failing only on real transport errors)
+already covers the shared dependency (the mTLS channel) these two reused
+methods run over — no new probe is designed or needed, since no new driven
+port is added (Earned Trust is satisfied by inheritance, not a new
+obligation).
+
+**External integrations**: `embyr-agent` (customer-VPC binary) is not a
+third-party vendor API — it is this codebase's own second deployment artifact,
+communicating via a proto contract this codebase itself owns, versions, and
+compiles both sides of from the same source tree. Not a consumer-driven
+contract-testing candidate (Pact-style) in the traditional sense; the actual
+cross-process risk class here is DEPLOYED-BINARY VERSION SKEW, addressed (for
+this feature: found not applicable) by ADR-061, not by contract tests.
+
+---
+
+## Wave: DESIGN / [REF] C4 Diagrams
+
+### System Context (L1) — delta only; full system context unchanged from `brief.md`'s own System Architecture section
+
+```mermaid
+C4Context
+  title System Context — agent-mode-write-streaming (delta)
+  Person(alex, "Alex", "SDK Developer, P1, backend_mode=agent")
+  System_Ext(sdk, "Firebase SDK", "Opens Write internally for offline-write-durability")
+  System(embyr, "embyr-rs SaaS", "Firestore-protocol-compatible server")
+  System_Ext(agent, "embyr-agent", "Customer-VPC binary, owns local Postgres")
+  Rel(alex, sdk, "Calls setDoc()/updateDoc()/deleteDoc()")
+  Rel(sdk, embyr, "Opens Write bidi-stream, flushes queued writes")
+  Rel(embyr, agent, "Per WriteRequest: BeginTransaction + Commit over mTLS (existing, unary)")
+```
+
+### Container (L2)
+
+```mermaid
+C4Container
+  title Container Diagram — agent-mode Write path (delta)
+  Container(grpc, "FirestoreGrpcHandler", "Tonic gRPC :8080", "handle_write — UNCHANGED, ADR-046")
+  Container(writeStream, "write_stream.rs", "Rust / tokio", "UNCHANGED, ADR-046 — calls only begin_transaction/commit_transaction")
+  Container(agentAdapter, "AgentBackendAdapter", "Rust, mTLS client", "UNCHANGED — already implements both trait methods (ADR-049)")
+  Container(agentSvc, "StorageAgentService::commit", "Rust, embyr-agent binary", "FIXED — now populates write_results (ADR-060)")
+  ContainerDb(agentPg, "Customer-VPC Postgres", "PostgreSQL", "Agent's own local DB — UNCHANGED schema")
+  Rel(grpc, writeStream, "Spawns, owns Streaming<WriteRequest> + mpsc::Sender")
+  Rel(writeStream, agentAdapter, "Calls begin_transaction() then commit_transaction() per WriteRequest")
+  Rel(agentAdapter, agentSvc, "BeginTransaction, Commit RPCs over mTLS (existing, unary)")
+  Rel(agentSvc, agentPg, "Reads/writes via PostgresBackendAdapter")
+```
+
+Component (L3) omitted — no new component crosses the 5+-component
+threshold; the one changed component (`commit()`) is a single-function bug
+fix.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+No new dependency, no new crate, no new proto import. Nothing to evaluate —
+this feature adds no new technology surface.
+
+---
+
+## Wave: DESIGN / [REF] Enforcement
+
+No new architectural rule is introduced (no new abstraction, no new port, no
+new adapter). The existing `deny.toml` IO-import ban for `embyr-core` is
+unaffected (no `embyr-core` file changes). The existing "every non-EOF/Cancel
+error terminates the stream via one shared exit path" rule (`firestore-write-streaming`'s
+own enforcement recommendation, `write_stream.rs`) already covers agent-mode
+`Write` automatically, since the file is unchanged.
+
+---
+
+## Wave: DESIGN / [REF] Quality Validation
+
+- [x] Requirements traced: AC-01 (populated `updateTime`) traces to the
+  `commit()` bug fix; all other US-01/US-02 ACs trace to already-existing,
+  ground-truth-verified mechanism plus new test coverage.
+- [x] Component boundaries: no boundary changes — `write_stream.rs` remains
+  fully backend-agnostic; the one fix stays inside `embyr-agent`'s own
+  existing `commit()` handler.
+- [x] Technology choices: N/A, zero new deps.
+- [x] Quality attributes: reliability (no new failure mode — fix is strictly
+  additive); security (write-path access-rule enforcement already uniform,
+  § Reading Confirmation); maintainability (zero new abstraction to
+  maintain); performance (latency profile named, ADR-060 § Consequences, not
+  mitigated for lack of evidence, matching ADR-049's own precedent).
+- [x] Dependency-inversion compliance: unchanged — `write_stream.rs` depends
+  on `BackendAdapter` trait only, never a concrete adapter; this feature adds
+  no new dependency of any kind.
+- [x] C4 diagrams: L1 delta + L2 provided above.
+- [x] Integration patterns: existing mTLS unary RPC pair, unchanged; no new
+  integration pattern introduced.
+- [x] OSS preference: N/A, zero new dependencies.
+- [x] AC behavioral, not implementation-coupled: corrected where DISCUSS's
+  own AC wording conflicted with already-shipped behavior (§ Escalation
+  Resolutions, precondition/malformed-write and idle-timeout items).
+- [x] External integrations: `embyr-agent` is this codebase's own artifact,
+  not a third-party API — no Pact-style contract-test annotation; the
+  relevant risk (version skew) is addressed by ADR-061 (found not applicable
+  to this feature's own zero-new-wire-surface scope).
+- [x] Enforcement tooling: N/A, no new architectural rule.
+- [x] Earned Trust: no new driven-port method added; the reused
+  `begin_transaction`/`commit_transaction` methods' shared dependency (the
+  mTLS channel) is already covered by `AgentBackendAdapter::probe()`
+  (pre-existing, unchanged).
+- Peer review: **not performed** — standing session practice for this
+  feature set skips per-wave peer review (orchestrator dispatches
+  `nw-software-crafter` directly after this DESIGN wave).
+
+---
+
+## Wave: DESIGN / [REF] Handoff to DELIVER
+
+**Slice sequencing**: unchanged from DISCUSS (Slice 01 then Slice 02) — no
+new structural dependency introduced, since neither slice adds a new
+mechanism for the other to depend on.
+
+**What the crafter must do, precisely**:
+
+1. **Fix `crates/embyr-agent/src/server.rs::commit`** (ADR-060 § Decision 2)
+   — map `Ok(results)` from `self.storage.commit_transaction(...)` into
+   `CommitResponse.write_results: Vec<embyr_proto::agent::WriteResult>`,
+   each with `update_time: Some(Timestamp { seconds: wr.update_time.0, nanos:
+   wr.update_time.1 })`. This is the ONLY production code change in this
+   feature.
+2. **Do NOT touch** `proto/embyr/agent/v1/storage_agent.proto`,
+   `crates/embyr-server/src/adapters/agent_backend.rs`,
+   `crates/embyr-server/src/grpc/write_stream.rs`, or
+   `crates/embyr-server/src/grpc/handler.rs::handle_write`. All four are
+   already correct and already backend-agnostic for this feature's purposes.
+3. **Write Slice 01's walking-skeleton test** against a real `embyr-agent`
+   instance (harness `serve()`, mirroring existing agent-mode integration
+   test conventions) and real Postgres: open a `Write` stream against a
+   `backend_mode=agent` project, send one write, assert the response's
+   `write_results[0].update_time` is populated (this is the test that would
+   have caught the `commit()` bug directly, without this DESIGN pass finding
+   it first).
+4. **Implement precondition/malformed-write test scenarios as WHOLE-STREAM
+   TERMINATION**, not the "scoped, stream stays open" shape in the Slice 01
+   brief's own literal AC/Domain-Example text (ADR-060 § Decision 6) — assert
+   the stream closes with `Status::failed_precondition`/
+   `Status::invalid_argument` respectively, matching `write_stream.rs`'s
+   already-shipped, unchanged behavior.
+5. **Write Slice 02's multi-write/disconnect tests** — no new mechanism to
+   implement; these tests exercise Slice 01's own unchanged loop under
+   realistic session shapes. The "idle timeout" AC is satisfied by asserting
+   NO error is raised purely from elapsed idle time (there is no timer to
+   test against — ADR-060 § Decision 7).
+6. **Mutation testing**: per this repo's own `per-feature` policy
+   (`CLAUDE.md`), run after Slice 02's own DELIVER completes — scoped to the
+   one changed function (`commit()`) plus the new test files, not a
+   full-workspace run.
+
