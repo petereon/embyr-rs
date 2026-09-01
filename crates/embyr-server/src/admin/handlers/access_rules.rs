@@ -1137,24 +1137,56 @@ pub async fn import_rules_file(
 
     let mut imported = Vec::with_capacity(decomposed.len());
     for rule in decomposed {
+        // AC-17-195 (idempotent re-import, ADR-062): `upsert_access_rule`/
+        // `upsert_write_access_rule` unconditionally append a history entry
+        // on every call (security-rules-operations, ADR-035 § Decision —
+        // Capture Mechanism Placement, deliberately: AC-17-166 requires even
+        // a no-op hand-authored redefine to capture a new entry). That
+        // per-call semantics is correct and untouched for
+        // `define_access_rule`/`define_write_access_rule` — but re-importing
+        // a byte-identical file must NOT spuriously grow history (AC-17-195),
+        // so THIS caller skips the upsert entirely when the stored condition
+        // already matches, a pure equality check specific to the import path.
         if let Some(condition) = &rule.read_condition {
-            if let Err(e) = state
+            let already_current = state
                 .system_db
-                .upsert_access_rule(&project_id, &rule.collection_path, condition, session.account_id)
+                .get_access_rule(&project_id, &rule.collection_path)
                 .await
-            {
-                tracing::error!("import_rules_file upsert_access_rule error: {e}");
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                .map_err(|e| {
+                    tracing::error!("import_rules_file get_access_rule error: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .is_some_and(|existing| existing.condition_source == *condition);
+            if !already_current {
+                if let Err(e) = state
+                    .system_db
+                    .upsert_access_rule(&project_id, &rule.collection_path, condition, session.account_id)
+                    .await
+                {
+                    tracing::error!("import_rules_file upsert_access_rule error: {e}");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
             }
         }
         if let Some(condition) = &rule.write_condition {
-            if let Err(e) = state
+            let already_current = state
                 .system_db
-                .upsert_write_access_rule(&project_id, &rule.collection_path, condition, session.account_id)
+                .get_write_access_rule(&project_id, &rule.collection_path)
                 .await
-            {
-                tracing::error!("import_rules_file upsert_write_access_rule error: {e}");
-                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                .map_err(|e| {
+                    tracing::error!("import_rules_file get_write_access_rule error: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                .is_some_and(|existing| existing.condition_source == *condition);
+            if !already_current {
+                if let Err(e) = state
+                    .system_db
+                    .upsert_write_access_rule(&project_id, &rule.collection_path, condition, session.account_id)
+                    .await
+                {
+                    tracing::error!("import_rules_file upsert_write_access_rule error: {e}");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
             }
         }
         imported.push(ImportedBlockSummary {

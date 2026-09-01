@@ -763,6 +763,14 @@ path = "../../tests/security_rules_cel_parity/acceptance/cp03_path_variable_gate
 name = "security_rules_cel_parity_cp04_reject_out_of_scope_imports"
 path = "../../tests/security_rules_cel_parity/acceptance/cp04_reject_out_of_scope_imports.rs"
 
+# security-rules-cel-parity acceptance tests (Slice 05, US-05, ADR-062) —
+# importing protects only the collections named (non-interference with
+# JSON-API-defined rules), and re-importing is idempotent (no duplicate
+# history entry).
+[[test]]
+name = "security_rules_cel_parity_cp05_non_interference_and_idempotency"
+path = "../../tests/security_rules_cel_parity/acceptance/cp05_non_interference_and_idempotency.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
