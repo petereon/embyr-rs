@@ -820,3 +820,357 @@ The remaining 0.04 gap (slightly larger than 4a's own 0.03) is the routing/stora
 
 **Handoff To**: nw-solution-architect (DESIGN wave) + nw-platform-architect (DEVOPS wave, KPIs only)
 **Deliverables**: This `feature-delta.md` + 6 slice briefs + outcome KPIs + SSOT journey/jobs updates.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Agent**: Morgan (nw-solution-architect) | **Mode**: Propose (autonomous analysis; DISCUSS's 3 central resolutions — deterministic reject-on-overlap routing, fixed-depth-only scope, read+write+Listen-per-event parity — were already locked before DESIGN started; the genuinely open item DISCUSS handed to DESIGN, the routing/storage mechanism itself, is resolved here, ADR-063)
+
+✓ `docs/product/architecture/brief.md` § Application Architecture — read every `security-rules*` subsection (lines 3481-4395: `security-rules`, `security-rules-write-path`, `security-rules-query-path`, `security-rules-collection-group-rules`, `security-rules-realtime`, `custom-claims`, `security-rules-operations`, `security-rules-cel-parity`) — confirms ADR-027 through ADR-035 and ADR-062's own summaries, the existing `AccessRule`/`WriteAccessRule`/`GroupAccessRule` aggregate shapes, and BC-4's current component map.
+✓ `docs/feature/security-rules-cel-path-matching/feature-delta.md` §§ Wave: DISCUSS (full, this file, above) — Resolutions 1-3, System Constraints, Handoff Package flags 1-7, User Stories US-01 through US-06, Out of Scope, Open Questions OQ-PM-01 through OQ-PM-05.
+✓ `docs/feature/security-rules-cel-parity/feature-delta.md` (full, 1104 lines) — 4a's own locked v1 scope, its DESIGN section (§ Summary reproduced in brief.md lines 4291-4391), and confirmation the outer-syntax scanner/`Operand::PathVariable`/`evaluate()`'s existing 5-parameter signature are exactly what this feature extends, not replaces.
+✓ `docs/product/architecture/adr-062-rules-file-import-parser-path-variable-and-decomposition.md` (full) — the exact current mechanism (canonical-rewrite-at-import, `evaluate()`'s single-value `path_variable_value: Option<&str>`, `decompose_decidable`'s structural verification for a single `PathVariable`) this feature's own ADR-063 widens.
+✓ `docs/feature/security-rules-collection-group-rules/feature-delta.md` § DESIGN Summary (reproduced in `brief.md` lines 3899-3994) — **independently re-verified, not trusted uncritically, per the dispatch's own explicit instruction**: `group_access_rules` (ADR-032) is confirmed, by direct schema read (`migrations/0024_group_access_rules.sql`, below), to be `PRIMARY KEY (project_id, collection_id)` with a `CHECK (collection_id NOT LIKE '%/%')` constraint — a bare identifier, zero path/wildcard/precedence concept of any kind. DISCUSS's own finding ("does NOT reduce this feature's own scope or sizing... orthogonal problem") is CONFIRMED correct by this independent re-read — the only genuinely reusable precedent is the "new disjoint table, DB-level CHECK over convention-only invariant" *schema shape*, which ADR-063 explicitly adopts (§ Decision — Schema), never a matching *algorithm*, which does not exist in that feature at all.
+✓ `crates/embyr-core/src/access_control/rules_file.rs` (full, 669 lines, including all 8 tests) — confirmed directly: `parse_path_segments` already splits on arbitrary `/`-delimited segments producing `Vec<PathSegment>` for any shape; `parse_match_blocks` today handles exactly ONE top-level scan pass (does NOT recurse into a nested `match { match { ... } } }` shell — confirmed by reading `parse_match_blocks`/`parse_allow_clauses` directly: a nested `match` keyword inside a block's own body would fail `parse_allow_clauses`'s `strip_prefix("allow")` check as a `SYNTAX_ERROR` today) — this is new parser work, not already-general, correcting an ambiguity in the DISCUSS-stage framing that called nested-match "a pure parser-flattening concern" without confirming the scanner already flattens it (it does not, yet; ADR-063 § Decision — Nested Match-Block Flattening builds it). `decompose_block`'s 2-shape allow-list confirmed exactly as DISCUSS described.
+✓ `crates/embyr-core/src/access_control/mod.rs` (targeted: `Condition`, `Operand` 9-variant enum, `AuthContext`, `EvaluationOutcome`, `evaluate()` full body, `eval_bool`, `compare_operands`, `resolve_field_value`, `decompose_decidable` full body) — confirmed `Operand::PathVariable(String)` already retains the captured name (ADR-062's own text: "retained... Epic 4b's multiple wildcards will need it to disambiguate" — directly actionable here); confirmed `decompose_decidable`'s match arms are keyed on `Operand` *variant*, never on a `PathVariable`'s own `String` value — the structural fact ADR-063 § Decision — Structural Re-Verification relies on to resolve OQ-PM-02.
+✓ `crates/embyr-server/src/adapters/system_db.rs` (targeted: `upsert_access_rule`/`get_access_rule`/`upsert_write_access_rule`/history methods, lines 853-1250+) — confirmed `get_access_rule` is a single indexed exact-match lookup; confirmed, by direct grep across the whole file, **no "list all rules for a project" method exists for any of the 3 existing rule tables** — direct evidence a routing mechanism has no reusable precedent, exactly as DISCUSS found.
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` (targeted: `import_rules_file` full body, lines 1129-1215) — confirmed the exact idempotency-check-before-upsert shape (`get_access_rule` equality check before calling `upsert_access_rule`, per collection, to satisfy AC-17-195 without spuriously growing history) — the shape ADR-063's own pattern-import path mirrors identically for `access_rule_patterns`.
+✓ `crates/embyr-server/src/grpc/handler.rs` (targeted: `handle_get_document` full body lines 955-1096, `handle_create_document`/`handle_update_document`/`handle_delete_document` call shapes lines 1096-1470, 2 Listen per-event call sites confirmed near lines 1591 and 1822) — confirmed all 6 locked call sites' exact current shape; confirmed `path.collection_path` is threaded directly into `get_access_rule` today.
+✓ `crates/embyr-core/src/domain/document.rs` (targeted: `DocumentPath { collection_path, document_id }`) — confirmed the structural fact ADR-063's entire ancestor/leaf split is built on: `collection_path` is already an ancestor-path concept (always odd-length, ending on a literal collection name), independent of `document_id` (the leaf) — this is what narrows this feature's genuinely new routing surface to ancestor wildcards only.
+✓ `migrations/0022_access_rules.sql`, `0023_write_access_rules.sql`, `0024_group_access_rules.sql`, `0025_access_rule_history.sql` (full) — confirmed exact schema/index style precedent (`PRIMARY KEY`, `CHECK` constraint placement, `idx_*_lookup` naming, `ORDER BY id DESC` history-ordering convention) `migrations/0032`/`0033` (new, this DESIGN pass) follow. Confirmed highest existing migration is `0031_anonymous_signing_keys.sql`; `0032`/`0033` are the next available, verified via `Glob` immediately before writing (no concurrent DESIGN agent active, per dispatch).
+✓ `docs/product/architecture/adr-027` through `adr-035` (targeted, via `brief.md`'s own summaries plus direct ADR-062 read) — confirmed none is amended by this feature; ADR-063 extends, never contradicts, all nine.
+
+**Migration numbering re-verified at write-time**: `Glob docs/product/architecture/adr-*.md` immediately before writing confirmed the highest existing ADR is `adr-062-*`; this DESIGN pass assigns `adr-063-multi-segment-path-pattern-routing-and-storage.md` — no collision found, no renumbering/stub-redirect needed.
+
+**No contradictions found.** This DESIGN does not reopen any of DISCUSS's 3 locked Resolutions. One correction to DISCUSS's own framing is noted above (nested-match-block flattening is new parser work, not an already-general scanner capability) — this does not change locked scope or observable behavior, only the DESIGN-owned implementation-surface estimate; recorded here per the "flag, don't silently smooth over" discipline this initiative applies throughout, not escalated as a contradiction requiring resolution before proceeding (DISCUSS's own Slice 01 estimate already budgeted 2.5 days for "widening the outer grammar," which comfortably covers this).
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| `rules_file::parse_path_segments`/`PathSegment` | `crates/embyr-core/src/access_control/rules_file.rs` | Path-pattern segment scanning | **EXTEND (reuse unchanged as the shared type)** | Already fully general (arbitrary-length, `Literal`/`Wildcard`/`RecursiveWildcard`). `path_routing.rs`'s new primitives operate on THIS type directly — zero new segment representation invented. |
+| `rules_file::parse_match_blocks` | `crates/embyr-core/src/access_control/rules_file.rs` | Outer `match` block scanning | **EXTEND** | Becomes recursive to flatten nested `match { match { ... } } }` shells (confirmed NOT already-general by direct read — see Reading Confirmation correction, above). Widening one function, not a new module. |
+| `rules_file::decompose_block` | `crates/embyr-core/src/access_control/rules_file.rs` | Path-shape validation, 2-shape allow-list | **EXTEND** | Allow-list widened to a general alternating-shape rule (any length ≥1); ancestor/leaf split added. Same function, same file, same responsibility. |
+| `rules_file::rewrite_path_variable` | `crates/embyr-core/src/access_control/rules_file.rs` | Wildcard-name-to-`request.path.` rewrite | **EXTEND** | Looped over every distinct wildcard name in a block (ancestor + leaf) instead of at most one; per-name substitution logic itself unchanged. |
+| `Operand::PathVariable(String)` / `evaluate()` / `resolve_field_value` | `crates/embyr-core/src/access_control/mod.rs` | Path-variable operand + resolution | **EXTEND** | `evaluate()` gains one additive 6th parameter (`ancestor_path_variable_values`); the existing `path_variable_value: Option<&str>` leaf slot is completely unchanged — zero new reasoning for any of 4a's own already-shipped rows. |
+| `decompose_decidable` | `crates/embyr-core/src/access_control/mod.rs` | Query/Listen subscribe-time compliance shape rejection | **EXTEND (reuse unchanged, re-verified)** | Confirmed by direct inspection: variant-keyed match arms mean zero code change is needed for the multi-variable case (ADR-063 § Decision — Structural Re-Verification). Not a new CREATE — a confirmed no-op extension. |
+| `access_rules`/`write_access_rules` tables + `upsert_access_rule`/`get_access_rule`/`upsert_write_access_rule`/`get_write_access_rule` | `migrations/0022-0023`, `adapters/system_db.rs` | Per-collection exact-match rule storage | **EXTEND (reuse unchanged, zero rows/schema touched)** | Every existing row, method, and call site is byte-for-byte unmodified (US-05 guardrail). The exact-match lookup remains step 1 of the new 2-step composition, always tried first, never bypassed. |
+| `group_access_rules` (ADR-032) + its own disjoint-table/CHECK-constraint schema shape | `migrations/0024_group_access_rules.sql` | Storage precedent for a rule concept with no exact analog in `access_rules` | **EXTEND (pattern reuse only — not the same aggregate, not the same algorithm)** | Confirmed by independent re-read (not trusted from DISCUSS alone): `group_access_rules` has zero path/wildcard/precedence concept — nothing to reuse algorithmically. The ONLY reusable precedent is the schema *shape* ("new disjoint table + DB-level invariant over convention-only enforcement"), which ADR-063 explicitly adopts for `access_rule_patterns`. |
+| `access_rule_history`/`write_access_rule_history`/`group_access_rule_history` (ADR-035) | `migrations/0025-0027` | History-capture-fused-into-upsert pattern | **EXTEND (pattern reuse)** | `access_rule_pattern_history` (new table) + `upsert_access_rule_pattern`'s fused-transaction shape follow this identical, already-3x-proven precedent. |
+| `import_rules_file` admin handler + idempotency-check-before-upsert shape | `crates/embyr-server/src/admin/handlers/access_rules.rs:1129-1215` | File-import composition, AC-17-195 idempotency mechanism | **EXTEND** | Same route, same handler function, branches on `DecomposedTarget`'s new variant to call either the existing `upsert_access_rule`/`upsert_write_access_rule` (unchanged) or the new `upsert_access_rule_pattern`, after the identical already-current-check-before-write pattern. |
+| `handle_get_document`/`handle_create_document`/`handle_update_document`/`handle_delete_document`/`handle_add_target` (2 arms) | `crates/embyr-server/src/grpc/handler.rs` | The 6 locked real-enforcement call sites | **EXTEND** | Each gains one call to a new shared private helper (`resolve_access_rule_pattern`, EXTEND of this same file) inserted after the existing exact-match lookup misses — no call site duplicates the routing logic itself. |
+| `simulate_access_rule` / `SimulateAccessRuleBody` | `crates/embyr-server/src/admin/handlers/access_rules.rs:264,882` | Candidate-rule simulation | **NOT extended for US-06 — see CREATE NEW below** | The response contract (`{outcome: Allow\|Deny}`) cannot express "no matching pattern" (a 3rd state, AC-17-230) or resolved bindings (AC-17-228) — the same "genuinely different contract → new handler" threshold ADR-032/033 already crossed once each; extending in place would silently overload an existing, tested contract. |
+| Routing/overlap-detection matching algorithm (given a concrete or candidate path, does it structurally match a stored pattern shape) | — | Core new capability | **CREATE NEW** | Confirmed by direct grep (`system_db.rs`, all 3 existing rule tables): no "list all rules for a project" method, and no matching/routing function of any kind, exists anywhere in this codebase today. `security-rules-collection-group-rules` independently re-confirmed non-reusable for this specific algorithm (bare-id matching only, zero path/wildcard concept). |
+| `access_rule_patterns` table + `access_rule_pattern_history` table | `migrations/0032`, `migrations/0033` (new) | Multi-segment pattern storage | **CREATE NEW** | No existing table can represent a multi-segment ancestor template without either overloading `access_rules.collection_path`'s own semantics (ADR-063 § Considered Options, Option A rejected) or losing the indexed-narrowing columns routing needs cheaply. |
+| `simulate_routed_access_rule` handler + `SimulateRoutedAccessRuleBody`/`Response` | `crates/embyr-server/src/admin/handlers/access_rules.rs` (new fn) | US-06 routing-aware simulation | **CREATE NEW** | Justified above (genuinely different response contract) — reuses the SAME `resolve_access_rule_pattern`/`bind_ancestor` routing primitives internally, never a second implementation. |
+
+**Verdict: 11 EXTEND (2 of which are "reuse unchanged, re-verified" — zero
+code touched, confirmed by inspection), 3 CREATE NEW (the routing/overlap
+algorithm itself, its storage table pair, and the routing-aware simulation
+handler) — all 3 CREATE NEW decisions extensively justified by direct-code
+evidence that no existing mechanism performs this computation or stores this
+shape; 0 unjustified CREATE NEW.**
+
+---
+
+## Wave: DESIGN / [REF] Quality Attribute Priorities
+
+| Rank | Attribute | Forcing Constraint |
+|---|---|---|
+| 1 | **Deterministic routing correctness (no cross-instance leakage, no ambiguous match)** | KPI #1 North Star. The single highest-consequence defect class this feature can introduce — a routing bug's blast radius spans every concrete path a pattern *could* match (§ DISCUSS Shared Artifact table). Structurally enforced via Resolution 1's own import-time overlap rejection (ADR-063 § Decision — Overlap Detection), not just tested. |
+| 2 | **No regression to `access_rules`/`write_access_rules`/pre-4a rules or collections with no rule at all** | KPI #3 guardrail, US-05. Zero schema/row change to any existing table (ADR-063 § Decision — Schema); the existing exact-match lookup is ALWAYS step 1, unconditionally, never bypassed. |
+| 3 | **Cheap on every read/write/query/Listen call** | § System Constraints NFR obligation. Indexed narrowing (`ancestor_segment_count`, `literal_skeleton`) bounds routing to O(1) Postgres round-trips + small-K in-memory compatibility checks — never a per-project scan (ADR-063 § Complexity). |
+| 4 | **Shared-artifact integrity (import-time overlap detection and request-time routing never drift)** | DISCUSS Shared Artifact table, HIGH risk — mirrors ADR-029 DDD-SR-8/ADR-030 Decision Driver 3's own recurring concern, now at the pattern-matching layer. One primitive (`positions_compatible`), two call shapes (`bind_ancestor`/`structurally_overlap`), never two independently-maintained routines. |
+| 5 | **Fail-closed correctness on any routing ambiguity** | A defensive, should-never-trigger guard: if the pure-function invariant (Resolution 1) is ever violated (bug or concurrent-import race), the composition denies and logs `security_rules.routing_invariant_violated` rather than guessing which pattern wins. |
+| 6 | **Grammar/scope containment (do not silently widen toward recursive wildcards or OR-composition)** | § System Constraints, Handoff Package flags 1-2. Drives the explicit `RecursiveWildcard` rejection in the widened shape-check and the hard "at most one match" invariant throughout. |
+
+---
+
+## Wave: DESIGN / [REF] Bounded-Context Placement
+
+No new bounded context (per Handoff Package flag 6, not reopened). **BC-4
+Access Control** (ADR-029) gains:
+- One new pure submodule, `embyr_core::access_control::path_routing`
+  (`bind_ancestor`, `structurally_overlap`, `literal_skeleton`).
+- One new `rules_file` type pair (`DecomposedPatternRule`,
+  `DecomposedTarget`) alongside the existing, unchanged `DecomposedRule`.
+- `evaluate()`'s additive 6th parameter.
+- A third/fourth aggregate pair in the storage layer
+  (`AccessRulePattern`/`AccessRulePatternHistory`), alongside the existing
+  `AccessRule`/`WriteAccessRule`/`GroupAccessRule`.
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component | Crate/Module Path | Responsibility | Change Type |
+|---|---|---|---|
+| `rules_file::parse_match_blocks` | `crates/embyr-core/src/access_control/rules_file.rs` | Recursive nested-`match`-block flattening (US-01) | EXTEND |
+| `rules_file::decompose_block` | `crates/embyr-core/src/access_control/rules_file.rs` | Widened alternating-shape validation, ancestor/leaf split, verb-bucketing | EXTEND |
+| `rules_file::rewrite_path_variable` (loop) | `crates/embyr-core/src/access_control/rules_file.rs` | Multi-name condition rewrite (ancestor + leaf) | EXTEND |
+| `rules_file::{DecomposedPatternRule, DecomposedTarget}` | `crates/embyr-core/src/access_control/rules_file.rs` | New decomposition-target types | NEW (additive, `DecomposedRule` unchanged) |
+| `path_routing::{bind_ancestor, structurally_overlap, literal_skeleton}` | `crates/embyr-core/src/access_control/path_routing.rs` (new file) | Shared pure matching primitives — routing (US-02/03) and overlap detection (US-04) | NEW |
+| `Operand::PathVariable` resolution / `evaluate()` | `crates/embyr-core/src/access_control/mod.rs` | Additive 6th parameter `ancestor_path_variable_values`; leaf slot unchanged | EXTEND |
+| `SystemDb::{upsert_access_rule_pattern, get_access_rule_pattern, list_access_rule_patterns_by_skeleton, get_access_rule_pattern_history}` + `AccessRulePatternRow` | `crates/embyr-server/src/adapters/system_db.rs` | Pattern storage CRUD + fused history capture | EXTEND (new methods in existing file) |
+| `access_rule_patterns` / `access_rule_pattern_history` tables | `migrations/0032`, `migrations/0033` (new) | Pattern storage (ADR-063 § Schema) | NEW |
+| `grpc::handler::resolve_access_rule_pattern` (new private helper) | `crates/embyr-server/src/grpc/handler.rs` | Shared 2-step composition (exact-match then pattern-routing) for all 6 locked call sites | NEW (helper), consumed by EXTEND at 6 call sites |
+| `handle_get_document` / `handle_create_document` / `handle_update_document` / `handle_delete_document` / `handle_add_target` (`Changed`/`Removed` arms) | `crates/embyr-server/src/grpc/handler.rs` | Call `resolve_access_rule_pattern` when the exact-match lookup misses (US-02/03; Listen closes OQ-CP-04) | EXTEND |
+| `admin::handlers::access_rules::import_rules_file` | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Branch on `DecomposedTarget`; run overlap detection before any write; call pattern-idempotency-check-then-upsert | EXTEND |
+| `admin::handlers::access_rules::simulate_routed_access_rule` (new fn) + `SimulateRoutedAccessRuleBody`/`Response` | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Routing-aware simulation (US-06, Release 2) | NEW |
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports (Inbound)
+
+| Port | Protocol | Location | New/Extended | What it does |
+|---|---|---|---|---|
+| `AccessRuleImportPort` (existing route, `POST /admin/v1/projects/:project_id/access_rules/import`) | HTTP (admin `:9090`) | `admin/handlers/access_rules.rs::import_rules_file` | **Extended** | Now also accepts fixed-depth multi-segment/nested-match-block patterns (US-01), runs overlap detection (US-04), stores via the new pattern adapter methods. Same route, same request/response types (additive semantics on `ImportedBlockSummary`/`OffendingBlock`). |
+| `AccessRuleRoutedSimulationPort` (new route, `POST /admin/v1/projects/:project_id/access_rules/simulate_route`) | HTTP (admin `:9090`) | `admin/handlers/access_rules.rs::simulate_routed_access_rule` | **New** | US-06 (Release 2). Any role, read-only, zero writes (AC-17-231). |
+| `FirestoreGrpcPort` / `RestPort` (existing) | gRPC `:8080` / REST `:8081` | `grpc/handler.rs` — `handle_get_document`, 3 write handlers | **Extended, additively** | Unchanged call shapes; now additionally routed against a stored multi-segment pattern when the exact-match lookup misses (US-02/03). No new RPC, no new endpoint. `RunQuery` is explicitly **not** extended in this feature (OQ-PM-07). |
+| Real-time delivery (existing) | gRPC (server-streaming) | `realtime` / `handle_add_target`'s `Changed`/`Removed` arms | **Extended, additively** | Per-event re-check now resolves multi-segment routing, closing 4a's own deferred `OQ-CP-04` (Resolution 3). Listen's subscribe-time (initial-snapshot) compliance gate is explicitly **not** extended in this feature (OQ-PM-07). No new RPC. |
+
+No new network-facing port introduced.
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters (Outbound)
+
+No new *driven* (outbound infrastructure) port. `upsert_access_rule_pattern`/
+`get_access_rule_pattern`/`list_access_rule_patterns_by_skeleton`/
+`get_access_rule_pattern_history` execute through the existing,
+already-probed `SystemDb` connection pool — the identical substrate every
+other BC-4 read/write already uses.
+
+**Earned Trust note (Principle 12, explicit, not silently skipped):** no new
+Earned Trust probe is required — no new *substrate* dependency is
+introduced. `path_routing::bind_ancestor`/`structurally_overlap` and the
+widened `rules_file::decompose` are pure, deterministic CPU computation over
+values already resident in memory (`Vec<PathSegment>`, `&str`, `BTreeMap`) —
+the identical "no environment can lie to a pure function" reasoning ADR-024/
+027/029/030/031/033/062 already established applies unchanged. The new
+adapter methods are ordinary `sqlx` calls through the SAME already-probed
+`SystemDb` pool every existing `access_rules`/`write_access_rules`/
+`group_access_rules` method uses.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+| Layer | Choice | Version | License | Rationale |
+|---|---|---|---|---|
+| Path-pattern routing/overlap matcher | Hand-rolled pure functions (new, in-crate, `path_routing.rs`) | N/A (no crate) | N/A | Zero new dependency. Operates on the existing `rules_file::PathSegment` type. Rejected alternative: a generic trie/radix-tree crate — unjustified for a routing problem this small (dozens of patterns per project at most) and would obscure the exact "reject on overlap, never precedence" semantics Resolution 1 locks. |
+| Pattern storage | New Postgres table (`access_rule_patterns` + `access_rule_pattern_history`), `sqlx` (existing dependency, unchanged version) | N/A | N/A | Zero new dependency. Schema-only addition, mirroring `group_access_rules`' own precedent (ADR-032). |
+
+No new workspace dependency is added by this feature.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table
+
+| ID | Decision | Verdict |
+|---|---|---|
+| DDD-PM-1 | Storage/routing mechanism: new disjoint `access_rule_patterns` table, structured for indexed narrowing (`ancestor_segment_count`, `literal_skeleton`), never overloading `access_rules.collection_path`'s own semantics | Accepted — ADR-063 |
+| DDD-PM-2 | Ancestor/leaf split: routing touches only intermediate wildcards; the leaf capture reuses ADR-062's own mechanism completely unchanged | Accepted — ADR-063 |
+| DDD-PM-3 | One row per pattern SHAPE (combined read+write columns), a departure from `access_rules`/`write_access_rules`'s own disjoint-table precedent, justified by the single-authoring-path (import-only) evidence | Accepted — ADR-063 |
+| DDD-PM-4 | Shared pure-function matching primitives (`bind_ancestor`/`structurally_overlap`, both built on one `positions_compatible` predicate) for both routing and overlap detection — never two independently-maintained routines | Accepted — ADR-063 |
+| DDD-PM-5 | `evaluate()` gains an additive 6th parameter (`ancestor_path_variable_values: &BTreeMap<String,String>`); the existing `path_variable_value: Option<&str>` leaf slot is unchanged | Accepted — ADR-063 |
+| DDD-PM-6 | Composition: 2-step lookup (existing exact-match first, unconditionally; new pattern-routing only on a miss) at all 6 locked call sites, via one shared private helper — never duplicated per call site | Accepted — ADR-063 |
+| DDD-PM-7 | `RunQuery` and Listen's subscribe-time (initial-snapshot) compliance gate are explicitly NOT extended to consult patterns in this feature — a named, deliberate scope boundary, not an oversight (OQ-PM-07) | Accepted — ADR-063 |
+| DDD-PM-8 | Nested match-block bodies may not mix `allow` clauses with further nested `match` blocks — rejected `SYNTAX_ERROR` | Accepted (DESIGN-owned scoping decision, flagged OQ-PM-08 for DISTILL) — ADR-063 |
+| DDD-PM-9 | US-06 simulation gets a new sibling handler (`simulate_routed_access_rule`), not an additive extension of `simulate_access_rule` — response contract genuinely differs (3-state outcome + resolved bindings) | Accepted — ADR-063 |
+| DDD-PM-10 | Overlap detection scoped to `access_rule_patterns` only, never against `access_rules`/`write_access_rules`' own pre-existing, unvalidated `/`-containing `collection_path` loophole | Accepted, residual gap named — ADR-063 (OQ-PM-06) |
+| DDD-PM-11 | History capture fused into `upsert_access_rule_pattern`'s own transaction, mirroring ADR-035's 3x-proven precedent for a 4th sibling table | Accepted — ADR-063 |
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context (Mermaid)
+
+No new external system. Same actors `security-rules`/`security-rules-cel-parity` already established; new relationship labels only:
+
+```mermaid
+C4Context
+    title System Context — embyr-rs (security-rules-cel-path-matching delta)
+
+    Person(sdkDev, "SDK Developer (Alex)", "Imports a real .rules file containing fixed-depth multi-segment/nested-match-block patterns; simulates a candidate pattern's routing before import")
+    System_Ext(firebaseSDK, "Firebase / Firestore SDK", "Client library. getDoc()/writes/onSnapshot() against nested-collection paths are now additionally routed against an imported multi-segment pattern, if one structurally matches.")
+    System(embyr, "embyr-rs", "Firestore gRPC wire-protocol translator. Now also stores and deterministically routes fixed-depth multi-segment access-control patterns.")
+    System_Ext(systemDB, "System Postgres", "Adds access_rule_patterns + access_rule_pattern_history tables.")
+
+    Rel(sdkDev, embyr, "Imports a multi-segment pattern file; simulates routing for a candidate pattern", "Admin API :9090")
+    Rel(firebaseSDK, embyr, "getDoc()/writes/onSnapshot() on nested paths — routed against a stored pattern when the exact-match lookup misses", "gRPC :8080 / REST :8081 (UNCHANGED for collections with no pattern involvement beyond one extra indexed lookup on a miss)")
+    Rel(embyr, systemDB, "Reads/writes access_rule_patterns; unchanged access_rules/write_access_rules reads", "Postgres SQL")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Container Diagram (Mermaid)
+
+```mermaid
+C4Container
+    title Container Diagram — embyr-rs (security-rules-cel-path-matching delta)
+
+    Person(sdkDev, "SDK Developer (Alex)")
+    Person_Ext(endUser, "Trailmark end user (Maria / Dana)", "Never calls embyr directly — experiences this feature only through whether a nested-collection getDoc()/write/subscription succeeds or fails")
+
+    System_Boundary(embyrsvc, "embyr SaaS") {
+        Container(embyrA, "embyr-rs instance", "Rust binary", "Existing: gRPC :8080, REST :8081, Admin :9090. Extended: import/simulate admin actions accept multi-segment patterns; a new shared routing helper (resolve_access_rule_pattern) consulted at 6 call sites (GetDocument, 3 write handlers, 2 Listen per-event arms) only when the existing exact-match lookup misses.")
+        ContainerDb(sysDB, "System Postgres", "PostgreSQL", "Existing access_rules/write_access_rules/group_access_rules + history tables, UNCHANGED. New: access_rule_patterns + access_rule_pattern_history (1 row per pattern shape, idempotent upsert).")
+        ContainerDb(custDB, "Customer Postgres (BC-2, per-project)", "PostgreSQL", "Unchanged. resource.data for pattern-routed evaluation is read from the document already fetched by the existing GetDocument/write path — no new query issued against this database.")
+    }
+
+    Rel(sdkDev, embyrA, "Imports/simulates multi-segment patterns (admin session auth)", "HTTP :9090")
+    Rel(endUser, embyrA, "getDoc()/write/onSnapshot() on a nested path — routed against the matching pattern, if any", "gRPC :8080 / REST :8081")
+    Rel(embyrA, sysDB, "CRUD access_rule_patterns; unchanged reads of access_rules/write_access_rules on the exact-match fast path", "Postgres SQL")
+    Rel(embyrA, custDB, "Unchanged document fetch (adapter.get_document) — evaluation reads its already-returned result", "Postgres SQL, via BackendAdapter")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Component Diagram — Multi-Segment Pattern Routing (Mermaid)
+
+Warranted per the SKILL's "5+ components, complex subsystem" threshold: the
+widened parser, the two new shared pure-function primitives, the new
+adapter, the new composition helper, and the two call-site families (import
+vs. real-enforcement) are six separable pieces whose call-graph (ONE routing
+implementation, TWO callers — import-time overlap check and request-time
+routing) is exactly the property this feature's HIGH-risk Shared Artifact
+concern depends on being visible.
+
+```mermaid
+C4Component
+    title Component Diagram — Multi-Segment Pattern Routing (BC-4 extension)
+
+    Container_Boundary(core, "embyr-core::access_control (pure, zero IO)") {
+        Component(rulesFile, "rules_file::{parse_match_blocks, decompose_block, decompose}", "Rust fn", "Widened: recursive nested-match flattening, general alternating-shape validation, ancestor/leaf split, multi-name condition rewrite. Produces DecomposedTarget::{SingleCollection, MultiSegmentPattern}.")
+        Component(pathRouting, "path_routing::{bind_ancestor, structurally_overlap}", "Rust fn", "ONE shared per-position compatibility primitive. bind_ancestor = request-time routing (US-02/03). structurally_overlap = import-time overlap detection (US-04). Never two implementations.")
+        Component(evaluator, "evaluate() (extended)", "Rust fn", "6th parameter ancestor_path_variable_values: &BTreeMap<String,String>, additive. Existing leaf slot (path_variable_value) unchanged.")
+    }
+
+    Container_Boundary(server, "embyr-server (adapters + composition)") {
+        Component(patternStorage, "SystemDb::{upsert_access_rule_pattern, get_access_rule_pattern, list_access_rule_patterns_by_skeleton}", "sqlx adapter", "ADR-063. Indexed on (project_id, ancestor_segment_count, literal_skeleton).")
+        Component(routeHelper, "grpc::handler::resolve_access_rule_pattern", "Rust fn (new, shared)", "2-step composition: existing exact-match lookup first (unconditional), then pattern-routing only on a miss. Consumed by all 6 locked call sites.")
+        Component(importHandler, "admin::handlers::access_rules::import_rules_file", "Axum handler", "Extended: branches on DecomposedTarget; runs structurally_overlap (intra-file + cross-import) before any write.")
+        Component(realEnforcement, "6 locked call sites", "Tonic/realtime handlers", "GetDocument, 3 write handlers, Listen Changed/Removed. Each calls resolve_access_rule_pattern once.")
+    }
+
+    Rel(importHandler, rulesFile, "parses + decomposes the file")
+    Rel(importHandler, pathRouting, "structurally_overlap — intra-file and cross-import, BEFORE any write")
+    Rel(importHandler, patternStorage, "upsert_access_rule_pattern — only after overlap check passes")
+    Rel(realEnforcement, routeHelper, "calls once per request, on exact-match miss")
+    Rel(routeHelper, patternStorage, "list_access_rule_patterns_by_skeleton — indexed narrowing")
+    Rel(routeHelper, pathRouting, "bind_ancestor — SAME primitive importHandler's overlap check uses")
+    Rel(realEnforcement, evaluator, "evaluate — ancestor bindings from routeHelper, leaf binding via the unchanged ADR-062 slot")
+```
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+Style: Hexagonal (ports-and-adapters), unchanged project-wide pattern. BC-4
+is extended, not restructured — no new crate, no new tooling.
+
+Rules enforced (existing, applying unchanged to the new submodules):
+- `embyr-core::access_control::path_routing` has zero IO imports
+  (`cargo-deny`, `deny.toml`, already covers all of `embyr-core`).
+- `embyr-core` defines the value-type/function surface; `embyr-server`
+  consumes it — dependency direction inward, matching AD-02's existing rule.
+- No new adapter, no new `probe()` required (§ Driven Ports + Adapters,
+  above).
+
+---
+
+## Wave: DESIGN / [REF] Open Questions
+
+| ID | Question | Impact | Resolution owner |
+|---|---|---|---|
+| OQ-PM-06 | `access_rules`/`write_access_rules`' own pre-existing, unvalidated `/`-containing `collection_path` loophole (no CHECK constraint) is not cross-checked by this feature's own overlap detection — should a future feature close this pre-existing gap? | Latent, low-probability cross-tenant risk if the direct hand-authoring JSON API is ever used to define a deep literal `collection_path` value that happens to coincide with a pattern-governed concrete path (exact-match wins deterministically today, per ADR-063 — not ambiguous, just unvalidated at the source) | Product Discovery / a future hardening feature, not this one |
+| OQ-PM-07 | `RunQuery` and Listen's subscribe-time (initial-snapshot) compliance gate remain pattern-blind — is this asymmetry (vs. `GetDocument`/writes/Listen-per-event, which ARE pattern-aware) acceptable long-term, or does a future feature need to wire `handle_run_query`'s non-group arm and Listen's subscribe-time gate to `access_rule_patterns` too? | A `RunQuery` against a collection governed EXCLUSIVELY by a multi-segment pattern is currently unrestricted, not denied — a real, named behavioral gap; not evidenced as needed by any domain example in this feature's own DISCUSS | DISTILL to confirm no acceptance scenario requires it; Product Discovery for a future follow-up if evidence appears |
+| OQ-PM-08 | Nested match-block bodies may not mix `allow` clauses with further nested `match` blocks (rejected `SYNTAX_ERROR`) — is this DESIGN-owned scoping decision correct, or does a real Trailmark-shaped file need mixing? | No domain example requires mixing; flagged for explicit acceptance coverage, mirrors ADR-062's own `CONFLICTING_VERB_CONDITIONS` precedent | DISTILL (acceptance-designer), confirm scope before DELIVER locks the parser |
+| OQ-PM-09 | The "2 indexed lookups on a total-miss" cost (§ ADR-063 Complexity) — should a per-project "has any patterns at all" cache be built now, or deferred until profiling shows it matters? | Deferred per Principle 8/YAGNI, mirrors OQ-SR-05's own precedent; not required for correctness | Platform-architect, post-launch, if profiling warrants |
+| OQ-PM-01 (carried from DISCUSS) | Exact runtime routing/storage mechanism | **Resolved by this DESIGN pass** — ADR-063, new disjoint `access_rule_patterns` table with indexed narrowing | Closed |
+| OQ-PM-02 (carried from DISCUSS) | Does `decompose_decidable`'s wildcard catch-all soundly reject a multi-variable `PathVariable` reference, independently re-verified? | **Resolved by this DESIGN pass, HIGH confidence** — confirmed variant-keyed match arms never inspect the captured name (ADR-063 § Decision — Structural Re-Verification) | Closed |
+| OQ-PM-03 (carried from DISCUSS) | Exact wire shape for the extended import/simulate endpoints | **Resolved by this DESIGN pass** — `ImportedBlockSummary.collection_path` reused unchanged for pattern text; new `SimulateRoutedAccessRuleBody`/`Response` for US-06 (ADR-063 § Decision — Admin Surface Extensions) | Closed |
+| OQ-PM-04 / OQ-PM-05 (carried from DISCUSS, `security-rules-cel-recursive-wildcards` sequencing / real-Firestore OR-composition) | Unchanged — strategic, post-launch, evidence-gated | Not this feature's concern | Product Discovery, after this feature ships |
+
+---
+
+## Wave: DESIGN / [REF] External Integrations
+
+**None requiring contract tests.** This feature introduces no new outbound
+network dependency: pattern storage reuses the existing, already-probed
+`SystemDb` Postgres connection; routing/overlap-detection is pure in-process
+computation over data already resident in memory or returned by one indexed
+Postgres lookup. No new adapter, no new external service, no new
+consumer-driven-contract surface.
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package
+
+**To DISTILL (acceptance-designer)**: this `feature-delta.md` (DISCUSS +
+DESIGN sections), 6 slice briefs, `docs/product/architecture/
+adr-063-multi-segment-path-pattern-routing-and-storage.md`,
+`migrations/0032_access_rule_patterns.sql`,
+`migrations/0033_access_rule_pattern_history.sql`.
+
+**Explicit flags for DISTILL**:
+1. OQ-PM-08 (nested match-block mixing rejected as `SYNTAX_ERROR`) needs
+   explicit acceptance coverage, not silently assumed.
+2. OQ-PM-07 (RunQuery/Listen-subscribe-time remain pattern-blind) should NOT
+   be exercised by any acceptance scenario expecting pattern enforcement on
+   those two surfaces — this is locked, deliberate scope, not a gap to test
+   against.
+3. The routing invariant ("at most one pattern ever matches") is the single
+   highest-value property to stress in acceptance scenarios — two different
+   literal expedition IDs sharing one wildcard pattern (US-02 Domain Example
+   3) and the literal-vs-wildcard collision (US-04 Domain Example 1) are the
+   two canonical scenarios ADR-063's own design is built to make impossible
+   to get wrong.
+4. `read_condition IS NULL`/`write_condition IS NULL` on a MATCHED pattern
+   row means unrestricted for that operation, never fail-closed deny — an
+   easy-to-invert composition rule (ADR-063 § Decision — Schema) worth its
+   own explicit acceptance scenario.
+
+**External Integrations Requiring Contract Tests**: None (see § External
+Integrations, above).
+
+Peer review: not invoked per-wave (this session's standing practice skips
+per-wave review, per explicit human authorization for this epic, mirroring
+4a's identical practice).
+
+---
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] Storage/routing mechanism resolved: new disjoint `access_rule_patterns` table (migrations 0032/0033), structured for indexed narrowing on `(project_id, ancestor_segment_count, literal_skeleton)` — never overloading `access_rules.collection_path`'s existing semantics (ADR-063).
+- [D2] The genuinely new routing surface is scoped to ANCESTOR wildcards only — the leaf capture reuses ADR-062's own mechanism completely unchanged, confirmed by the `DocumentPath{collection_path, document_id}` structural fact.
+- [D3] One shared pure-function matching primitive family (`bind_ancestor`/`structurally_overlap`, one `positions_compatible` predicate) serves both import-time overlap detection and request-time routing.
+- [D4] `evaluate()` gains an additive 6th parameter; zero behavior change to any of 4a's own already-shipped rows or call sites beyond a mechanical empty-map argument.
+- [D5] `RunQuery`/Listen-subscribe-time compliance are explicitly NOT extended to consult patterns in this feature (OQ-PM-07) — consistent with DISCUSS's own locked 6-call-site list, named not hidden.
+- [D6] `security-rules-collection-group-rules`'s own mechanism independently re-confirmed non-reusable for the routing algorithm itself (only its schema *shape* is reused) — DISCUSS's own finding verified, not trusted uncritically.
+
+### Reuse Analysis
+See § Wave: DESIGN / [REF] Reuse Analysis, above — 11 EXTEND, 3 CREATE NEW, 0 unjustified.
+
+### Technology Stack
+- No new workspace dependency. Hand-rolled pure functions + one new Postgres table pair via the existing `sqlx`/`SystemDb` adapter.
+
+### Constraints Established
+- Deterministic single-pattern routing enforced structurally (import-time overlap rejection), never by runtime precedence.
+- Zero change to `access_rules`/`write_access_rules`/`group_access_rules` schema or rows.
+- Routing/overlap detection share one implementation, never two.
+- `RunQuery`/Listen-subscribe-time remain pattern-blind (named scope boundary).
+
+### Upstream Changes
+- One correction to DISCUSS's own framing (nested-match-block flattening is new parser work, not an already-general scanner capability) — recorded in § Reading Confirmation, above; does not change locked scope, observable behavior, or the Slice 01 estimate.
+
+---
+
+## Wave: DESIGN / [REF] Next Wave
+
+**Handoff To**: nw-acceptance-designer (DISTILL wave) — not dispatched by this session (per Standing Methodology: no nWave DISTILL/DELIVER pipeline for this dispatch; delivery is dispatched separately per-slice after independent verification).
+**Deliverables**: This `feature-delta.md` (DISCUSS + DESIGN), 6 slice briefs, ADR-063, `migrations/0032`/`0033`.

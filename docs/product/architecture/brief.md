@@ -4392,6 +4392,127 @@ option, and the rejected new-transaction-wrapped-import option):
 
 ---
 
+## Application Architecture — security-rules-cel-path-matching
+
+> Updated: 2026-09-01
+> Feature: security-rules-cel-path-matching (JOB-17, 9th realization — Epic
+> 4b of the "Full CEL Parity" initiative; lets Alex import fixed-depth
+> multi-segment/nested-match-block `.rules` patterns — e.g.
+> `expeditions/{expeditionId}/journal_entries/{entryId}` — the single most
+> common real Firestore hierarchical-ownership shape 4a's own locked v1 scope
+> left untranslatable, with deterministic, reject-on-overlap routing)
+> Mode: Propose (autonomous analysis; DISCUSS's 3 central resolutions —
+> deterministic reject-on-overlap routing, fixed-depth-only scope, read+write
+> +Listen-per-event parity — were already locked before DESIGN started; the
+> genuinely open item DISCUSS handed to DESIGN, the routing/storage
+> mechanism itself, is resolved here)
+> ADR: `docs/product/architecture/adr-063-multi-segment-path-pattern-routing-and-storage.md`
+> (new — combined storage/routing/overlap-detection/grammar-extension
+> decision, mirroring ADR-030/031/032/062's own smaller-decision-surface
+> precedent). Amends no prior ADR — `access_rules`/`write_access_rules`/
+> `group_access_rules` and ADR-027 through ADR-035/062 all remain accurate as
+> written; this feature extends, never contradicts, them.
+
+Full DESIGN content (Reading Confirmation, Reuse Analysis, Quality Attribute
+Priorities, Bounded-Context Placement, Component Decomposition, Driving/
+Driven Ports, Technology Choices, Decisions Table DDD-PM-1..11, C4 System
+Context/Container/Component diagrams, Architecture Enforcement, Open
+Questions, External Integrations, Handoff Package) lives in
+`docs/feature/security-rules-cel-path-matching/feature-delta.md` §§ Wave:
+DESIGN — the single narrative file per the lean output convention. Summary
+below.
+
+### Summary
+
+**The central decision**: a new, disjoint table, `access_rule_patterns`
+(`migrations/0032_access_rule_patterns.sql` +
+`0033_access_rule_pattern_history.sql`), storing each multi-segment
+pattern's own **ancestor path** (e.g.
+`"expeditions/{expeditionId}/journal_entries"`) in a form the database can
+index directly (`ancestor_segment_count`, `literal_skeleton`) — never
+overloading `access_rules`/`write_access_rules`' own `collection_path`
+semantics. **The genuinely new routing surface is narrower than it first
+appears**: `DocumentPath{collection_path, document_id}` already separates a
+document's ancestor path from its leaf ID, and 4a's own `[Literal(coll)]`/
+`[Literal(coll), Wildcard(var)]` shapes are the depth-1 special case of this
+same structure — so only INTERMEDIATE (ancestor) wildcard-or-literal
+document-ID captures are new. The LEAF capture (e.g. `entryId`) reuses
+`security-rules-cel-parity`'s own condition-rewrite + `document_id`
+-threading mechanism (ADR-062) completely unchanged.
+
+**Routing/overlap detection share one implementation**: two new pure
+functions in `embyr_core::access_control::path_routing` (new submodule) —
+`bind_ancestor` (request-time routing, US-02/03) and `structurally_overlap`
+(import-time overlap detection, US-04) — both built on one per-position
+compatibility primitive, operating on the existing, reused
+`rules_file::PathSegment` type. Resolution 1's own locked semantics
+(deterministic, reject-on-overlap, never precedence) is enforced
+structurally: an import is rejected outright, naming both colliding
+patterns, before any write, whenever a new pattern could structurally
+overlap another pattern in the same file or already stored.
+
+**Composition**: all 6 of Resolution 3's own locked call sites
+(`GetDocument`, `CreateDocument`/`UpdateDocument`/`DeleteDocument`, and
+`handle_add_target`'s `Changed`/`Removed` arms — closing 4a's own deferred
+`OQ-CP-04`) gain an identical 2-step lookup via one new shared private
+helper: the existing exact-match `access_rules`/`write_access_rules` lookup
+runs first, unconditionally, byte-for-byte unchanged (US-05 guardrail); only
+on a miss does the new pattern-routing lookup run — one indexed query,
+typically 0-1 candidate rows. `evaluate()` gains an additive 6th parameter
+(`ancestor_path_variable_values: &BTreeMap<String, String>`) for ancestor
+bindings; the existing `path_variable_value: Option<&str>` leaf slot (ADR-062)
+is completely unchanged, so every one of 4a's own already-shipped rows needs
+zero new reasoning.
+
+**Named, deliberate scope boundary (not an oversight)**: `RunQuery` and
+Listen's subscribe-time (initial-snapshot) compliance gate are **not**
+extended to consult patterns in this feature — DISCUSS's own locked
+call-site list names exactly 6 sites, none of them `RunQuery`/subscribe-time.
+A collection governed exclusively by a multi-segment pattern is currently
+unrestricted (not denied) for those two surfaces — flagged OQ-PM-07, not
+silently built nor silently hidden.
+
+**Re-verified, not re-cited**: `decompose_decidable`'s wildcard catch-all is
+confirmed, by direct inspection of its own variant-keyed match arms, to
+reject any `PathVariable` reference regardless of how many distinct captured
+names a condition uses — zero code change needed for the multi-variable
+case, resolving OQ-PM-02 with high confidence.
+
+**`security-rules-collection-group-rules` independently re-confirmed
+non-reusable for the routing algorithm** (not merely trusted from DISCUSS):
+`group_access_rules` is a flat, bare-identifier-keyed table with zero path/
+wildcard/precedence concept — only its schema *shape* ("new disjoint table +
+DB-level invariant over convention-only enforcement") is reused; the
+matching algorithm itself has no precedent anywhere in this codebase,
+confirmed by direct grep (no "list all rules for a project" method exists
+for any of the 3 pre-existing rule tables).
+
+**Bounded context**: no new context. BC-4 Access Control (ADR-029) gains one
+new pure submodule (`path_routing`), one new additive `rules_file` type pair
+(`DecomposedPatternRule`/`DecomposedTarget`, `DecomposedRule` itself
+unchanged), and `evaluate()`'s 6th parameter.
+
+**Admin surface**: `import_rules_file` (existing route, extended) branches on
+the new `DecomposedTarget` variant. A new sibling handler,
+`simulate_routed_access_rule` (`POST .../access_rules/simulate_route`, US-06,
+Release 2), is justified — not an additive extension of
+`simulate_access_rule` — because the response contract genuinely differs (a
+3-state outcome including "no matching pattern," plus resolved bindings),
+the same "genuinely different contract → new handler" threshold ADR-032/033
+already crossed once each.
+
+**No new external integration, no new driven port, no new Earned Trust
+probe, no new workspace dependency** — all new I/O reuses the existing,
+already-probed `SystemDb` pool; the new matching functions are pure CPU
+computation over in-memory values.
+
+Full alternatives-considered analysis (including the rejected
+overload-`access_rules.collection_path` option and the rejected
+mixed-body nested-match-block option):
+`docs/product/architecture/adr-063-multi-segment-path-pattern-routing-and-storage.md`.
+
+---
+
 ## Application Architecture — client-auth-hosted-identity
 
 > Updated: 2026-08-27
