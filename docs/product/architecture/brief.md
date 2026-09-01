@@ -4288,6 +4288,110 @@ placement, and the rejected FK-to-`accounts` actor-attribution option):
 
 ---
 
+## Application Architecture — security-rules-cel-parity
+
+> Updated: 2026-09-01
+> Feature: security-rules-cel-parity (JOB-17, 8th realization — Epic 4a of
+> the 5-epic "Full CEL Parity" initiative; lets Alex import a real Firestore
+> `.rules` file's outer syntax for single top-level collections with at most
+> one leaf-level path-variable capture, decomposed into the existing
+> per-collection admin API. Reverses `security-rules`'s own original
+> Resolution 1 rejection of full CEL parity, per new external
+> customer-migration evidence — see `docs/feature/security-rules-cel-parity/feature-delta.md`
+> § Changed Assumptions)
+> Mode: Propose (autonomous analysis; DISCUSS's 3 central resolutions —
+> locked v1 scope, all-or-nothing import, read+write parity — were already
+> locked before DESIGN started; the genuinely open item DISCUSS handed to
+> DESIGN, the path-variable parsing mechanism, is resolved here)
+> ADR: `docs/product/architecture/adr-062-rules-file-import-parser-path-variable-and-decomposition.md`
+> (new — combined outer-syntax-parser/grammar-extension/decomposition-atomicity
+> decision, mirroring ADR-030/031/033's own smaller-decision-surface
+> precedent). Amends no prior ADR — `Operand`/`evaluate()` are extended per
+> the existing, established additive-parameter/additive-variant precedent
+> (ADR-027/030/034), not corrected.
+
+Full DESIGN content (Reading Confirmation, Reuse Analysis, DDD List,
+Component Decomposition, Driving/Driven Ports, Technology Choices, Decisions
+Table DDD-CP-1..11, C4 System Context/Container/Component diagrams,
+Architecture Enforcement, Open Questions, Handoff Package) lives in
+`docs/feature/security-rules-cel-parity/feature-delta.md` §§ Wave: DESIGN —
+the single narrative file per the lean output convention. Summary below.
+
+### Summary
+
+**The central decision (resolves DISCUSS's own Handoff Package flag 7 /
+OQ-CP-01)**: the raw `.rules` file's bare wildcard-name references (e.g.
+`userId` in `match /profiles/{userId} { allow read, write: if
+request.auth.uid == userId; }`) are rewritten, at import time, into embyr's
+own canonical dot-prefixed operand text — `request.path.userId` — before the
+existing, byte-for-byte-unmodified `upsert_access_rule`/
+`upsert_write_access_rule` are ever called. A new `Operand::PathVariable(String)`
+is parsed via one ordinary `word_to_operand` prefix arm, uniform with
+`resource.data.`/`request.resource.data.`/`request.auth.token.`. This
+eliminates the "context-dependent parsing" concern DISCUSS flagged entirely:
+`parse_condition`'s signature never changes, and every re-parse of a stored
+`condition_source` (real enforcement, simulation) reconstructs the identical
+AST from the text alone — zero new storage column, zero side-channel
+context.
+
+**Evaluation**: `evaluate()` gains a 5th parameter, `path_variable_value:
+Option<&str>` — a plain value, not a name-keyed map, since this feature's
+own locked scope (at most one leaf-level wildcard per collection) makes
+"the value" structurally unambiguous. Threaded from `DocumentPath.document_id`
+(already known before any of the 4 real call sites — `GetDocument`,
+`CreateDocument`, `UpdateDocument`, `DeleteDocument` — touch storage) — zero
+new I/O, mirrors the `RequestResourceField`(ADR-030)/`AuthTokenClaim`
+(ADR-034) additive-parameter precedent exactly.
+
+**Structural verification, not assumption (Handoff Package flag 5)**:
+confirmed by direct inspection that `check_query_compliance`'s existing
+`decompose_decidable` function requires ZERO code change to reject any rule
+referencing the new `PathVariable` operand — its wildcard catch-all already,
+structurally, rejects every operand family it doesn't explicitly name. This
+holds for both `RunQuery` and Listen's subscribe-time gate (ADR-031/033,
+unchanged).
+
+**Listen's per-event re-check is deliberately left unwired**: `evaluate()`'s
+new parameter is threaded to 2 Listen call sites (`handle_add_target`'s
+`Changed`/`Removed` arms) as `None`, mechanically (Rust has no default
+arguments) — not as a working capability. A `PathVariable`-referencing
+rule's live per-event Listen re-check fails closed (always denies) for the
+lifetime of this feature, matching DISCUSS's own explicit "Listen's
+per-event re-check is out of scope" — safe, not silently dropped.
+
+**Import atomicity**: achieved by validating the ENTIRE file (outer syntax +
+path-shape + verb-bucketing + rewritten-condition grammar) before applying
+any block, then looping the existing unmodified `upsert_*` calls — not by
+wrapping the loop in a new cross-call database transaction. Evidenced risk
+(invalid file content) is fully closed structurally; unevidenced risk
+(infrastructure failure mid-loop) is named, not built against
+speculatively (Principle 8).
+
+**New scoping decision beyond DISCUSS's own text**: Firestore's granular
+verb vocabulary (`read`/`get`/`list`/`write`/`create`/`update`/`delete`) is
+bucketed onto embyr's existing 2-condition-per-collection model; a block
+assigning two different conditions to the same bucket (e.g. differing
+`get`/`list` conditions) is rejected (`CONFLICTING_VERB_CONDITIONS`) —
+flagged for DISTILL to confirm (OQ-CP-05), not silently asserted as
+DISCUSS-locked.
+
+**Bounded context**: no new context. BC-4 Access Control (ADR-029) gains one
+new pure submodule (`access_control::rules_file`) and one new `Operand`
+variant — the same extension shape every prior sibling epic used.
+
+**No new external integration, no new driven port, no new Earned Trust
+probe, no new workspace dependency** — the new parser is pure CPU
+computation over an in-memory string; the new admin handler's only I/O
+reuses the existing, already-probed `SystemDb` pool via unmodified methods.
+Zero new migration, zero new table, zero new crate.
+
+Full alternatives-considered analysis (including the rejected
+context-parameterized-parsing option, the rejected second-evaluation-function
+option, and the rejected new-transaction-wrapped-import option):
+`docs/product/architecture/adr-062-rules-file-import-parser-path-variable-and-decomposition.md`.
+
+---
+
 ## Application Architecture — client-auth-hosted-identity
 
 > Updated: 2026-08-27

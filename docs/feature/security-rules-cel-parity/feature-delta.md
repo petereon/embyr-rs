@@ -816,3 +816,288 @@ The remaining 0.03 gap is the parsing-mechanism flag (Handoff Package flag 7) �
 
 **Handoff To**: nw-solution-architect (DESIGN wave) + nw-platform-architect (DEVOPS wave, KPIs only)
 **Deliverables**: This `feature-delta.md` + 6 slice briefs + outcome KPIs + SSOT journey/jobs updates.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+**Agent**: Morgan (nw-solution-architect) | **Date**: 2026-09-01 | **Mode**: Propose (autonomous analysis; DISCUSS's 3 central resolutions were already locked before DESIGN started — this pass designs the mechanism, not the observable behavior)
+
+✓ `docs/feature/security-rules-cel-parity/feature-delta.md` (this file, full, 818 lines — DISCUSS's own content above).
+✓ 6 slice briefs, `docs/feature/security-rules-cel-parity/slices/slice-01-*.md` through `slice-06-*.md` (full).
+✓ `docs/product/architecture/brief.md` §§ Application Architecture — `security-rules` through `security-rules-operations` (lines 3481-4290, full) — confirms BC-4's current shape, every prior epic's own reuse/extension pattern, and that `security-rules-operations` is the most recent sibling (no gap between it and this feature).
+✓ `docs/feature/security-rules/feature-delta.md` §§ Wave: DESIGN — the original locked v1 grammar EBNF and Reuse Analysis, confirming this feature extends rather than reopens Resolution 1's original scope decision.
+✓ `docs/product/architecture/adr-027-access-rule-grammar-and-evaluation.md` (full), `adr-028-access-rule-storage-and-lifecycle.md` (full), `adr-029-access-control-composition-and-bounded-context.md` (full), `adr-030-write-path-grammar-storage-and-composition.md` (full), `adr-031-query-shape-compliance-check.md` (full), `adr-033-listen-compliance-composition-and-collection-scoping.md` (full), `adr-034-custom-claims-representation-and-grammar-extension.md` (referenced via ADR-027's own § Changed Assumptions), `adr-035-access-rule-history-storage-and-capture-mechanism.md` (referenced via ADR-030's own § Changed Assumptions) — the complete, current grammar/evaluator/storage/composition/realtime architecture this feature extends. Confirmed current `Operand` enum (8 variants), `evaluate()`'s 4-parameter signature, `decompose_decidable`'s exact match arms, and `handle_add_target`'s exact per-event `evaluate()` call shape — all directly, not assumed.
+✓ `crates/embyr-core/src/access_control/mod.rs` (full, 1971 lines) — `Operand`, `Condition`, `word_to_operand`, `tokenize`, `detect_unsupported_construct`, `evaluate`/`eval_bool`/`compare_operands`/`resolve_field_value`, `check_query_compliance`/`decompose_decidable`/`filter_binds_field_to_uid` — the exact current shapes this feature's grammar extension (ADR-062) builds on.
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` (targeted: module doc header, all `pub struct`/`pub async fn` signatures, `define_access_rule`, `simulate_access_rule`, `json_value_to_field_value`) — the exact current admin-handler shapes the new import handler and extended simulation handler mirror.
+✓ `crates/embyr-server/src/admin/router.rs` (targeted: route table) — confirmed the current `access_rules`/`write_access_rules`/`group_access_rules` route grouping the new `.../access_rules/import` route joins.
+✓ `crates/embyr-core/src/domain/document.rs` (targeted) — confirmed `DocumentPath { collection_path, document_id }`, the source of the value threaded into `evaluate()`'s new parameter.
+✓ `crates/embyr-core/Cargo.toml` — confirmed zero existing parser-generator/CEL dependency (no `pest`/`nom`/similar) — the hand-rolled-parser precedent (ADR-027 Option C) has no existing alternative to reuse for the outer syntax either.
+✓ ADR directory listing (`docs/product/architecture/adr-*.md`) — confirmed highest existing ADR number is `adr-061` before this session's own new ADR; a pre-existing numbering collision at `adr-056`/`adr-057` (3 and 2 files respectively, unrelated `agent-mode-*` features) was found and is NOT this feature's own creation — not touched, out of this feature's scope; this feature's own new ADR is numbered `adr-062`, confirmed unused before writing.
+
+**No contradictions found.** This DESIGN pass implements DISCUSS's locked Resolutions 1-3 without reopening any of them; the one genuinely open item DISCUSS handed to DESIGN (Handoff Package flag 7, the path-variable parsing mechanism / OQ-CP-01) is resolved below and in ADR-062.
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis (hard gate)
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| `parse_condition`/`evaluate`/`Operand` grammar | `crates/embyr-core/src/access_control/mod.rs` | Condition parsing/evaluation for every imported rule's condition text | **EXTEND** | One new dot-prefixed operand family (`request.path.<name>` → `Operand::PathVariable`), one new `evaluate()` parameter (`path_variable_value: Option<&str>`) — identical shape and precedent to `RequestResourceField` (ADR-030) and `AuthTokenClaim` (ADR-034). `parse_condition`'s own signature is unchanged; zero of its 5 pre-existing call sites need modification. |
+| `upsert_access_rule`/`upsert_write_access_rule` | `crates/embyr-server/src/adapters/system_db.rs` | Rule storage (define/redefine, with fused history capture) | **REUSE, byte-for-byte unmodified** | This is the feature's own decomposition TARGET, per DISCUSS's own locked System Constraints ("zero change to any already-shipped storage shape"). The import handler calls these exactly as `define_access_rule`/`define_write_access_rule` already do. |
+| `define_access_rule`/`define_write_access_rule` | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Per-collection rule authoring (single collection, single condition, per request) | **CREATE NEW** (`import_rules_file`), pattern REUSED | A whole-file, multi-block, all-or-nothing request/response contract is genuinely different from a single-collection body — mirrors ADR-030's own `define_write_access_rule` "two single-purpose routes, not one route with a discriminated body" precedent and ADR-032's "genuinely different contract → new handler" test. The new handler calls the SAME `upsert_*` methods `define_*` already calls — no parallel storage mechanism. |
+| `simulate_access_rule` | `crates/embyr-server/src/admin/handlers/access_rules.rs` | Candidate-rule evaluation against synthetic identity/data | **EXTEND** | One additive, `#[serde(default)]` field (`path_variable: Option<String>`) — mirrors ADR-030's own `request_resource`/ADR-034's own `claims` additive-field precedent. Response contract (`{outcome}`) is completely unchanged, so ADR-032's "new handler for a genuinely different contract" test does NOT fire here — an extension is the correct, evaluated call, not a reflexive new-handler default. |
+| `decompose_decidable`/`check_query_compliance` (query-path compliance) | `crates/embyr-core/src/access_control/mod.rs` | Statically-decidable rule-shape checking for `RunQuery`/Listen subscribe-time | **REUSE, zero code change — VERIFIED, not assumed** | `decompose_decidable`'s explicit match arms name only `Literal`/`AuthNullSentinel↔NullLiteral`/`AuthUid↔ResourceField`/`And`; any `Compare` naming the new `PathVariable` operand falls through the existing wildcard `_ => Err(Undecidable)` arm automatically — the identical mechanism that already rejects `AuthTokenClaim`/`StringLiteral`/`RequestResourceField` today. Confirmed by direct inspection (ADR-062 § Decision — Structural Verification). |
+| `handle_add_target`'s per-event `evaluate()` calls (Listen) | `crates/embyr-server/src/realtime/listen_handler.rs` | Per-event rule re-check on live document changes | **EXTEND, mechanical signature only** | Rust's lack of default arguments forces a 1-line argument-list update at 2 call sites (`Changed`/`Removed` arms) when `evaluate()` gains its 5th parameter. Both pass `None` — deliberately, per DISCUSS's own explicit "Listen per-event re-check is out of scope" (see ADR-062 § Decision — Listen's Per-Event Re-Check). Zero new logic. |
+| A general-purpose parser/parser-generator crate (`pest`/`nom`/a CEL-in-Rust crate) | n/a | Outer `.rules`-file syntax parsing | **REJECTED — hand-rolled instead** | Mirrors ADR-027's own Option A rejection verbatim, reapplied to the outer grammar: a grammar-file-driven parser makes "accept one more path shape" (Epic 4b/4c/4d/4e's own deferred scope) a one-line edit — exactly the silent-widening risk this feature's own v1 scope boundary must resist. Zero new workspace dependency preserved (confirmed via `embyr-core/Cargo.toml`, no such crate present today). |
+
+**Verdict**: zero unjustified `CREATE NEW`. The two genuine `CREATE NEW` items — the `rules_file` parser/decomposer module and the `import_rules_file` admin handler — are both confirmed, by DISCUSS's own Walking Skeleton Evaluation and by this table's own contract-difference test, to have no existing alternative to extend.
+
+---
+
+## Wave: DESIGN / [REF] DDD List
+
+| # | Decision | Verdict |
+|---|---|---|
+| DDD-CP-1 | Outer `.rules`-file syntax parser location and technology | CREATE NEW `embyr-core::access_control::rules_file` (new submodule); hand-rolled scanner, zero new dependency — mirrors ADR-027 Option C |
+| DDD-CP-2 | Path-variable binding mechanism (resolves OQ-CP-01 / Handoff Package flag 7) | Canonical rewrite at import time: bare wildcard name → `request.path.<name>` in the STORED condition text, before calling the existing `upsert_*`. New `Operand::PathVariable(String)`, one new dot-prefixed `word_to_operand` arm. Zero context-dependent parsing anywhere; zero new storage column |
+| DDD-CP-3 | `evaluate()` extension | New 5th parameter `path_variable_value: Option<&str>` (not a name-keyed map — YAGNI, deferred to Epic 4b) |
+| DDD-CP-4 | Query-path/Listen subscribe-time "zero new code" claim (Handoff Package flag 5) | VERIFIED by direct inspection — `decompose_decidable`'s existing wildcard catch-all structurally rejects any `PathVariable`-referencing rule with zero modification |
+| DDD-CP-5 | Listen per-event re-check wiring | Deliberately NOT wired to a real value — mechanical `None` at 2 call sites, fail-closed always-deny for `PathVariable` rules on live updates, named OQ-CP-04 |
+| DDD-CP-6 | Import atomicity mechanism | Validate-the-whole-file-first, then apply via the existing, byte-for-byte-unmodified `upsert_*` calls in a plain loop — no new cross-call DB transaction (evidenced-absent risk, named not built) |
+| DDD-CP-7 | Verb-to-bucket mapping | Firestore's `{read,get,list}` → `access_rules`; `{write,create,update,delete}` → `write_access_rules`; conflicting same-bucket conditions within one block rejected (`CONFLICTING_VERB_CONDITIONS`, DESIGN-introduced, named OQ-CP-05) |
+| DDD-CP-8 | Path-shape validation | Explicit 2-shape allow-list (`[Literal]` / `[Literal, Wildcard]`); anything else rejected `NESTED_PATH`/`RECURSIVE_WILDCARD` |
+| DDD-CP-9 | Undefined path-variable reference | No new error class — reuses `parse_condition`'s existing `SyntaxError` catch-all (already distinguishable from a runtime denial by virtue of firing at import time) |
+| DDD-CP-10 | Admin endpoint shape (resolves OQ-CP-02) | New `POST .../access_rules/import` (Owner/Admin), Bearer-gated, atomic all-or-nothing response; `simulate_access_rule` extended in place with one additive field |
+| DDD-CP-11 | Bounded-context placement | No new BC — extends BC-4 Access Control (ADR-029) with a new submodule and one operand; not reopened |
+
+---
+
+## Wave: DESIGN / [REF] Component Decomposition
+
+| Component | Path | Type | Notes |
+|---|---|---|---|
+| `access_control::rules_file` (outer-syntax parser + path-shape validator + verb-bucketer + condition rewriter) | `crates/embyr-core/src/access_control/rules_file.rs` | **CREATE NEW** | Pure, zero-IO, hand-rolled. Produces `Vec<DecomposedRule>` or a `RulesFileError` naming every offending block |
+| `Operand::PathVariable` + `word_to_operand`/`resolve_field_value`/`evaluate()` extension | `crates/embyr-core/src/access_control/mod.rs` | **EXTEND** | One new operand variant, one new dot-prefix parse arm, one new `evaluate()` parameter |
+| `import_rules_file` admin handler | `crates/embyr-server/src/admin/handlers/access_rules.rs` | **CREATE NEW** | Calls `rules_file::{parse_rules_file, decompose}` then the existing `upsert_access_rule`/`upsert_write_access_rule` in a loop |
+| `simulate_access_rule` (extended) | `crates/embyr-server/src/admin/handlers/access_rules.rs` | **EXTEND** | One additive `path_variable: Option<String>` field on `SimulateAccessRuleBody`; one new argument to the existing `evaluate()` call |
+| `handle_get_document` | `crates/embyr-server/src/grpc/handler.rs` | **EXTEND** | Threads `Some(path.document_id.as_str())` into the extended `evaluate()` call |
+| `handle_create_document`/`handle_update_document`/`handle_delete_document` | `crates/embyr-server/src/grpc/handler.rs` | **EXTEND** | Same threading, mirrors Resolution 3's "mechanical, uniform" precedent exactly |
+| `handle_add_target` (`Changed`/`Removed` arms) | `crates/embyr-server/src/realtime/listen_handler.rs` | **EXTEND (mechanical only)** | Passes `None` — see DDD-CP-5 |
+| Admin router | `crates/embyr-server/src/admin/router.rs` | **EXTEND** | One new route: `POST /admin/v1/projects/:project_id/access_rules/import` |
+
+No new crate, no new bounded context, no new migration, no new table.
+
+---
+
+## Wave: DESIGN / [REF] Driving Ports (Inbound)
+
+| Port | Protocol | Extension |
+|---|---|---|
+| Admin port `:9090` (existing, extended) | HTTP/1.1 | New `POST /admin/v1/projects/:project_id/access_rules/import` (Owner/Admin) — US-01/04/05. Extended `POST .../access_rules/simulate` (any role, additive field) — US-06 |
+| Data ports `:8080` (gRPC) / `:8081` (REST/gRPC-Web) (existing, unchanged RPC shapes) | gRPC / HTTP | `GetDocument`, `CreateDocument`, `UpdateDocument`, `DeleteDocument` — zero new RPC, observable behavior extended to honor `PathVariable`-bearing rules (US-02/03) |
+
+No new network-facing port.
+
+---
+
+## Wave: DESIGN / [REF] Driven Ports + Adapters (Outbound)
+
+**No new driven port, no new adapter, no new Earned Trust probe** — mirroring ADR-027/029/030/031/033 § Enforcement verbatim:
+
+- `rules_file::parse_rules_file`/`decompose` are pure, deterministic CPU computation over an in-memory `&str` — no filesystem, network, subprocess, clock, or vendor-SDK dependency anywhere in this call graph. No environment can lie to a pure function.
+- The new admin handler's only I/O is the existing, already-probed `SystemDb` connection pool, via `upsert_access_rule`/`upsert_write_access_rule` — byte-for-byte unmodified methods, the identical substrate every sibling epic's own rule-authoring call already uses.
+- `evaluate()`'s extended signature adds no new substrate reliance — `path_variable_value` is a value already resident in memory (`DocumentPath.document_id`) at every real call site, never a new fetch.
+
+Full probe-contract table: not applicable — zero new driven ports means zero new probe obligations under Principle 12; the existing `SystemDb` probe (composition root) already covers every I/O this feature performs.
+
+---
+
+## Wave: DESIGN / [REF] Technology Choices
+
+| Choice | Rationale |
+|---|---|
+| Hand-rolled recursive-descent/scanner parser for the outer `.rules`-file syntax, zero new dependency | Mirrors ADR-027 Option C exactly; a grammar-file-driven parser (`pest`/`nom`) would make the locked v1 scope boundary a one-line edit to widen — the opposite of what this feature needs (ADR-062 § Decision — Outer-Syntax Parser) |
+| `Operand::PathVariable(String)` as an ordinary dot-prefixed grammar family (`request.path.<name>`) | Reuses the existing `RequestResourceField`/`AuthTokenClaim` precedent verbatim — zero tokenizer change, zero context-dependent parsing (ADR-062 § Decision — Grammar Extension) |
+| `evaluate()`'s 5th parameter as `Option<&str>`, not a name-keyed map | YAGNI — this feature's own locked scope guarantees at most one wildcard per collection; a map is Epic 4b's own future extension point, not built speculatively |
+| No new Rust crate anywhere in this feature | Confirmed against `embyr-core/Cargo.toml` and `embyr-server`'s existing dependency set — nothing this feature needs is unavailable in `std` plus already-present crates |
+
+All choices are OSS-neutral (no dependency added at all, new or existing-external); no license consideration applies.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table
+
+| # | Decision | Rationale (one line) |
+|---|---|---|
+| DDD-CP-1 | `rules_file` submodule, hand-rolled | Prevents silent widening of the locked outer-syntax scope, zero new dependency |
+| DDD-CP-2 | Canonical `request.path.<name>` rewrite | Eliminates context-dependent parsing entirely; zero new storage |
+| DDD-CP-3 | `evaluate()` gains `path_variable_value: Option<&str>` | Mechanical, additive, mirrors 2 prior precedents (ADR-030, ADR-034) |
+| DDD-CP-4 | Query-path/Listen subscribe-time verified zero-code-change | Confirmed by direct inspection of `decompose_decidable`'s exhaustive match |
+| DDD-CP-5 | Listen per-event stays unwired (`None`) | Honors DISCUSS's explicit out-of-scope call; fail-closed, not fail-open |
+| DDD-CP-6 | No new cross-call DB transaction for import | Validate-then-apply already satisfies every locked AC; unevidenced risk not built against |
+| DDD-CP-7 | Verb bucketing + conflict rejection | Firestore's 7 verbs collapse onto embyr's 2 buckets; conflicts named, not silently resolved |
+| DDD-CP-8 | 2-shape path allow-list | Explicit allow-list mirrors `decompose_decidable`'s own reject-by-default discipline |
+| DDD-CP-9 | No new "undefined path variable" error class | Existing `SyntaxError` catch-all already satisfies the AC |
+| DDD-CP-10 | New import route + extended simulate | Genuinely different request contract justifies new handler; unchanged response contract does not |
+| DDD-CP-11 | No new bounded context | BC-4 extended, not reopened |
+
+---
+
+## Wave: DESIGN / [REF] C4 System Context (Mermaid) — security-rules-cel-parity
+
+```mermaid
+C4Context
+  title System Context — embyr-rs (security-rules-cel-parity delta)
+  Person(alex, "Alex", "SDK Developer, Trailmark — imports a real .rules file")
+  Person(maria, "Maria Santos", "Trailmark end user — reads/writes her own profile")
+  Person(dana, "Dana Kim", "Trailmark end user — denied access to Maria's profile")
+  System(embyr, "embyr-rs", "Firestore-protocol translation server")
+  SystemDb_Ext(system_db, "System DB (Postgres)", "access_rules / write_access_rules — UNCHANGED schema")
+
+  Rel(alex, embyr, "Imports a real .rules file via Admin API")
+  Rel(maria, embyr, "getDoc()/updateDoc() on profiles/maria-santos via SDK")
+  Rel(dana, embyr, "getDoc()/updateDoc() on profiles/maria-santos via SDK (denied)")
+  Rel(embyr, system_db, "Reads/writes access_rules, write_access_rules (existing tables, unmodified schema)")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Container Diagram (Mermaid) — security-rules-cel-parity
+
+```mermaid
+C4Container
+  title Container Diagram — embyr-rs (security-rules-cel-parity delta)
+  Person(alex, "Alex", "SDK Developer")
+  Person(end_user, "Maria / Dana", "Trailmark end users")
+
+  Container_Boundary(embyr_server, "embyr-server") {
+    Container(admin_http, "Admin HTTP :9090", "axum", "NEW: POST .../access_rules/import. EXTENDED: POST .../access_rules/simulate")
+    Container(grpc, "gRPC :8080 / REST-Web :8081", "tonic/axum", "GetDocument, Create/Update/DeleteDocument — EXTENDED to honor PathVariable rules")
+    Container(realtime, "Realtime (Listen) :8080", "tokio", "handle_add_target — mechanical evaluate() signature update only")
+  }
+
+  Container_Boundary(embyr_core, "embyr-core (BC-4 Access Control)") {
+    Container(rules_file, "access_control::rules_file", "Rust, pure", "NEW: outer-syntax parser, path-shape validator, verb-bucketer, condition rewriter")
+    Container(access_control, "access_control (grammar/evaluator)", "Rust, pure", "EXTENDED: Operand::PathVariable, evaluate() 5th param")
+  }
+
+  ContainerDb(system_db, "System DB (Postgres)", "access_rules / write_access_rules", "UNCHANGED schema")
+
+  Rel(alex, admin_http, "Imports .rules file / simulates candidate rule")
+  Rel(end_user, grpc, "getDoc()/updateDoc()/etc.")
+  Rel(admin_http, rules_file, "Parses + validates + decomposes")
+  Rel(rules_file, access_control, "Calls parse_condition() for each rewritten block condition")
+  Rel(admin_http, system_db, "upsert_access_rule / upsert_write_access_rule (existing, unmodified)")
+  Rel(grpc, access_control, "Calls extended evaluate() with path_variable_value")
+  Rel(realtime, access_control, "Calls evaluate() with path_variable_value = None (unwired, fail-closed)")
+```
+
+---
+
+## Wave: DESIGN / [REF] C4 Component Diagram — BC-4 Import Subsystem (Mermaid)
+
+```mermaid
+C4Component
+  title Component Diagram — Rules-File Import Subsystem (BC-4 Access Control)
+  Container_Boundary(handler, "import_rules_file (embyr-server admin handler)") {
+    Component(role_gate, "Owner/Admin role gate", "Rust", "Mirrors define_access_rule's existing gate")
+  }
+  Container_Boundary(rules_file_mod, "access_control::rules_file (embyr-core, pure)") {
+    Component(outer_parser, "parse_rules_file()", "Rust", "Scans service/match wrapper into Vec<MatchBlock>")
+    Component(decomposer, "decompose()", "Rust", "Path-shape validation, verb-bucketing, condition rewrite")
+  }
+  Component(parse_condition, "parse_condition() [EXTENDED]", "Rust, embyr-core::access_control", "Existing grammar parser + new PathVariable arm")
+  Component(upsert_read, "upsert_access_rule() [UNCHANGED]", "Rust, SystemDb adapter", "Existing storage call")
+  Component(upsert_write, "upsert_write_access_rule() [UNCHANGED]", "Rust, SystemDb adapter", "Existing storage call")
+  ContainerDb(pg, "System DB", "Postgres", "access_rules / write_access_rules")
+
+  Rel(role_gate, outer_parser, "Passes raw file text to")
+  Rel(outer_parser, decomposer, "Passes Vec<MatchBlock> to")
+  Rel(decomposer, parse_condition, "Validates each rewritten block condition via")
+  Rel(decomposer, role_gate, "Returns Vec<DecomposedRule> OR RulesFileError naming every offending block")
+  Rel(role_gate, upsert_read, "Applies read-bucket rules via (only if decompose succeeded)")
+  Rel(role_gate, upsert_write, "Applies write-bucket rules via (only if decompose succeeded)")
+  Rel(upsert_read, pg, "INSERT ... ON CONFLICT ... DO UPDATE (existing statement, unmodified)")
+  Rel(upsert_write, pg, "INSERT ... ON CONFLICT ... DO UPDATE (existing statement, unmodified)")
+```
+
+---
+
+## Wave: DESIGN / [REF] Architecture Enforcement
+
+- `embyr-core::access_control` (including the new `rules_file` submodule) retains zero IO imports — covered by the existing `cargo-deny`/`deny.toml` rule for all of `embyr-core`, no new configuration needed.
+- `embyr-core` defines the value-type/function surface; `embyr-server` consumes it — dependency direction inward, unchanged.
+- No new workspace dependency — `cargo-deny`/`deny.toml` unaffected.
+- Mutation-testing surface (per-feature strategy, project CLAUDE.md): `rules_file::decompose`'s path-shape allow-list and verb-bucketing/conflict-detection logic, and `resolve_field_value`'s new `PathVariable` arm — the two highest-consequence new decision points this feature adds (a false-accept on path-shape validation would silently widen the locked scope; a wrong resolution value would be a false-allow/false-deny on real Trailmark traffic).
+
+---
+
+## Wave: DESIGN / [REF] Open Questions
+
+| ID | Question | Status |
+|---|---|---|
+| OQ-CP-01 | Exact parsing mechanism for context-dependent path-variable-name validity | **RESOLVED** — canonical `request.path.<name>` rewrite at import time eliminates the need for context-dependent parsing entirely (ADR-062 § Decision — Path-Variable Binding Mechanism, Option C) |
+| OQ-CP-02 | Exact wire shape for the new import endpoint | **RESOLVED** — `POST /admin/v1/projects/:project_id/access_rules/import`, Owner/Admin, atomic all-or-nothing response naming every offending block (ADR-062 § Decision — Admin Surface) |
+| OQ-CP-03 | Should Epic 4b/4c/4d be sequenced next, based on real import usage | **CARRIED, unchanged** — owned by Product Discovery after this feature ships, not DESIGN's call |
+| OQ-CP-04 (NEW, DESIGN-raised) | Listen's per-event re-check fails closed (always-deny), not correctly, for `PathVariable`-bearing rules on live subscriptions — is this acceptable long enough to defer wiring to Epic 4b, or does real usage warrant an accelerated fast-follow? | Open — no evidence either way yet; flagged for Product Discovery / DELIVER retro |
+| OQ-CP-05 (NEW, DESIGN-raised) | `CONFLICTING_VERB_CONDITIONS` (a single block assigning two different conditions to the same read/write bucket via granular verbs, e.g. differing `get` vs `list` conditions) has no DISCUSS-authored UAT scenario — is DESIGN's rejection-based resolution correct, or should DISTILL confirm a different behavior (e.g. logical OR of the two conditions)? | Open — flagged for acceptance-designer to add explicit coverage during DISTILL |
+
+---
+
+## Wave: DESIGN / [REF] External Integrations
+
+None. This feature introduces zero new external API, webhook, or third-party service dependency — confirmed by ADR-062 § Enforcement (zero new substrate reliance).
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package
+
+**To DISTILL (acceptance-designer, via direct dispatch per this session's standing practice — no nWave DISTILL orchestration)**:
+1. This `feature-delta.md` (DISCUSS + DESIGN sections), 6 slice briefs, `docs/product/architecture/adr-062-rules-file-import-parser-path-variable-and-decomposition.md`.
+2. Exact wire contracts (§ Decision — Admin Surface, ADR-062): `ImportRulesFileBody`/`ImportRulesFileResponse`/`RulesFileRejectionResponse`/`OffendingBlock`, and the extended `SimulateAccessRuleBody.path_variable` field.
+3. OQ-CP-04/05 (above) — DISTILL should confirm acceptance-scenario coverage for both, or explicitly defer with rationale.
+4. Slice sequencing is unchanged from DISCUSS (01→02→03→04→05, Release 1; 06, Release 2) — DESIGN introduces no new slice.
+5. Reuse Analysis and structural-verification claims (query-path/Listen subscribe-time zero-code-change) above are load-bearing for acceptance-scenario design — a scenario asserting "no code change" is unnecessary; a scenario asserting the OBSERVABLE behavior (an imported `PathVariable`-rule collection's `RunQuery`/Listen-subscribe is rejected outright) is the correct acceptance-level assertion.
+
+**To DEVOPS (platform-architect, KPIs only, unchanged from DISCUSS)**: § Outcome KPIs (DISCUSS section) — no new KPI from DESIGN.
+
+Peer review: not invoked per this session's standing practice (human is the review gate for this dispatch, per explicit instruction).
+
+---
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] Path-variable binding resolved via canonical `request.path.<name>` rewrite at import time — zero context-dependent parsing, zero new storage (ADR-062).
+- [D2] `evaluate()` extended with `path_variable_value: Option<&str>` (not a name-keyed map — YAGNI).
+- [D3] Query-path/Listen subscribe-time zero-code-change claim independently VERIFIED by direct inspection of `decompose_decidable`'s exhaustive match arms.
+- [D4] Listen's per-event re-check deliberately left unwired (`None`) — fail-closed, not fail-open, per DISCUSS's own explicit scope exclusion.
+- [D5] Import atomicity achieved via validate-then-apply over the existing, byte-for-byte-unmodified `upsert_*` calls — no new cross-call DB transaction built against an unevidenced risk.
+- [D6] New verb-bucketing/conflict-rejection rule (`CONFLICTING_VERB_CONDITIONS`) — a DESIGN-introduced scoping decision, flagged for DISTILL confirmation (OQ-CP-05).
+- [D7] New admin route `POST .../access_rules/import`; `simulate_access_rule` extended in place with one additive field — no new simulation route.
+
+### Architecture Summary
+- Pattern: modular monolith with dependency inversion (unchanged) — this feature adds no new component category, only extends BC-4 Access Control.
+- Paradigm: functional-where-practical Rust (unchanged, project CLAUDE.md) — the new `rules_file` module is pure functions over immutable values throughout, `Result<T, E>` for every fallible step.
+- Key components: `access_control::rules_file` (new), `Operand::PathVariable` + `evaluate()` extension, `import_rules_file` admin handler (new), extended `simulate_access_rule`.
+
+### Reuse Analysis
+See § Wave: DESIGN / [REF] Reuse Analysis above (full table).
+
+### Technology Stack
+- No new dependency — hand-rolled Rust parser, consistent with ADR-027's own precedent and this project's dependency-minimalism default.
+
+### Constraints Established
+- `evaluate()`'s signature is now 5 parameters; any future operand family extension continues this additive-parameter or additive-field pattern, not a rewrite.
+- The `rules_file` module's path-shape allow-list is the enforcement boundary for "single top-level collection, at most one leaf wildcard" — Epic 4b must extend this allow-list, not bypass it.
+
+### Upstream Changes
+None — DISCUSS's locked Resolutions 1-3 and System Constraints are implemented as written; no assumption from DISCUSS required revision.
+
+---
+
+## Wave: DESIGN / [REF] Next Wave
+
+**Handoff To**: DISTILL (acceptance-designer, direct dispatch) for E2E acceptance-test design against the 6 slice briefs; DELIVER (software-crafter) per-slice thereafter, per this session's standing Outside-In TDD practice.
+**Deliverables**: This `feature-delta.md` (DISCUSS + DESIGN), 6 slice briefs, `adr-062-rules-file-import-parser-path-variable-and-decomposition.md`, `docs/product/architecture/brief.md` § Application Architecture — security-rules-cel-parity.
