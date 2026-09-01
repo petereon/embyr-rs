@@ -756,6 +756,13 @@ path = "../../tests/security_rules_cel_parity/acceptance/cp02_path_variable_gate
 name = "security_rules_cel_parity_cp03_path_variable_gates_writes"
 path = "../../tests/security_rules_cel_parity/acceptance/cp03_path_variable_gates_writes.rs"
 
+# security-rules-cel-parity acceptance tests (Slice 04, US-04, ADR-062) — an
+# import containing any out-of-v1-scope construct is rejected whole, naming
+# every offending block, with zero effect on any existing rule.
+[[test]]
+name = "security_rules_cel_parity_cp04_reject_out_of_scope_imports"
+path = "../../tests/security_rules_cel_parity/acceptance/cp04_reject_out_of_scope_imports.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

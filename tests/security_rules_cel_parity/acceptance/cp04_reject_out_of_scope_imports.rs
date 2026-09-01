@@ -1,0 +1,371 @@
+//! CP04 (Slice 04, US-04, Release 1) — An Import Containing Out-of-v1-Scope
+//! Constructs Is Rejected Whole, Naming Every Offending Block.
+//!
+//! Acceptance criteria verified here (feature-delta.md US-04):
+//!   AC-17-188: a nested/multi-segment collection path is rejected in full,
+//!              naming that specific block (NESTED_PATH).
+//!   AC-17-189: a recursive wildcard (`{path=**}`) is rejected in full,
+//!              naming that specific block (RECURSIVE_WILDCARD).
+//!   AC-17-190: a custom `function` call or `get()`/`exists()` call is
+//!              rejected in full, naming that specific block and construct
+//!              (CUSTOM_FUNCTION / CROSS_DOCUMENT_READ).
+//!   AC-17-191: a rejection response names EVERY offending block, not only
+//!              the first found.
+//!   AC-17-192: a rejected import leaves every existing rule — for the
+//!              file's own named collections and any other collection —
+//!              completely unchanged.
+//!   AC-17-193: a condition referencing a path-variable name not captured by
+//!              its own block's own path pattern is rejected at import time
+//!              as a named, distinguishable error (SYNTAX_ERROR, fired at
+//!              import-time parsing per ADR-062 § Decision — Condition
+//!              rewrite), never silently treated as a runtime missing-field
+//!              denial.
+//!   (DESIGN-introduced, OQ-CP-05, ADR-062 § Decision — Verb-bucketing):
+//!              a single block assigning two DIFFERENT conditions to the
+//!              same read/write bucket via granular verbs is rejected,
+//!              named CONFLICTING_VERB_CONDITIONS.
+//!
+//! Driving port: Admin HTTP :9090 (`SecurityRulesAdminContext`, reused
+//! unchanged from cp01's own fixture).
+//!
+//! Error ratio: every scenario here IS a rejection/boundary case by this
+//! story's own nature (US-04 is entirely about rejection) — well over the
+//! 40% mandate.
+
+#![allow(unused_imports)]
+
+#[path = "../common/mod.rs"]
+mod common;
+use common::SecurityRulesAdminContext;
+
+/// Journey:
+///   Given: project `trailmark-prod` exists, no rules imported yet
+///   When:  Alex imports a file containing a nested-subcollection block
+///          (`expeditions/{expeditionId}/journal_entries/{entryId}`)
+///   Then:  the whole import is rejected, naming that block as NESTED_PATH,
+///          and no rule is stored for it
+///
+/// AC-17-188
+///
+/// @error @driving_port @real-io @US-04 @AC-17-188
+#[tokio::test]
+async fn a_nested_subcollection_path_is_rejected_naming_that_block() {
+    let ctx = SecurityRulesAdminContext::new().await;
+    let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+    ctx.insert_project("trailmark-prod").await;
+
+    let rules_file = r#"
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /expeditions/{expeditionId}/journal_entries/{entryId} {
+              allow read: if request.auth.uid == resource.data.owner_id;
+            }
+          }
+        }
+    "#;
+
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/projects/trailmark-prod/access_rules/import"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "rules_file": rules_file }))
+        .send()
+        .await
+        .expect("import request failed");
+
+    assert_eq!(resp.status().as_u16(), 400, "AC-17-188: an out-of-scope import must be rejected");
+    let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
+    assert_eq!(body["reason"], "IMPORT_REJECTED");
+    let offending = body["offending_blocks"].as_array().expect("offending_blocks must be an array");
+    assert_eq!(offending.len(), 1);
+    assert_eq!(offending[0]["construct"], "NESTED_PATH", "AC-17-188: must be named NESTED_PATH specifically");
+    assert_eq!(offending[0]["path_pattern"], "/expeditions/{expeditionId}/journal_entries/{entryId}");
+
+    assert_eq!(
+        ctx.access_rule_condition_source("trailmark-prod", "expeditions").await,
+        None,
+        "AC-17-192: no rule may be stored for a rejected block"
+    );
+}
+
+/// Journey:
+///   Given: project `trailmark-prod` exists
+///   When:  Alex imports a file containing `match /{path=**} { allow read:
+///          if false; }`
+///   Then:  the request is rejected naming recursive wildcard paths,
+///          distinguishable from a plain grammar syntax error
+///
+/// AC-17-189
+///
+/// @error @driving_port @real-io @US-04 @AC-17-189
+#[tokio::test]
+async fn a_recursive_wildcard_path_is_rejected_naming_that_block() {
+    let ctx = SecurityRulesAdminContext::new().await;
+    let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+    ctx.insert_project("trailmark-prod").await;
+
+    let rules_file = r#"
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /{path=**} {
+              allow read: if false;
+            }
+          }
+        }
+    "#;
+
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/projects/trailmark-prod/access_rules/import"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "rules_file": rules_file }))
+        .send()
+        .await
+        .expect("import request failed");
+
+    assert_eq!(resp.status().as_u16(), 400, "AC-17-189: a recursive wildcard import must be rejected");
+    let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
+    let offending = body["offending_blocks"].as_array().expect("offending_blocks must be an array");
+    assert_eq!(offending.len(), 1);
+    assert_eq!(
+        offending[0]["construct"], "RECURSIVE_WILDCARD",
+        "AC-17-189: must be named RECURSIVE_WILDCARD, distinguishable from a plain SYNTAX_ERROR"
+    );
+}
+
+/// Journey (feature-delta.md UAT "Multiple offending blocks are all named in
+/// a single response"):
+///   Given: project `trailmark-prod` exists
+///   When:  Alex imports a file containing a nested-path block, a
+///          custom-function-call block (`isEditor()`), and a `get()`-call
+///          block
+///   Then:  the rejection response names all three, each with its own
+///          specific reason — not just the first one found
+///
+/// AC-17-190, AC-17-191
+///
+/// @error @driving_port @real-io @US-04 @AC-17-190 @AC-17-191
+#[tokio::test]
+async fn multiple_offending_blocks_are_all_named_in_a_single_rejection_response() {
+    let ctx = SecurityRulesAdminContext::new().await;
+    let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+    ctx.insert_project("trailmark-prod").await;
+
+    let rules_file = r#"
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /expeditions/{expeditionId}/journal_entries/{entryId} {
+              allow read: if request.auth.uid == resource.data.owner_id;
+            }
+            match /trail_guides/{guideId} {
+              allow write: if isEditor();
+            }
+            match /journal_entries {
+              allow read: if get(/databases/x/documents/users/y).data.admin;
+            }
+          }
+        }
+    "#;
+
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/projects/trailmark-prod/access_rules/import"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "rules_file": rules_file }))
+        .send()
+        .await
+        .expect("import request failed");
+
+    assert_eq!(resp.status().as_u16(), 400, "AC-17-190/191: any offending block rejects the whole import");
+    let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
+    let offending = body["offending_blocks"].as_array().expect("offending_blocks must be an array");
+    assert_eq!(offending.len(), 3, "AC-17-191: every offending block must be named, not just the first");
+
+    let constructs: Vec<&str> = offending.iter().map(|b| b["construct"].as_str().unwrap()).collect();
+    assert!(constructs.contains(&"NESTED_PATH"), "AC-17-188 (within multi-block): {constructs:?}");
+    assert!(constructs.contains(&"CUSTOM_FUNCTION"), "AC-17-190: custom function call: {constructs:?}");
+    assert!(constructs.contains(&"CROSS_DOCUMENT_READ"), "AC-17-190: get()/exists() call: {constructs:?}");
+
+    // AC-17-192: none of the 3 offending blocks' collections received a rule.
+    for collection in ["expeditions", "trail_guides", "journal_entries"] {
+        assert_eq!(
+            ctx.access_rule_condition_source("trailmark-prod", collection).await,
+            None,
+            "AC-17-192: no rule may be stored for collection '{collection}' from a rejected import"
+        );
+    }
+}
+
+/// Journey (feature-delta.md UAT "A rejected import leaves all existing
+/// rules completely unchanged"):
+///   Given: `trail_guides` already has an active rule (unrelated to this
+///          import) and `profiles` has no rule yet
+///   When:  Alex imports a file naming `profiles` (in-scope) and
+///          `expeditions/.../journal_entries` (nested-path, out-of-scope)
+///   Then:  the whole import is rejected; `trail_guides`'s pre-existing rule
+///          is completely unaffected, AND `profiles`'s own in-scope block
+///          from THIS SAME file received no rule either (zero partial
+///          application within one rejected import)
+///
+/// AC-17-192
+///
+/// @error @driving_port @real-io @US-04 @AC-17-192
+#[tokio::test]
+async fn a_rejected_import_leaves_every_existing_and_would_be_rule_completely_unchanged() {
+    let ctx = SecurityRulesAdminContext::new().await;
+    let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+    ctx.insert_project("trailmark-prod").await;
+    ctx.seed_access_rule("trailmark-prod", "trail_guides", "true").await;
+
+    let rules_file = r#"
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /profiles/{userId} {
+              allow read, write: if request.auth.uid == userId;
+            }
+            match /expeditions/{expeditionId}/journal_entries/{entryId} {
+              allow read: if request.auth.uid == resource.data.owner_id;
+            }
+          }
+        }
+    "#;
+
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/projects/trailmark-prod/access_rules/import"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "rules_file": rules_file }))
+        .send()
+        .await
+        .expect("import request failed");
+
+    assert_eq!(resp.status().as_u16(), 400, "AC-17-192: any offending block rejects the whole import");
+
+    assert_eq!(
+        ctx.access_rule_condition_source("trailmark-prod", "trail_guides").await.as_deref(),
+        Some("true"),
+        "AC-17-192: a pre-existing rule for a collection NOT named in the rejected import must be unchanged"
+    );
+    assert_eq!(
+        ctx.access_rule_condition_source("trailmark-prod", "profiles").await,
+        None,
+        "AC-17-192: the in-scope block's own collection in a rejected import must receive NO rule (zero partial application)"
+    );
+}
+
+/// Journey (feature-delta.md UAT "A path-variable name referenced in a
+/// condition but not captured by that block's own path is rejected"):
+///   Given: project `trailmark-prod` exists
+///   When:  Alex imports a file containing `match /profiles/{userId} {
+///          allow read: if request.auth.uid == postId; }` (a typo — the
+///          captured name is `userId`, the condition references `postId`)
+///   Then:  the request is rejected naming the undefined variable
+///          reference, distinguishable from a missing-document-field
+///          runtime denial (a 400 IMPORT_REJECTED, never a stored rule that
+///          could later 403/deny at request time)
+///
+/// AC-17-193
+///
+/// @error @driving_port @real-io @US-04 @AC-17-193
+#[tokio::test]
+async fn a_condition_referencing_an_undefined_path_variable_is_rejected_at_import_time() {
+    let ctx = SecurityRulesAdminContext::new().await;
+    let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+    ctx.insert_project("trailmark-prod").await;
+
+    let rules_file = r#"
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /profiles/{userId} {
+              allow read: if request.auth.uid == postId;
+            }
+          }
+        }
+    "#;
+
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/projects/trailmark-prod/access_rules/import"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "rules_file": rules_file }))
+        .send()
+        .await
+        .expect("import request failed");
+
+    assert_eq!(
+        resp.status().as_u16(),
+        400,
+        "AC-17-193: an undefined path-variable reference must be rejected at import time, not stored"
+    );
+    let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
+    assert_eq!(body["reason"], "IMPORT_REJECTED");
+    let offending = body["offending_blocks"].as_array().expect("offending_blocks must be an array");
+    assert_eq!(offending.len(), 1);
+    assert_eq!(
+        offending[0]["construct"], "SYNTAX_ERROR",
+        "AC-17-193: an undefined bare identifier is a named, distinguishable import-time construct rejection"
+    );
+
+    assert_eq!(
+        ctx.access_rule_condition_source("trailmark-prod", "profiles").await,
+        None,
+        "AC-17-193: no rule may be stored — this must never fall through to a runtime missing-field denial"
+    );
+}
+
+/// Journey (ADR-062 § Decision — Verb-bucketing, OQ-CP-05 — orchestrator-
+/// resolved DESIGN scoping, not a DISCUSS-authored AC, but explicit test
+/// coverage requested for this slice):
+///   Given: project `trailmark-prod` exists
+///   When:  Alex imports a file whose single `match` block assigns two
+///          DIFFERENT conditions to the same read bucket via granular verbs
+///          (`get` vs `list`)
+///   Then:  the whole import is rejected, naming that block
+///          CONFLICTING_VERB_CONDITIONS — embyr's storage has no way to
+///          express two conditions for one bucket, and the two conditions
+///          are never silently OR'd together
+///
+/// OQ-CP-05
+///
+/// @error @driving_port @real-io @US-04 @OQ-CP-05
+#[tokio::test]
+async fn differing_conditions_for_the_same_verb_bucket_are_rejected_as_conflicting() {
+    let ctx = SecurityRulesAdminContext::new().await;
+    let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+    ctx.insert_project("trailmark-prod").await;
+
+    let rules_file = r#"
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /journal_entries {
+              allow get: if request.auth.uid == resource.data.owner_id;
+              allow list: if true;
+            }
+          }
+        }
+    "#;
+
+    let resp = ctx
+        .client
+        .post(ctx.url("/admin/v1/projects/trailmark-prod/access_rules/import"))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({ "rules_file": rules_file }))
+        .send()
+        .await
+        .expect("import request failed");
+
+    assert_eq!(resp.status().as_u16(), 400, "OQ-CP-05: conflicting per-verb conditions must reject the whole import");
+    let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
+    let offending = body["offending_blocks"].as_array().expect("offending_blocks must be an array");
+    assert_eq!(offending.len(), 1);
+    assert_eq!(
+        offending[0]["construct"], "CONFLICTING_VERB_CONDITIONS",
+        "OQ-CP-05: differing get/list conditions on the same bucket must be named CONFLICTING_VERB_CONDITIONS"
+    );
+
+    assert_eq!(
+        ctx.access_rule_condition_source("trailmark-prod", "journal_entries").await,
+        None,
+        "OQ-CP-05: no rule may be stored — the two conditions must never be silently OR'd or one silently picked"
+    );
+}
