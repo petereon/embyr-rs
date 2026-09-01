@@ -14,9 +14,12 @@
 //!   AC-02-05: each distinct collection name is returned exactly once,
 //!             regardless of how many documents it contains.
 //!   AC-02-06: an empty `parent` is rejected with `InvalidArgument`.
-//!   Agent-mode deferral (ADR-051 § Decision 3, Out of Scope): a
-//!             `backend_mode=agent` project's `ListCollectionIds` call
-//!             returns a clean `FailedPrecondition`, never a panic or a
+//!   Cross-version graceful degradation (agent-mode-list-collection-ids,
+//!             ADR-059 § Consequences, "Residual" — supersedes this file's
+//!             former "Agent-mode deferral" scenario, obsolete since
+//!             `AgentBackendAdapter` now has a real `list_collection_ids`
+//!             override): an old `embyr-agent` binary predating this RPC
+//!             fails with a clean `Internal`, never a panic or a
 //!             silently-wrong empty success.
 //!
 //! Driving port: gRPC :8080 `ListCollectionIds` (via `SecurityRulesFullContext`
@@ -25,9 +28,9 @@
 //!
 //! Test Budget: 7 behaviors (paginated listing; root-vs-nested scoping;
 //! empty-subcollections no-error; distinct-name-exactly-once;
-//! empty-parent rejection; agent-mode deferral) x 2 = 14 max. 6 written —
-//! one per behavior, no variation-inflation (pagination pair AC-02-01/02
-//! counted as one behavior per ld01's own identical precedent).
+//! empty-parent rejection; old-agent graceful degradation) x 2 = 14 max. 6
+//! written — one per behavior, no variation-inflation (pagination pair
+//! AC-02-01/02 counted as one behavior per ld01's own identical precedent).
 
 #![allow(unused_imports)]
 
@@ -206,24 +209,35 @@ async fn an_empty_parent_is_rejected_with_invalid_argument() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Agent-mode deferral (ADR-051 § Decision 3, Out of Scope): a
-// backend_mode=agent project's ListCollectionIds call returns a clean
-// FailedPrecondition, never a panic or a silently-wrong empty success —
-// proving the deferral is honest, not silently broken.
+// Cross-version graceful degradation (superseded by agent-mode-list-collection-ids,
+// ADR-059): ADR-051 § Decision 3 originally deferred agent-mode
+// `ListCollectionIds` entirely (`AgentBackendAdapter` had no override, so the
+// trait's default-provided body rejected with `FailedPrecondition` before any
+// network call). agent-mode-list-collection-ids (ADR-059) gives
+// `AgentBackendAdapter::list_collection_ids` a real override that DOES call
+// the agent over mTLS — so this scenario now documents a DIFFERENT, still-real
+// case: an `embyr-agent` binary that predates this RPC (here, `StubAgentServer`
+// stands in for exactly that — it implements `StorageAgent` but not this RPC's
+// real logic, mirroring an old deployed agent) returns a clean
+// `Status::unimplemented`, which `AgentBackendAdapter`'s own `grpc_err`
+// collapses to `CoreError::BackendUnavailable` -> `Status::internal`
+// (ADR-059 § Consequences, "Residual" — the named cross-version failure mode,
+// not a panic or a silently-wrong empty success).
 // ─────────────────────────────────────────────────────────────────────────────
 
-// A minimal mTLS `StorageAgent` stub — exists ONLY so `AgentBackendAdapter::new`'s
-// real mTLS `connect()` succeeds. None of its RPC methods are ever invoked:
-// `BackendAdapter::list_collection_ids`'s default-provided body (ADR-051 §
-// Decision 1/3) rejects before `AgentBackendAdapter` makes any network call —
-// `AgentBackendAdapter` does not override it (§ Decision 3). Every method
-// below is unreachable by this test; each returns `unimplemented` to fail
+// A minimal mTLS `StorageAgent` stub — exists so `AgentBackendAdapter::new`'s
+// real mTLS `connect()` succeeds, AND (post agent-mode-list-collection-ids,
+// ADR-059) so `list_collection_ids` specifically is now reached over the
+// wire and returns a deliberate `unimplemented`, standing in for an
+// old-version agent binary that predates this RPC. Every OTHER method below
+// remains unreachable by this test; each returns `unimplemented` to fail
 // loudly if that assumption is ever wrong.
 mod stub_agent {
     use embyr_proto::agent::{
         storage_agent_server::StorageAgent, BeginTransactionRequest, BeginTransactionResponse,
         CommitRequest, CommitResponse, CreateDocumentRequest, DeleteDocumentRequest, DocChange,
-        Document as AgentDocument, GetDocumentRequest, ListDocumentsRequest,
+        Document as AgentDocument, GetDocumentRequest, ListCollectionIdsRequest,
+        ListCollectionIdsResponse, ListDocumentsRequest,
         ListDocumentsResponse, PingRequest, PingResponse, RollbackRequest,
         RunAggregationQueryRequest, RunAggregationQueryResponse, RunQueryRequest,
         RunQueryResponse, SubscribeRequest, UpdateDocumentRequest,
@@ -268,6 +282,13 @@ mod stub_agent {
         }
         async fn list_documents(&self, _: Request<ListDocumentsRequest>) -> Result<Response<ListDocumentsResponse>, Status> {
             Err(Status::unimplemented("stub"))
+        }
+        async fn list_collection_ids(&self, _: Request<ListCollectionIdsRequest>) -> Result<Response<ListCollectionIdsResponse>, Status> {
+            // Deliberately unimplemented — stands in for an embyr-agent
+            // binary that predates the ListCollectionIds RPC (ADR-059 §
+            // Consequences, "Residual"). Reached for real now that
+            // AgentBackendAdapter has an override that calls this RPC.
+            Err(Status::unimplemented("stub agent predates ListCollectionIds"))
         }
         type SubscribeStream = ReceiverStream<Result<DocChange, Status>>;
         async fn subscribe(&self, _: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
@@ -396,11 +417,16 @@ async fn provision_agent_mode_project(
     (api_key, shutdown_tx)
 }
 
-/// Agent-mode deferral
+/// Cross-version graceful degradation: an old embyr-agent binary predating
+/// ListCollectionIds (agent-mode-list-collection-ids, ADR-059 § Consequences,
+/// "Residual") fails cleanly, never a panic or a silently-wrong empty
+/// success. Supersedes this file's own former "agent-mode deferral" test
+/// (ADR-051 § Decision 3), obsolete since AgentBackendAdapter now has a real
+/// list_collection_ids override (ADR-059).
 ///
 /// @error @driving_port @real-io @US-02
 #[tokio::test]
-async fn an_agent_mode_projects_list_collection_ids_call_returns_a_clean_failed_precondition() {
+async fn an_old_agents_list_collection_ids_call_returns_a_clean_internal_error() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-lc02-agent-mode").await;
 
     let project_id = "lc02-agent-proj";
@@ -425,11 +451,12 @@ async fn an_agent_mode_projects_list_collection_ids_call_returns_a_clean_failed_
     let result = client.list_collection_ids(request).await;
 
     let err = result.expect_err(
-        "agent-mode ListCollectionIds must be rejected, not silently succeed with wrong data",
+        "an old agent's ListCollectionIds call must be rejected, not silently succeed with wrong data",
     );
     assert_eq!(
         err.code(),
-        tonic::Code::FailedPrecondition,
-        "agent-mode ListCollectionIds must fail with a clear FailedPrecondition, not a panic or a confusing internal error; got: {err:?}"
+        tonic::Code::Internal,
+        "an old agent's Unimplemented must cross grpc_err's own BackendUnavailable collapse into a \
+         clean Internal, not a panic or a silently-wrong empty success; got: {err:?}"
     );
 }

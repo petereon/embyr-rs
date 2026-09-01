@@ -45,6 +45,9 @@ service StorageAgent {
   // Lists documents in a collection with pagination.
   rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
 
+  // Lists the distinct child collection IDs immediately under a parent.
+  rpc ListCollectionIds(ListCollectionIdsRequest) returns (ListCollectionIdsResponse);
+
   // Subscribes to real-time changes for a collection.
   rpc Subscribe(SubscribeRequest) returns (stream DocChange);
 }
@@ -399,5 +402,18 @@ message ListDocumentsRequest {
 // The response to ListDocuments.
 message ListDocumentsResponse {
   repeated Document documents = 1;
+  string next_page_token = 2;
+}
+
+// A request to list the distinct child collection IDs under a parent.
+message ListCollectionIdsRequest {
+  string parent = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+// The response to ListCollectionIds.
+message ListCollectionIdsResponse {
+  repeated string collection_ids = 1;
   string next_page_token = 2;
 }

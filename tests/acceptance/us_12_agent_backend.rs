@@ -203,7 +203,8 @@ use embyr_proto::agent::{
     storage_agent_server::{StorageAgent, StorageAgentServer},
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, DocChange, Document as AgentDocument,
-    FieldFilterOp as AgentFieldFilterOp, GetDocumentRequest, ListDocumentsRequest,
+    FieldFilterOp as AgentFieldFilterOp, GetDocumentRequest, ListCollectionIdsRequest,
+    ListCollectionIdsResponse, ListDocumentsRequest,
     ListDocumentsResponse, PingRequest, PingResponse, RollbackRequest,
     RunAggregationQueryRequest, RunAggregationQueryResponse,
     RunQueryRequest, RunQueryResponse, SubscribeRequest, UpdateDocumentRequest,
@@ -441,6 +442,13 @@ impl StorageAgent for MockAgentServer {
         _request: Request<ListDocumentsRequest>,
     ) -> Result<Response<ListDocumentsResponse>, Status> {
         Err(Status::unimplemented("not implemented — step 05-02"))
+    }
+
+    async fn list_collection_ids(
+        &self,
+        _request: Request<ListCollectionIdsRequest>,
+    ) -> Result<Response<ListCollectionIdsResponse>, Status> {
+        Err(Status::unimplemented("not implemented — agent-mode-list-collection-ids not exercised via MockAgentServer"))
     }
 
     type SubscribeStream = ReceiverStream<Result<DocChange, Status>>;

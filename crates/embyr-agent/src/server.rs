@@ -31,6 +31,7 @@ use embyr_proto::agent::{
     BeginTransactionRequest, BeginTransactionResponse, CommitRequest, CommitResponse,
     CreateDocumentRequest, DeleteDocumentRequest, DocChange, DocChangeKind, Document, FieldFilterOp,
     Filter as ProtoFilter, GetDocumentRequest,
+    ListCollectionIdsRequest, ListCollectionIdsResponse,
     ListDocumentsRequest, ListDocumentsResponse,
     PingRequest, PingResponse, Precondition, RollbackRequest,
     RunAggregationQueryRequest, RunAggregationQueryResponse,
@@ -654,6 +655,42 @@ impl StorageAgent for StorageAgentService {
         }))
     }
 
+    /// agent-mode-list-collection-ids (Slice 01, US-01, ADR-059 § Decision
+    /// 2): zero new SQL — calls `self.storage.list_collection_ids(...)`
+    /// directly, the SAME `PostgresBackendAdapter` method/SQL the non-agent
+    /// path already uses. Same fetch-one-extra-to-detect-more-pages
+    /// pagination technique `list_documents` (above) already applies.
+    async fn list_collection_ids(
+        &self,
+        request: Request<ListCollectionIdsRequest>,
+    ) -> Result<Response<ListCollectionIdsResponse>, Status> {
+        let req = request.into_inner();
+        let project_id_str = parse_project_id_from_parent(&req.parent)?;
+        let prefix = parent_prefix(&req.parent)?;
+        let page_size = if req.page_size <= 0 { 100i32 } else { req.page_size.min(100) };
+        let offset = decode_page_token(&req.page_token)?;
+        let pid = ProjectId::new(&project_id_str)
+            .map_err(|e| Status::invalid_argument(format!("{e}")))?;
+        let parent = CollectionPath { project_id: pid, collection_path: prefix };
+
+        let mut ids = self
+            .storage
+            .list_collection_ids(&parent, page_size + 1, offset as i32)
+            .await
+            .map_err(core_error_to_status)?;
+
+        let has_more = ids.len() > page_size as usize;
+        if has_more {
+            ids.truncate(page_size as usize);
+        }
+        let next_page_token = if has_more {
+            encode_page_token(offset + page_size as u32)
+        } else {
+            String::new()
+        };
+        Ok(Response::new(ListCollectionIdsResponse { collection_ids: ids, next_page_token }))
+    }
+
     async fn begin_transaction(
         &self,
         _request: Request<BeginTransactionRequest>,
@@ -829,25 +866,38 @@ fn parse_project_id_from_parent(parent: &str) -> Result<String, Status> {
     Ok(rest[..slash_pos].to_string())
 }
 
+/// Extract the parent's own suffix path (relative to `.../documents`), with
+/// any leading slash trimmed — root parents yield the empty string.
+///
+/// Small in-file refactor (agent-mode-list-collection-ids, ADR-059 §
+/// Decision 2): extracted from `build_collection_path`'s own former
+/// inlined marker-finding block so `list_collection_ids` can reuse the
+/// same "find `databases/(default)/documents`, take the suffix, trim
+/// the leading slash" logic without appending `collection_id` — a distinct
+/// need `build_collection_path` alone could not serve. Behavior-preserving:
+/// `build_collection_path` becomes a two-line wrapper below.
+fn parent_prefix(parent: &str) -> Result<String, Status> {
+    let doc_marker = "databases/(default)/documents";
+    let marker_pos = parent
+        .find(doc_marker)
+        .ok_or_else(|| Status::invalid_argument("parent missing databases/(default)/documents"))?;
+    let after_documents = &parent[marker_pos + doc_marker.len()..];
+    Ok(after_documents.trim_start_matches('/').to_string())
+}
+
 /// Build the collection path from a parent and collection_id.
 ///
 /// Parent formats:
 ///   `projects/{pid}/databases/(default)/documents` → collection_path = collection_id
 ///   `projects/{pid}/databases/(default)/documents/a/b` → collection_path = "a/b/{collection_id}"
 fn build_collection_path(parent: &str, collection_id: &str) -> Result<String, Status> {
-    let doc_marker = "databases/(default)/documents";
-    let marker_pos = parent
-        .find(doc_marker)
-        .ok_or_else(|| Status::invalid_argument("parent missing databases/(default)/documents"))?;
-    let after_documents = &parent[marker_pos + doc_marker.len()..];
-
-    if after_documents.is_empty() {
+    let prefix = parent_prefix(parent)?;
+    if prefix.is_empty() {
         // Root: collection_path = collection_id
         Ok(collection_id.to_string())
     } else {
-        // Nested path: strip leading slash, append collection_id
-        let nested = after_documents.trim_start_matches('/');
-        Ok(format!("{nested}/{collection_id}"))
+        // Nested path: prefix + "/" + collection_id
+        Ok(format!("{prefix}/{collection_id}"))
     }
 }
 

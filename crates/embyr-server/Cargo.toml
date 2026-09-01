@@ -728,6 +728,14 @@ path = "../../tests/agent_mode_write_streaming/acceptance/aw01_single_write_stre
 name = "agent_mode_write_streaming_aw02_multi_write_durability"
 path = "../../tests/agent_mode_write_streaming/acceptance/aw02_multi_write_durability.rs"
 
+# agent-mode-list-collection-ids acceptance tests (Slice 01, Walking
+# Skeleton, LAST/ONLY slice, US-01, ADR-059) — new unary ListCollectionIds
+# RPC on storage_agent.proto, zero SQL duplication, AgentBackendAdapter's own
+# page-flattening loop.
+[[test]]
+name = "agent_mode_list_collection_ids_alc01_enumerate_subcollections"
+path = "../../tests/agent_mode_list_collection_ids/acceptance/alc01_enumerate_subcollections.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

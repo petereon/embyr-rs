@@ -250,6 +250,24 @@ fn domain_path_to_agent_parent(path: &DocumentPath) -> String {
     )
 }
 
+/// Build the agent RPC's own `parent` string from a `CollectionPath` used as
+/// a PARENT PREFIX (ADR-051's own semantic overload for
+/// `BackendAdapter::list_collection_ids` — a `CollectionPath` whose
+/// `collection_path` is empty means database root) — distinct from
+/// `domain_path_to_agent_parent` (&DocumentPath), which never carries a path
+/// suffix (ADR-059 § Decision 3).
+fn domain_collection_prefix_to_agent_parent(collection: &CollectionPath) -> String {
+    let base = format!(
+        "projects/{}/databases/(default)/documents",
+        collection.project_id.as_str()
+    );
+    if collection.collection_path.is_empty() {
+        base
+    } else {
+        format!("{base}/{}", collection.collection_path)
+    }
+}
+
 fn precondition_to_agent(p: &WritePrecondition) -> AgentPrecondition {
     use embyr_proto::agent::precondition::ConditionType;
     match p {
@@ -546,6 +564,48 @@ impl BackendAdapter for AgentBackendAdapter {
             .await
             .map_err(grpc_err)?;
         Ok(AggregateValue::Count(resp.into_inner().count))
+    }
+
+    /// agent-mode-list-collection-ids (Slice 01, US-01, ADR-059 § Decision
+    /// 3): the driven-port contract is a single bounded call (`limit`,
+    /// `offset`), but the agent's own new `ListCollectionIds` RPC is itself
+    /// paginated (≤100 per call, matching `list_documents`'s existing
+    /// defensive clamp). This loop flattens the agent's own pagination into
+    /// a single `Vec<String>` satisfying an arbitrary `limit`, transparently
+    /// to the caller — verified correct at the exact 100/101-item boundary
+    /// worked through in the ADR (forwarding `limit` directly as the wire
+    /// `page_size` in one round trip is demonstrated incorrect there).
+    async fn list_collection_ids(
+        &self,
+        parent: &CollectionPath,
+        limit: i32,
+        offset: i32,
+    ) -> Result<Vec<String>, CoreError> {
+        use embyr_proto::agent::{ListCollectionIdsRequest, ListCollectionIdsResponse};
+
+        let parent_str = domain_collection_prefix_to_agent_parent(parent);
+        let mut collected: Vec<String> = Vec::new();
+        let mut page_token = embyr_core::pagination::encode_page_token(offset.max(0) as u32);
+        let mut client = self.client.clone();
+
+        loop {
+            let req = ListCollectionIdsRequest {
+                parent: parent_str.clone(),
+                page_size: 100, // agent's own per-call ceiling
+                page_token,
+            };
+            let resp: ListCollectionIdsResponse =
+                client.list_collection_ids(req).await.map_err(grpc_err)?.into_inner();
+            collected.extend(resp.collection_ids);
+
+            if resp.next_page_token.is_empty() || collected.len() as i64 >= limit as i64 {
+                break;
+            }
+            page_token = resp.next_page_token;
+        }
+
+        collected.truncate(limit.max(0) as usize);
+        Ok(collected)
     }
 
     async fn begin_transaction(
