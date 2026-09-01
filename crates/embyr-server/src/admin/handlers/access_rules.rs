@@ -29,7 +29,11 @@
 //!   -maintained copy. 200 { outcome: "allow" | "deny" } on success; 400
 //!   with the same SYNTAX_ERROR/UNSUPPORTED_CONSTRUCT taxonomy as
 //!   define/redefine if the candidate condition itself fails to parse.
-//!   Implemented (DELIVER, step 06-01; extended step 07-01, US-07).
+//!   Implemented (DELIVER, step 06-01; extended step 07-01, US-07;
+//!   extended again security-rules-cel-parity Slice 06, US-06, ADR-062 —
+//!   additive `path_variable` synthetic-document-ID field, threaded into
+//!   `evaluate()`'s 5th param, mirroring `security-rules-write-path`'s own
+//!   `request_resource` in-place-extension precedent).
 //!
 //! simulate_group_query_compliance (POST /admin/v1/projects/:project_id/access_rules/simulate_group_query):
 //!   Session auth, ANY role (US-07, ADR-032, read-only — mirrors
@@ -274,6 +278,15 @@ pub struct SimulateAccessRuleBody {
     /// like `resource` above — reused, not duplicated.
     #[serde(default)]
     pub request_resource: BTreeMap<String, serde_json::Value>,
+    /// NEW (security-rules-cel-parity, Slice 06, US-06, ADR-062): a
+    /// synthetic document ID for a path-variable-bound candidate condition
+    /// (e.g. `request.path.userId`) — a simulation has no real document to
+    /// derive the path variable from (§ IN Scope). `None`/absent threads
+    /// through to `evaluate()`'s `path_variable_value` param exactly like
+    /// every other simulated input; a candidate condition with no
+    /// `PathVariable` operand ignores it entirely.
+    #[serde(default)]
+    pub path_variable: Option<String>,
 }
 
 /// Response for POST .../access_rules/simulate — 200. `outcome` is
@@ -911,16 +924,17 @@ pub async fn simulate_access_rule(
     // `request_resource` are populated vs. empty drives create/update/delete
     // semantics identically to real enforcement — `body.operation` is never
     // read here.
-    // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s new 5th
-    // parameter, mechanical `None` here — simulation's own path-variable
-    // support is Slice 06's job (`SimulateAccessRuleBody.path_variable`,
-    // not yet added).
+    // security-rules-cel-parity (Slice 06, US-06, ADR-062): `evaluate()`'s
+    // 5th parameter, now threaded from the caller-supplied synthetic
+    // document ID — the identical mechanism `handle_get_document`/the 3
+    // write handlers use for a real document ID (ADR-062 § Decision —
+    // evaluate() signature), never a second resolution path.
     let outcome = evaluate(
         &condition,
         auth_ctx.as_ref(),
         &resource_fields,
         &request_resource_fields,
-        None,
+        body.path_variable.as_deref(),
     );
 
     Ok((

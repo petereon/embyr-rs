@@ -771,6 +771,13 @@ path = "../../tests/security_rules_cel_parity/acceptance/cp04_reject_out_of_scop
 name = "security_rules_cel_parity_cp05_non_interference_and_idempotency"
 path = "../../tests/security_rules_cel_parity/acceptance/cp05_non_interference_and_idempotency.rs"
 
+# security-rules-cel-parity acceptance tests (Slice 06, US-06, ADR-062) —
+# simulating a path-variable-bound candidate rule before importing it,
+# extending the existing simulate_access_rule handler in place.
+[[test]]
+name = "security_rules_cel_parity_cp06_simulate_path_variable_rule"
+path = "../../tests/security_rules_cel_parity/acceptance/cp06_simulate_path_variable_rule.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
