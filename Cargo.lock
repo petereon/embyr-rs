@@ -1935,6 +1935,7 @@ dependencies = [
  "chrono",
  "config 0.14.1",
  "ed25519-dalek",
+ "embyr-agent",
  "embyr-core",
  "embyr-pg-storage",
  "embyr-proto",

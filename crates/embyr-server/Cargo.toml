@@ -715,9 +715,27 @@ path = "../../tests/customer_db_transaction_sweeper/acceptance/us01_reclaim_orph
 name = "customer_db_transaction_sweeper_us02_purge_terminal_transactions"
 path = "../../tests/customer_db_transaction_sweeper/acceptance/us02_purge_terminal_transactions.rs"
 
+# agent-mode-write-streaming acceptance tests (Slice 01, Walking Skeleton,
+# US-01, ADR-060) — Write bidi-streaming against backend_mode=agent, reusing
+# write_stream.rs unchanged.
+[[test]]
+name = "agent_mode_write_streaming_aw01_single_write_stream"
+path = "../../tests/agent_mode_write_streaming/acceptance/aw01_single_write_stream.rs"
+
+# agent-mode-write-streaming acceptance tests (Slice 02, LAST slice, US-02,
+# ADR-060) — multi-write session + disconnect/reconnect durability.
+[[test]]
+name = "agent_mode_write_streaming_aw02_multi_write_durability"
+path = "../../tests/agent_mode_write_streaming/acceptance/aw02_multi_write_durability.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
+# agent-mode-write-streaming (ADR-060): the WS test starts a REAL embyr-agent
+# in-process (embyr_agent::server::serve) alongside a real embyr-server —
+# proves backend_mode=agent Write streaming through the actual composition,
+# no mocked transport (DESIGN's own WS Strategy B).
+embyr-agent.workspace = true
 testcontainers.workspace = true
 testcontainers-modules.workspace = true
 sqlx.workspace = true

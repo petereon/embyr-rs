@@ -682,12 +682,20 @@ impl StorageAgent for StorageAgentService {
 
         let now = chrono::Utc::now();
         match self.storage.commit_transaction(&pid, &txn_id, writes).await {
-            Ok(_results) => Ok(Response::new(CommitResponse {
+            Ok(results) => Ok(Response::new(CommitResponse {
+                write_results: results
+                    .into_iter()
+                    .map(|wr| embyr_proto::agent::WriteResult {
+                        update_time: Some(prost_types::Timestamp {
+                            seconds: wr.update_time.0,
+                            nanos: wr.update_time.1,
+                        }),
+                    })
+                    .collect(),
                 commit_time: Some(prost_types::Timestamp {
                     seconds: now.timestamp(),
                     nanos: now.timestamp_subsec_nanos() as i32,
                 }),
-                ..Default::default()
             })),
             Err(CoreError::TransactionNotFound) => {
                 Err(Status::not_found("transaction not found or expired"))
