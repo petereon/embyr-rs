@@ -778,6 +778,14 @@ path = "../../tests/security_rules_cel_parity/acceptance/cp05_non_interference_a
 name = "security_rules_cel_parity_cp06_simulate_path_variable_rule"
 path = "../../tests/security_rules_cel_parity/acceptance/cp06_simulate_path_variable_rule.rs"
 
+# security-rules-cel-path-matching acceptance tests (Slice 01, Walking
+# Skeleton, US-01, ADR-063) — import + decompose a real .rules file
+# containing fixed-depth multi-segment/nested-match-block patterns into the
+# new access_rule_patterns table.
+[[test]]
+name = "security_rules_cel_path_matching_pm01_import_multi_segment_patterns"
+path = "../../tests/security_rules_cel_path_matching/acceptance/pm01_import_multi_segment_patterns.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

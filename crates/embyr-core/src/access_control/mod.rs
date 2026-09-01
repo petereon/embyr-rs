@@ -56,6 +56,12 @@ use crate::domain::query::QueryFilter;
 // beside this file, covered by the same zero-IO enforcement unchanged.
 pub mod rules_file;
 
+// security-rules-cel-path-matching (Slice 01, US-01, ADR-063): shared pure
+// matching primitives for multi-segment path-pattern routing — a pure,
+// zero-IO submodule beside this file, covered by the same zero-IO
+// enforcement unchanged.
+pub mod path_routing;
+
 // ---------------------------------------------------------------------------
 // Types (ADR-027 § Decision — Types)
 // ---------------------------------------------------------------------------

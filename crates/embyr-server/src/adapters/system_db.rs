@@ -161,6 +161,23 @@ pub struct GroupAccessRuleHistoryRow {
     pub captured_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// security-rules-cel-path-matching (ADR-063): a project's stored
+/// multi-segment path-pattern row, as stored in `access_rule_patterns` — a
+/// table structurally independent of `access_rules`/`write_access_rules`/
+/// `group_access_rules` (ADR-063 § Decision — Schema). One row per pattern
+/// SHAPE (both read and write conditions), unlike the read/write-disjoint
+/// precedent those three tables established — evidenced by this feature's
+/// own single (import-only) authoring path.
+#[derive(Debug, Clone)]
+pub struct AccessRulePatternRow {
+    pub collection_path_pattern: String,
+    pub leaf_variable: Option<String>,
+    pub read_condition: Option<String>,
+    pub write_condition: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// customer-db-transaction-sweeper (ADR-054 § D4): one PG-reachable
 /// project row, as returned by [`SystemDb::list_pg_reachable_projects`].
 /// Mirrors [`ProjectAuthRow`]'s shape minus the auth-only fields
@@ -978,6 +995,129 @@ impl SystemDb {
                 })
             })
             .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // security-rules-cel-path-matching (Slice 01, US-01, ADR-063) —
+    // access_rule_patterns CRUD. Mirrors upsert_access_rule/get_access_rule's
+    // exact shape (idempotent upsert, history fused into the same
+    // transaction) against the new, structurally independent pattern table.
+    // -----------------------------------------------------------------------
+
+    /// Define OR redefine the multi-segment pattern rule for
+    /// `(project_id, collection_path_pattern)` — same idempotent-upsert
+    /// shape as `upsert_access_rule` (ADR-063 § Decision — Adapter).
+    /// History capture is FUSED into this SAME transaction (ADR-035
+    /// precedent, extended to a 4th sibling table).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_access_rule_pattern(
+        &self,
+        project_id: &str,
+        collection_path_pattern: &str,
+        ancestor_segment_count: i16,
+        literal_skeleton: &str,
+        leaf_variable: Option<&str>,
+        read_condition: Option<&str>,
+        write_condition: Option<&str>,
+        actor_account_id: uuid::Uuid,
+    ) -> Result<(), CoreError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx begin failed: {e}")))?;
+
+        sqlx::query(
+            "INSERT INTO access_rule_patterns \
+             (project_id, collection_path_pattern, ancestor_segment_count, literal_skeleton, \
+              leaf_variable, read_condition, write_condition) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (project_id, collection_path_pattern) \
+             DO UPDATE SET ancestor_segment_count = EXCLUDED.ancestor_segment_count, \
+                            literal_skeleton = EXCLUDED.literal_skeleton, \
+                            leaf_variable = EXCLUDED.leaf_variable, \
+                            read_condition = EXCLUDED.read_condition, \
+                            write_condition = EXCLUDED.write_condition, \
+                            updated_at = now()",
+        )
+        .bind(project_id)
+        .bind(collection_path_pattern)
+        .bind(ancestor_segment_count)
+        .bind(literal_skeleton)
+        .bind(leaf_variable)
+        .bind(read_condition)
+        .bind(write_condition)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(format!("upsert_access_rule_pattern failed: {e}")))?;
+
+        sqlx::query(
+            "INSERT INTO access_rule_pattern_history \
+             (project_id, collection_path_pattern, leaf_variable, read_condition, write_condition, actor_account_id) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(project_id)
+        .bind(collection_path_pattern)
+        .bind(leaf_variable)
+        .bind(read_condition)
+        .bind(write_condition)
+        .bind(actor_account_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("access_rule_pattern_history insert failed: {e}"))
+        })?;
+
+        tx.commit()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(format!("tx commit failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Look up the multi-segment pattern rule for
+    /// `(project_id, collection_path_pattern)` — the exact-PK idempotency
+    /// check `import_rules_file` runs before `upsert_access_rule_pattern`
+    /// (mirrors `get_access_rule`'s own role, AC-17-205).
+    pub async fn get_access_rule_pattern(
+        &self,
+        project_id: &str,
+        collection_path_pattern: &str,
+    ) -> Result<Option<AccessRulePatternRow>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT collection_path_pattern, leaf_variable, read_condition, write_condition, \
+             created_at, updated_at \
+             FROM access_rule_patterns WHERE project_id = $1 AND collection_path_pattern = $2",
+        )
+        .bind(project_id)
+        .bind(collection_path_pattern)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(format!("get_access_rule_pattern failed: {e}")))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(AccessRulePatternRow {
+            collection_path_pattern: r
+                .try_get("collection_path_pattern")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            leaf_variable: r
+                .try_get("leaf_variable")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            read_condition: r
+                .try_get("read_condition")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            write_condition: r
+                .try_get("write_condition")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            created_at: r
+                .try_get("created_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            updated_at: r
+                .try_get("updated_at")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
     }
 
     // -----------------------------------------------------------------------

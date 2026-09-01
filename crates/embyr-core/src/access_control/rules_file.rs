@@ -24,7 +24,21 @@
 //! block/verb parser) — no `pest`/`nom`, mirroring `access_control::mod`'s
 //! own condition-tokenizer discipline one syntactic layer out, so the outer
 //! grammar cannot silently widen via a grammar-file edit.
+//!
+//! Widened (feature `security-rules-cel-path-matching`, Slice 01, US-01,
+//! ADR-063): `parse_match_blocks` now recurses into nested `match { match
+//! { ... } } }` shells (§ Decision — Nested Match-Block Flattening),
+//! prepending each ancestor's own already-parsed `PathSegment`s so the
+//! flattened result is byte-for-byte identical to the equivalent flat
+//! multi-segment syntax. `decompose_block`'s own shape allow-list widens
+//! from 4a's `[Literal]`/`[Literal, Wildcard]` two-shape check to any
+//! length ≥ 1 alternating literal-collection/wildcard-or-literal-document-ID
+//! sequence (§ Decision — Widened `decompose_block` Shape-Check), splitting
+//! into an ancestor (`> 1` segment ⇒ `DecomposedTarget::MultiSegmentPattern`)
+//! and 4a's own single-collection shape (`== 1` segment ⇒
+//! `DecomposedTarget::SingleCollection`, `DecomposedRule` unchanged).
 
+use crate::access_control::path_routing;
 use crate::access_control::{parse_condition, ConditionParseError, UnsupportedConstruct};
 
 // ---------------------------------------------------------------------------
@@ -83,6 +97,44 @@ pub struct DecomposedRule {
     pub collection_path: String,
     pub read_condition: Option<String>,
     pub write_condition: Option<String>,
+}
+
+/// The decomposition target for ONE multi-segment `match` block (ancestor
+/// segment count > 1) — feature `security-rules-cel-path-matching`, Slice
+/// 01, US-01, ADR-063 § Decision — Schema. `collection_path_pattern` is the
+/// ANCESTOR path only (e.g. `"expeditions/{expeditionId}/journal_entries"`)
+/// — the leaf (if any) is split off separately into `leaf_variable`, never
+/// part of this text. Ready for `SystemDb::upsert_access_rule_pattern`
+/// unmodified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecomposedPatternRule {
+    pub collection_path_pattern: String,
+    pub ancestor_segment_count: u16,
+    pub literal_skeleton: String,
+    /// `Some(name)` iff the pattern's leaf (final) segment is a named
+    /// wildcard capture; `None` for both "no leaf position" (odd total
+    /// segment length) and "a literal-valued leaf" (routing never inspects
+    /// the leaf structurally, ADR-063 § Decision — Routing Composition —
+    /// only a captured NAME is ever bound).
+    pub leaf_variable: Option<String>,
+    pub read_condition: Option<String>,
+    pub write_condition: Option<String>,
+}
+
+/// One `match` block's decomposition target — additive over 4a's own
+/// `DecomposedRule` (ADR-063 § Decision — Widened `decompose_block`
+/// Shape-Check). `decompose()`'s return type carries this enum so the admin
+/// import handler can branch to the correct storage call
+/// (`upsert_access_rule`/`upsert_write_access_rule` vs.
+/// `upsert_access_rule_pattern`) without either storage shape needing to
+/// know about the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecomposedTarget {
+    /// `ancestor_segments.len() == 1` — 4a's own shape, `DecomposedRule`
+    /// completely unchanged.
+    SingleCollection(DecomposedRule),
+    /// `ancestor_segments.len() > 1` — this feature's own new shape.
+    MultiSegmentPattern(DecomposedPatternRule),
 }
 
 /// One offending `match` block, naming what about it is out of v1 scope.
@@ -203,8 +255,28 @@ fn find_matching_close(s: &str, open_idx: usize) -> Option<usize> {
 
 /// Repeatedly scan `body` (the content directly inside `match
 /// /databases/{database}/documents { ... }`) for `match /<pattern> { ...
-/// }` blocks, in order, until exhausted.
-fn parse_match_blocks(mut body: &str) -> Result<Vec<MatchBlock>, RulesFileError> {
+/// }` blocks, in order, until exhausted. Entry point — always the
+/// top-level scan, no ancestor to prepend (ADR-063 § Decision — Nested
+/// Match-Block Flattening).
+fn parse_match_blocks(body: &str) -> Result<Vec<MatchBlock>, RulesFileError> {
+    let blocks = parse_nested_match_blocks(body, "", &[])?;
+    if blocks.is_empty() {
+        return Err(shell_syntax_error("expected at least one 'match /<path> { ... }' block"));
+    }
+    Ok(blocks)
+}
+
+/// Repeatedly scan `body` for `match /<pattern> { ... }` blocks, prepending
+/// `parent_path_text`/`parent_segments` onto each one found — the recursive
+/// step that flattens a nested `match { match { ... } } }` shell (ADR-063 §
+/// Decision — Nested Match-Block Flattening) to the identical
+/// `Vec<PathSegment>`/path-pattern-text shape flat multi-segment syntax
+/// already produces (`Some("")`/`&[]` at the top level).
+fn parse_nested_match_blocks(
+    mut body: &str,
+    parent_path_text: &str,
+    parent_segments: &[PathSegment],
+) -> Result<Vec<MatchBlock>, RulesFileError> {
     let mut blocks = Vec::new();
     loop {
         body = body.trim_start();
@@ -214,32 +286,63 @@ fn parse_match_blocks(mut body: &str) -> Result<Vec<MatchBlock>, RulesFileError>
         let after_match = body
             .strip_prefix("match")
             .filter(|rest| rest.starts_with(char::is_whitespace))
-            .ok_or_else(|| shell_syntax_error("expected a 'match /<path> { ... }' block"))?
+            .ok_or_else(|| {
+                shell_syntax_error(
+                    "expected a 'match /<path> { ... }' block — a match block body may not mix \
+                     'allow' clauses with nested 'match' blocks",
+                )
+            })?
             .trim_start();
         let pattern_end = find_path_pattern_end(after_match)
             .ok_or_else(|| shell_syntax_error("expected a '/'-prefixed match block path pattern"))?;
-        let path_pattern = after_match[..pattern_end].trim().to_string();
+        let local_path_pattern = after_match[..pattern_end].trim().to_string();
         let after_pattern = after_match[pattern_end..].trim_start();
         if !after_pattern.starts_with('{') {
             return Err(shell_syntax_error("expected '{' after a match block's path pattern"));
         }
         let rest = after_pattern;
-        let close_idx = find_matching_close(rest, 0)
-            .ok_or_else(|| shell_syntax_error(&format!("unbalanced '{{' in match block '{path_pattern}'")))?;
+        let close_idx = find_matching_close(rest, 0).ok_or_else(|| {
+            shell_syntax_error(&format!("unbalanced '{{' in match block '{local_path_pattern}'"))
+        })?;
         let block_body = &rest[1..close_idx];
 
-        let segments = parse_path_segments(&path_pattern)?;
-        let allow_clauses = parse_allow_clauses(block_body, &path_pattern)?;
+        let local_segments = parse_path_segments(&local_path_pattern)?;
+        let full_path_pattern = format!("{parent_path_text}{local_path_pattern}");
+        let mut full_segments = parent_segments.to_vec();
+        full_segments.extend(local_segments);
 
-        blocks.push(MatchBlock { path_pattern, segments, allow_clauses });
+        let mut nested = parse_block_body(block_body, &full_path_pattern, &full_segments)?;
+        blocks.append(&mut nested);
 
         body = &rest[close_idx + 1..];
     }
-
-    if blocks.is_empty() {
-        return Err(shell_syntax_error("expected at least one 'match /<path> { ... }' block"));
-    }
     Ok(blocks)
+}
+
+/// A match block's own body is either EXCLUSIVELY `allow` clauses (a leaf
+/// block) or EXCLUSIVELY further nested `match /<pattern> { ... }` blocks —
+/// never a mix (ADR-063 § Decision — Nested Match-Block Flattening,
+/// DDD-PM-8). Dispatches on the body's first token.
+fn parse_block_body(
+    block_body: &str,
+    full_path_pattern: &str,
+    full_segments: &[PathSegment],
+) -> Result<Vec<MatchBlock>, RulesFileError> {
+    let trimmed = block_body.trim_start();
+    let starts_with_nested_match = trimmed
+        .strip_prefix("match")
+        .is_some_and(|rest| rest.starts_with(char::is_whitespace));
+
+    if starts_with_nested_match {
+        return parse_nested_match_blocks(block_body, full_path_pattern, full_segments);
+    }
+
+    let allow_clauses = parse_allow_clauses(block_body, full_path_pattern)?;
+    Ok(vec![MatchBlock {
+        path_pattern: full_path_pattern.to_string(),
+        segments: full_segments.to_vec(),
+        allow_clauses,
+    }])
 }
 
 /// Find the byte offset where a match block's `/`-delimited path pattern
@@ -377,13 +480,13 @@ fn parse_verb(v: &str, path_pattern: &str) -> Result<Verb, RulesFileError> {
 /// shell problem; `decompose`'s own per-block loop is what will carry
 /// multiple entries starting Slice 04, once several independently
 /// -well-formed blocks can each fail on their own semantic grounds).
-pub fn decompose(blocks: Vec<MatchBlock>) -> Result<Vec<DecomposedRule>, RulesFileError> {
+pub fn decompose(blocks: Vec<MatchBlock>) -> Result<Vec<DecomposedTarget>, RulesFileError> {
     let mut offending = Vec::new();
-    let mut rules = Vec::new();
+    let mut targets = Vec::new();
 
     for block in &blocks {
         match decompose_block(block) {
-            Ok(rule) => rules.push(rule),
+            Ok(target) => targets.push(target),
             Err(mut err) => offending.append(&mut err.offending_blocks),
         }
     }
@@ -391,37 +494,94 @@ pub fn decompose(blocks: Vec<MatchBlock>) -> Result<Vec<DecomposedRule>, RulesFi
     if !offending.is_empty() {
         return Err(RulesFileError { offending_blocks: offending });
     }
-    Ok(rules)
+    Ok(targets)
 }
 
-fn decompose_block(block: &MatchBlock) -> Result<DecomposedRule, RulesFileError> {
-    let (collection, wildcard_var) = match block.segments.as_slice() {
-        [PathSegment::Literal(coll)] => (coll.clone(), None),
-        [PathSegment::Literal(coll), PathSegment::Wildcard(var)] => (coll.clone(), Some(var.clone())),
-        segments if segments.iter().any(|s| matches!(s, PathSegment::RecursiveWildcard)) => {
+/// Widened shape-check (ADR-063 § Decision — Widened `decompose_block`
+/// Shape-Check): `segments` is valid iff every even index holds `Literal`
+/// and every odd index holds `Wildcard` or `Literal` (never
+/// `RecursiveWildcard`), for any length ≥ 1 — replaces 4a's own 2-entry
+/// allow-list (`[Literal]` / `[Literal, Wildcard]`).
+fn validate_segment_shape(segments: &[PathSegment], path_pattern: &str) -> Result<(), RulesFileError> {
+    if segments.iter().any(|s| matches!(s, PathSegment::RecursiveWildcard)) {
+        return Err(RulesFileError::single(
+            path_pattern,
+            "RECURSIVE_WILDCARD",
+            "recursive wildcard path matching is not supported in this feature",
+        ));
+    }
+    for (i, seg) in segments.iter().enumerate() {
+        if i.is_multiple_of(2) && !matches!(seg, PathSegment::Literal(_)) {
             return Err(RulesFileError::single(
-                &block.path_pattern,
-                "RECURSIVE_WILDCARD",
-                "recursive wildcard path matching is not supported in this slice",
-            ));
-        }
-        _ => {
-            return Err(RulesFileError::single(
-                &block.path_pattern,
+                path_pattern,
                 "NESTED_PATH",
-                "only a single top-level collection with at most one leaf-level path variable is supported in this slice",
+                "a collection-name position must be a literal segment, never a wildcard",
             ));
         }
+    }
+    Ok(())
+}
+
+/// Every `/`-delimited segment, rendered back to its canonical textual
+/// form (`Literal(s) -> s`, `Wildcard(name) -> "{name}"`) and joined with
+/// `/` — used to build `DecomposedPatternRule::collection_path_pattern`
+/// (ADR-063 § Decision — Schema).
+fn render_ancestor_pattern(ancestor: &[PathSegment]) -> String {
+    ancestor
+        .iter()
+        .map(|seg| match seg {
+            PathSegment::Literal(s) => s.clone(),
+            PathSegment::Wildcard(name) => format!("{{{name}}}"),
+            PathSegment::RecursiveWildcard => unreachable!("rejected by validate_segment_shape"),
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn decompose_block(block: &MatchBlock) -> Result<DecomposedTarget, RulesFileError> {
+    validate_segment_shape(&block.segments, &block.path_pattern)?;
+
+    let segments = block.segments.as_slice();
+    let len = segments.len();
+    // Ancestor/leaf split (ADR-063 § Decision — The Ancestor/Leaf Split):
+    // a leaf position is present iff `len` is even; ancestor length is
+    // always odd by construction.
+    let (ancestor, leaf): (&[PathSegment], Option<&PathSegment>) = if len.is_multiple_of(2) {
+        (&segments[..len - 1], segments.last())
+    } else {
+        (segments, None)
     };
+
+    // A named wildcard leaf capture is retained by name (AC-17-204); a
+    // literal-valued leaf (or no leaf position at all) contributes no
+    // binding — routing never inspects the leaf structurally (ADR-063 §
+    // Decision — Routing Composition, "Routing touches ONLY the ancestor").
+    let leaf_variable: Option<String> = match leaf {
+        Some(PathSegment::Wildcard(name)) => Some(name.clone()),
+        _ => None,
+    };
+
+    // Every DISTINCT wildcard name across the whole pattern (ancestor AND
+    // leaf) must be rewritten in the condition text, never just one
+    // (ADR-063 § Decision — Widened `decompose_block` Shape-Check, "a loop
+    // over Wildcard segments instead of a single optional one").
+    let mut wildcard_names: Vec<String> = ancestor
+        .iter()
+        .filter_map(|s| match s {
+            PathSegment::Wildcard(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    wildcard_names.extend(leaf_variable.clone());
 
     let mut read_condition: Option<String> = None;
     let mut write_condition: Option<String> = None;
 
     for (verbs, raw_condition) in &block.allow_clauses {
-        let rewritten = match &wildcard_var {
-            Some(var) => rewrite_path_variable(raw_condition, var),
-            None => raw_condition.clone(),
-        };
+        let mut rewritten = raw_condition.clone();
+        for var in &wildcard_names {
+            rewritten = rewrite_path_variable(&rewritten, var);
+        }
 
         if let Err(e) = parse_condition(&rewritten) {
             return Err(RulesFileError::single(&block.path_pattern, construct_for(&e), detail_for(e)));
@@ -445,7 +605,26 @@ fn decompose_block(block: &MatchBlock) -> Result<DecomposedRule, RulesFileError>
         }
     }
 
-    Ok(DecomposedRule { collection_path: collection, read_condition, write_condition })
+    if ancestor.len() == 1 {
+        // 4a's own shape (ADR-062), completely unchanged.
+        let PathSegment::Literal(collection) = &ancestor[0] else {
+            unreachable!("validate_segment_shape guarantees a literal at an even index")
+        };
+        Ok(DecomposedTarget::SingleCollection(DecomposedRule {
+            collection_path: collection.clone(),
+            read_condition,
+            write_condition,
+        }))
+    } else {
+        Ok(DecomposedTarget::MultiSegmentPattern(DecomposedPatternRule {
+            collection_path_pattern: render_ancestor_pattern(ancestor),
+            ancestor_segment_count: ancestor.len() as u16,
+            literal_skeleton: path_routing::literal_skeleton(ancestor),
+            leaf_variable,
+            read_condition,
+            write_condition,
+        }))
+    }
 }
 
 fn construct_for(e: &ConditionParseError) -> &'static str {
@@ -508,6 +687,23 @@ mod tests {
     //! (7) decompose rejects a nested/multi-segment path. 7 behaviors x 2 =
     //! 14 budget; 8 tests used (parametrized where variations share one
     //! behavior).
+    //!
+    //! Widened (`security-rules-cel-path-matching`, Slice 01, US-01,
+    //! ADR-063) — NEW distinct behaviors this slice introduces: (8)
+    //! decompose accepts a flat multi-segment pattern, splitting
+    //! ancestor/leaf correctly (supersedes old behavior 7's rejection —
+    //! DESIGN-authorized scope widening, ADR-063, not a test weakening);
+    //! (9) a nested `match { match { ... } } }` shell flattens to the
+    //! IDENTICAL `DecomposedTarget` the flat form produces; (10) every
+    //! distinct wildcard name (ancestor AND leaf) is rewritten without
+    //! collision; (11) a wildcard at a collection-name position is still
+    //! rejected (`NESTED_PATH`); (12) a recursive wildcard inside a
+    //! multi-segment pattern is still rejected (`RECURSIVE_WILDCARD`); (13)
+    //! one file mixing a single-collection and a multi-segment pattern
+    //! decomposes both correctly; (14) a nested match-block body mixing
+    //! `allow` with a further nested `match` is a `SYNTAX_ERROR`. 6 NEW
+    //! behaviors x 2 = 12 budget (behavior 8 subsumes old behavior 7, not
+    //! double-counted); 7 new tests used.
 
     use super::*;
 
@@ -612,11 +808,11 @@ mod tests {
         assert_eq!(rules.len(), 1);
         assert_eq!(
             rules[0],
-            DecomposedRule {
+            DecomposedTarget::SingleCollection(DecomposedRule {
                 collection_path: "journal_entries".to_string(),
                 read_condition: Some("request.auth.uid == resource.data.owner_id".to_string()),
                 write_condition: None,
-            }
+            })
         );
     }
 
@@ -629,11 +825,11 @@ mod tests {
         let expected_condition = "request.auth.uid == request.path.userId".to_string();
         assert_eq!(
             rules[0],
-            DecomposedRule {
+            DecomposedTarget::SingleCollection(DecomposedRule {
                 collection_path: "profiles".to_string(),
                 read_condition: Some(expected_condition.clone()),
                 write_condition: Some(expected_condition.clone()),
-            }
+            })
         );
         // The rewritten condition must itself parse via the SAME,
         // unmodified parse_condition real enforcement/simulation use —
@@ -642,13 +838,116 @@ mod tests {
         assert!(parse_condition(&expected_condition).is_ok());
     }
 
+    // -----------------------------------------------------------------------
+    // security-rules-cel-path-matching (Slice 01, US-01, ADR-063) — widened
+    // decompose_block, nested match-block flattening.
+    // -----------------------------------------------------------------------
+
+    /// Supersedes the old `decompose_rejects_a_nested_multi_segment_path`
+    /// test — DESIGN-authorized scope widening (ADR-063), the identical
+    /// input this feature exists to accept.
     #[test]
-    fn decompose_rejects_a_nested_multi_segment_path() {
+    fn decompose_accepts_a_flat_multi_segment_pattern_and_splits_ancestor_leaf() {
         let blocks = parse_rules_file(
             r#"
             service cloud.firestore {
               match /databases/{database}/documents {
-                match /expeditions/{id}/journal_entries/{entryId} {
+                match /expeditions/{expeditionId}/journal_entries/{entryId} {
+                  allow read, write: if request.auth.uid == resource.data.owner_id;
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+
+        let targets = decompose(blocks).expect("must decompose");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            targets[0],
+            DecomposedTarget::MultiSegmentPattern(DecomposedPatternRule {
+                collection_path_pattern: "expeditions/{expeditionId}/journal_entries".to_string(),
+                ancestor_segment_count: 3,
+                literal_skeleton: "expeditions/journal_entries".to_string(),
+                leaf_variable: Some("entryId".to_string()),
+                read_condition: Some("request.auth.uid == resource.data.owner_id".to_string()),
+                write_condition: Some("request.auth.uid == resource.data.owner_id".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn nested_match_block_flattens_to_the_identical_decomposed_target_as_flat_syntax() {
+        let flat = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /expeditions/{expeditionId}/journal_entries/{entryId} {
+                  allow read, write: if request.auth.uid == resource.data.owner_id;
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse flat form");
+        let nested = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /expeditions/{expeditionId} {
+                  match /journal_entries/{entryId} {
+                    allow read, write: if request.auth.uid == resource.data.owner_id;
+                  }
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse nested form");
+
+        let flat_targets = decompose(flat).expect("must decompose flat form");
+        let nested_targets = decompose(nested).expect("must decompose nested form");
+        assert_eq!(
+            flat_targets, nested_targets,
+            "AC-17-203: a nested match-block shell must decompose to the identical DecomposedTarget the flat form produces"
+        );
+    }
+
+    #[test]
+    fn decompose_rewrites_every_distinct_wildcard_name_across_ancestor_and_leaf_without_collision() {
+        let blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /expeditions/{expeditionId}/journal_entries/{entryId} {
+                  allow read: if expeditionId != entryId;
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+
+        let targets = decompose(blocks).expect("must decompose");
+        let DecomposedTarget::MultiSegmentPattern(pattern) = &targets[0] else {
+            panic!("expected a MultiSegmentPattern target");
+        };
+        let expected = "request.path.expeditionId != request.path.entryId".to_string();
+        assert_eq!(
+            pattern.read_condition,
+            Some(expected.clone()),
+            "AC-17-204: both distinct wildcard names must be rewritten, never colliding with each other"
+        );
+        assert!(parse_condition(&expected).is_ok());
+    }
+
+    #[test]
+    fn decompose_rejects_a_wildcard_at_a_collection_name_position() {
+        let blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /{expeditionId}/journal_entries {
                   allow read: if true;
                 }
               }
@@ -657,12 +956,81 @@ mod tests {
         )
         .expect("must parse");
 
-        let result = decompose(blocks);
-        match result {
+        match decompose(blocks) {
             Err(RulesFileError { offending_blocks }) => {
                 assert_eq!(offending_blocks[0].construct, "NESTED_PATH");
             }
-            Ok(_) => panic!("expected NESTED_PATH rejection"),
+            Ok(_) => panic!("expected NESTED_PATH rejection for a wildcard at a collection-name position"),
+        }
+    }
+
+    #[test]
+    fn decompose_still_rejects_a_recursive_wildcard_in_a_multi_segment_pattern() {
+        let blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /expeditions/{expeditionId}/journal_entries/{name=**} {
+                  allow read: if true;
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+
+        match decompose(blocks) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "RECURSIVE_WILDCARD");
+            }
+            Ok(_) => panic!("expected RECURSIVE_WILDCARD rejection"),
+        }
+    }
+
+    #[test]
+    fn decompose_handles_a_file_mixing_single_collection_and_multi_segment_patterns() {
+        let blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /profiles/{userId} {
+                  allow read, write: if request.auth.uid == userId;
+                }
+                match /expeditions/{expeditionId}/journal_entries/{entryId} {
+                  allow read: if true;
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+
+        let targets = decompose(blocks).expect("must decompose");
+        assert_eq!(targets.len(), 2);
+        assert!(matches!(targets[0], DecomposedTarget::SingleCollection(_)));
+        assert!(matches!(targets[1], DecomposedTarget::MultiSegmentPattern(_)));
+    }
+
+    #[test]
+    fn nested_match_block_body_mixing_allow_and_nested_match_is_a_syntax_error() {
+        let source = r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /expeditions/{expeditionId} {
+                  allow read: if true;
+                  match /journal_entries/{entryId} {
+                    allow read: if true;
+                  }
+                }
+              }
+            }
+        "#;
+
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
+            }
+            Ok(_) => panic!("expected SYNTAX_ERROR: a match block body may not mix 'allow' with nested 'match'"),
         }
     }
 }
