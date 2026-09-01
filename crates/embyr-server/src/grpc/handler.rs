@@ -665,7 +665,16 @@ impl FirestoreService {
         let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
         let request_fields = request_resource_fields.unwrap_or(resource_fields);
 
-        match embyr_core::access_control::evaluate(&condition, auth_ctx.as_ref(), resource_fields, request_fields) {
+        // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s new
+        // 5th parameter, mechanical `None` here — write-path threading is
+        // Slice 03's job, not this slice's.
+        match embyr_core::access_control::evaluate(
+            &condition,
+            auth_ctx.as_ref(),
+            resource_fields,
+            request_fields,
+            None,
+        ) {
             embyr_core::access_control::EvaluationOutcome::Deny => {
                 Err(Status::permission_denied("access denied by write rule"))
             }
@@ -1044,11 +1053,21 @@ impl FirestoreService {
                 // but semantically nonsensical for a read) denies via the
                 // same fail-closed mechanism, never a crash. Zero other
                 // change to this function.
+                //
+                // security-rules-cel-parity (Slice 02, US-02, ADR-062 §
+                // Decision — evaluate() signature): the document's own
+                // already-known ID (`path.document_id`) — zero new I/O, the
+                // SAME `path` this handler already parsed above. This is
+                // the ONE real call site this slice wires with a real
+                // value; every other `evaluate()` call site in this
+                // codebase passes `None` until its own slice threads a
+                // real value.
                 match embyr_core::access_control::evaluate(
                     &condition,
                     auth_ctx.as_ref(),
                     resource_fields,
                     &empty_fields,
+                    Some(path.document_id.as_str()),
                 ) {
                     // AC-17-10: `Deny` ALWAYS produces the identical
                     // `PermissionDenied` response — never distinguishes
@@ -1162,11 +1181,15 @@ impl FirestoreService {
             let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
                 std::collections::BTreeMap::new();
 
+            // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s
+            // new 5th parameter, mechanical `None` here — write-path
+            // threading is Slice 03's job.
             match embyr_core::access_control::evaluate(
                 &condition,
                 auth_ctx.as_ref(),
                 &empty_resource_fields,
                 &fields,
+                None,
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));
@@ -1286,11 +1309,15 @@ impl FirestoreService {
             // Proposed new state: the already-parsed update body fields, no
             // new I/O — the two-value old-vs-new comparison this slice
             // exists to prove.
+            // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s
+            // new 5th parameter, mechanical `None` here — write-path
+            // threading is Slice 03's job.
             match embyr_core::access_control::evaluate(
                 &condition,
                 auth_ctx.as_ref(),
                 resource_fields,
                 &fields,
+                None,
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));
@@ -1405,11 +1432,15 @@ impl FirestoreService {
             let request_resource_fields: std::collections::BTreeMap<String, FieldValue> =
                 std::collections::BTreeMap::new();
 
+            // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s
+            // new 5th parameter, mechanical `None` here — write-path
+            // threading is Slice 03's job.
             match embyr_core::access_control::evaluate(
                 &condition,
                 auth_ctx.as_ref(),
                 resource_fields,
                 &request_resource_fields,
+                None,
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));
@@ -1574,11 +1605,16 @@ impl FirestoreService {
                     let empty_fields: std::collections::BTreeMap<String, FieldValue> =
                         std::collections::BTreeMap::new();
                     for doc in docs {
+                        // security-rules-cel-parity (Slice 02, ADR-062):
+                        // `evaluate()`'s new 5th parameter, mechanical
+                        // `None` here — `ListDocuments` is out of this
+                        // slice's own locked scope (`GetDocument` only).
                         match embyr_core::access_control::evaluate(
                             &condition,
                             auth_ctx.as_ref(),
                             &doc.fields,
                             &empty_fields,
+                            None,
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Allow => {
                                 all_docs.push(doc);
@@ -1811,11 +1847,16 @@ impl FirestoreService {
                     let resource_fields =
                         doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
 
+                    // security-rules-cel-parity (Slice 02, ADR-062):
+                    // `evaluate()`'s new 5th parameter, mechanical `None`
+                    // here — `BatchGetDocuments` is out of this slice's own
+                    // locked scope (`GetDocument` only).
                     match embyr_core::access_control::evaluate(
                         &condition,
                         auth_ctx.as_ref(),
                         resource_fields,
                         &empty_fields,
+                        None,
                     ) {
                         // ADR-042/DDD-BGD-5: `Deny` maps to a per-document
                         // `missing` item — the batch is NEVER aborted

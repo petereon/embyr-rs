@@ -911,11 +911,16 @@ pub async fn simulate_access_rule(
     // `request_resource` are populated vs. empty drives create/update/delete
     // semantics identically to real enforcement — `body.operation` is never
     // read here.
+    // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s new 5th
+    // parameter, mechanical `None` here — simulation's own path-variable
+    // support is Slice 06's job (`SimulateAccessRuleBody.path_variable`,
+    // not yet added).
     let outcome = evaluate(
         &condition,
         auth_ctx.as_ref(),
         &resource_fields,
         &request_resource_fields,
+        None,
     );
 
     Ok((

@@ -743,6 +743,12 @@ path = "../../tests/agent_mode_list_collection_ids/acceptance/alc01_enumerate_su
 name = "security_rules_cel_parity_cp01_import_and_decompose_rules_file"
 path = "../../tests/security_rules_cel_parity/acceptance/cp01_import_and_decompose_rules_file.rs"
 
+# security-rules-cel-parity acceptance tests (Slice 02, Walking Skeleton,
+# US-02, ADR-062) — the imported path-variable rule gates GetDocument reads.
+[[test]]
+name = "security_rules_cel_parity_cp02_path_variable_gates_reads"
+path = "../../tests/security_rules_cel_parity/acceptance/cp02_path_variable_gates_reads.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

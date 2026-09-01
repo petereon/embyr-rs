@@ -259,7 +259,13 @@ pub async fn handle_add_target(
                             // ADR-030's own empty-map convention: Listen has
                             // no "proposed new document" concept, mirrors
                             // handle_get_document exactly (AC-17-120).
-                            if evaluate(condition, auth_ctx.as_ref(), &doc.fields, &empty_fields)
+                            //
+                            // security-rules-cel-parity (Slice 02, ADR-062 §
+                            // Decision — Listen's Per-Event Re-Check Is
+                            // Deliberately Not Wired): `None`, deliberately —
+                            // a `PathVariable`-referencing rule's per-event
+                            // re-check fails closed (OQ-CP-04), not a gap.
+                            if evaluate(condition, auth_ctx.as_ref(), &doc.fields, &empty_fields, None)
                                 == EvaluationOutcome::Deny
                             {
                                 continue; // US-04: withheld, never sent, never a crash (AC-17-118/119).
@@ -292,7 +298,10 @@ pub async fn handle_add_target(
                         // as `evaluate()`'s own decision input.
                         if let Some(condition) = &condition {
                             let empty_fields: BTreeMap<String, FieldValue> = BTreeMap::new();
-                            if evaluate(condition, auth_ctx.as_ref(), &fields, &empty_fields)
+                            // security-rules-cel-parity (Slice 02, ADR-062 §
+                            // Decision — Listen's Per-Event Re-Check Is
+                            // Deliberately Not Wired): `None`, deliberately.
+                            if evaluate(condition, auth_ctx.as_ref(), &fields, &empty_fields, None)
                                 == EvaluationOutcome::Deny
                             {
                                 continue; // US-05: withheld, never sent.

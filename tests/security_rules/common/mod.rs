@@ -276,6 +276,11 @@ pub struct SecurityRulesFullContext {
     _cust_container: ContainerAsync<Postgres>,
     pub server: embyr_server::TestServer,
     pub sys_pool: sqlx::PgPool,
+    // security-rules-cel-parity (Slice 02, ADR-062): exposed so CP02's own
+    // scenarios can seed `profiles/<uid>`-shaped documents beyond the fixed
+    // journal_entries/trail_guides/app_config set `new()` seeds below —
+    // mirrors `sys_pool`'s own pub-field precedent, not a new port.
+    pub cust_pool: sqlx::PgPool,
     pub api_key: String,
     pub project_id: String,
     pub account_id: uuid::Uuid,
@@ -384,6 +389,7 @@ impl SecurityRulesFullContext {
             _cust_container: cust_container,
             server,
             sys_pool,
+            cust_pool,
             api_key,
             project_id: project_id.to_string(),
             account_id,
@@ -475,6 +481,27 @@ impl SecurityRulesFullContext {
         .execute(&self.sys_pool)
         .await
         .expect("insert client_identity_credentials row");
+    }
+
+    /// Seed a document directly into the customer DB (bypassing
+    /// `CreateDocument` — the same bypass-the-endpoint allowance
+    /// `seed_access_rule` above already uses), mirroring `new()`'s own
+    /// journal_entries/trail_guides/app_config seeding shape exactly.
+    /// security-rules-cel-parity (Slice 02): lets CP02 seed
+    /// `profiles/<uid>`-shaped documents this fixture's fixed seed set
+    /// doesn't cover.
+    pub async fn seed_document(&self, collection: &str, document_id: &str, fields: serde_json::Value) {
+        sqlx::query(
+            "INSERT INTO documents (project_id, collection_path, document_id, fields, create_time, update_time, version) \
+             VALUES ($1, $2, $3, $4, now(), now(), 1)",
+        )
+        .bind(&self.project_id)
+        .bind(collection)
+        .bind(document_id)
+        .bind(fields)
+        .execute(&self.cust_pool)
+        .await
+        .expect("insert seed document");
     }
 
     pub fn document_resource_name(&self, collection: &str, doc_suffix: &str) -> String {

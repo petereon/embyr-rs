@@ -104,13 +104,13 @@ pub enum Operand {
     /// the `match` block's own captured wildcard name to this canonical
     /// form BEFORE calling `parse_condition` — so this arm is what makes a
     /// wildcard-bearing block import and STORE successfully in Slice 01.
-    /// The name is retained for future evaluation (Slice 02 wires
-    /// `evaluate()`'s new `path_variable_value` parameter into
-    /// `resolve_field_value`'s arm below); until then, ANY rule referencing
-    /// this operand fails closed unconditionally (see `resolve_field_value`)
-    /// — a wildcard-bearing rule imports and stores correctly here, but is
-    /// not yet correctly ENFORCED until Slice 02 ships (Slice 01's own
-    /// explicit, locked out-of-scope note).
+    /// The name is retained for fidelity/future use (Epic 4b's multiple
+    /// wildcards); this feature's own locked scope (at most one path
+    /// variable per rule) means `resolve_field_value` resolves it without a
+    /// name-keyed lookup (Slice 02, ADR-062 § Decision — Evaluation). Real
+    /// enforcement is wired at `GetDocument` only (Slice 02); every other
+    /// call site passes `None` for `evaluate()`'s `path_variable_value`
+    /// parameter until its own slice wires it (write handlers — Slice 03).
     PathVariable(String),
 }
 
@@ -547,8 +547,22 @@ pub fn evaluate(
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
     request_resource_fields: &BTreeMap<String, FieldValue>,
+    // security-rules-cel-parity (Slice 02, US-02, ADR-062 § Decision —
+    // evaluate() signature): the document's own already-known ID at the
+    // call site (`GetDocument`, ADR-062's own zero-new-I/O guarantee) —
+    // `None` at every call site that doesn't yet thread a real value
+    // (write handlers/Listen's per-event re-check/simulation, all deferred
+    // to later slices) fails `PathVariable` closed via the existing
+    // `FieldMissing` short-circuit, never a new control-flow shape.
+    path_variable_value: Option<&str>,
 ) -> EvaluationOutcome {
-    match eval_bool(condition, auth, resource_fields, request_resource_fields) {
+    match eval_bool(
+        condition,
+        auth,
+        resource_fields,
+        request_resource_fields,
+        path_variable_value,
+    ) {
         Ok(true) => EvaluationOutcome::Allow,
         Ok(false) | Err(FieldMissing) => EvaluationOutcome::Deny,
     }
@@ -570,14 +584,30 @@ fn eval_bool(
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
     request_resource_fields: &BTreeMap<String, FieldValue>,
+    path_variable_value: Option<&str>,
 ) -> Result<bool, FieldMissing> {
     match condition {
         Condition::Literal(value) => Ok(*value),
-        Condition::Not(inner) => {
-            Ok(!eval_bool(inner, auth, resource_fields, request_resource_fields)?)
-        }
-        Condition::And(left, right) => Ok(eval_bool(left, auth, resource_fields, request_resource_fields)?
-            && eval_bool(right, auth, resource_fields, request_resource_fields)?),
+        Condition::Not(inner) => Ok(!eval_bool(
+            inner,
+            auth,
+            resource_fields,
+            request_resource_fields,
+            path_variable_value,
+        )?),
+        Condition::And(left, right) => Ok(eval_bool(
+            left,
+            auth,
+            resource_fields,
+            request_resource_fields,
+            path_variable_value,
+        )? && eval_bool(
+            right,
+            auth,
+            resource_fields,
+            request_resource_fields,
+            path_variable_value,
+        )?),
         Condition::Or(left, right) => {
             // custom-claims (US-02, ADR-034, AC-17-142): a claim reference is
             // legitimately absent for many callers (unlike resource fields,
@@ -594,11 +624,13 @@ fn eval_bool(
             // either side (direct grep — `||` never previously appeared in
             // an evaluated, as opposed to parsed-only or
             // compliance-checked, condition).
-            let left_result = eval_bool(left, auth, resource_fields, request_resource_fields);
+            let left_result =
+                eval_bool(left, auth, resource_fields, request_resource_fields, path_variable_value);
             if let Ok(true) = left_result {
                 return Ok(true);
             }
-            let right_result = eval_bool(right, auth, resource_fields, request_resource_fields);
+            let right_result =
+                eval_bool(right, auth, resource_fields, request_resource_fields, path_variable_value);
             match (left_result, right_result) {
                 (_, Ok(true)) => Ok(true),
                 (Ok(false), Ok(false)) => Ok(false),
@@ -606,7 +638,14 @@ fn eval_bool(
             }
         }
         Condition::Compare(left, op, right) => {
-            let equal = compare_operands(left, right, auth, resource_fields, request_resource_fields)?;
+            let equal = compare_operands(
+                left,
+                right,
+                auth,
+                resource_fields,
+                request_resource_fields,
+                path_variable_value,
+            )?;
             Ok(match op {
                 CompareOp::Eq => equal,
                 CompareOp::Ne => !equal,
@@ -629,6 +668,7 @@ fn compare_operands(
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
     request_resource_fields: &BTreeMap<String, FieldValue>,
+    path_variable_value: Option<&str>,
 ) -> Result<bool, FieldMissing> {
     match (left, right) {
         (Operand::AuthUid, Operand::ResourceField(name))
@@ -653,8 +693,20 @@ fn compare_operands(
         | (Operand::AuthUid, Operand::NullLiteral)
         | (Operand::NullLiteral, Operand::AuthUid) => Ok(auth.is_none()),
         _ => {
-            let left_value = resolve_field_value(left, auth, resource_fields, request_resource_fields)?;
-            let right_value = resolve_field_value(right, auth, resource_fields, request_resource_fields)?;
+            let left_value = resolve_field_value(
+                left,
+                auth,
+                resource_fields,
+                request_resource_fields,
+                path_variable_value,
+            )?;
+            let right_value = resolve_field_value(
+                right,
+                auth,
+                resource_fields,
+                request_resource_fields,
+                path_variable_value,
+            )?;
             Ok(left_value == right_value)
         }
     }
@@ -665,6 +717,7 @@ fn resolve_field_value(
     auth: Option<&AuthContext>,
     resource_fields: &BTreeMap<String, FieldValue>,
     request_resource_fields: &BTreeMap<String, FieldValue>,
+    path_variable_value: Option<&str>,
 ) -> Result<FieldValue, FieldMissing> {
     match operand {
         Operand::ResourceField(name) => resource_fields.get(name).cloned().ok_or(FieldMissing),
@@ -694,14 +747,19 @@ fn resolve_field_value(
         Operand::AuthUid | Operand::AuthNullSentinel => {
             auth.map(|a| FieldValue::String(a.uid.clone())).ok_or(FieldMissing)
         }
-        // security-rules-cel-parity (Slice 01, ADR-062): NOT YET resolvable
-        // — `evaluate()` has no `path_variable_value` parameter until Slice
-        // 02 wires it in. Unconditional fail-closed, mirroring every other
-        // operand family's own `FieldMissing` short-circuit — a
-        // PathVariable-referencing rule imports and stores correctly
-        // (Slice 01) but always denies until Slice 02 ships (named,
-        // locked out-of-scope note, not a silent gap).
-        Operand::PathVariable(_) => Err(FieldMissing),
+        // security-rules-cel-parity (Slice 02, US-02, ADR-062 § Decision —
+        // resolve_field_value): resolves to the document's own path-bound
+        // value threaded in via `evaluate()`'s `path_variable_value`
+        // parameter — `None` (no call site wired, or a call site that
+        // deliberately passes `None`, e.g. write handlers pre-Slice-03,
+        // Listen's per-event re-check) fails closed via the SAME
+        // `FieldMissing` short-circuit every other operand family already
+        // uses. The captured variable's NAME is not consulted here (this
+        // feature's own locked scope guarantees at most one path variable
+        // per rule, ADR-062 § Decision — evaluate() signature).
+        Operand::PathVariable(_) => {
+            path_variable_value.map(|id| FieldValue::String(id.to_string())).ok_or(FieldMissing)
+        }
     }
 }
 
@@ -1193,7 +1251,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Allow);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None), EvaluationOutcome::Allow);
     }
 
     #[test]
@@ -1206,7 +1264,7 @@ mod tests {
         let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None), EvaluationOutcome::Deny);
     }
 
     #[test]
@@ -1219,7 +1277,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new(); // owner_id absent
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None), EvaluationOutcome::Deny);
     }
 
     // ── evaluate: request.resource.data.<field> (security-rules-write-path, ADR-030) ──
@@ -1239,7 +1297,7 @@ mod tests {
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &proposed),
+            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None),
             EvaluationOutcome::Allow
         );
     }
@@ -1258,7 +1316,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields()),
+            evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1279,7 +1337,7 @@ mod tests {
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &proposed),
+            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None),
             EvaluationOutcome::Deny
         );
     }
@@ -1294,14 +1352,14 @@ mod tests {
         );
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-        assert_eq!(evaluate(&condition, None, &resource, &empty_fields()), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, None, &resource, &empty_fields(), None), EvaluationOutcome::Deny);
     }
 
     #[test]
     fn bare_true_literal_allows_regardless_of_auth_or_resource_ac_17_12() {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
         assert_eq!(
-            evaluate(&Condition::Literal(true), None, &resource, &empty_fields()),
+            evaluate(&Condition::Literal(true), None, &resource, &empty_fields(), None),
             EvaluationOutcome::Allow
         );
     }
@@ -1333,7 +1391,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields()),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None),
             EvaluationOutcome::Allow
         );
     }
@@ -1347,7 +1405,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields()),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1362,7 +1420,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields()),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1372,7 +1430,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), None, &resource, &empty_fields()),
+            evaluate(&is_moderator_condition(), None, &resource, &empty_fields(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1397,7 +1455,7 @@ mod tests {
             claims: claims_with("is_moderator", FieldValue::Boolean(true)),
         };
         assert_eq!(
-            evaluate(&condition, Some(&priya), &resource, &empty_fields()),
+            evaluate(&condition, Some(&priya), &resource, &empty_fields(), None),
             EvaluationOutcome::Allow,
             "a moderator must be admitted via the claim disjunct"
         );
@@ -1405,7 +1463,7 @@ mod tests {
         // Maria: satisfies the ownership disjunct, has no moderator claim.
         let maria = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         assert_eq!(
-            evaluate(&condition, Some(&maria), &resource, &empty_fields()),
+            evaluate(&condition, Some(&maria), &resource, &empty_fields(), None),
             EvaluationOutcome::Allow,
             "the document owner must be admitted via the ownership disjunct"
         );
@@ -1413,7 +1471,7 @@ mod tests {
         // Dana: satisfies neither disjunct.
         let dana = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
         assert_eq!(
-            evaluate(&condition, Some(&dana), &resource, &empty_fields()),
+            evaluate(&condition, Some(&dana), &resource, &empty_fields(), None),
             EvaluationOutcome::Deny,
             "neither a moderator nor the owner — must deny"
         );
@@ -1438,7 +1496,7 @@ mod tests {
         let matching_ticket =
             resource_with("department", FieldValue::String("billing".to_string()));
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &matching_ticket, &empty_fields()),
+            evaluate(&condition, Some(&jordan), &matching_ticket, &empty_fields(), None),
             EvaluationOutcome::Allow,
             "AC-17-143: matching department claim/field must allow"
         );
@@ -1446,7 +1504,7 @@ mod tests {
         let other_ticket =
             resource_with("department", FieldValue::String("engineering".to_string()));
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields()),
+            evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields(), None),
             EvaluationOutcome::Deny,
             "AC-17-143: mismatched department claim/field must deny"
         );
@@ -1474,7 +1532,7 @@ mod tests {
             claims: claims_with("department", FieldValue::String("billing".to_string())),
         };
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &resource, &empty_fields()),
+            evaluate(&condition, Some(&jordan), &resource, &empty_fields(), None),
             EvaluationOutcome::Allow,
             "AC-17-151: a matching department claim/string-literal must allow"
         );
@@ -1484,7 +1542,7 @@ mod tests {
             claims: claims_with("department", FieldValue::String("engineering".to_string())),
         };
         assert_eq!(
-            evaluate(&condition, Some(&sam), &resource, &empty_fields()),
+            evaluate(&condition, Some(&sam), &resource, &empty_fields(), None),
             EvaluationOutcome::Deny,
             "AC-17-151: a mismatched department claim/string-literal must deny"
         );
@@ -1502,7 +1560,7 @@ mod tests {
         let resource = resource_with("status", FieldValue::String("published".to_string()));
 
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields()),
+            evaluate(&condition, None, &resource, &empty_fields(), None),
             EvaluationOutcome::Allow,
             "AC-17-152: a matching resource-field/string-literal comparison must allow, \
              independent of any claim or verified caller"
@@ -1532,7 +1590,7 @@ mod tests {
             let auth = AuthContext { uid, claims: BTreeMap::new() };
             let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None), EvaluationOutcome::Deny);
         }
 
         /// Property (AC-17-10's underlying mechanism): for ANY
@@ -1556,7 +1614,7 @@ mod tests {
             let mut resource = resource_with("owner_id", FieldValue::String(owner_uid));
             resource.insert("title".to_string(), FieldValue::String(unrelated_value));
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields()), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None), EvaluationOutcome::Deny);
         }
     }
 
