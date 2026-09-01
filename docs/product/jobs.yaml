@@ -917,6 +917,35 @@ jobs:
         way, not learn an unrelated new authorization model
     opportunity_score: 17
     priority: critical
+    # NOTE (security-rules-cel-path-matching DISCUSS, 2026-09-01): JOB-17 now
+    # also covers importing a real Firestore `.rules` file's fixed-depth
+    # multi-segment/nested-collection path patterns (e.g. `match
+    # /expeditions/{expeditionId}/journal_entries/{entryId} { ... }`, or the
+    # equivalent nested-match-block syntax), with deterministic (reject-on-
+    # structural-overlap) routing of a concrete request path to the one
+    # matching pattern, wired into read, write, AND Listen's per-event
+    # re-check (closing security-rules-cel-parity's own deferred OQ-CP-04) —
+    # same job, same persona, not a new job (9th realization). No new
+    # Alex-facing mental model beyond "the same real file I already trust
+    # embyr to import now covers the largest remaining share of its own
+    # shapes." Decision 3 (UX Research Depth) = Comprehensive for this
+    # feature (both Alex's own import arc and the routing-correctness
+    # consequence arc for Trailmark's end users were mapped in full), but per
+    # this codebase's established convention it lives inline in
+    # docs/feature/security-rules-cel-path-matching/feature-delta.md
+    # § Journey, not as a separate journey-*.yaml artifact. This feature
+    # narrows security-rules-cel-parity's own predecessor table's single
+    # "Epic 4b" bucket into two independently-shippable epics: this feature
+    # (fixed-depth multi-segment patterns, deterministic routing) and a new
+    # named, deferred follow-up, security-rules-cel-recursive-wildcards
+    # ("Epic 4b-ii", for `{path=**}` recursive wildcards — a categorically
+    # harder, variable-depth routing problem, not evidenced as necessary by
+    # any domain example here). Confirmed, by direct code read, that
+    # security-rules-collection-group-rules' own mechanism does NOT reduce
+    # this feature's own scope — an orthogonal, non-reusable solution to an
+    # orthogonal problem. See docs/feature/security-rules-cel-path-matching/
+    # feature-delta.md § Job Discovery Framing Resolution and § Scope
+    # Assessment.
     # NOTE (security-rules DISCUSS, 2026-08-17): new job, not a JOB-16
     # amendment — authoring/evaluating access-control rules is a
     # functionally, emotionally, and socially distinct job from establishing

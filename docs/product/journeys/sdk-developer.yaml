@@ -12,6 +12,30 @@ jobs:
   - JOB-20  # anonymous-identity (added by anonymous-sessions DISCUSS, 2026-08-30)
 updated: "2026-09-01"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (security-rules-cel-path-matching DISCUSS, 2026-09-01): JOB-17 now
+# also covers importing fixed-depth multi-segment/nested-collection `.rules`
+# file path patterns (e.g. `match /expeditions/{expeditionId}/
+# journal_entries/{entryId} { ... }`), with deterministic routing of a
+# concrete request path to the one structurally-matching pattern, across
+# read, write, and Listen's per-event re-check — same job, same persona, not
+# a new job (9th realization, following security-rules-cel-parity's own
+# 8th). No new Alex-facing mental model beyond "the same real file, now
+# covering nested/shared collections too" — Decision 3 (UX Research Depth) =
+# Comprehensive for this feature (Alex's own import arc AND a new
+# routing-correctness consequence arc — does a rule for one expedition ever
+# leak into another? — were both mapped in full), but per this codebase's
+# established convention it lives inline in
+# docs/feature/security-rules-cel-path-matching/feature-delta.md § Journey,
+# not as a separate journey-*.yaml artifact. This feature narrows
+# security-rules-cel-parity's own deferred "Epic 4b" bucket into two: this
+# feature (fixed-depth multi-segment patterns) and a new named, deferred
+# follow-up, security-rules-cel-recursive-wildcards ("Epic 4b-ii",
+# `{path=**}`). Confirmed by direct code read that
+# security-rules-collection-group-rules' own mechanism does not reduce this
+# feature's own scope — a related but orthogonal, non-reusable solution to
+# an orthogonal problem. See
+# docs/feature/security-rules-cel-path-matching/feature-delta.md § Job
+# Discovery Framing Resolution and § Scope Assessment.
 # NOTE (security-rules-cel-parity DISCUSS, 2026-09-01): JOB-17 now also covers
 # importing a real, existing Firestore `.rules` file directly (the outer
 # service/match-block syntax, plus a single leaf-level path-variable capture
