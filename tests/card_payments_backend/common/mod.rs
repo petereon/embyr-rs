@@ -526,7 +526,8 @@ impl CpbTestContext {
     }
 
     /// Insert a `daily_project_metrics` row for yesterday with the given
-    /// counters, used by US-205/US-206 scenarios.
+    /// counters, used by US-205 metering scenarios (`run-metering` targets
+    /// the literal previous calendar day's finalized totals).
     pub async fn insert_yesterday_metrics(
         &self,
         project_id: &str,
@@ -538,6 +539,35 @@ impl CpbTestContext {
             "INSERT INTO daily_project_metrics \
              (project_id, date, read_ops, write_ops, delete_ops) \
              VALUES ($1, CURRENT_DATE - INTERVAL '1 day', $2, $3, $4) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(project_id)
+        .bind(reads)
+        .bind(writes)
+        .bind(deletes)
+        .execute(&self.pool)
+        .await
+        .expect("insert daily_project_metrics row");
+    }
+
+    /// Insert a `daily_project_metrics` row within the current calendar
+    /// month, used by US-206 cumulative cap-check scenarios. The cumulative
+    /// cap query sums `m.date >= DATE_TRUNC('month', CURRENT_DATE)`
+    /// (ADR-020, month-to-date caps) — clamped here so the row always lands
+    /// inside that window regardless of what day of the month the test
+    /// runs on (plain `CURRENT_DATE - INTERVAL '1 day'` falls into the
+    /// previous month on the 1st and silently drops out of the sum).
+    pub async fn insert_current_month_metrics(
+        &self,
+        project_id: &str,
+        reads: i64,
+        writes: i64,
+        deletes: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO daily_project_metrics \
+             (project_id, date, read_ops, write_ops, delete_ops) \
+             VALUES ($1, GREATEST(CURRENT_DATE - INTERVAL '1 day', DATE_TRUNC('month', CURRENT_DATE))::date, $2, $3, $4) \
              ON CONFLICT DO NOTHING",
         )
         .bind(project_id)

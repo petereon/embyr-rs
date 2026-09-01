@@ -85,7 +85,7 @@ async fn crossing_100_percent_of_a_free_plan_cap_suspends_the_accounts_projects(
     ctx.insert_project("solstice-cap-1").await;
     ctx.insert_project("solstice-cap-2").await;
     // Free-plan deletes cap is 100_000 — this crosses it.
-    ctx.insert_yesterday_metrics("solstice-cap-1", 0, 0, 100_000)
+    ctx.insert_current_month_metrics("solstice-cap-1", 0, 0, 100_000)
         .await;
 
     let status =
@@ -134,7 +134,7 @@ async fn below_cap_usage_never_suspends() {
 
     ctx.insert_project("aperture-below-cap").await;
     // 82% of the 500_000 writes cap — below the 100% threshold.
-    ctx.insert_yesterday_metrics("aperture-below-cap", 0, 410_000, 0)
+    ctx.insert_current_month_metrics("aperture-below-cap", 0, 410_000, 0)
         .await;
 
     // Wait roughly one enforcement window, then assert the project is still active.
@@ -175,7 +175,7 @@ async fn pro_plan_accounts_are_never_suspended_by_this_mechanism() {
     ctx.insert_project("northwind-pro-heavy").await;
     // Usage exceeds what a Free-plan cap would have been — Pro is metered
     // overage instead (US-205), never hard-stopped by this mechanism.
-    ctx.insert_yesterday_metrics("northwind-pro-heavy", 0, 900_000, 0)
+    ctx.insert_current_month_metrics("northwind-pro-heavy", 0, 900_000, 0)
         .await;
 
     tokio::time::sleep(Duration::from_secs(65)).await;
@@ -215,7 +215,7 @@ async fn upgrading_to_pro_reactivates_projects_suspended_by_cap_enforcement() {
         .expect("provisioning GET failed");
 
     ctx.insert_project("solstice-reactivate").await;
-    ctx.insert_yesterday_metrics("solstice-reactivate", 0, 0, 100_000)
+    ctx.insert_current_month_metrics("solstice-reactivate", 0, 0, 100_000)
         .await;
 
     let suspended = poll_for_project_status(
@@ -275,7 +275,7 @@ async fn concurrent_requests_during_cap_crossing_do_not_double_suspend() {
         .expect("provisioning GET failed");
 
     ctx.insert_project("aperture-race").await;
-    ctx.insert_yesterday_metrics("aperture-race", 0, 0, 100_000)
+    ctx.insert_current_month_metrics("aperture-race", 0, 0, 100_000)
         .await;
 
     // Fire 10 concurrent GETs while the background refresher may be mid-cycle.

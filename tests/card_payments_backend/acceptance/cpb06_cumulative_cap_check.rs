@@ -88,11 +88,11 @@ async fn cumulative_usage_sums_across_all_of_an_accounts_projects() {
     ctx.insert_project("aperture-1").await;
     ctx.insert_project("aperture-2").await;
     ctx.insert_project("aperture-3").await;
-    ctx.insert_yesterday_metrics("aperture-1", 0, 200_000, 0)
+    ctx.insert_current_month_metrics("aperture-1", 0, 200_000, 0)
         .await;
-    ctx.insert_yesterday_metrics("aperture-2", 0, 150_000, 0)
+    ctx.insert_current_month_metrics("aperture-2", 0, 150_000, 0)
         .await;
-    ctx.insert_yesterday_metrics("aperture-3", 0, 62_000, 0)
+    ctx.insert_current_month_metrics("aperture-3", 0, 62_000, 0)
         .await;
 
     let body = poll_for_cap_status(&ctx, &cookie, Duration::from_secs(90)).await;
@@ -133,7 +133,7 @@ async fn usage_at_exactly_the_cap_reports_100_percent() {
 
     ctx.insert_project("solstice-1").await;
     // Free-plan deletes cap is 100_000 (embyr_core::admin::billing::free_plan_caps).
-    ctx.insert_yesterday_metrics("solstice-1", 0, 0, 100_000)
+    ctx.insert_current_month_metrics("solstice-1", 0, 0, 100_000)
         .await;
 
     let body = poll_for_cap_status(&ctx, &cookie, Duration::from_secs(90)).await;
