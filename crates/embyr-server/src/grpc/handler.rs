@@ -665,15 +665,16 @@ impl FirestoreService {
         let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
         let request_fields = request_resource_fields.unwrap_or(resource_fields);
 
-        // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s new
-        // 5th parameter, mechanical `None` here — write-path threading is
-        // Slice 03's job, not this slice's.
+        // security-rules-cel-parity (Slice 03, US-03, ADR-062): the
+        // document's own already-known target ID (`path.document_id`) —
+        // zero new I/O, the SAME `path` this function already received.
+        // Mirrors `handle_get_document`'s own Slice 02 wiring exactly.
         match embyr_core::access_control::evaluate(
             &condition,
             auth_ctx.as_ref(),
             resource_fields,
             request_fields,
-            None,
+            Some(path.document_id.as_str()),
         ) {
             embyr_core::access_control::EvaluationOutcome::Deny => {
                 Err(Status::permission_denied("access denied by write rule"))
@@ -1181,15 +1182,18 @@ impl FirestoreService {
             let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
                 std::collections::BTreeMap::new();
 
-            // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s
-            // new 5th parameter, mechanical `None` here — write-path
-            // threading is Slice 03's job.
+            // security-rules-cel-parity (Slice 03, US-03, AC-17-184/186,
+            // ADR-062): the document's own already-known target ID
+            // (`path.document_id`) — for Create this is the TARGET path
+            // being written to, not fetched content (nothing exists yet to
+            // fetch), zero new I/O. Mirrors `handle_get_document`'s own
+            // Slice 02 wiring exactly.
             match embyr_core::access_control::evaluate(
                 &condition,
                 auth_ctx.as_ref(),
                 &empty_resource_fields,
                 &fields,
-                None,
+                Some(path.document_id.as_str()),
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));
@@ -1309,15 +1313,16 @@ impl FirestoreService {
             // Proposed new state: the already-parsed update body fields, no
             // new I/O — the two-value old-vs-new comparison this slice
             // exists to prove.
-            // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s
-            // new 5th parameter, mechanical `None` here — write-path
-            // threading is Slice 03's job.
+            // security-rules-cel-parity (Slice 03, US-03, AC-17-184/186,
+            // ADR-062): the document's own already-known target ID
+            // (`path.document_id`) — zero new I/O. Mirrors
+            // `handle_get_document`'s own Slice 02 wiring exactly.
             match embyr_core::access_control::evaluate(
                 &condition,
                 auth_ctx.as_ref(),
                 resource_fields,
                 &fields,
-                None,
+                Some(path.document_id.as_str()),
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));
@@ -1432,15 +1437,16 @@ impl FirestoreService {
             let request_resource_fields: std::collections::BTreeMap<String, FieldValue> =
                 std::collections::BTreeMap::new();
 
-            // security-rules-cel-parity (Slice 02, ADR-062): `evaluate()`'s
-            // new 5th parameter, mechanical `None` here — write-path
-            // threading is Slice 03's job.
+            // security-rules-cel-parity (Slice 03, US-03, AC-17-184,
+            // ADR-062): the document's own already-known target ID
+            // (`path.document_id`) — zero new I/O. Mirrors
+            // `handle_get_document`'s own Slice 02 wiring exactly.
             match embyr_core::access_control::evaluate(
                 &condition,
                 auth_ctx.as_ref(),
                 resource_fields,
                 &request_resource_fields,
-                None,
+                Some(path.document_id.as_str()),
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));

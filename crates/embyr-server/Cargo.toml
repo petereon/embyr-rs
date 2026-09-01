@@ -749,6 +749,13 @@ path = "../../tests/security_rules_cel_parity/acceptance/cp01_import_and_decompo
 name = "security_rules_cel_parity_cp02_path_variable_gates_reads"
 path = "../../tests/security_rules_cel_parity/acceptance/cp02_path_variable_gates_reads.rs"
 
+# security-rules-cel-parity acceptance tests (Slice 03, Walking Skeleton,
+# US-03, ADR-062) — the same imported path-variable rule gates
+# Create/Update/DeleteDocument writes, not just GetDocument reads.
+[[test]]
+name = "security_rules_cel_parity_cp03_path_variable_gates_writes"
+path = "../../tests/security_rules_cel_parity/acceptance/cp03_path_variable_gates_writes.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

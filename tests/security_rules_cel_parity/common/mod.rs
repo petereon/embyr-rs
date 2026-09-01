@@ -11,6 +11,16 @@
 //! `handle_get_document` seam, not a hand-assembled router). Both reused
 //! via path import rather than duplicated — mirrors `security_rules`'s own
 //! common/mod.rs reusing `client_auth`'s fixture the same way.
+//!
+//! Slice 03 (US-03, ADR-062) needs real `CreateDocument`/`UpdateDocument`/
+//! `DeleteDocument` gRPC calls too — its own acceptance file path-imports
+//! `security_rules_write_path`'s fixture module DIRECTLY (not re-exported
+//! from here) to avoid a duplicate, nominally-distinct
+//! `SecurityRulesFullContext` type: that module ALSO path-imports
+//! `security_rules`'s common/mod.rs internally, and re-exporting both
+//! chains from this one file would instantiate `security_rules/common`'s
+//! source twice within the same test binary, producing two structurally
+//! identical but type-incompatible `SecurityRulesFullContext`s.
 
 #![allow(dead_code, unused_imports)]
 
