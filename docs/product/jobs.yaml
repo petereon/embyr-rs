@@ -1053,6 +1053,42 @@ jobs:
     # the orchestrator to confirm, not a silent decision. See
     # docs/feature/custom-claims/feature-delta.md § Job Discovery Framing
     # Resolution and § Scope Assessment.
+    # NOTE (security-rules-cel-parity DISCUSS, 2026-09-01): JOB-17 now also
+    # covers a new authoring-surface capability — importing a real, existing
+    # Firestore `.rules` file directly, for the file shapes this feature's own
+    # v1 scope covers (single top-level collections, at most one leaf-level
+    # path-variable capture per `match` block) — same job, same persona (P1
+    # Alex), not a new job. This REVERSES a prior verdict, not silently: the
+    # ORIGINAL security-rules DISCUSS (2026-08-17) rejected "Full Firestore
+    # Rules Language parity" as "unbounded scope, no evidenced need... a
+    # decision this scale deserves its own DISCUSS/DESIGN pass if evidence for
+    # it ever appears, not a default" — and security-rules-operations
+    # (2026-08-27) independently re-confirmed that verdict unfired ("NO firing
+    # trigger anywhere across six subsequent epics of evidence"). New,
+    # EXTERNAL evidence has since appeared — customers migrating a real,
+    # existing Firestore application, with real `.rules` files, cannot bring
+    # them to embyr at all, blocking essentially every migrating customer's
+    # authorization model — a genuinely different evidence class than the six
+    # "no firing trigger" epics of internal usage evidence that preceded it.
+    # The reversed target (full CEL parity) is confirmed oversized as a single
+    # feature (4 of 5 Elephant Carpaccio signals fired at full-ambition scope)
+    # and split into 5 independently-shippable follow-up features (candidate
+    # ids `security-rules-cel-path-matching`, `security-rules-cel-expression-
+    # grammar`, `security-rules-cel-cross-document-reads`,
+    # `security-rules-cel-functions` — named, deferred, not built here) plus
+    # this feature's own narrower v1 slice: the outer `.rules`-file syntax
+    # (`service`/`match` block wrapper) decomposed into the EXISTING
+    # per-collection admin upsert calls, unchanged, plus exactly one new
+    # evaluable construct (a path-captured document-ID variable, e.g.
+    # `match /profiles/{userId} { allow read, write: if request.auth.uid ==
+    # userId; }` — the single most common real Firestore ownership pattern,
+    # and one this codebase's schema had no way to express before this
+    # feature, since `collection_path` has always been single-segment-only).
+    # Zero new storage table, zero new I/O, zero new bounded-context
+    # dependency — mirrors `custom-claims`'s own "one new operand, uniform
+    # mechanical propagation" precedent exactly. See
+    # docs/feature/security-rules-cel-parity/feature-delta.md § Changed
+    # Assumptions and § Job Discovery Framing Resolution.
 
   - id: JOB-18
     name: embyr-hosted-identity

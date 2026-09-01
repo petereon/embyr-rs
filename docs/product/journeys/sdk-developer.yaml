@@ -10,8 +10,28 @@ jobs:
   - JOB-18  # embyr-hosted-identity (added by client-auth-hosted-identity DISCUSS, 2026-08-27)
   - JOB-19  # oauth-provider-identity (added by oauth-providers DISCUSS, 2026-08-30)
   - JOB-20  # anonymous-identity (added by anonymous-sessions DISCUSS, 2026-08-30)
-updated: "2026-08-30"
+updated: "2026-09-01"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (security-rules-cel-parity DISCUSS, 2026-09-01): JOB-17 now also covers
+# importing a real, existing Firestore `.rules` file directly (the outer
+# service/match-block syntax, plus a single leaf-level path-variable capture
+# per match block, e.g. `match /profiles/{userId} { allow read, write: if
+# request.auth.uid == userId; }`) — same job, same persona, not a new job. No
+# new Alex-facing mental model beyond "the real file I already have is now the
+# source of truth, instead of something I hand-retype into the JSON API" —
+# Decision 3 (UX Research Depth) = Comprehensive for this feature (both Alex's
+# import arc and Maria/Dana's downstream consequence arc were mapped in full),
+# but per this codebase's established convention it lives inline in
+# docs/feature/security-rules-cel-parity/feature-delta.md § Journey, not as a
+# separate journey-*.yaml artifact. This feature REVERSES security-rules' own
+# original Resolution 1 (full Firestore Rules Language parity, rejected
+# 2026-08-17) and security-rules-operations' own re-confirmation of it
+# (2026-08-27) — new, external customer-migration evidence, not internal
+# codebase-usage evidence. The reversed full-parity target is split into 5
+# independently-shippable features; this journey note covers only the first
+# (narrowest, lowest-risk) slice — see
+# docs/feature/security-rules-cel-parity/feature-delta.md § Changed
+# Assumptions and § Scope Assessment.
 # NOTE (firestore-write-streaming DISCUSS, 2026-08-30): JOB-01 now also
 # covers the SDK's own default offline-write-durability behavior (the
 # internal Write bidi-stream, used for offline-queue flushing / write-ahead
