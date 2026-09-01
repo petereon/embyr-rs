@@ -49,10 +49,15 @@ use super::handlers::anonymous_identity::enable_anonymous_identity;
 // security-rules-operations (US-02, ADR-035): retrieve a collection's
 // access-rule history — a NEW any-role, read-only route, mirroring
 // simulate_access_rule's identical shape.
+// security-rules-cel-parity (US-01, Slice 01, ADR-062): import + decompose
+// a real .rules file into the existing per-collection admin API — a NEW,
+// distinct route/handler (Owner/Admin, gated in-handler, mirrors
+// define_access_rule's exact gate).
 use super::handlers::access_rules::{
     define_access_rule, define_group_access_rule, define_write_access_rule,
     get_access_rule_history, get_group_access_rule_history, get_write_access_rule_history,
-    simulate_access_rule, simulate_group_query_compliance, simulate_query_compliance,
+    import_rules_file, simulate_access_rule, simulate_group_query_compliance,
+    simulate_query_compliance,
 };
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
@@ -303,6 +308,14 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/access_rules/simulate_group_query",
             post(simulate_group_query_compliance),
+        )
+        // security-rules-cel-parity (US-01, Slice 01, ADR-062): import a
+        // real .rules file (Owner/Admin, gated in-handler) — a NEW,
+        // DISTINCT sibling route, not a branch on the define/simulate
+        // routes above.
+        .route(
+            "/admin/v1/projects/:project_id/access_rules/import",
+            post(import_rules_file),
         )
         .route(
             "/admin/v1/projects/:project_id/metrics",

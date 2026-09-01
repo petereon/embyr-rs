@@ -63,8 +63,8 @@ use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::handlers::shared::verify_project_ownership;
 use crate::admin::state::UserAdminState;
 use embyr_core::access_control::{
-    check_query_compliance, evaluate, parse_condition, AuthContext, ConditionParseError,
-    EvaluationOutcome, QueryComplianceOutcome,
+    check_query_compliance, evaluate, parse_condition, rules_file, AuthContext,
+    ConditionParseError, EvaluationOutcome, QueryComplianceOutcome,
 };
 use embyr_core::admin::account::Role;
 use embyr_core::domain::field_value::FieldValue;
@@ -345,6 +345,68 @@ pub struct SimulateGroupQueryComplianceBody {
 struct ConditionRejectionResponse {
     reason: &'static str,
     error: String,
+}
+
+// ---------------------------------------------------------------------------
+// security-rules-cel-parity (Slice 01, US-01, ADR-062) — rules-file import.
+// ---------------------------------------------------------------------------
+
+/// Body for POST /admin/v1/projects/:project_id/access_rules/import
+/// (ADR-062 § Decision — Admin Surface).
+#[derive(Deserialize)]
+pub struct ImportRulesFileBody {
+    pub rules_file: String,
+}
+
+/// One successfully-decomposed `match` block in an import response.
+#[derive(Serialize)]
+pub struct ImportedBlockSummary {
+    pub collection_path: String,
+    pub read_condition: Option<String>,
+    pub write_condition: Option<String>,
+}
+
+/// Response for POST .../access_rules/import — 200, every block applied
+/// (ADR-062 § Decision — Admin Surface).
+#[derive(Serialize)]
+pub struct ImportRulesFileResponse {
+    pub project_id: String,
+    pub imported: Vec<ImportedBlockSummary>,
+}
+
+/// One offending `match` block, echoed back verbatim from
+/// `rules_file::OffendingBlock` (ADR-062 § Decision — Admin Surface).
+#[derive(Serialize)]
+pub struct OffendingBlockResponse {
+    pub path_pattern: String,
+    pub construct: &'static str,
+    pub detail: String,
+}
+
+/// Response for POST .../access_rules/import on any rejection — 400, names
+/// EVERY offending block (DISCUSS Resolution 2 / US-04), zero storage
+/// touched (ADR-062 § Decision — Import Atomicity).
+#[derive(Serialize)]
+pub struct RulesFileRejectionResponse {
+    pub reason: &'static str,
+    pub offending_blocks: Vec<OffendingBlockResponse>,
+}
+
+fn rules_file_rejection_response(err: rules_file::RulesFileError) -> Response {
+    let offending_blocks = err
+        .offending_blocks
+        .into_iter()
+        .map(|b| OffendingBlockResponse {
+            path_pattern: b.path_pattern,
+            construct: b.construct,
+            detail: b.detail,
+        })
+        .collect();
+    (
+        StatusCode::BAD_REQUEST,
+        Json(RulesFileRejectionResponse { reason: "IMPORT_REJECTED", offending_blocks }),
+    )
+        .into_response()
 }
 
 fn condition_parse_error_response(err: ConditionParseError) -> Response {
@@ -1026,4 +1088,76 @@ pub async fn simulate_group_query_compliance(
         Json(SimulateQueryComplianceResponse { compliant, reasons }),
     )
         .into_response())
+}
+
+/// POST /admin/v1/projects/:project_id/access_rules/import
+/// (security-rules-cel-parity, US-01, Slice 01, ADR-062 § Decision — Admin
+/// Surface).
+///
+/// Owner or Admin only — mirrors `define_access_rule`'s exact gate (this
+/// writes rules, unlike the any-role simulate handlers above).
+/// `rules_file::parse_rules_file` then `rules_file::decompose` run over the
+/// WHOLE file BEFORE any storage call (ADR-062 § Decision — Import
+/// Atomicity): on any rejection, zero `upsert_access_rule`/
+/// `upsert_write_access_rule` calls are made and every existing rule is
+/// left untouched (DISCUSS Resolution 2). Only once every block validates
+/// does this loop over the decomposed rules, calling the existing,
+/// byte-for-byte unmodified `upsert_access_rule`/`upsert_write_access_rule`
+/// once per (collection, bucket) pair — the SAME calls
+/// `define_access_rule`/`define_write_access_rule` make, so re-importing an
+/// unchanged file is idempotent by the identical upsert-on-conflict
+/// mechanism those handlers already rely on (AC-17-176).
+pub async fn import_rules_file(
+    Path(project_id): Path<String>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+    Json(body): Json<ImportRulesFileBody>,
+) -> Result<Response, StatusCode> {
+    // Owner or Admin only, mirrors define_access_rule/define_write_access_rule.
+    if session.role < Role::Admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    let blocks = match rules_file::parse_rules_file(&body.rules_file) {
+        Ok(b) => b,
+        Err(e) => return Ok(rules_file_rejection_response(e)),
+    };
+    let decomposed = match rules_file::decompose(blocks) {
+        Ok(d) => d,
+        Err(e) => return Ok(rules_file_rejection_response(e)),
+    };
+
+    let mut imported = Vec::with_capacity(decomposed.len());
+    for rule in decomposed {
+        if let Some(condition) = &rule.read_condition {
+            if let Err(e) = state
+                .system_db
+                .upsert_access_rule(&project_id, &rule.collection_path, condition, session.account_id)
+                .await
+            {
+                tracing::error!("import_rules_file upsert_access_rule error: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+        if let Some(condition) = &rule.write_condition {
+            if let Err(e) = state
+                .system_db
+                .upsert_write_access_rule(&project_id, &rule.collection_path, condition, session.account_id)
+                .await
+            {
+                tracing::error!("import_rules_file upsert_write_access_rule error: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+        imported.push(ImportedBlockSummary {
+            collection_path: rule.collection_path,
+            read_condition: rule.read_condition,
+            write_condition: rule.write_condition,
+        });
+    }
+
+    Ok((StatusCode::OK, Json(ImportRulesFileResponse { project_id, imported })).into_response())
 }

@@ -51,6 +51,11 @@ use std::collections::BTreeMap;
 use crate::domain::field_value::FieldValue;
 use crate::domain::query::QueryFilter;
 
+// security-rules-cel-parity (Slice 01, US-01, ADR-062): the outer
+// `.rules`-file syntax parser + decomposition — a pure, zero-IO submodule
+// beside this file, covered by the same zero-IO enforcement unchanged.
+pub mod rules_file;
+
 // ---------------------------------------------------------------------------
 // Types (ADR-027 § Decision — Types)
 // ---------------------------------------------------------------------------
@@ -92,6 +97,21 @@ pub enum Operand {
     /// Resolves OQ-SR-04 for the whole grammar, scoped narrowly to strings
     /// only (no escape-sequence support in v1).
     StringLiteral(String),
+    /// A `.rules`-file leaf-level path-variable capture, referenced via the
+    /// canonical rewritten text `request.path.<name>` (security-rules-cel
+    /// -parity, Slice 01, ADR-062 § Decision — Grammar Extension). The
+    /// importer (`rules_file::decompose`) rewrites every bare occurrence of
+    /// the `match` block's own captured wildcard name to this canonical
+    /// form BEFORE calling `parse_condition` — so this arm is what makes a
+    /// wildcard-bearing block import and STORE successfully in Slice 01.
+    /// The name is retained for future evaluation (Slice 02 wires
+    /// `evaluate()`'s new `path_variable_value` parameter into
+    /// `resolve_field_value`'s arm below); until then, ANY rule referencing
+    /// this operand fails closed unconditionally (see `resolve_field_value`)
+    /// — a wildcard-bearing rule imports and stores correctly here, but is
+    /// not yet correctly ENFORCED until Slice 02 ships (Slice 01's own
+    /// explicit, locked out-of-scope note).
+    PathVariable(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,6 +393,19 @@ fn word_to_operand(word: &str) -> Result<Operand, ConditionParseError> {
                 return Err(syntax_error("'request.auth.token.' requires a claim name"));
             }
             Ok(Operand::AuthTokenClaim(claim.to_string()))
+        }
+        // security-rules-cel-parity (Slice 01, ADR-062 § Decision — Grammar
+        // Extension): one new, ordinary, unconditional dot-prefix arm,
+        // uniform with the 3 families above — never reachable from a
+        // hand-authored JSON-API condition (only `rules_file::decompose`'s
+        // own rewrite step ever produces this text), but `parse_condition`
+        // itself has no way to know that, nor does it need to.
+        w if w.starts_with("request.path.") => {
+            let name = &w["request.path.".len()..];
+            if name.is_empty() {
+                return Err(syntax_error("'request.path.' requires a variable name"));
+            }
+            Ok(Operand::PathVariable(name.to_string()))
         }
         w if w.starts_with("request.resource.data.") => {
             let field = &w["request.resource.data.".len()..];
@@ -661,6 +694,14 @@ fn resolve_field_value(
         Operand::AuthUid | Operand::AuthNullSentinel => {
             auth.map(|a| FieldValue::String(a.uid.clone())).ok_or(FieldMissing)
         }
+        // security-rules-cel-parity (Slice 01, ADR-062): NOT YET resolvable
+        // — `evaluate()` has no `path_variable_value` parameter until Slice
+        // 02 wires it in. Unconditional fail-closed, mirroring every other
+        // operand family's own `FieldMissing` short-circuit — a
+        // PathVariable-referencing rule imports and stores correctly
+        // (Slice 01) but always denies until Slice 02 ships (named,
+        // locked out-of-scope note, not a silent gap).
+        Operand::PathVariable(_) => Err(FieldMissing),
     }
 }
 

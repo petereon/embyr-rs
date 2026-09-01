@@ -736,6 +736,13 @@ path = "../../tests/agent_mode_write_streaming/acceptance/aw02_multi_write_durab
 name = "agent_mode_list_collection_ids_alc01_enumerate_subcollections"
 path = "../../tests/agent_mode_list_collection_ids/acceptance/alc01_enumerate_subcollections.rs"
 
+# security-rules-cel-parity acceptance tests (Slice 01, Walking Skeleton,
+# US-01, ADR-062) — import + decompose a real .rules file into the existing
+# per-collection admin API.
+[[test]]
+name = "security_rules_cel_parity_cp01_import_and_decompose_rules_file"
+path = "../../tests/security_rules_cel_parity/acceptance/cp01_import_and_decompose_rules_file.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
