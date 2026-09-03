@@ -917,6 +917,44 @@ jobs:
         way, not learn an unrelated new authorization model
     opportunity_score: 17
     priority: critical
+    # NOTE (security-rules-cel-recursive-wildcards DISCUSS, 2026-09-03): JOB-17
+    # now also covers importing a real Firestore `.rules` file's even-prefix
+    # recursive-wildcard patterns (e.g. `match /{document=**} { allow read,
+    # write: if false; }` — Trailmark's own project-wide safety net, and
+    # `match /expeditions/{expeditionId}/{path=**} { allow read: if
+    # request.auth != null; }` — a narrower, scoped catch-all), with
+    # deterministic, most-specific-wins precedence against any co-existing
+    # exact-match (4a) or fixed-depth-pattern (4b) rule, wired into read,
+    # write, AND Listen's per-event re-check — same job, same persona, not a
+    # new job (10th realization). No new Alex-facing mental model beyond "the
+    # same real file's own safety net, which 4a/4b both rejected, now
+    # actually protects everything it was always meant to." Decision 3 (UX
+    # Research Depth) = Comprehensive for this feature (both Alex's own
+    # import arc and a NEW precedence-correctness consequence arc — did a
+    # catch-all silently swallow a specific rule, or vice versa — were mapped
+    # in full), but per this codebase's established convention it lives
+    # inline in
+    # docs/feature/security-rules-cel-recursive-wildcards/feature-delta.md
+    # § Journey, not as a separate journey-*.yaml artifact. This feature
+    # closes the exact construct security-rules-cel-path-matching's own
+    # DISCUSS named and deferred by id ("Epic 4b-ii"). Central architectural
+    # finding, confirmed by direct code read: ADR-063's own fixed-depth
+    # mechanism (`bind_ancestor`/`structurally_overlap`'s hard equal-length
+    # precondition, the `access_rule_patterns` table's exact-segment-count
+    # index) does NOT trivially extend to variable-depth recursive-wildcard
+    # matching — this feature AUGMENTS it with a new, parallel primitive
+    # family built on the SAME `PathSegment`/`positions_compatible`
+    # foundation, never a wholesale replacement. A second, genuinely new
+    # finding: real Firestore's own recursive-wildcard composition semantics
+    # (OR across every matching rule) would gut this feature's own evidenced
+    # core use case (a specific override plus a general catch-all) if 4b's
+    # own reject-on-any-overlap rule were reused unchanged for this
+    # construct — resolved with a new, narrower, evidenced precedence rule
+    # (most-specific-wins, scoped by structural containment) that reopens no
+    # part of 4b's own already-settled fixed-depth-vs-fixed-depth semantics.
+    # See
+    # docs/feature/security-rules-cel-recursive-wildcards/feature-delta.md
+    # § Job Discovery Framing Resolution and § Scope Assessment.
     # NOTE (security-rules-cel-path-matching DISCUSS, 2026-09-01): JOB-17 now
     # also covers importing a real Firestore `.rules` file's fixed-depth
     # multi-segment/nested-collection path patterns (e.g. `match

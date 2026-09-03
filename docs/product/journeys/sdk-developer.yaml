@@ -10,8 +10,34 @@ jobs:
   - JOB-18  # embyr-hosted-identity (added by client-auth-hosted-identity DISCUSS, 2026-08-27)
   - JOB-19  # oauth-provider-identity (added by oauth-providers DISCUSS, 2026-08-30)
   - JOB-20  # anonymous-identity (added by anonymous-sessions DISCUSS, 2026-08-30)
-updated: "2026-09-01"
+updated: "2026-09-03"
 source: docs/feature/embyr-rs/discuss/journey-sdk-developer.yaml
+# NOTE (security-rules-cel-recursive-wildcards DISCUSS, 2026-09-03): JOB-17
+# now also covers even-prefix recursive-wildcard `.rules` patterns
+# (`{path=**}`) — Trailmark's own always-assumed-but-never-enforced
+# project-wide safety net, plus narrower, scoped catch-alls — with
+# deterministic, most-specific-wins precedence against any co-existing more
+# specific rule, across read, write, and Listen's per-event re-check — same
+# job, same persona, not a new job (10th realization, following
+# security-rules-cel-path-matching's own 9th). No new Alex-facing mental
+# model beyond "the same real file's own safety net finally actually
+# protects everything it always assumed it did." Decision 3 (UX Research
+# Depth) = Comprehensive for this feature (Alex's own import arc AND a NEW
+# precedence-correctness consequence arc — did the catch-all silently
+# swallow a specific rule, or vice versa — were both mapped in full), but per
+# this codebase's established convention it lives inline in
+# docs/feature/security-rules-cel-recursive-wildcards/feature-delta.md
+# § Journey, not as a separate journey-*.yaml artifact. Central architectural
+# finding: security-rules-cel-path-matching's own ADR-063 mechanism (fixed-
+# depth, equal-length-precondition routing) does NOT trivially extend to
+# variable-depth recursive-wildcard matching — this feature augments it with
+# a new, parallel primitive family sharing the same foundation, plus a new,
+# narrower precedence rule (most-specific-wins) that preserves this
+# construct's own evidenced core value (specific override + general
+# catch-all) without reopening 4b's own already-settled semantics or
+# building real Firestore's own full OR-composition. See
+# docs/feature/security-rules-cel-recursive-wildcards/feature-delta.md
+# § Job Discovery Framing Resolution.
 # NOTE (security-rules-cel-path-matching DISCUSS, 2026-09-01): JOB-17 now
 # also covers importing fixed-depth multi-segment/nested-collection `.rules`
 # file path patterns (e.g. `match /expeditions/{expeditionId}/
