@@ -810,6 +810,17 @@ path = "../../tests/security_rules_cel_path_matching/acceptance/pm03_write_and_l
 name = "security_rules_cel_path_matching_pm04_reject_structural_overlap"
 path = "../../tests/security_rules_cel_path_matching/acceptance/pm04_reject_structural_overlap.rs"
 
+# security-rules-cel-path-matching acceptance tests (Slice 05, US-05,
+# AC-17-225/226/227) — proof, not assertion, that this feature's own
+# routing/overlap-detection mechanism has zero observable effect on 4a's own
+# single-wildcard imports, the original zero-wildcard exact-path rules, and
+# any collection with no rule/pattern at all. AC-17-224 (the full regression
+# baseline) is proven by re-running every security_rules_* target directly,
+# not by anything in this file.
+[[test]]
+name = "security_rules_cel_path_matching_pm05_non_regression_guardrail"
+path = "../../tests/security_rules_cel_path_matching/acceptance/pm05_non_regression_guardrail.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
