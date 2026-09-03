@@ -849,6 +849,13 @@ path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw01_impor
 name = "security_rules_cel_recursive_wildcards_rw02_route_with_precedence_on_read"
 path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw02_route_with_precedence_on_read.rs"
 
+# security-rules-cel-recursive-wildcards (Slice 03, Walking Skeleton, US-03,
+# ADR-064) — extends Slice 02's own precedence-aware composition to the 3
+# write handlers and Listen's 2 per-event (Changed/Removed) re-check arms.
+[[test]]
+name = "security_rules_cel_recursive_wildcards_rw03_write_and_listen_parity"
+path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw03_write_and_listen_parity.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -120,7 +120,20 @@ pub async fn handle_add_target(
     // (Slice 04's own extension point) and security-rules-cel-path-matching
     // (Slice 03, US-03, ADR-063 § Decision — Routing Composition): the
     // per-event `Changed`/`Removed` re-check below reuses these SAME
-    // loop-lifetime locals, never re-resolving per event.
+    // loop-lifetime locals UNLESS `needs_recursive_recheck` is set, in which
+    // case it re-resolves per event instead (security-rules-cel-recursive
+    // -wildcards, Slice 03, below).
+    // security-rules-cel-recursive-wildcards (Slice 03, US-03, AC-17-247):
+    // set ONLY when subscribe time found NEITHER an exact-match rule NOR a
+    // 4b fixed-depth pattern (steps 1-2 both miss) — the ONE case where a
+    // recursive-wildcard catch-all could still govern, but step 3 couldn't
+    // run here (no concrete document at subscribe time). When either step
+    // 1 or step 2 already resolved a governing rule/pattern, it ALWAYS wins
+    // over a recursive-wildcard catch-all (AC-17-239, extended) and this
+    // stays `false` — zero additional per-event I/O for every
+    // already-covered collection, unaffected by this slice.
+    let mut needs_recursive_recheck = false;
+
     let (condition, ancestor_bindings): (Option<Condition>, BTreeMap<String, String>) =
         match rule_row {
             // security-rules-cel-path-matching (Slice 03, US-03, AC-17-216,
@@ -146,13 +159,22 @@ pub async fn handle_add_target(
                     // no concrete document in scope at all (it governs a
                     // whole-collection Listen target, not one document),
                     // unlike every other call site. `None` preserves this
-                    // call site's exact pre-Slice-02 behavior, unaffected;
-                    // Slice 03's own job to design its own per-event value.
+                    // call site's exact pre-Slice-02 behavior, unaffected —
+                    // Slice 03's own per-event value is resolved separately,
+                    // per event, below (`resolve_recursive_wildcard_condition`).
                     None,
                 )
                 .await?;
                 match routed {
-                    None => (None, BTreeMap::new()), // US-06: no rule/pattern -> unrestricted.
+                    // security-rules-cel-recursive-wildcards (Slice 03):
+                    // steps 1-2 BOTH missed — the only case a recursive
+                    // -wildcard catch-all could still apply. Flag it; the
+                    // actual step-3 scan runs per event, once a concrete
+                    // document is known (AC-17-247).
+                    None => {
+                        needs_recursive_recheck = true;
+                        (None, BTreeMap::new())
+                    }
                     Some((pattern_row, bindings)) => match pattern_row.read_condition {
                         None => (None, BTreeMap::new()),
                         Some(read_condition_source) => {
@@ -293,16 +315,35 @@ pub async fn handle_add_target(
                         if doc.path.collection_path != collection.collection_path {
                             continue;
                         }
+                        // security-rules-cel-recursive-wildcards (Slice 03,
+                        // US-03, AC-17-247): subscribe time could not run
+                        // step 3 (no concrete document in scope then) — now
+                        // that this event names one, resolve it HERE, ONLY
+                        // when steps 1-2 both missed at subscribe time. An
+                        // exact-match rule or a 4b pattern already resolved
+                        // a final `condition` above and is NEVER overridden
+                        // (AC-17-239, extended) — this branch is skipped for
+                        // those, zero additional per-event I/O.
+                        let (event_condition, event_bindings) = if needs_recursive_recheck {
+                            resolve_recursive_wildcard_condition(
+                                system_db,
+                                &project_id,
+                                &collection.collection_path,
+                                doc.path.document_id.as_str(),
+                            )
+                            .await?
+                        } else {
+                            (condition.clone(), ancestor_bindings.clone())
+                        };
                         // security-rules-realtime (ADR-033 § Decision —
                         // Per-Event Composition, US-04): re-check the
                         // ALREADY-in-memory `doc.fields` against the
                         // subscription's own rule, reusing `evaluate()`
                         // (ADR-027/030) completely unmodified — zero
-                        // additional I/O (AC-17-121). `condition`/`auth_ctx`
-                        // are the SAME loop-lifetime locals built once at
-                        // subscribe time (Slice 03), never re-parsed or
-                        // re-fetched per event.
-                        if let Some(condition) = &condition {
+                        // additional I/O (AC-17-121) for every
+                        // already-resolved (non-recursive-wildcard)
+                        // collection.
+                        if let Some(condition) = &event_condition {
                             let empty_fields: BTreeMap<String, FieldValue> = BTreeMap::new();
                             // ADR-030's own empty-map convention: Listen has
                             // no "proposed new document" concept, mirrors
@@ -315,16 +356,14 @@ pub async fn handle_add_target(
                             // I/O — closes 4a's own deferred `OQ-CP-04`
                             // (previously always `None`, permanently
                             // fail-closed for any `PathVariable`-referencing
-                            // rule). `ancestor_bindings` is the SAME
-                            // loop-lifetime local resolved once at subscribe
-                            // time above.
+                            // rule).
                             if evaluate(
                                 condition,
                                 auth_ctx.as_ref(),
                                 &doc.fields,
                                 &empty_fields,
                                 Some(doc.path.document_id.as_str()),
-                                &ancestor_bindings,
+                                &event_bindings,
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-04: withheld, never sent, never a crash (AC-17-118/119).
@@ -347,6 +386,21 @@ pub async fn handle_add_target(
                         if path.collection_path != collection.collection_path {
                             continue;
                         }
+                        // security-rules-cel-recursive-wildcards (Slice 03,
+                        // US-03, AC-17-247): mirrors the `Changed` arm's own
+                        // per-event fallback resolution above exactly — only
+                        // when steps 1-2 both missed at subscribe time.
+                        let (event_condition, event_bindings) = if needs_recursive_recheck {
+                            resolve_recursive_wildcard_condition(
+                                system_db,
+                                &project_id,
+                                &collection.collection_path,
+                                path.document_id.as_str(),
+                            )
+                            .await?
+                        } else {
+                            (condition.clone(), ancestor_bindings.clone())
+                        };
                         // security-rules-realtime (ADR-033 § Decision —
                         // Delete Non-Leakage, US-05): re-check the
                         // pre-deletion `fields` snapshot against the
@@ -355,7 +409,7 @@ pub async fn handle_add_target(
                         // `fields` is NEVER serialized into the
                         // `DocumentDelete` response below, it exists only
                         // as `evaluate()`'s own decision input.
-                        if let Some(condition) = &condition {
+                        if let Some(condition) = &event_condition {
                             let empty_fields: BTreeMap<String, FieldValue> = BTreeMap::new();
                             // security-rules-cel-path-matching (Slice 03,
                             // US-03, AC-17-216, ADR-063): `Some(path
@@ -369,7 +423,7 @@ pub async fn handle_add_target(
                                 &fields,
                                 &empty_fields,
                                 Some(path.document_id.as_str()),
-                                &ancestor_bindings,
+                                &event_bindings,
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-05: withheld, never sent.
@@ -420,6 +474,44 @@ pub async fn handle_add_target(
     }
 
     Ok(())
+}
+
+/// security-rules-cel-recursive-wildcards (Slice 03, US-03, AC-17-247):
+/// per-event fallback resolution — re-runs the SAME `resolve_access_rule_pattern`
+/// composition `handle_get_document`/the 3 write handlers already call, now
+/// with the event's own concrete `document_id`, so step 3 (the
+/// recursive-wildcard scan) can actually run. Called ONLY when subscribe
+/// time's own steps 1-2 both missed (`needs_recursive_recheck`) — an
+/// exact-match rule or a 4b fixed-depth pattern never reaches here, they
+/// already resolved a final, loop-lifetime `condition` at subscribe time
+/// (AC-17-239, extended to Listen).
+async fn resolve_recursive_wildcard_condition(
+    system_db: &SystemDb,
+    project_id: &str,
+    collection_path: &str,
+    document_id: &str,
+) -> Result<(Option<Condition>, BTreeMap<String, String>), Status> {
+    let routed = crate::grpc::handler::FirestoreService::resolve_access_rule_pattern(
+        system_db,
+        project_id,
+        collection_path,
+        Some(document_id),
+    )
+    .await?;
+    match routed {
+        None => Ok((None, BTreeMap::new())),
+        Some((pattern_row, bindings)) => match pattern_row.read_condition {
+            None => Ok((None, BTreeMap::new())),
+            Some(read_condition_source) => {
+                let condition = parse_condition(&read_condition_source).map_err(|e| {
+                    Status::internal(format!(
+                        "stored access rule pattern failed to re-parse: {e:?}"
+                    ))
+                })?;
+                Ok((Some(condition), bindings))
+            }
+        },
+    }
 }
 
 /// Extract `collection_id` from a `QueryTarget` by reading `from[0]` in the

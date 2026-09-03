@@ -1472,13 +1472,14 @@ impl FirestoreService {
                     &self.system_db,
                     &project_id_str,
                     &req.collection_id,
-                    // security-rules-cel-recursive-wildcards (Slice 02,
-                    // ADR-064): step 3 (recursive-wildcard scan) deliberately
-                    // deferred for write handlers — Slice 03's own job to
-                    // flip to `Some(path.document_id.as_str())` plus add its
-                    // own AT coverage. `None` preserves this call site's
-                    // exact pre-Slice-02 behavior, unaffected.
-                    None,
+                    // security-rules-cel-recursive-wildcards (Slice 03,
+                    // US-03, AC-17-245/246): `Some(path.document_id.as_str())`
+                    // — the request's own TARGET path (`path`, already parsed
+                    // above), never fetched content (nothing exists yet to
+                    // fetch for Create), zero new I/O. Enables step 3's own
+                    // recursive-wildcard scan for this call site, mirroring
+                    // `handle_get_document`'s own Slice 02 wiring exactly.
+                    Some(path.document_id.as_str()),
                 )
                 .await?;
                 if let Some((pattern_row, ancestor_bindings)) = routed {
@@ -1670,13 +1671,13 @@ impl FirestoreService {
                     &self.system_db,
                     &project_id_str,
                     &path.collection_path,
-                    // security-rules-cel-recursive-wildcards (Slice 02,
-                    // ADR-064): step 3 (recursive-wildcard scan) deliberately
-                    // deferred for write handlers — Slice 03's own job to
-                    // flip to `Some(path.document_id.as_str())` plus add its
-                    // own AT coverage. `None` preserves this call site's
-                    // exact pre-Slice-02 behavior, unaffected.
-                    None,
+                    // security-rules-cel-recursive-wildcards (Slice 03,
+                    // US-03, AC-17-245/246): `Some(path.document_id.as_str())`
+                    // — the request's own TARGET path, zero new I/O. Enables
+                    // step 3's own recursive-wildcard scan for this call
+                    // site, mirroring `handle_get_document`'s own Slice 02
+                    // wiring exactly.
+                    Some(path.document_id.as_str()),
                 )
                 .await?;
                 if let Some((pattern_row, ancestor_bindings)) = routed {
@@ -1867,13 +1868,13 @@ impl FirestoreService {
                     &self.system_db,
                     &project_id_str,
                     &path.collection_path,
-                    // security-rules-cel-recursive-wildcards (Slice 02,
-                    // ADR-064): step 3 (recursive-wildcard scan) deliberately
-                    // deferred for write handlers — Slice 03's own job to
-                    // flip to `Some(path.document_id.as_str())` plus add its
-                    // own AT coverage. `None` preserves this call site's
-                    // exact pre-Slice-02 behavior, unaffected.
-                    None,
+                    // security-rules-cel-recursive-wildcards (Slice 03,
+                    // US-03, AC-17-245/246): `Some(path.document_id.as_str())`
+                    // — the request's own TARGET path, zero new I/O. Enables
+                    // step 3's own recursive-wildcard scan for this call
+                    // site, mirroring `handle_get_document`'s own Slice 02
+                    // wiring exactly.
+                    Some(path.document_id.as_str()),
                 )
                 .await?;
                 if let Some((pattern_row, ancestor_bindings)) = routed {
