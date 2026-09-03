@@ -67,7 +67,7 @@ use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::handlers::shared::verify_project_ownership;
 use crate::admin::state::UserAdminState;
 use embyr_core::access_control::{
-    check_query_compliance, evaluate, parse_condition, rules_file, AuthContext,
+    check_query_compliance, evaluate, parse_condition, path_routing, rules_file, AuthContext,
     ConditionParseError, EvaluationOutcome, QueryComplianceOutcome,
 };
 use embyr_core::admin::account::Role;
@@ -417,7 +417,10 @@ fn rules_file_rejection_response(err: rules_file::RulesFileError) -> Response {
         .collect();
     (
         StatusCode::BAD_REQUEST,
-        Json(RulesFileRejectionResponse { reason: "IMPORT_REJECTED", offending_blocks }),
+        Json(RulesFileRejectionResponse {
+            reason: "IMPORT_REJECTED",
+            offending_blocks,
+        }),
     )
         .into_response()
 }
@@ -452,9 +455,8 @@ fn validate_bare_collection_id(id: &str) -> Result<(), Box<Response>> {
                 StatusCode::BAD_REQUEST,
                 Json(ConditionRejectionResponse {
                     reason: "INVALID_COLLECTION_ID",
-                    error:
-                        "a collection-group id must be a bare collection identifier, not a path"
-                            .to_string(),
+                    error: "a collection-group id must be a bare collection identifier, not a path"
+                        .to_string(),
                 }),
             )
                 .into_response(),
@@ -1114,6 +1116,123 @@ pub async fn simulate_group_query_compliance(
         .into_response())
 }
 
+/// One offending block naming a colliding pattern (Slice 04, US-04, ADR-063
+/// § Decision — Overlap Detection). `path_pattern` is the offending pattern
+/// itself; `detail` names the OTHER pattern it structurally overlaps —
+/// called once per pattern in a colliding pair so the response names BOTH
+/// (AC-17-218/219/223).
+fn overlap_offending_block(path_pattern: &str, other: &str) -> rules_file::OffendingBlock {
+    rules_file::OffendingBlock {
+        path_pattern: path_pattern.to_string(),
+        construct: "PATTERN_OVERLAP",
+        detail: format!("structurally overlaps pattern '{other}'"),
+    }
+}
+
+/// Whole-file overlap validation pass (Slice 04, US-04, ADR-063 § Decision —
+/// Overlap Detection) — runs BEFORE any storage write (`import_rules_file`
+/// calls this immediately after `decompose()` succeeds), mirroring
+/// `decompose()`'s own validate-then-apply atomicity discipline (DISCUSS
+/// Resolution 2): on any overlap, zero `upsert_access_rule_pattern` calls
+/// are made and every existing pattern/rule is left untouched (AC-17-220).
+///
+/// 1. **Intra-file**: pairwise `path_routing::structurally_overlap` against
+///    every other multi-segment pattern in the SAME import (AC-17-219).
+/// 2. **Cross-import**: `structurally_overlap` against every ALREADY-STORED
+///    pattern sharing the candidate's own `(ancestor_segment_count,
+///    literal_skeleton)` bucket — the SAME indexed narrowing request-time
+///    routing uses (AC-17-218). A stored row whose `collection_path_pattern`
+///    text is byte-identical to the candidate is skipped — that is an
+///    idempotent re-import (AC-17-205/222), never an overlap.
+///
+/// Both steps reuse `path_routing::structurally_overlap` — the SAME
+/// `positions_compatible` primitive `path_routing::bind_ancestor` (request
+/// -time routing, Slice 02) is built on, never a second, independently
+/// -maintained matching implementation (DDD-PM-4).
+async fn check_pattern_overlap(
+    state: &UserAdminState,
+    project_id: &str,
+    decomposed: &[rules_file::DecomposedTarget],
+) -> Result<Option<rules_file::RulesFileError>, StatusCode> {
+    let patterns: Vec<&rules_file::DecomposedPatternRule> = decomposed
+        .iter()
+        .filter_map(|t| match t {
+            rules_file::DecomposedTarget::MultiSegmentPattern(p) => Some(p),
+            rules_file::DecomposedTarget::SingleCollection(_) => None,
+        })
+        .collect();
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+
+    let ancestors: Vec<Vec<rules_file::PathSegment>> = patterns
+        .iter()
+        .map(|p| {
+            rules_file::parse_path_segments(&p.collection_path_pattern)
+                .expect("collection_path_pattern was produced by decompose() itself")
+        })
+        .collect();
+
+    for i in 0..patterns.len() {
+        for j in (i + 1)..patterns.len() {
+            if path_routing::structurally_overlap(&ancestors[i], &ancestors[j]) {
+                return Ok(Some(rules_file::RulesFileError {
+                    offending_blocks: vec![
+                        overlap_offending_block(
+                            &patterns[i].collection_path_pattern,
+                            &patterns[j].collection_path_pattern,
+                        ),
+                        overlap_offending_block(
+                            &patterns[j].collection_path_pattern,
+                            &patterns[i].collection_path_pattern,
+                        ),
+                    ],
+                }));
+            }
+        }
+    }
+
+    for (pattern, ancestor) in patterns.iter().zip(ancestors.iter()) {
+        let stored = state
+            .system_db
+            .list_access_rule_patterns_by_skeleton(
+                project_id,
+                pattern.ancestor_segment_count as i16,
+                &pattern.literal_skeleton,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "import_rules_file list_access_rule_patterns_by_skeleton error: {e}"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        for row in &stored {
+            if row.collection_path_pattern == pattern.collection_path_pattern {
+                continue;
+            }
+            let row_ancestor = rules_file::parse_path_segments(&row.collection_path_pattern)
+                .expect("stored collection_path_pattern was produced by decompose() itself");
+            if path_routing::structurally_overlap(ancestor, &row_ancestor) {
+                return Ok(Some(rules_file::RulesFileError {
+                    offending_blocks: vec![
+                        overlap_offending_block(
+                            &pattern.collection_path_pattern,
+                            &row.collection_path_pattern,
+                        ),
+                        overlap_offending_block(
+                            &row.collection_path_pattern,
+                            &pattern.collection_path_pattern,
+                        ),
+                    ],
+                }));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 /// POST /admin/v1/projects/:project_id/access_rules/import
 /// (security-rules-cel-parity, US-01, Slice 01, ADR-062 § Decision — Admin
 /// Surface).
@@ -1154,6 +1273,10 @@ pub async fn import_rules_file(
         Err(e) => return Ok(rules_file_rejection_response(e)),
     };
 
+    if let Some(rejection) = check_pattern_overlap(&state, &project_id, &decomposed).await? {
+        return Ok(rules_file_rejection_response(rejection));
+    }
+
     let mut imported = Vec::with_capacity(decomposed.len());
     for target in decomposed {
         match target {
@@ -1181,7 +1304,12 @@ pub async fn import_rules_file(
                     if !already_current {
                         if let Err(e) = state
                             .system_db
-                            .upsert_access_rule(&project_id, &rule.collection_path, condition, session.account_id)
+                            .upsert_access_rule(
+                                &project_id,
+                                &rule.collection_path,
+                                condition,
+                                session.account_id,
+                            )
                             .await
                         {
                             tracing::error!("import_rules_file upsert_access_rule error: {e}");
@@ -1202,10 +1330,17 @@ pub async fn import_rules_file(
                     if !already_current {
                         if let Err(e) = state
                             .system_db
-                            .upsert_write_access_rule(&project_id, &rule.collection_path, condition, session.account_id)
+                            .upsert_write_access_rule(
+                                &project_id,
+                                &rule.collection_path,
+                                condition,
+                                session.account_id,
+                            )
                             .await
                         {
-                            tracing::error!("import_rules_file upsert_write_access_rule error: {e}");
+                            tracing::error!(
+                                "import_rules_file upsert_write_access_rule error: {e}"
+                            );
                             return Err(StatusCode::INTERNAL_SERVER_ERROR);
                         }
                     }
@@ -1265,5 +1400,12 @@ pub async fn import_rules_file(
         }
     }
 
-    Ok((StatusCode::OK, Json(ImportRulesFileResponse { project_id, imported })).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(ImportRulesFileResponse {
+            project_id,
+            imported,
+        }),
+    )
+        .into_response())
 }

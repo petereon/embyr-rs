@@ -802,6 +802,14 @@ path = "../../tests/security_rules_cel_path_matching/acceptance/pm02_route_and_e
 name = "security_rules_cel_path_matching_pm03_write_and_listen_parity"
 path = "../../tests/security_rules_cel_path_matching/acceptance/pm03_write_and_listen_parity.rs"
 
+# security-rules-cel-path-matching acceptance tests (Slice 04, US-04,
+# ADR-063 § Decision — Overlap Detection) — reject an import (intra-file or
+# against an already-stored pattern) that would introduce structural
+# overlap, naming both colliding patterns; a corrected re-submit succeeds.
+[[test]]
+name = "security_rules_cel_path_matching_pm04_reject_structural_overlap"
+path = "../../tests/security_rules_cel_path_matching/acceptance/pm04_reject_structural_overlap.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
