@@ -878,6 +878,15 @@ path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw04_rejec
 name = "security_rules_cel_recursive_wildcards_rw05_non_regression_guardrail"
 path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw05_non_regression_guardrail.rs"
 
+# security-rules-cel-recursive-wildcards (Slice 06, US-06, ADR-064) — LAST
+# slice of this feature: simulate_routed_access_rule extended to accept a
+# candidate recursive-wildcard pattern, weighing precedence against REAL
+# stored patterns via the SAME resolve_access_rule_pattern composition real
+# enforcement uses. AC-17-259 through AC-17-262.
+[[test]]
+name = "security_rules_cel_recursive_wildcards_rw06_simulate_recursive_wildcard_precedence"
+path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw06_simulate_recursive_wildcard_precedence.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

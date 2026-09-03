@@ -1011,6 +1011,14 @@ pub struct SimulateRoutedAccessRuleResponse {
     pub outcome: &'static str,
     #[serde(default)]
     pub bindings: BTreeMap<String, String>,
+    /// security-rules-cel-recursive-wildcards (Slice 06, US-06, ADR-064):
+    /// which pattern actually produced `outcome` — `"candidate"` or
+    /// `"stored"` (AC-17-259/260), `None` when `outcome` is
+    /// `"no_matching_pattern"` (nothing won). Always `Some("candidate")`
+    /// for 4b's own fixed-depth branch (unchanged this slice — it never
+    /// weighs precedence against stored patterns, only structural match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winning_pattern: Option<&'static str>,
 }
 
 /// POST /admin/v1/projects/:project_id/access_rules/simulate_route
@@ -1038,6 +1046,20 @@ pub async fn simulate_routed_access_rule(
         Ok(s) => s,
         Err(e) => return Ok(rules_file_rejection_response(e)),
     };
+
+    // security-rules-cel-recursive-wildcards (Slice 06, US-06, ADR-064 §
+    // Decision — simulate_routed_access_rule Extended): a candidate ending
+    // in a terminal recursive wildcard asks a genuinely different question
+    // than 4b's own fixed-depth candidate below — it must also weigh
+    // precedence against REAL, already-stored patterns (AC-17-260), not
+    // merely structurally match the synthetic path in isolation. Branches
+    // here, before 4b's own `< 2` segment guard below — a recursive
+    // candidate's own fixed prefix may legally be EMPTY (Resolution 3's
+    // project-wide catch-all shape), which that guard would wrongly reject.
+    if matches!(pattern_segments.last(), Some(rules_file::PathSegment::RecursiveWildcard)) {
+        return simulate_recursive_wildcard_candidate(&state, &project_id, body, pattern_segments).await;
+    }
+
     let concrete_segments = match rules_file::parse_path_segments(&body.concrete_path) {
         Ok(s) => s,
         Err(e) => return Ok(rules_file_rejection_response(e)),
@@ -1072,6 +1094,7 @@ pub async fn simulate_routed_access_rule(
             Json(SimulateRoutedAccessRuleResponse {
                 outcome: "no_matching_pattern",
                 bindings: BTreeMap::new(),
+                winning_pattern: None,
             }),
         )
             .into_response());
@@ -1129,6 +1152,238 @@ pub async fn simulate_routed_access_rule(
                 EvaluationOutcome::Deny => "deny",
             },
             bindings,
+            // 4b's own fixed-depth candidate never weighs precedence
+            // against stored patterns (out of this slice's own scope) — it
+            // is, by construction, always the thing that just won.
+            winning_pattern: Some("candidate"),
+        }),
+    )
+        .into_response())
+}
+
+/// security-rules-cel-recursive-wildcards (Slice 06, US-06, ADR-064 §
+/// Decision — simulate_routed_access_rule Extended): simulates a candidate
+/// recursive-wildcard pattern's own precedence outcome, weighing it against
+/// REAL, already-stored patterns via the SAME two-step composition
+/// `resolve_access_rule_pattern` uses (fixed-depth ALWAYS wins; among
+/// recursive patterns the deepest fixed prefix wins) — never a second,
+/// independently-maintained precedence routine. A stored winner is
+/// evaluated against its OWN real `read_condition` (never the candidate's),
+/// so a "deferred" outcome (AC-17-260) reflects what real routing would
+/// actually do, not what the candidate merely claims.
+async fn simulate_recursive_wildcard_candidate(
+    state: &UserAdminState,
+    project_id: &str,
+    body: SimulateRoutedAccessRuleBody,
+    pattern_segments: Vec<rules_file::PathSegment>,
+) -> Result<Response, StatusCode> {
+    if let Err(e) = rules_file::validate_segment_shape(&pattern_segments, &body.pattern) {
+        return Ok(rules_file_rejection_response(e));
+    }
+    let concrete_segments = match rules_file::parse_path_segments(&body.concrete_path) {
+        Ok(s) => s,
+        Err(e) => return Ok(rules_file_rejection_response(e)),
+    };
+    if concrete_segments.len() < 2 {
+        return Ok(rules_file_rejection_response(rules_file::RulesFileError {
+            offending_blocks: vec![rules_file::OffendingBlock {
+                path_pattern: body.concrete_path.clone(),
+                construct: "SYNTAX_ERROR",
+                detail: "a routed concrete path requires at least an ancestor segment and a leaf \
+                          segment"
+                    .to_string(),
+            }],
+        }));
+    }
+
+    let fixed_prefix = &pattern_segments[..pattern_segments.len() - 1];
+
+    // AC-17-261: the candidate's own fixed prefix must structurally reach
+    // the synthetic path at all before precedence is even worth weighing.
+    let Some((candidate_bindings, _remainder)) =
+        path_routing::bind_recursive_prefix(fixed_prefix, &concrete_segments)
+    else {
+        return Ok((
+            StatusCode::OK,
+            Json(SimulateRoutedAccessRuleResponse {
+                outcome: "no_matching_pattern",
+                bindings: BTreeMap::new(),
+                winning_pattern: None,
+            }),
+        )
+            .into_response());
+    };
+
+    let (concrete_ancestor, _concrete_leaf) = concrete_segments.split_at(concrete_segments.len() - 1);
+
+    // Step 2 equivalent (`resolve_access_rule_pattern`): a REAL, stored
+    // fixed-depth (4a/4b) pattern ALWAYS wins over ANY recursive wildcard,
+    // candidate included — mere composition order, zero runtime containment
+    // check.
+    let ancestor_segment_count = concrete_ancestor.len() as i16;
+    let literal_skeleton = path_routing::literal_skeleton(concrete_ancestor);
+    let fixed_candidates = state
+        .system_db
+        .list_access_rule_patterns_by_skeleton(project_id, ancestor_segment_count, &literal_skeleton)
+        .await
+        .map_err(|e| {
+            tracing::error!("simulate_routed_access_rule (recursive candidate) lookup error: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    for stored in &fixed_candidates {
+        let stored_ancestor = match rules_file::parse_path_segments(&stored.collection_path_pattern) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("stored fixed-depth pattern failed to re-parse: {e:?}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+        if let Some(bindings) = path_routing::bind_ancestor(&stored_ancestor, concrete_ancestor) {
+            return evaluate_stored_pattern_outcome(body, stored, bindings);
+        }
+    }
+
+    // Step 3 equivalent: among REAL, stored recursive-wildcard patterns AND
+    // this candidate, the deepest fixed prefix governs (AC-17-260); a tie
+    // between the candidate and a stored pattern defensively favors the
+    // already-stored one — a real tie between an imported candidate and a
+    // stored pattern would already have been rejected at import time
+    // (Slice 04), so this is unreached in practice, never silently
+    // favoring the not-yet-imported candidate.
+    let stored_recursive = state
+        .system_db
+        .list_recursive_access_rule_patterns_up_to(project_id, concrete_segments.len() as i16)
+        .await
+        .map_err(|e| {
+            tracing::error!("simulate_routed_access_rule (recursive candidate) lookup error: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut best_stored: Option<(
+        crate::adapters::system_db::AccessRulePatternRow,
+        usize,
+        BTreeMap<String, String>,
+    )> = None;
+    for stored in stored_recursive {
+        let prefix_segments = if stored.collection_path_pattern.is_empty() {
+            Vec::new()
+        } else {
+            match rules_file::parse_path_segments(&stored.collection_path_pattern) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("stored recursive pattern failed to re-parse: {e:?}");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
+        };
+        let Some((bindings, _remainder)) =
+            path_routing::bind_recursive_prefix(&prefix_segments, &concrete_segments)
+        else {
+            continue;
+        };
+        let len = prefix_segments.len();
+        match &best_stored {
+            Some((_, best_len, _)) if *best_len >= len => {}
+            _ => best_stored = Some((stored, len, bindings)),
+        }
+    }
+
+    let candidate_prefix_len = fixed_prefix.len();
+    if let Some((stored, stored_len, bindings)) = best_stored {
+        if stored_len >= candidate_prefix_len {
+            return evaluate_stored_pattern_outcome(body, &stored, bindings);
+        }
+    }
+
+    // The candidate itself wins — evaluate ITS OWN condition (AC-17-259).
+    let condition = match parse_condition(&body.condition) {
+        Ok(c) => c,
+        Err(e) => return Ok(condition_parse_error_response(e)),
+    };
+    let auth_ctx = body.auth.map(simulated_auth_to_context);
+    let resource_fields: BTreeMap<String, FieldValue> = body
+        .resource
+        .iter()
+        .map(|(k, v)| (k.clone(), json_value_to_field_value(v)))
+        .collect();
+    let empty_request_resource: BTreeMap<String, FieldValue> = BTreeMap::new();
+    let outcome = evaluate(
+        &condition,
+        auth_ctx.as_ref(),
+        &resource_fields,
+        &empty_request_resource,
+        None,
+        &candidate_bindings,
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(SimulateRoutedAccessRuleResponse {
+            outcome: match outcome {
+                EvaluationOutcome::Allow => "allow",
+                EvaluationOutcome::Deny => "deny",
+            },
+            bindings: candidate_bindings,
+            winning_pattern: Some("candidate"),
+        }),
+    )
+        .into_response())
+}
+
+/// AC-17-260: evaluates a REAL, already-stored pattern's own
+/// `read_condition` against the caller-supplied synthetic identity/resource
+/// — never the candidate's own condition, so the outcome reflects what real
+/// enforcement would actually produce. `None` on `read_condition` means
+/// unrestricted for reads (ADR-063 § Decision — Schema), the SAME
+/// composition real `GetDocument` routing uses.
+fn evaluate_stored_pattern_outcome(
+    body: SimulateRoutedAccessRuleBody,
+    stored: &crate::adapters::system_db::AccessRulePatternRow,
+    bindings: BTreeMap<String, String>,
+) -> Result<Response, StatusCode> {
+    let Some(read_condition_source) = &stored.read_condition else {
+        return Ok((
+            StatusCode::OK,
+            Json(SimulateRoutedAccessRuleResponse {
+                outcome: "allow",
+                bindings,
+                winning_pattern: Some("stored"),
+            }),
+        )
+            .into_response());
+    };
+    let condition = match parse_condition(read_condition_source) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("stored pattern's own read_condition failed to re-parse: {e:?}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+    let auth_ctx = body.auth.map(simulated_auth_to_context);
+    let resource_fields: BTreeMap<String, FieldValue> = body
+        .resource
+        .iter()
+        .map(|(k, v)| (k.clone(), json_value_to_field_value(v)))
+        .collect();
+    let empty_request_resource: BTreeMap<String, FieldValue> = BTreeMap::new();
+    let outcome = evaluate(
+        &condition,
+        auth_ctx.as_ref(),
+        &resource_fields,
+        &empty_request_resource,
+        None,
+        &bindings,
+    );
+
+    Ok((
+        StatusCode::OK,
+        Json(SimulateRoutedAccessRuleResponse {
+            outcome: match outcome {
+                EvaluationOutcome::Allow => "allow",
+                EvaluationOutcome::Deny => "deny",
+            },
+            bindings,
+            winning_pattern: Some("stored"),
         }),
     )
         .into_response())

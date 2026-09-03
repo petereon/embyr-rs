@@ -540,7 +540,15 @@ pub fn decompose(blocks: Vec<MatchBlock>) -> Result<Vec<DecomposedTarget>, Rules
 /// position is `RECURSIVE_WILDCARD_NOT_TERMINAL`; at an odd index it is
 /// `RECURSIVE_WILDCARD_ODD_PREFIX` (out of this feature's own locked v1
 /// scope, Resolution 3 — deferred, unevidenced).
-fn validate_segment_shape(segments: &[PathSegment], path_pattern: &str) -> Result<(), RulesFileError> {
+///
+/// `pub` (security-rules-cel-recursive-wildcards, Slice 06, US-06, ADR-064):
+/// `embyr_server`'s `simulate_routed_access_rule` (a different crate — deny.
+/// toml's `embyr-core` IO-free boundary is unaffected, this is pure) needs
+/// this IDENTICAL shape check for a candidate pattern that never goes
+/// through `decompose_block` (simulate's `pattern`/`condition` are separate
+/// fields, not rules-file block text) — reused directly rather than
+/// re-implemented, never a second, independently-maintained copy.
+pub fn validate_segment_shape(segments: &[PathSegment], path_pattern: &str) -> Result<(), RulesFileError> {
     for (i, seg) in segments.iter().enumerate() {
         let is_last = i == segments.len() - 1;
         match seg {
