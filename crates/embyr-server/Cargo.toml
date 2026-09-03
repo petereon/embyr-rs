@@ -866,6 +866,18 @@ path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw03_write
 name = "security_rules_cel_recursive_wildcards_rw04_reject_precedence_ties"
 path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw04_reject_precedence_ties.rs"
 
+# security-rules-cel-recursive-wildcards (Slice 05, US-05, ADR-064) — proof
+# obligation: 4a's own exact-match rules and 4b's own fixed-depth patterns
+# are unaffected by a co-existing, structurally-overlapping recursive
+# -wildcard catch-all; an untouched collection remains fully unrestricted;
+# importing a non-overlapping recursive-wildcard pattern has zero storage
+# -level effect on an unrelated 4a row. AC-17-255 (full external regression
+# baseline) is proven by re-running every security_rules_* target, not by
+# anything in this file.
+[[test]]
+name = "security_rules_cel_recursive_wildcards_rw05_non_regression_guardrail"
+path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw05_non_regression_guardrail.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

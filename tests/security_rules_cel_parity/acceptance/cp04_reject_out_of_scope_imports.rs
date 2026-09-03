@@ -109,15 +109,37 @@ async fn a_wildcard_at_a_collection_name_position_is_rejected_naming_that_block(
 /// Journey:
 ///   Given: project `trailmark-prod` exists
 ///   When:  Alex imports a file containing `match /{path=**} { allow read:
-///          if false; }`
-///   Then:  the request is rejected naming recursive wildcard paths,
-///          distinguishable from a plain grammar syntax error
+///          if false; }` — a terminal, even-prefix (empty-prefix) recursive
+///          wildcard
+///   Then:  the import now succeeds and is stored as a recursive-wildcard
+///          pattern with an empty fixed prefix
 ///
-/// AC-17-189
+/// SUPERSEDED SCENARIO NOTE (found during `security-rules-cel-recursive-
+/// wildcards` Slice 05, AC-17-255 full-baseline regression run): this test
+/// originally asserted that ANY recursive-wildcard path (`{path=**}`) was
+/// unconditionally rejected as RECURSIVE_WILDCARD. That assumption was true
+/// under 4a's/4b's own locked v1 scope but is INTENTIONALLY superseded by
+/// this feature's own Slice 01 (ADR-064, Resolution 3 Option B): a
+/// terminal, even-prefix recursive wildcard — including the empty-prefix,
+/// project-wide catch-all shape exercised here — is now a supported,
+/// first-class import shape (confirmed directly via rw01's own
+/// `a_project_wide_recursive_wildcard_catch_all_is_imported_and_active`,
+/// AC-17-232/AC-17-237, identical rules-file shape). The bare
+/// `RECURSIVE_WILDCARD` rejection construct this test asserted no longer
+/// exists in the implementation; it was replaced by two narrower,
+/// distinguishable constructs (`RECURSIVE_WILDCARD_ODD_PREFIX`,
+/// `RECURSIVE_WILDCARD_NOT_TERMINAL` — both already proven by rw01's own
+/// AC-17-233/AC-17-234). This test is repurposed (not silently deleted,
+/// matching this codebase's own "superseded, not silently deleted"
+/// precedent) to lock 4a's/cp04's own regression baseline to the NEW
+/// behavior — proving cp04's own historical rejection claim is stale —
+/// without duplicating rw01's own more granular storage assertions.
 ///
-/// @error @driving_port @real-io @US-04 @AC-17-189
+/// AC-17-189 (superseded; see note above)
+///
+/// @driving_port @real-io @US-04 @AC-17-189 @security-regression
 #[tokio::test]
-async fn a_recursive_wildcard_path_is_rejected_naming_that_block() {
+async fn a_recursive_wildcard_path_is_now_accepted_superseding_the_original_rejection() {
     let ctx = SecurityRulesAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     ctx.insert_project("trailmark-prod").await;
@@ -141,13 +163,25 @@ async fn a_recursive_wildcard_path_is_rejected_naming_that_block() {
         .await
         .expect("import request failed");
 
-    assert_eq!(resp.status().as_u16(), 400, "AC-17-189: a recursive wildcard import must be rejected");
-    let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
-    let offending = body["offending_blocks"].as_array().expect("offending_blocks must be an array");
-    assert_eq!(offending.len(), 1);
     assert_eq!(
-        offending[0]["construct"], "RECURSIVE_WILDCARD",
-        "AC-17-189: must be named RECURSIVE_WILDCARD, distinguishable from a plain SYNTAX_ERROR"
+        resp.status().as_u16(),
+        200,
+        "AC-17-189 (superseded): a terminal, even-prefix recursive wildcard must now import cleanly"
+    );
+    let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
+    assert_eq!(body["imported"].as_array().expect("imported must be an array").len(), 1);
+
+    let row_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM access_rule_patterns WHERE project_id = $1 AND collection_path_pattern = $2 AND is_recursive",
+    )
+    .bind("trailmark-prod")
+    .bind("")
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("count access_rule_patterns rows");
+    assert_eq!(
+        row_count, 1,
+        "AC-17-189 (superseded): the recursive-wildcard pattern must be stored, not rejected"
     );
 }
 
