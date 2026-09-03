@@ -786,6 +786,14 @@ path = "../../tests/security_rules_cel_parity/acceptance/cp06_simulate_path_vari
 name = "security_rules_cel_path_matching_pm01_import_multi_segment_patterns"
 path = "../../tests/security_rules_cel_path_matching/acceptance/pm01_import_multi_segment_patterns.rs"
 
+# security-rules-cel-path-matching acceptance tests (Slice 02, Walking
+# Skeleton, US-02, ADR-063) — route a concrete document path to its
+# structurally-matching multi-segment pattern and evaluate real GetDocument
+# calls against the routed, name-keyed ancestor bindings.
+[[test]]
+name = "security_rules_cel_path_matching_pm02_route_and_evaluate_on_read"
+path = "../../tests/security_rules_cel_path_matching/acceptance/pm02_route_and_evaluate_on_read.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

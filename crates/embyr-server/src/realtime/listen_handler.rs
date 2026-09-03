@@ -265,8 +265,18 @@ pub async fn handle_add_target(
                             // Deliberately Not Wired): `None`, deliberately —
                             // a `PathVariable`-referencing rule's per-event
                             // re-check fails closed (OQ-CP-04), not a gap.
-                            if evaluate(condition, auth_ctx.as_ref(), &doc.fields, &empty_fields, None)
-                                == EvaluationOutcome::Deny
+                            // security-rules-cel-path-matching (Slice 02,
+                            // ADR-063): mechanical empty-map argument —
+                            // Listen's own per-event routing wiring is
+                            // Slice 03's job (OUT of this slice's scope).
+                            if evaluate(
+                                condition,
+                                auth_ctx.as_ref(),
+                                &doc.fields,
+                                &empty_fields,
+                                None,
+                                &BTreeMap::new(),
+                            ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-04: withheld, never sent, never a crash (AC-17-118/119).
                             }
@@ -301,8 +311,18 @@ pub async fn handle_add_target(
                             // security-rules-cel-parity (Slice 02, ADR-062 §
                             // Decision — Listen's Per-Event Re-Check Is
                             // Deliberately Not Wired): `None`, deliberately.
-                            if evaluate(condition, auth_ctx.as_ref(), &fields, &empty_fields, None)
-                                == EvaluationOutcome::Deny
+                            // security-rules-cel-path-matching (Slice 02,
+                            // ADR-063): mechanical empty-map argument —
+                            // Listen's own per-event routing wiring is
+                            // Slice 03's job (OUT of this slice's scope).
+                            if evaluate(
+                                condition,
+                                auth_ctx.as_ref(),
+                                &fields,
+                                &empty_fields,
+                                None,
+                                &BTreeMap::new(),
+                            ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-05: withheld, never sent.
                             }

@@ -378,7 +378,14 @@ fn find_path_pattern_end(after_match: &str) -> Option<usize> {
     Some(idx)
 }
 
-fn parse_path_segments(pattern: &str) -> Result<Vec<PathSegment>, RulesFileError> {
+/// Split a `/`-delimited path-pattern (or a concrete request path — the SAME
+/// scanner, ADR-063 § Decision — Shared Matching Primitives) into segments.
+/// `pub` (Slice 02, `security-rules-cel-path-matching`, ADR-063): reused
+/// verbatim by `access_control::path_routing::bind_ancestor`'s own caller
+/// (`grpc::handler`) to represent a concrete request's own ancestor path as
+/// `Vec<PathSegment>` — the identical splitter proven on stored pattern
+/// text, never a second one.
+pub fn parse_path_segments(pattern: &str) -> Result<Vec<PathSegment>, RulesFileError> {
     let stripped = pattern.strip_prefix('/').unwrap_or(pattern);
     if stripped.is_empty() {
         return Err(RulesFileError::single(pattern, "SYNTAX_ERROR", "empty match path"));

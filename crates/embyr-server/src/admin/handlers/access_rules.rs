@@ -935,6 +935,11 @@ pub async fn simulate_access_rule(
         &resource_fields,
         &request_resource_fields,
         body.path_variable.as_deref(),
+        // security-rules-cel-path-matching (Slice 02, ADR-063): mechanical
+        // empty-map argument — this route simulates 4a's own single-leaf-
+        // variable rules only; a routed-pattern simulation is US-06
+        // (Release 2, `simulate_route`), out of this slice's scope.
+        &std::collections::BTreeMap::new(),
     );
 
     Ok((

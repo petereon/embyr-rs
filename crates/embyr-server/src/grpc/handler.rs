@@ -618,6 +618,72 @@ impl FirestoreService {
         }
     }
 
+    /// security-rules-cel-path-matching (Slice 02, US-02, ADR-063 §
+    /// Decision — Routing Composition, steps 2-3): the routing lookup
+    /// itself. Runs ONLY when the caller's own EXISTING exact-match lookup
+    /// (`get_access_rule`/`get_write_access_rule`, unchanged, step 1) has
+    /// already returned `None` for `collection_path` — this function is
+    /// never a substitute for that lookup, only its fallback. Computes the
+    /// request's own ancestor `(ancestor_segment_count, literal_skeleton)`
+    /// from `collection_path` (reusing `rules_file::parse_path_segments`/
+    /// `path_routing::literal_skeleton`, the SAME functions Slice 01's own
+    /// import path already proved), narrows via the indexed
+    /// `list_access_rule_patterns_by_skeleton` query (typically 0-1
+    /// candidate rows), then calls `path_routing::bind_ancestor` per
+    /// candidate. Resolution 1's own import-time overlap-rejection
+    /// guarantee means AT MOST ONE candidate can structurally match — if
+    /// more than one ever does (a bug or a concurrent-import race), this
+    /// fails closed (`PermissionDenied`) and logs
+    /// `security_rules.routing_invariant_violated`, rather than guessing.
+    async fn resolve_access_rule_pattern(
+        system_db: &SystemDb,
+        project_id: &str,
+        collection_path: &str,
+    ) -> Result<
+        Option<(
+            crate::adapters::system_db::AccessRulePatternRow,
+            std::collections::BTreeMap<String, String>,
+        )>,
+        Status,
+    > {
+        let concrete_ancestor =
+            embyr_core::access_control::rules_file::parse_path_segments(collection_path).map_err(
+                |e| Status::internal(format!("failed to parse the request's own ancestor path: {e:?}")),
+            )?;
+        let ancestor_segment_count = concrete_ancestor.len() as i16;
+        let literal_skeleton = embyr_core::access_control::path_routing::literal_skeleton(&concrete_ancestor);
+
+        let candidates = system_db
+            .list_access_rule_patterns_by_skeleton(project_id, ancestor_segment_count, &literal_skeleton)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut matched = None;
+        for candidate in candidates {
+            let pattern_ancestor = embyr_core::access_control::rules_file::parse_path_segments(
+                &candidate.collection_path_pattern,
+            )
+            .map_err(|e| Status::internal(format!("stored pattern failed to re-parse: {e:?}")))?;
+            let Some(bindings) =
+                embyr_core::access_control::path_routing::bind_ancestor(&pattern_ancestor, &concrete_ancestor)
+            else {
+                continue;
+            };
+            if matched.is_some() {
+                tracing::error!(
+                    project_id,
+                    collection_path,
+                    "security_rules.routing_invariant_violated: more than one stored pattern \
+                     structurally matched the same concrete path"
+                );
+                return Err(Status::permission_denied("access denied: routing invariant violated"));
+            }
+            matched = Some((candidate, bindings));
+        }
+
+        Ok(matched)
+    }
+
     /// Evaluate one write's write-path security rule, shared by
     /// `handle_commit`'s per-write batch loop. Mirrors
     /// `handle_create_document`/`handle_update_document`/`handle_delete_document`'s
@@ -675,6 +741,11 @@ impl FirestoreService {
             resource_fields,
             request_fields,
             Some(path.document_id.as_str()),
+            // security-rules-cel-path-matching (Slice 02, ADR-063 §
+            // Decision — evaluate() signature): mechanical empty-map
+            // argument — write-path routing wiring is Slice 03's own job
+            // (OUT of this slice's scope).
+            &std::collections::BTreeMap::new(),
         ) {
             embyr_core::access_control::EvaluationOutcome::Deny => {
                 Err(Status::permission_denied("access denied by write rule"))
@@ -1011,17 +1082,102 @@ impl FirestoreService {
             .map_err(core_error_to_status)?;
 
         match rule_row {
-            // No rule defined for this collection — UNCHANGED, unmodified
-            // pre-`security-rules` code path (AC-17-14/15/16, structural
-            // regression guardrail).
-            None => match doc_opt {
-                None => Err(Status::not_found(format!("{name} not found"))),
-                Some(doc) => {
-                    let mut response = Response::new(document_to_proto(doc));
-                    Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
-                    Ok(response)
+            // No EXACT-MATCH rule defined for this collection.
+            //
+            // security-rules-cel-path-matching (Slice 02, US-02, ADR-063 §
+            // Decision — Routing Composition, step 2): before falling
+            // through to the pre-existing unrestricted default, try the NEW
+            // multi-segment pattern routing lookup — one additional indexed
+            // lookup on this miss path (named Performance-vs-Simplicity
+            // trade-off, ADR-063 § Consequences), never a scan. A
+            // collection with NO patterns of any kind still falls through
+            // to the EXACT SAME unrestricted behavior as before this slice
+            // (US-05 zero-regression guardrail) — `resolve_access_rule_pattern`
+            // returning `None` reaches the identical match arm the
+            // no-rule-at-all case always has.
+            None => {
+                let routed =
+                    Self::resolve_access_rule_pattern(&self.system_db, &project_id, &path.collection_path)
+                        .await?;
+                match routed {
+                    None => match doc_opt {
+                        None => Err(Status::not_found(format!("{name} not found"))),
+                        Some(doc) => {
+                            let mut response = Response::new(document_to_proto(doc));
+                            Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+                            Ok(response)
+                        }
+                    },
+                    Some((pattern_row, ancestor_bindings)) => match pattern_row.read_condition {
+                        // ADR-063 § Decision — Schema: `None` on the MATCHED
+                        // pattern's own `read_condition` column means
+                        // UNRESTRICTED for reads — the same composition rule
+                        // an absent row means today, never a fail-closed
+                        // deny.
+                        None => match doc_opt {
+                            None => Err(Status::not_found(format!("{name} not found"))),
+                            Some(doc) => {
+                                let mut response = Response::new(document_to_proto(doc));
+                                Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+                                Ok(response)
+                            }
+                        },
+                        Some(read_condition_source) => {
+                            let condition =
+                                embyr_core::access_control::parse_condition(&read_condition_source)
+                                    .map_err(|e| {
+                                        Status::internal(format!(
+                                            "stored access rule pattern failed to re-parse: {e:?}"
+                                        ))
+                                    })?;
+                            let auth_ctx = verified_identity.as_ref().map(|v| {
+                                embyr_core::access_control::AuthContext {
+                                    uid: v.end_user_id.clone(),
+                                    claims: v.claims.clone(),
+                                }
+                            });
+                            let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                                std::collections::BTreeMap::new();
+                            let resource_fields =
+                                doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+
+                            // security-rules-cel-path-matching (Slice 02,
+                            // US-02, ADR-063 § Decision — Routing
+                            // Composition, step 3): the leaf capture (if
+                            // any) threads through the SAME, UNCHANGED
+                            // `path_variable_value` slot ADR-062 already
+                            // shipped — `path.document_id` unconditionally,
+                            // exactly like the exact-match branch below (a
+                            // condition referencing no leaf name simply
+                            // never looks it up). The NEW ancestor bindings
+                            // thread through the NEW 6th parameter.
+                            match embyr_core::access_control::evaluate(
+                                &condition,
+                                auth_ctx.as_ref(),
+                                resource_fields,
+                                &empty_fields,
+                                Some(path.document_id.as_str()),
+                                &ancestor_bindings,
+                            ) {
+                                embyr_core::access_control::EvaluationOutcome::Deny => {
+                                    Err(Status::permission_denied("access denied by rule"))
+                                }
+                                embyr_core::access_control::EvaluationOutcome::Allow => match doc_opt {
+                                    None => Err(Status::not_found(format!("{name} not found"))),
+                                    Some(doc) => {
+                                        let mut response = Response::new(document_to_proto(doc));
+                                        Self::attach_rate_limit_headers(
+                                            response.metadata_mut(),
+                                            &rate_info,
+                                        );
+                                        Ok(response)
+                                    }
+                                },
+                            }
+                        }
+                    },
                 }
-            },
+            }
             // A rule is defined — evaluate it (US-02/03/04, AC-17-06..13).
             Some(rule_row) => {
                 let condition = embyr_core::access_control::parse_condition(&rule_row.condition_source)
@@ -1069,6 +1225,12 @@ impl FirestoreService {
                     resource_fields,
                     &empty_fields,
                     Some(path.document_id.as_str()),
+                    // security-rules-cel-path-matching (Slice 02, ADR-063 §
+                    // Decision — evaluate() signature): mechanical empty-map
+                    // argument on the EXACT-MATCH branch — this rule row has
+                    // no ancestor wildcard concept at all (US-05
+                    // zero-regression guardrail).
+                    &std::collections::BTreeMap::new(),
                 ) {
                     // AC-17-10: `Deny` ALWAYS produces the identical
                     // `PermissionDenied` response — never distinguishes
@@ -1194,6 +1356,10 @@ impl FirestoreService {
                 &empty_resource_fields,
                 &fields,
                 Some(path.document_id.as_str()),
+                // security-rules-cel-path-matching (Slice 02, ADR-063):
+                // mechanical empty-map argument — write-path routing wiring
+                // is Slice 03's own job (OUT of this slice's scope).
+                &std::collections::BTreeMap::new(),
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));
@@ -1323,6 +1489,10 @@ impl FirestoreService {
                 resource_fields,
                 &fields,
                 Some(path.document_id.as_str()),
+                // security-rules-cel-path-matching (Slice 02, ADR-063):
+                // mechanical empty-map argument — write-path routing wiring
+                // is Slice 03's own job (OUT of this slice's scope).
+                &std::collections::BTreeMap::new(),
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));
@@ -1447,6 +1617,10 @@ impl FirestoreService {
                 resource_fields,
                 &request_resource_fields,
                 Some(path.document_id.as_str()),
+                // security-rules-cel-path-matching (Slice 02, ADR-063):
+                // mechanical empty-map argument — write-path routing wiring
+                // is Slice 03's own job (OUT of this slice's scope).
+                &std::collections::BTreeMap::new(),
             ) {
                 embyr_core::access_control::EvaluationOutcome::Deny => {
                     return Err(Status::permission_denied("access denied by write rule"));
@@ -1621,6 +1795,7 @@ impl FirestoreService {
                             &doc.fields,
                             &empty_fields,
                             None,
+                            &std::collections::BTreeMap::new(),
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Allow => {
                                 all_docs.push(doc);
@@ -1863,6 +2038,7 @@ impl FirestoreService {
                         resource_fields,
                         &empty_fields,
                         None,
+                        &std::collections::BTreeMap::new(),
                     ) {
                         // ADR-042/DDD-BGD-5: `Deny` maps to a per-document
                         // `missing` item — the batch is NEVER aborted

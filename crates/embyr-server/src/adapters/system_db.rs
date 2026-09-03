@@ -1120,6 +1120,63 @@ impl SystemDb {
         }))
     }
 
+    /// Routing (Slice 02, US-02, ADR-063 § Decision — Adapter) AND, later,
+    /// overlap-detection (Slice 04, US-04) candidate narrowing — the ONE new
+    /// query shape this feature introduces, deliberately narrowed via
+    /// `idx_access_rule_patterns_routing`'s own `(project_id,
+    /// ancestor_segment_count, literal_skeleton)` index (typically 0-1 rows,
+    /// never a per-project scan). Both callers compute
+    /// `ancestor_segment_count`/`literal_skeleton` from their own path (a
+    /// stored pattern's or a concrete request's own ancestor) via the SAME
+    /// `path_routing::literal_skeleton` function — never two independently
+    /// -maintained narrowing computations.
+    pub async fn list_access_rule_patterns_by_skeleton(
+        &self,
+        project_id: &str,
+        ancestor_segment_count: i16,
+        literal_skeleton: &str,
+    ) -> Result<Vec<AccessRulePatternRow>, CoreError> {
+        let rows = sqlx::query(
+            "SELECT collection_path_pattern, leaf_variable, read_condition, write_condition, \
+             created_at, updated_at \
+             FROM access_rule_patterns \
+             WHERE project_id = $1 AND ancestor_segment_count = $2 AND literal_skeleton = $3",
+        )
+        .bind(project_id)
+        .bind(ancestor_segment_count)
+        .bind(literal_skeleton)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            CoreError::BackendUnavailable(format!("list_access_rule_patterns_by_skeleton failed: {e}"))
+        })?;
+
+        rows.into_iter()
+            .map(|r| {
+                Ok(AccessRulePatternRow {
+                    collection_path_pattern: r
+                        .try_get("collection_path_pattern")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    leaf_variable: r
+                        .try_get("leaf_variable")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    read_condition: r
+                        .try_get("read_condition")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    write_condition: r
+                        .try_get("write_condition")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    created_at: r
+                        .try_get("created_at")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    updated_at: r
+                        .try_get("updated_at")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                })
+            })
+            .collect()
+    }
+
     // -----------------------------------------------------------------------
     // security-rules-write-path (ADR-030) — write_access_rules CRUD.
     // -----------------------------------------------------------------------
