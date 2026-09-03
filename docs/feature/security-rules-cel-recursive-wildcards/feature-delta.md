@@ -895,3 +895,167 @@ The remaining 0.05 gap is the routing/storage mechanism flag (Handoff Package fl
 
 **Handoff To**: nw-solution-architect (DESIGN wave) + nw-platform-architect (DEVOPS wave, KPIs only)
 **Deliverables**: This `feature-delta.md` + 6 slice briefs + outcome KPIs + SSOT journey/jobs updates.
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ `docs/feature/security-rules-cel-recursive-wildcards/feature-delta.md` (full, all DISCUSS sections, including the post-DISCUSS orchestrator correction to `OQ-RW-01` in commit `9d074e9` — the zero-remaining-segments case is LOCKED "must succeed," `rules_version = '2'` semantics).
+✓ 6 slice briefs (`docs/feature/security-rules-cel-recursive-wildcards/slices/slice-01..06-*.md`, full) — confirmed no additional DESIGN-relevant constraint beyond what `feature-delta.md` itself already states; Slice 02's own named fallback split (pure-catch-all first, precedence-against-co-existing-pattern second) is noted for DISTILL/DELIVER sequencing, not needed at DESIGN time since this document resolves the mechanism in full.
+✓ `docs/feature/security-rules-cel-path-matching/feature-delta.md` §§ Wave: DESIGN (full) — 4b's own component decomposition, Reuse Analysis, and Handoff Package flag 7 ("do not structurally preclude" this feature — confirmed held, § Job Discovery Framing Resolution Resolution 1).
+✓ `docs/product/architecture/adr-063-multi-segment-path-pattern-routing-and-storage.md` (full) — the exact mechanism this feature augments; every "unchanged" claim below is checked against this ADR's own shipped shape, not assumed.
+✓ `docs/product/architecture/brief.md` §§ Application Architecture — security-rules-cel-parity, security-rules-cel-path-matching (confirmed present, lines 4291-4514) — no gap before this feature's own new subsection.
+✓ `crates/embyr-core/src/access_control/rules_file.rs` (full, 1043 lines, all tests) — confirmed `PathSegment::RecursiveWildcard` is a unit-like variant (carries no captured name — directly enforces Resolution 3's "no condition may reference the captured remainder" at the type level, a finding this DESIGN relies on, not merely re-cites); confirmed `validate_segment_shape`'s exact current rejection shape and the ONE pre-existing test (`decompose_still_rejects_a_recursive_wildcard_in_a_multi_segment_pattern`, prefix length 3, odd) whose expected `construct` string this feature's widened taxonomy changes from `"RECURSIVE_WILDCARD"` to `"RECURSIVE_WILDCARD_ODD_PREFIX"` — a known, flagged test-string update for DELIVER, not a silent regression.
+✓ `crates/embyr-core/src/access_control/path_routing.rs` (full, 265 lines, all tests) — confirmed `positions_compatible`'s exact private signature and the equal-length precondition in `bind_ancestor`/`structurally_overlap`, load-bearing per DISCUSS's own Resolution 1, not relaxed anywhere in this design.
+✓ `crates/embyr-core/src/access_control/mod.rs` (targeted: `Operand`, `evaluate`, `resolve_field_value`, `decompose_decidable`, `compare_operands`, full bodies) — confirmed `PathVariable(name)` already resolves against `ancestor_path_variable_values` (ADR-063's own 6th `evaluate()` parameter) before falling back to the leaf slot — the EXACT mechanism this feature's own fixed-prefix wildcard bindings reuse with zero signature change.
+✓ `crates/embyr-server/src/grpc/handler.rs` (targeted: `resolve_access_rule_pattern` full body, `handle_get_document` full body, `evaluate_write_rule_for_commit` full body) — confirmed the exact 2-step composition and the exact `evaluate()` call shape at the `GetDocument` call site this feature's own step 3 is appended behind.
+✓ `crates/embyr-server/src/adapters/system_db.rs` (targeted: `AccessRulePatternRow`, `upsert_access_rule_pattern`, `get_access_rule_pattern`, `list_access_rule_patterns_by_skeleton`, full bodies) — confirmed the exact current column set and query shapes this feature's own migration and new methods extend.
+✓ `migrations/0032_access_rule_patterns.sql`, `0033_access_rule_pattern_history.sql` (full) — confirmed the exact current schema; `0034`/`0035` are the next available migration numbers.
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` (targeted: `check_pattern_overlap`, `import_rules_file`, `simulate_routed_access_rule`, `SimulateRoutedAccessRuleBody`/`Response`, full bodies) — confirmed the exact current overlap-detection and import/simulate shapes this feature widens.
+✓ `docs/product/architecture/adr-*.md` directory listing — confirmed `adr-063` is the highest existing ADR number; `adr-064` (this feature's own ADR) is the next available number, no collision.
+
+**No contradictions found.** This DESIGN does not reopen any DISCUSS Resolution. `OQ-RW-02` (storage/routing mechanism) and `OQ-RW-03` (wire shape for extended endpoints) are resolved below.
+
+---
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Existing Component | File | Overlap | Decision | Justification |
+|---|---|---|---|---|
+| `PathSegment::RecursiveWildcard` | `rules_file.rs` | Already-scanned variant, never matched to a routing primitive | EXTEND | Zero new scanning; only `validate_segment_shape`'s own acceptance logic widens (~15 LOC, single-pass rewrite of the existing loop) |
+| `positions_compatible` (private) | `path_routing.rs` | Per-position wildcard/literal compatibility test | EXTEND (reused verbatim) | `bind_recursive_prefix` calls it directly; same-module visibility, zero signature change |
+| `structurally_overlap` | `path_routing.rs` | Equal-length pairwise overlap test | EXTEND (reused verbatim, unmodified) | Reused as-is for ALL equal-length pairs in the new `classify_prefix_relation` (recursive-vs-recursive same depth, recursive-vs-4b same depth) — zero new equal-length logic anywhere |
+| `bind_ancestor` | `path_routing.rs` | Pattern-vs-concrete equal-length binding | NOT reused directly | Equal-length precondition load-bearing (DISCUSS Resolution 1, confirmed by direct read `path_routing.rs:90-92`) — `bind_recursive_prefix` is a genuinely new sibling primitive, CREATE NEW justified by structural impossibility, not preference |
+| `validate_segment_shape` | `rules_file.rs` | Single unconditional-rejection point for `RecursiveWildcard` | EXTEND | The ONE function DISCUSS itself identified as the exact widening point |
+| `decompose_block` | `rules_file.rs` | Ancestor/leaf split, condition rewrite, verb-bucketing | EXTEND (new branch) | New branch reuses the IDENTICAL rewrite/verb-bucketing loop shape inline, not a new function |
+| `DecomposedTarget` enum | `rules_file.rs` | Decomposition target dispatch | EXTEND (additive variant) | `RecursiveWildcardPattern` added; `SingleCollection`/`MultiSegmentPattern` untouched |
+| `access_rule_patterns` table | `migrations/0032` | Storage for multi-segment patterns | EXTEND (discriminator column + compound PK + partial index) | CREATE NEW (a disjoint table) evaluated and rejected — see ADR-064 § Considered Options; extension wins on every named NFR axis, especially "one shared implementation" |
+| `resolve_access_rule_pattern` | `grpc/handler.rs` | 2-step routing composition, all 6 call sites | EXTEND (new internal step 3) | All 6 call sites gain recursive-wildcard support via ONE new already-in-scope argument (`document_id`); zero call-site control-flow change |
+| `evaluate()` / `AccessRulePatternRow` | `mod.rs` / `system_db.rs` | Condition evaluation, pattern row shape | NOT extended (zero change) | Resolution 3 locks "no condition references the captured remainder"; a recursive row's own condition only ever references fixed-prefix wildcard names, already representable via the EXISTING `ancestor_path_variable_values` parameter |
+| `check_pattern_overlap` | `access_rules.rs` | 4b's own intra-file + cross-import overlap check | EXTEND (generalized) | Widened into the single shared overlap-detection entry point for the whole pattern family (4b + this feature), not a parallel function — directly satisfies the Shared Artifact table's own "never two independently-maintained rules" requirement |
+| `import_rules_file` | `access_rules.rs` | Decomposed-target branch dispatch | EXTEND (new match arm) | Mirrors the existing `MultiSegmentPattern` arm's identical shape |
+| `simulate_routed_access_rule` | `access_rules.rs` | US-06 routing simulation | EXTEND | Candidate parsing widened to detect a trailing `RecursiveWildcard`; response contract (3-state outcome + bindings) needs no shape change |
+| `decompose_decidable` | `mod.rs` | Variant-keyed condition-shape recognition | NOT extended (zero change, re-verified) | This feature introduces no new `Operand` variant at all — a narrower footprint than ADR-063's own multi-variable re-verification |
+
+Zero unjustified CREATE NEW decisions: the only genuinely new primitives
+(`bind_recursive_prefix`, `classify_prefix_relation`, `generalizes`,
+`fixed_depth_full_reach`, `PrefixRelation`) and the only genuinely new
+storage surface (2 migrations extending an existing table, 2 new adapter
+methods) are each justified by a structural impossibility confirmed by
+direct code read, not by preference.
+
+---
+
+## Wave: DESIGN / [REF] Architecture Design
+
+**ADR**: `docs/product/architecture/adr-064-recursive-wildcard-prefix-matching-precedence-and-storage.md` (new). Amends no prior ADR — ADR-062/063 remain accurate as written; this feature extends, never contradicts, them.
+
+**Storage/indexing decision (`OQ-RW-02`, resolved)**: extend `access_rule_patterns` (ADR-063's own table) with `is_recursive BOOLEAN NOT NULL DEFAULT false`, repurposing `ancestor_segment_count`/`literal_skeleton` to describe the recursive pattern's own FIXED PREFIX (always even) instead of a full ancestor (always odd, for 4b rows). A wholly separate table (DISCUSS's own other named candidate direction) was evaluated and rejected: it would duplicate ~90% of `access_rule_patterns`' own shape and reintroduce a cross-table "who wins" coupling point the single-table design avoids entirely by composition-step ORDER alone. A structural non-collision proof (odd-length 4b ancestors vs. even-length recursive prefixes can never render to identical text) backs the schema choice; the `is_recursive` column and its place in a new compound primary key (`project_id, collection_path_pattern, is_recursive`) are kept explicit anyway, never relying solely on the parity proof. Full alternatives analysis: ADR-064 § Considered Options.
+
+**Component decomposition**:
+
+| Component | Path | Change |
+|---|---|---|
+| `PathSegment`/`validate_segment_shape`/`decompose_block`/`DecomposedTarget` | `crates/embyr-core/src/access_control/rules_file.rs` | EXTEND |
+| `bind_recursive_prefix`/`classify_prefix_relation`/`PrefixRelation`/`generalizes`/`fixed_depth_full_reach` | `crates/embyr-core/src/access_control/path_routing.rs` | EXTEND (new pure functions/types) |
+| `evaluate`/`Operand`/`decompose_decidable` | `crates/embyr-core/src/access_control/mod.rs` | NO CHANGE (re-verified) |
+| `access_rule_patterns`, `access_rule_pattern_history` | `migrations/0034`, `migrations/0035` | EXTEND (ALTER, not CREATE TABLE) |
+| `AccessRulePatternRow`, `upsert_access_rule_pattern`, `get_access_rule_pattern`, `list_access_rule_patterns_by_skeleton`, `list_recursive_access_rule_patterns_up_to` (NEW), `list_all_access_rule_patterns` (NEW) | `crates/embyr-server/src/adapters/system_db.rs` | EXTEND |
+| `resolve_access_rule_pattern` (+1 argument, +1 internal step) | `crates/embyr-server/src/grpc/handler.rs` | EXTEND (all 6 call sites: mechanical, thread existing `document_id`) |
+| `check_pattern_overlap`, `import_rules_file`, `simulate_routed_access_rule` | `crates/embyr-server/src/admin/handlers/access_rules.rs` | EXTEND |
+
+**Driving ports** (no new routes, mirrors DISCUSS's own Driving Ports table): Admin `:9090` (`import_rules_file`, `simulate_routed_access_rule`, both extended). Data `:8080`/`:8081` (`GetDocument`, 3 write handlers — observable behavior only). Realtime Listen (`handle_add_target`'s `Changed`/`Removed` arms — observable behavior only).
+
+**Driven ports**: no new driven port/trait. `SystemDb` (concrete adapter, `crates/embyr-server/src/adapters/system_db.rs`, EXTEND) — 2 new methods (`list_recursive_access_rule_patterns_up_to`, `list_all_access_rule_patterns`), 3 extended methods, both through the SAME already-probed connection pool.
+
+**`bind_recursive_prefix`/precedence-composition algorithm** (full mechanism, complexity stated per call type — this runs on every read/write/query/Listen call): see ADR-064 §§ Decision — New Pure Primitives, Decision — Request-Time Routing Never Needs Containment Classification, Decision — `resolve_access_rule_pattern` Extended, § Complexity. Summary: request-time routing needs ONLY `bind_recursive_prefix` (pattern-vs-concrete-full-path binding) plus "pick the deepest matching candidate, fail closed on a depth-tie" — `classify_prefix_relation`'s containment/ambiguity classification is needed ONLY at import time (US-04), because the composition step ORDER (exact-match, then 4b fixed-depth, then this feature's recursive scan) makes "4b always wins" free at request time, with zero runtime containment check.
+
+**External integrations**: none. No new external API, no contract-testing annotation needed for this feature (unchanged from 4a/4b — the whole initiative is internal parser/storage/routing logic against embyr's own `SystemDb`).
+
+**Development paradigm**: unchanged — functional-where-practical Rust (`CLAUDE.md`), pure transformations (`path_routing`'s new functions are all pure, zero-IO), explicit `Result`/`Option` types throughout, `Vec<PathSegment>` value types.
+
+---
+
+## Wave: DESIGN / [REF] Decisions Table
+
+| # | Decision | Verdict |
+|---|---|---|
+| DDD-RW-1 | Storage mechanism (`OQ-RW-02`) | Extend `access_rule_patterns` with `is_recursive` discriminator + compound PK + partial index; new disjoint table rejected |
+| DDD-RW-2 | New routing primitive | `bind_recursive_prefix`, operating on the concrete document's FULL path (not ancestor alone), built on the SAME `positions_compatible` predicate |
+| DDD-RW-3 | Request-time precedence between 4b and recursive | Free, via composition step ORDER (exact-match → 4b fixed-depth → recursive scan) — zero runtime containment check |
+| DDD-RW-4 | Import-time precedence/containment | New `classify_prefix_relation` (3-way: Disjoint/Contains/AmbiguousOverlap), built on a NEW directional `generalizes` predicate for unequal-length pairs, `structurally_overlap` reused unchanged for equal-length pairs |
+| DDD-RW-5 | `evaluate()` signature | Zero change — recursive-pattern conditions reuse the existing `ancestor_path_variable_values` parameter unmodified |
+| DDD-RW-6 | Overlap detection scope | `check_pattern_overlap` generalized (not duplicated) to check BOTH directions: new-recursive-vs-stored-4b and new-4b-vs-stored-recursive |
+| DDD-RW-7 | Taxonomy | New construct strings `RECURSIVE_WILDCARD_ODD_PREFIX`, `RECURSIVE_WILDCARD_NOT_TERMINAL`; one pre-existing test's expected string updates (flagged, not a regression) |
+| DDD-RW-8 | Admin surface | `import_rules_file` +1 match arm; `simulate_routed_access_rule` extended (not a new handler) — response contract already fits |
+| DDD-RW-9 | Earned Trust probe | None needed — zero new substrate reliance, all new I/O through the already-probed `SystemDb` pool, all new functions pure CPU |
+
+---
+
+## Wave: DESIGN / [REF] C4 Diagrams
+
+### System Context (L1) — unchanged from `security-rules-cel-path-matching`'s own diagram
+
+```mermaid
+C4Context
+  title System Context — embyr Access Control (unchanged by this feature)
+  Person(alex, "Alex", "SDK Developer, Trailmark")
+  Person(enduser, "Maria / Dana", "Trailmark end users")
+  System(embyr, "embyr", "Firestore gRPC protocol-translation server")
+  System_Ext(sdk, "Firestore SDK", "getDoc/setDoc/onSnapshot, unchanged wire contract")
+  Rel(alex, embyr, "Imports .rules file (now incl. recursive-wildcard blocks) via")
+  Rel(enduser, sdk, "Reads/writes/subscribes via")
+  Rel(sdk, embyr, "Issues GetDocument/Write/Listen RPCs to")
+```
+
+### Container (L2) — new step inside the existing Access Control container
+
+```mermaid
+C4Container
+  title Container Diagram — BC-4 Access Control (this feature's own addition highlighted)
+  Container_Boundary(bc4, "BC-4 Access Control (embyr-core, zero-IO)") {
+    Component(rules_file, "rules_file", "Rust module", "Parses .rules text; widened to accept even-prefix terminal RecursiveWildcard")
+    Component(path_routing, "path_routing", "Rust module", "bind_ancestor/structurally_overlap (4b, unchanged) + bind_recursive_prefix/classify_prefix_relation (NEW)")
+    Component(evaluate, "evaluate()", "Rust function", "Condition evaluation — UNCHANGED signature")
+  }
+  Container(handler, "grpc::handler", "embyr-server", "resolve_access_rule_pattern: exact-match -> 4b fixed-depth -> NEW recursive scan")
+  Container(admin, "admin::handlers::access_rules", "embyr-server", "import_rules_file / simulate_routed_access_rule, both extended")
+  ContainerDb(db, "PostgreSQL", "access_rule_patterns extended with is_recursive; 2 new adapter query methods")
+  Rel(admin, rules_file, "Decomposes recursive blocks via")
+  Rel(admin, path_routing, "Validates import-time precedence/overlap via")
+  Rel(admin, db, "Upserts recursive rows into")
+  Rel(handler, path_routing, "Resolves request-time routing via")
+  Rel(handler, evaluate, "Evaluates the winning condition via")
+  Rel(handler, db, "Queries candidate recursive patterns from (step 3, on double-miss)")
+```
+
+Component (L3) diagram omitted — the new subsystem (`path_routing`'s own new functions) is 5 functions/1 enum inside an existing module, below the "complex subsystem" threshold; ADR-064 §§ Decision sections give the full function-level detail in place of an L3 diagram.
+
+---
+
+## Wave: DESIGN / [REF] Open Questions (post-DESIGN status)
+
+| ID | Question | DESIGN status |
+|---|---|---|
+| OQ-RW-01 | Zero-remaining-segments match | RESOLVED pre-DESIGN (orchestrator correction) — carried into this design as "must succeed," confirmed no code path treats it as an error (`fixed_prefix_segment_count = 0` is a valid, non-error value throughout) |
+| OQ-RW-02 | Storage/routing mechanism | RESOLVED — ADR-064 (extend `access_rule_patterns`) |
+| OQ-RW-03 | Wire shape for extended endpoints | RESOLVED — `import_rules_file`'s existing `ImportedBlockSummary.collection_path` reused for the fixed-prefix text (mirrors 4b's own reuse of the same field); `simulate_routed_access_rule`'s existing request/response shapes unchanged, candidate parsing only widened |
+| OQ-RW-04 | Build odd-prefix follow-up? | Unchanged, not DESIGN's concern — Product Discovery, gated on evidence |
+| OQ-RW-05 | Build full OR-composition follow-up? | Unchanged, not DESIGN's concern — Product Discovery, gated on evidence |
+| OQ-RW-06 | 4c/4d/4e prioritization | Unchanged, not DESIGN's concern — Product Discovery, post-ship |
+| OQ-RW-07 (NEW, DESIGN) | The compound-PK migration (`DROP CONSTRAINT` / `ADD PRIMARY KEY`) on `access_rule_patterns` — any operational concern for a table with production rows already in it? | Flagged for DEVOPS/platform-architect review at migration-execution time; no evidence in this codebase's own fiction of a production table large enough for this to be a real concern, named rather than assumed safe |
+
+---
+
+## Wave: DESIGN / [REF] Handoff Package
+
+**To DISTILL (acceptance-designer) / DELIVER (software-crafter)**: this `feature-delta.md` (DISCUSS + DESIGN sections), 6 slice briefs, `docs/product/architecture/adr-064-recursive-wildcard-prefix-matching-precedence-and-storage.md`, `docs/product/architecture/brief.md` § Application Architecture — security-rules-cel-recursive-wildcards.
+
+**Explicit flags**:
+1. Request-time routing (`resolve_access_rule_pattern`'s new step 3) needs ONLY `bind_recursive_prefix` + max-depth selection — do NOT port `classify_prefix_relation`/`generalizes` into the request-time path under any framing; that machinery is import-time-only (ADR-064 § Decision — Request-Time Routing Never Needs Containment Classification).
+2. `check_pattern_overlap` must be GENERALIZED, not duplicated into a parallel recursive-only function — both directions (new-recursive-vs-stored-4b, new-4b-vs-stored-recursive) must share the identical classification call.
+3. The one pre-existing `rules_file.rs` test whose expected construct string changes (`"RECURSIVE_WILDCARD"` → `"RECURSIVE_WILDCARD_ODD_PREFIX"`) is a KNOWN, flagged update for Slice 01 — not a regression to investigate.
+4. `evaluate()`'s signature does not change — if a crafter finds themselves wanting to add a 7th parameter for this feature, stop; the design is wrong or misunderstood, re-read ADR-064 § Decision — `resolve_access_rule_pattern` Extended.
+5. The compound-PK migration (`OQ-RW-07`) should be reviewed by platform-architect/DEVOPS before execution against any environment with existing rows.
+
+Peer review: not invoked per this session's standing practice (human-relayed review gate, mirroring 4a/4b/this feature's own DISCUSS).

@@ -6120,3 +6120,135 @@ verify DESIGN output directly against the code, rather than dispatching a
 Full alternatives-considered analysis and the C4 diagrams: ADR-060, ADR-061,
 and `docs/feature/agent-mode-write-streaming/feature-delta.md` §§ Wave: DESIGN.
 
+## Application Architecture — security-rules-cel-recursive-wildcards
+
+> Updated: 2026-09-03
+> Feature: security-rules-cel-recursive-wildcards (JOB-17, 10th realization —
+> "Epic 4b-ii"; lets Alex import even-prefix, terminal-position recursive-
+> wildcard `.rules` blocks — e.g. `match /{document=**} { allow read, write:
+> if false; }` and `match /expeditions/{expeditionId}/{path=**} { allow
+> read: if request.auth != null; }` — real Firestore's own idiomatic
+> specific-override-plus-catch-all pattern, which 4a and 4b both rejected
+> outright, with most-specific-wins precedence scoped by structural
+> containment)
+> Mode: Propose (autonomous analysis; DISCUSS's own 4 central resolutions —
+> augmentation-not-replacement, precedence semantics, even-prefix-only
+> scope, read+write+Listen parity — were already locked before DESIGN
+> started; the genuinely open item DISCUSS handed to DESIGN, the routing/
+> storage mechanism itself (`OQ-RW-02`), is resolved here)
+> ADR: `docs/product/architecture/adr-064-recursive-wildcard-prefix-matching-precedence-and-storage.md`
+> (new). Amends no prior ADR — ADR-062/063 remain accurate as written; this
+> feature extends, never contradicts, them.
+
+Full DESIGN content (Reading Confirmation, Reuse Analysis, Component
+Decomposition, Driving/Driven Ports, Decisions Table DDD-RW-1..9, C4 System
+Context/Container diagrams, Open Questions, Handoff Package) lives in
+`docs/feature/security-rules-cel-recursive-wildcards/feature-delta.md` §§
+Wave: DESIGN — the single narrative file per the lean output convention.
+Summary below.
+
+### Summary
+
+**The central decision**: extend `access_rule_patterns` (ADR-063's own
+table, not a new disjoint table) with `is_recursive BOOLEAN NOT NULL DEFAULT
+false` (`migrations/0034`/`0035`), repurposing `ancestor_segment_count`/
+`literal_skeleton` to describe a recursive pattern's own FIXED PREFIX
+(always even length) instead of a full ancestor (always odd, for 4b rows).
+A structural non-collision proof (odd-length 4b ancestor text can never
+render identically to even-length recursive-prefix text) backs the schema
+choice, but the discriminator and a new compound primary key
+(`project_id, collection_path_pattern, is_recursive`) are kept explicit
+anyway — Earned Trust discipline, never relying solely on an implicit
+parity argument. A wholly separate table was evaluated and rejected: it
+would duplicate ~90% of `access_rule_patterns`' own shape and reopen a
+cross-table "who wins" coupling point the single-table design avoids by
+composition-step ORDER alone.
+
+**The genuinely new routing primitive**: `bind_recursive_prefix`
+(`embyr_core::access_control::path_routing`, new), operating on a concrete
+document's own FULL path (ancestor + document ID joined) rather than the
+ancestor alone — `bind_ancestor`'s own equal-length precondition cannot
+represent the zero-remaining-segments case (the pattern's own prefix-
+boundary document matching itself, locked "must succeed" per the post-
+DISCUSS `OQ-RW-01` correction verifying real Firestore's `rules_version =
+'2'` semantics). Built on the SAME private `positions_compatible` predicate
+ADR-063's own `bind_ancestor`/`structurally_overlap` already use — reused
+verbatim, never reimplemented.
+
+**The single most important simplification**: request-time routing never
+needs to classify containment between a 4b fixed-depth pattern and a
+recursive-wildcard candidate. The EXISTING composition order (exact-match,
+then 4b's own fixed-depth `bind_ancestor`, then this feature's new
+recursive scan, consulted ONLY on a double miss) makes "a 4b pattern always
+wins over a containing recursive wildcard" (the locked precedence ranking's
+own rule 2) free by construction — zero runtime containment check. Request-
+time routing uses ONLY `bind_recursive_prefix` plus "pick the deepest
+matching candidate, fail closed on a depth-tie" (mirrors ADR-063's own
+`routing_invariant_violated` defensive-assertion precedent).
+
+**Import-time precedence/overlap (US-04)** is where the real new complexity
+lives: a new 3-way classification, `classify_prefix_relation` (`Disjoint` /
+`Contains` / `AmbiguousOverlap`), built on a NEW directional `generalizes`
+predicate for unequal-length prefix pairs (a `Literal` position must match
+identically to CONTAIN; a `Wildcard` position always contains) — confirmed
+by direct construction that `positions_compatible`'s own symmetric
+"Wildcard is always compatible" rule answers "do reaches overlap," not "does
+one reach contain the other," so a genuinely new, small predicate was
+required, not a reuse of an ill-fitting existing one. Equal-length pairs
+(same depth) reuse `structurally_overlap` completely unchanged — 4b's own
+fixed-depth-vs-fixed-depth Option C is untouched because the equal-length
+branch of this feature's own new logic literally calls it.
+
+**`check_pattern_overlap` (admin import handler) generalized, not
+duplicated**: now the single shared overlap-detection entry point for the
+WHOLE pattern family (4b + this feature) — a new 4b pattern must also be
+checked against already-stored recursive patterns (the reverse direction),
+using the identical `classify_prefix_relation` call, never two
+independently-maintained rules that could silently disagree.
+
+**Zero change to `evaluate()`'s signature, `AccessRulePatternRow`'s own
+field shape, or any of the 6 already-wired call sites' own control flow —
+re-verified, not assumed**: Resolution 3 locks "no condition may reference
+the captured remainder," and `PathSegment::RecursiveWildcard` is a unit-like
+enum variant carrying no captured name at all — enforcing that lock at the
+type level, not by convention. A recursive pattern's own condition only ever
+references its FIXED PREFIX's own named wildcards, already representable
+via the EXISTING `ancestor_path_variable_values` parameter ADR-063 shipped.
+`resolve_access_rule_pattern` gains one already-in-scope argument
+(`document_id`) and one new internal step; the 6 call sites change nothing
+beyond passing a value they already hold.
+
+**Admin surface**: `import_rules_file` gains one new match arm
+(`DecomposedTarget::RecursiveWildcardPattern`), mirroring the existing
+`MultiSegmentPattern` arm's shape. `simulate_routed_access_rule` (US-06,
+Release 2) is EXTENDED, not replaced by a new handler — the 3-state
+response contract already fits; candidate parsing widens to detect a
+trailing `RecursiveWildcard` segment and dispatch to `bind_recursive_prefix`.
+
+**No new external integration, no new driven port, no new Earned Trust
+probe, no new workspace dependency** — the 2 new adapter methods
+(`list_recursive_access_rule_patterns_up_to`, `list_all_access_rule_patterns`)
+execute through the existing, already-probed `SystemDb` pool; every new
+matching function (`bind_recursive_prefix`, `classify_prefix_relation`,
+`generalizes`, `fixed_depth_full_reach`) is pure, deterministic CPU
+computation.
+
+**Complexity (runs on every read/write/query/Listen call)**: common case
+(zero recursive-wildcard patterns anywhere in the project) costs one
+additional PARTIAL-index lookup — empty, near-instant — only on the path
+ADR-063 already degraded once (both exact-match and 4b fixed-depth already
+missed). Pattern-governed case: O(K × depth) pure CPU, K = per-project
+recursive-pattern count (small, "dozens at most," realistically single
+digits). Import-time overlap validation: O(N² + N×M), admin-only,
+low-frequency, identical complexity class to ADR-063's own equivalent
+check.
+
+**Bounded context**: no new context. BC-4 Access Control (ADR-029) gains new
+pure functions in the EXISTING `path_routing` submodule, one new additive
+`rules_file` type, and one new argument on an existing `pub(crate)` helper.
+
+Full alternatives-considered analysis (including the rejected disjoint-
+table storage option and the rejected "reuse `positions_compatible`
+directly for containment" approach):
+`docs/product/architecture/adr-064-recursive-wildcard-prefix-matching-precedence-and-storage.md`.
+
