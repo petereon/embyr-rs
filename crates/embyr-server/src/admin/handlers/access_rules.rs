@@ -1337,6 +1337,12 @@ async fn check_pattern_overlap(
         .filter_map(|t| match t {
             rules_file::DecomposedTarget::MultiSegmentPattern(p) => Some(p),
             rules_file::DecomposedTarget::SingleCollection(_) => None,
+            // security-rules-cel-recursive-wildcards (Slice 01, ADR-064):
+            // precedence/overlap detection involving a recursive-wildcard
+            // pattern is Slice 04's own concern (US-04, `classify_prefix_
+            // relation`) — this slice stores recursive patterns without any
+            // overlap check, deliberately out of scope.
+            rules_file::DecomposedTarget::RecursiveWildcardPattern(_) => None,
         })
         .collect();
     if patterns.is_empty() {
@@ -1562,6 +1568,7 @@ pub async fn import_rules_file(
                             pattern.read_condition.as_deref(),
                             pattern.write_condition.as_deref(),
                             session.account_id,
+                            false,
                         )
                         .await
                     {
@@ -1571,6 +1578,57 @@ pub async fn import_rules_file(
                 }
                 imported.push(ImportedBlockSummary {
                     collection_path: pattern.collection_path_pattern,
+                    read_condition: pattern.read_condition,
+                    write_condition: pattern.write_condition,
+                });
+            }
+            // security-rules-cel-recursive-wildcards (Slice 01, US-01,
+            // ADR-064): a terminal, even-prefix recursive-wildcard pattern —
+            // mirrors the MultiSegmentPattern arm's identical idempotency
+            // -check-before-upsert shape (AC-17-235), against the SAME
+            // `access_rule_patterns` table with `is_recursive: true`.
+            // `get_access_rule_pattern` is not filtered by `is_recursive`
+            // (ADR-064's own structural non-collision proof: a 4b ancestor's
+            // rendered text is always odd-length, a recursive prefix's own
+            // rendered text is always even-length, so they can never collide
+            // at the same `collection_path_pattern` text) — routing/overlap
+            // detection against other patterns is Slice 02/04's own concern,
+            // not this slice's.
+            rules_file::DecomposedTarget::RecursiveWildcardPattern(pattern) => {
+                let already_current = state
+                    .system_db
+                    .get_access_rule_pattern(&project_id, &pattern.fixed_prefix_pattern)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("import_rules_file get_access_rule_pattern error: {e}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?
+                    .is_some_and(|existing| {
+                        existing.read_condition == pattern.read_condition
+                            && existing.write_condition == pattern.write_condition
+                    });
+                if !already_current {
+                    if let Err(e) = state
+                        .system_db
+                        .upsert_access_rule_pattern(
+                            &project_id,
+                            &pattern.fixed_prefix_pattern,
+                            pattern.fixed_prefix_segment_count as i16,
+                            &pattern.literal_skeleton_prefix,
+                            None,
+                            pattern.read_condition.as_deref(),
+                            pattern.write_condition.as_deref(),
+                            session.account_id,
+                            true,
+                        )
+                        .await
+                    {
+                        tracing::error!("import_rules_file upsert_access_rule_pattern (recursive) error: {e}");
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    }
+                }
+                imported.push(ImportedBlockSummary {
+                    collection_path: pattern.fixed_prefix_pattern,
                     read_condition: pattern.read_condition,
                     write_condition: pattern.write_condition,
                 });

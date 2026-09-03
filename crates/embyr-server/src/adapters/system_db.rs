@@ -176,6 +176,11 @@ pub struct AccessRulePatternRow {
     pub write_condition: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// security-rules-cel-recursive-wildcards (Slice 01, ADR-064 § Decision
+    /// — Schema): `true` iff this row is a recursive-wildcard pattern (its
+    /// `collection_path_pattern` is the FIXED PREFIX, always even-length),
+    /// `false` for 4b's own fixed-depth pattern (always odd-length).
+    pub is_recursive: bool,
 }
 
 /// customer-db-transaction-sweeper (ADR-054 § D4): one PG-reachable
@@ -1020,6 +1025,11 @@ impl SystemDb {
         read_condition: Option<&str>,
         write_condition: Option<&str>,
         actor_account_id: uuid::Uuid,
+        // security-rules-cel-recursive-wildcards (Slice 01, ADR-064 §
+        // Decision — Adapter): `true` for a recursive-wildcard pattern row
+        // (`collection_path_pattern` is the FIXED PREFIX). Threaded into
+        // both the INSERT and the compound-PK ON CONFLICT target.
+        is_recursive: bool,
     ) -> Result<(), CoreError> {
         let mut tx = self
             .pool
@@ -1030,9 +1040,9 @@ impl SystemDb {
         sqlx::query(
             "INSERT INTO access_rule_patterns \
              (project_id, collection_path_pattern, ancestor_segment_count, literal_skeleton, \
-              leaf_variable, read_condition, write_condition) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
-             ON CONFLICT (project_id, collection_path_pattern) \
+              leaf_variable, read_condition, write_condition, is_recursive) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (project_id, collection_path_pattern, is_recursive) \
              DO UPDATE SET ancestor_segment_count = EXCLUDED.ancestor_segment_count, \
                             literal_skeleton = EXCLUDED.literal_skeleton, \
                             leaf_variable = EXCLUDED.leaf_variable, \
@@ -1047,14 +1057,15 @@ impl SystemDb {
         .bind(leaf_variable)
         .bind(read_condition)
         .bind(write_condition)
+        .bind(is_recursive)
         .execute(&mut *tx)
         .await
         .map_err(|e| CoreError::BackendUnavailable(format!("upsert_access_rule_pattern failed: {e}")))?;
 
         sqlx::query(
             "INSERT INTO access_rule_pattern_history \
-             (project_id, collection_path_pattern, leaf_variable, read_condition, write_condition, actor_account_id) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             (project_id, collection_path_pattern, leaf_variable, read_condition, write_condition, actor_account_id, is_recursive) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(project_id)
         .bind(collection_path_pattern)
@@ -1062,6 +1073,7 @@ impl SystemDb {
         .bind(read_condition)
         .bind(write_condition)
         .bind(actor_account_id)
+        .bind(is_recursive)
         .execute(&mut *tx)
         .await
         .map_err(|e| {
@@ -1078,6 +1090,14 @@ impl SystemDb {
     /// `(project_id, collection_path_pattern)` — the exact-PK idempotency
     /// check `import_rules_file` runs before `upsert_access_rule_pattern`
     /// (mirrors `get_access_rule`'s own role, AC-17-205).
+    /// security-rules-cel-recursive-wildcards (Slice 01, ADR-064): NOT
+    /// filtered by `is_recursive` — a 4b ancestor's own rendered text always
+    /// has an ODD segment count and a recursive prefix's own rendered text
+    /// always has an EVEN segment count (Resolution 3, locked), so an
+    /// odd-count and an even-count rendering can never collide as raw text
+    /// (ADR-064 § Decision — Schema, structural non-collision proof) — at
+    /// most one row can ever match `(project_id, collection_path_pattern)`
+    /// regardless of `is_recursive`.
     pub async fn get_access_rule_pattern(
         &self,
         project_id: &str,
@@ -1085,7 +1105,7 @@ impl SystemDb {
     ) -> Result<Option<AccessRulePatternRow>, CoreError> {
         let row_opt = sqlx::query(
             "SELECT collection_path_pattern, leaf_variable, read_condition, write_condition, \
-             created_at, updated_at \
+             created_at, updated_at, is_recursive \
              FROM access_rule_patterns WHERE project_id = $1 AND collection_path_pattern = $2",
         )
         .bind(project_id)
@@ -1117,6 +1137,9 @@ impl SystemDb {
             updated_at: r
                 .try_get("updated_at")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            is_recursive: r
+                .try_get("is_recursive")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
     }
 
@@ -1130,6 +1153,14 @@ impl SystemDb {
     /// stored pattern's or a concrete request's own ancestor) via the SAME
     /// `path_routing::literal_skeleton` function — never two independently
     /// -maintained narrowing computations.
+    /// security-rules-cel-recursive-wildcards (Slice 01, ADR-064): gains an
+    /// explicit `AND NOT is_recursive` filter — not strictly required for
+    /// correctness (a request's own concrete ancestor segment count is
+    /// always odd, a recursive row's own stored `ancestor_segment_count` is
+    /// always even per the CHECK constraint, so the two can never satisfy
+    /// the same equality predicate), but added anyway per the identical
+    /// Earned Trust reasoning the schema's own non-collision proof is backed
+    /// by an explicit column for (ADR-064 § Decision — Schema).
     pub async fn list_access_rule_patterns_by_skeleton(
         &self,
         project_id: &str,
@@ -1138,9 +1169,10 @@ impl SystemDb {
     ) -> Result<Vec<AccessRulePatternRow>, CoreError> {
         let rows = sqlx::query(
             "SELECT collection_path_pattern, leaf_variable, read_condition, write_condition, \
-             created_at, updated_at \
+             created_at, updated_at, is_recursive \
              FROM access_rule_patterns \
-             WHERE project_id = $1 AND ancestor_segment_count = $2 AND literal_skeleton = $3",
+             WHERE project_id = $1 AND ancestor_segment_count = $2 AND literal_skeleton = $3 \
+               AND NOT is_recursive",
         )
         .bind(project_id)
         .bind(ancestor_segment_count)
@@ -1171,6 +1203,9 @@ impl SystemDb {
                         .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
                     updated_at: r
                         .try_get("updated_at")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    is_recursive: r
+                        .try_get("is_recursive")
                         .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
                 })
             })

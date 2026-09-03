@@ -121,6 +121,24 @@ pub struct DecomposedPatternRule {
     pub write_condition: Option<String>,
 }
 
+/// The decomposition target for ONE terminal, even-prefix recursive-wildcard
+/// `match` block (feature `security-rules-cel-recursive-wildcards`, Slice
+/// 01, US-01, ADR-064 § Decision — Parser). `fixed_prefix_pattern` is the
+/// pattern's own FIXED PREFIX only (e.g. `"expeditions/{expeditionId}"`) —
+/// possibly EMPTY (`""`) for a project-wide `{document=**}` catch-all
+/// (AC-17-237). The recursive wildcard's own captured name is never
+/// retained — it carries no usable binding, structurally (Resolution 3:
+/// no condition may reference the captured remainder). Ready for
+/// `SystemDb::upsert_access_rule_pattern` (`is_recursive: true`) unmodified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecomposedRecursivePattern {
+    pub fixed_prefix_pattern: String,
+    pub fixed_prefix_segment_count: u16,
+    pub literal_skeleton_prefix: String,
+    pub read_condition: Option<String>,
+    pub write_condition: Option<String>,
+}
+
 /// One `match` block's decomposition target — additive over 4a's own
 /// `DecomposedRule` (ADR-063 § Decision — Widened `decompose_block`
 /// Shape-Check). `decompose()`'s return type carries this enum so the admin
@@ -135,6 +153,10 @@ pub enum DecomposedTarget {
     SingleCollection(DecomposedRule),
     /// `ancestor_segments.len() > 1` — this feature's own new shape.
     MultiSegmentPattern(DecomposedPatternRule),
+    /// A terminal, even-prefix recursive-wildcard pattern (feature
+    /// `security-rules-cel-recursive-wildcards`, ADR-064) — additive,
+    /// 4a's/4b's own variants untouched.
+    RecursiveWildcardPattern(DecomposedRecursivePattern),
 }
 
 /// One offending `match` block, naming what about it is out of v1 scope.
@@ -505,25 +527,48 @@ pub fn decompose(blocks: Vec<MatchBlock>) -> Result<Vec<DecomposedTarget>, Rules
 }
 
 /// Widened shape-check (ADR-063 § Decision — Widened `decompose_block`
-/// Shape-Check): `segments` is valid iff every even index holds `Literal`
-/// and every odd index holds `Wildcard` or `Literal` (never
-/// `RecursiveWildcard`), for any length ≥ 1 — replaces 4a's own 2-entry
-/// allow-list (`[Literal]` / `[Literal, Wildcard]`).
+/// Shape-Check; further widened by ADR-064 § Decision — Parser):
+/// `segments` is valid iff every even index holds `Literal` and every odd
+/// index holds `Wildcard` or `Literal`, for any length ≥ 1 — with ONE
+/// additional accepted shape (feature `security-rules-cel-recursive-
+/// wildcards`, Slice 01, US-01): a `RecursiveWildcard` segment is valid iff
+/// it is the pattern's own FINAL segment AND sits at an even index (i.e.
+/// the segments preceding it have EVEN total length — the direct
+/// generalization of "every even index holds `Literal`", since prefix
+/// -length-even means the recursive wildcard's own index equals the
+/// (even) prefix length). A `RecursiveWildcard` anywhere but the final
+/// position is `RECURSIVE_WILDCARD_NOT_TERMINAL`; at an odd index it is
+/// `RECURSIVE_WILDCARD_ODD_PREFIX` (out of this feature's own locked v1
+/// scope, Resolution 3 — deferred, unevidenced).
 fn validate_segment_shape(segments: &[PathSegment], path_pattern: &str) -> Result<(), RulesFileError> {
-    if segments.iter().any(|s| matches!(s, PathSegment::RecursiveWildcard)) {
-        return Err(RulesFileError::single(
-            path_pattern,
-            "RECURSIVE_WILDCARD",
-            "recursive wildcard path matching is not supported in this feature",
-        ));
-    }
     for (i, seg) in segments.iter().enumerate() {
-        if i.is_multiple_of(2) && !matches!(seg, PathSegment::Literal(_)) {
-            return Err(RulesFileError::single(
-                path_pattern,
-                "NESTED_PATH",
-                "a collection-name position must be a literal segment, never a wildcard",
-            ));
+        let is_last = i == segments.len() - 1;
+        match seg {
+            PathSegment::RecursiveWildcard if !is_last => {
+                return Err(RulesFileError::single(
+                    path_pattern,
+                    "RECURSIVE_WILDCARD_NOT_TERMINAL",
+                    "a recursive wildcard segment must be the pattern's own final segment",
+                ));
+            }
+            PathSegment::RecursiveWildcard if !i.is_multiple_of(2) => {
+                return Err(RulesFileError::single(
+                    path_pattern,
+                    "RECURSIVE_WILDCARD_ODD_PREFIX",
+                    "a recursive wildcard segment must occupy an even-indexed (collection-name) \
+                     position — an odd-prefix recursive wildcard is out of this feature's own \
+                     locked v1 scope",
+                ));
+            }
+            PathSegment::RecursiveWildcard => {} // terminal, even prefix — valid (v1 scope)
+            other if i.is_multiple_of(2) && !matches!(other, PathSegment::Literal(_)) => {
+                return Err(RulesFileError::single(
+                    path_pattern,
+                    "NESTED_PATH",
+                    "a collection-name position must be a literal segment, never a wildcard",
+                ));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -549,6 +594,69 @@ fn decompose_block(block: &MatchBlock) -> Result<DecomposedTarget, RulesFileErro
     validate_segment_shape(&block.segments, &block.path_pattern)?;
 
     let segments = block.segments.as_slice();
+
+    if matches!(segments.last(), Some(PathSegment::RecursiveWildcard)) {
+        // security-rules-cel-recursive-wildcards (Slice 01, US-01, ADR-064 §
+        // Decision — Parser): terminal, even-prefix recursive wildcard —
+        // guaranteed by validate_segment_shape above. Split off the fixed
+        // prefix (possibly EMPTY, the project-wide `{document=**}` case,
+        // AC-17-237) and decompose it via the IDENTICAL wildcard-name
+        // -collection + condition-rewrite + verb-bucketing loop the
+        // ancestor branch below already runs — inlined here, not a new
+        // function (ADR-064). The recursive wildcard's own captured name is
+        // never added to the rewrite list — `PathSegment::RecursiveWildcard`
+        // is unit-like, carrying no name data at all — directly enforcing
+        // Resolution 3's own lock structurally.
+        let fixed_prefix = &segments[..segments.len() - 1];
+
+        let wildcard_names: Vec<String> = fixed_prefix
+            .iter()
+            .filter_map(|s| match s {
+                PathSegment::Wildcard(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let mut read_condition: Option<String> = None;
+        let mut write_condition: Option<String> = None;
+
+        for (verbs, raw_condition) in &block.allow_clauses {
+            let mut rewritten = raw_condition.clone();
+            for var in &wildcard_names {
+                rewritten = rewrite_path_variable(&rewritten, var);
+            }
+
+            if let Err(e) = parse_condition(&rewritten) {
+                return Err(RulesFileError::single(&block.path_pattern, construct_for(&e), detail_for(e)));
+            }
+
+            for verb in verbs {
+                let bucket = match verb {
+                    Verb::Read | Verb::Get | Verb::List => &mut read_condition,
+                    Verb::Write | Verb::Create | Verb::Update | Verb::Delete => &mut write_condition,
+                };
+                match bucket {
+                    Some(existing) if *existing != rewritten => {
+                        return Err(RulesFileError::single(
+                            &block.path_pattern,
+                            "CONFLICTING_VERB_CONDITIONS",
+                            "differing conditions for the same read/write bucket are not supported",
+                        ));
+                    }
+                    _ => *bucket = Some(rewritten.clone()),
+                }
+            }
+        }
+
+        return Ok(DecomposedTarget::RecursiveWildcardPattern(DecomposedRecursivePattern {
+            fixed_prefix_pattern: render_ancestor_pattern(fixed_prefix),
+            fixed_prefix_segment_count: fixed_prefix.len() as u16,
+            literal_skeleton_prefix: path_routing::literal_skeleton(fixed_prefix),
+            read_condition,
+            write_condition,
+        }));
+    }
+
     let len = segments.len();
     // Ancestor/leaf split (ADR-063 § Decision — The Ancestor/Leaf Split):
     // a leaf position is present iff `len` is even; ancestor length is
@@ -971,8 +1079,15 @@ mod tests {
         }
     }
 
+    /// Taxonomy note (security-rules-cel-recursive-wildcards, ADR-064 §
+    /// Decision — Parser, pre-flagged by DESIGN): this input's own recursive
+    /// wildcard sits at index 3 (an ODD prefix, `expeditions/{expeditionId}/
+    /// journal_entries` = 3 preceding segments) — under the widened
+    /// taxonomy this is `RECURSIVE_WILDCARD_ODD_PREFIX`, not the old bare
+    /// `RECURSIVE_WILDCARD`. The SHAPE is still rejected; only the construct
+    /// label narrows to name the specific reason. Not a regression.
     #[test]
-    fn decompose_still_rejects_a_recursive_wildcard_in_a_multi_segment_pattern() {
+    fn decompose_still_rejects_a_recursive_wildcard_at_an_odd_prefix_position() {
         let blocks = parse_rules_file(
             r#"
             service cloud.firestore {
@@ -988,10 +1103,132 @@ mod tests {
 
         match decompose(blocks) {
             Err(RulesFileError { offending_blocks }) => {
-                assert_eq!(offending_blocks[0].construct, "RECURSIVE_WILDCARD");
+                assert_eq!(offending_blocks[0].construct, "RECURSIVE_WILDCARD_ODD_PREFIX");
             }
-            Ok(_) => panic!("expected RECURSIVE_WILDCARD rejection"),
+            Ok(_) => panic!("expected RECURSIVE_WILDCARD_ODD_PREFIX rejection"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // security-rules-cel-recursive-wildcards (Slice 01, US-01, ADR-064) —
+    // widened validate_segment_shape + decompose_block RecursiveWildcardPattern
+    // branch.
+    //
+    // Test Budget: 4 NEW distinct behaviors this slice introduces — (1) a
+    // terminal, even-prefix recursive wildcard decomposes into a
+    // `RecursiveWildcardPattern`, including the empty-fixed-prefix case
+    // (AC-17-232/237, parametrized as 2 variations of the SAME behavior); (2)
+    // an odd-prefix recursive wildcard is rejected with
+    // `RECURSIVE_WILDCARD_ODD_PREFIX` (AC-17-233, covered above by the
+    // updated pre-flagged test — not double-counted here); (3) a non-terminal
+    // recursive wildcard is rejected with `RECURSIVE_WILDCARD_NOT_TERMINAL`
+    // (AC-17-234); (4) a file mixing a recursive-wildcard pattern with 4a's
+    // own shape decomposes both correctly (AC-17-236). 4 behaviors x 2 = 8
+    // budget; 3 new tests used (behavior 1 parametrized).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decompose_accepts_a_terminal_even_prefix_recursive_wildcard() {
+        // Narrower, prefix-scoped case (AC-17-232): fixed prefix
+        // `expeditions/{expeditionId}`, the prefix's own wildcard capture
+        // rewritten via the IDENTICAL mechanism 4a/4b already use.
+        let blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /expeditions/{expeditionId}/{path=**} {
+                  allow read: if expeditionId != "";
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+        let targets = decompose(blocks).expect("must decompose");
+        assert_eq!(
+            targets[0],
+            DecomposedTarget::RecursiveWildcardPattern(DecomposedRecursivePattern {
+                fixed_prefix_pattern: "expeditions/{expeditionId}".to_string(),
+                fixed_prefix_segment_count: 2,
+                literal_skeleton_prefix: "expeditions".to_string(),
+                read_condition: Some("request.path.expeditionId != \"\"".to_string()),
+                write_condition: None,
+            })
+        );
+
+        // Empty-fixed-prefix, project-wide catch-all case (AC-17-237) — a
+        // valid, importable shape, not a degenerate error.
+        let catch_all_blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /{document=**} {
+                  allow read, write: if false;
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+        let catch_all_targets = decompose(catch_all_blocks).expect("must decompose");
+        assert_eq!(
+            catch_all_targets[0],
+            DecomposedTarget::RecursiveWildcardPattern(DecomposedRecursivePattern {
+                fixed_prefix_pattern: String::new(),
+                fixed_prefix_segment_count: 0,
+                literal_skeleton_prefix: String::new(),
+                read_condition: Some("false".to_string()),
+                write_condition: Some("false".to_string()),
+            }),
+            "AC-17-237: the empty-fixed-prefix case must decompose to a valid, storable shape"
+        );
+    }
+
+    #[test]
+    fn decompose_rejects_a_recursive_wildcard_that_is_not_the_final_segment() {
+        let blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /expeditions/{path=**}/journal_entries {
+                  allow read: if true;
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+
+        match decompose(blocks) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "RECURSIVE_WILDCARD_NOT_TERMINAL");
+            }
+            Ok(_) => panic!("expected RECURSIVE_WILDCARD_NOT_TERMINAL rejection"),
+        }
+    }
+
+    #[test]
+    fn decompose_handles_a_file_mixing_a_recursive_wildcard_pattern_with_a_4a_shaped_block() {
+        let blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /{document=**} {
+                  allow read, write: if false;
+                }
+                match /profiles/{userId} {
+                  allow read, write: if request.auth.uid == userId;
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+
+        let targets = decompose(blocks).expect("must decompose");
+        assert_eq!(targets.len(), 2);
+        assert!(matches!(targets[0], DecomposedTarget::RecursiveWildcardPattern(_)));
+        assert!(matches!(targets[1], DecomposedTarget::SingleCollection(_)));
     }
 
     #[test]

@@ -831,6 +831,16 @@ path = "../../tests/security_rules_cel_path_matching/acceptance/pm05_non_regress
 name = "security_rules_cel_path_matching_pm06_simulate_multi_segment_pattern"
 path = "../../tests/security_rules_cel_path_matching/acceptance/pm06_simulate_multi_segment_pattern.rs"
 
+# security-rules-cel-recursive-wildcards (Slice 01, US-01, ADR-064, Walking
+# Skeleton): Alex imports a real file containing a terminal, even-prefix
+# recursive-wildcard pattern (a project-wide `{document=**}` catch-all, or a
+# narrower `expeditions/{expeditionId}/{path=**}` block) — decomposed and
+# stored in the widened `access_rule_patterns` table (`is_recursive` column).
+# Storage only this slice — routing/precedence is Slice 02/04's job.
+[[test]]
+name = "security_rules_cel_recursive_wildcards_rw01_import_recursive_wildcard_patterns"
+path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw01_import_recursive_wildcard_patterns.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
