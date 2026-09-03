@@ -1270,6 +1270,59 @@ impl SystemDb {
             .collect()
     }
 
+    /// Import-time overlap/precedence validation ONLY
+    /// (security-rules-cel-recursive-wildcards, Slice 04, US-04, ADR-064 §
+    /// Decision — Adapter) — every pattern (either kind, `is_recursive` or
+    /// not) currently stored for a project, bounded by realistic per-project
+    /// pattern counts ("dozens at most," ADR-063's own precedent). Never
+    /// called on the read/write/query/Listen hot path (that path uses
+    /// `list_access_rule_patterns_by_skeleton`/
+    /// `list_recursive_access_rule_patterns_up_to`'s own narrowed indices
+    /// instead).
+    pub async fn list_all_access_rule_patterns(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<AccessRulePatternRow>, CoreError> {
+        let rows = sqlx::query(
+            "SELECT collection_path_pattern, leaf_variable, read_condition, write_condition, \
+             created_at, updated_at, is_recursive \
+             FROM access_rule_patterns \
+             WHERE project_id = $1",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(format!("list_all_access_rule_patterns failed: {e}")))?;
+
+        rows.into_iter()
+            .map(|r| {
+                Ok(AccessRulePatternRow {
+                    collection_path_pattern: r
+                        .try_get("collection_path_pattern")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    leaf_variable: r
+                        .try_get("leaf_variable")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    read_condition: r
+                        .try_get("read_condition")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    write_condition: r
+                        .try_get("write_condition")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    created_at: r
+                        .try_get("created_at")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    updated_at: r
+                        .try_get("updated_at")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                    is_recursive: r
+                        .try_get("is_recursive")
+                        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+                })
+            })
+            .collect()
+    }
+
     // -----------------------------------------------------------------------
     // security-rules-write-path (ADR-030) — write_access_rules CRUD.
     // -----------------------------------------------------------------------

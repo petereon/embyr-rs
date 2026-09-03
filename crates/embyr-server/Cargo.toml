@@ -856,6 +856,16 @@ path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw02_route
 name = "security_rules_cel_recursive_wildcards_rw03_write_and_listen_parity"
 path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw03_write_and_listen_parity.rs"
 
+# security-rules-cel-recursive-wildcards (Slice 04, US-04, ADR-064) — rejects
+# a same-specificity tie between two recursive-wildcard patterns, and an
+# unrelated-shape overlap between a recursive-wildcard and a 4b pattern,
+# naming the offending pattern(s); confirms a non-containment pair imports
+# cleanly (classify_prefix_relation/generalizes, ADR-064 § Decision — New
+# Pure Primitives).
+[[test]]
+name = "security_rules_cel_recursive_wildcards_rw04_reject_precedence_ties"
+path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw04_reject_precedence_ties.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

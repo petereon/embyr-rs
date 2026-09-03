@@ -1307,13 +1307,46 @@ fn overlap_offending_block(path_pattern: &str, other: &str) -> rules_file::Offen
     }
 }
 
+/// Two-sided `PATTERN_OVERLAP` rejection, naming BOTH colliding patterns
+/// (security-rules-cel-recursive-wildcards, Slice 04, US-04) — the SAME
+/// `overlap_offending_block` shape 4b's own equal-length checks already
+/// produce inline, factored out for reuse by this feature's own
+/// recursive-wildcard-involving checks (ADR-064 § Decision — Overlap
+/// Detection, Generalized: `AmbiguousOverlap` -> reject both, `PATTERN_OVERLAP`
+/// reused unchanged — covers BOTH a genuine same-specificity tie and an
+/// unrelated-shape overlap, Resolution 2's own single carve-out).
+fn overlap_rejection(a: &str, b: &str) -> rules_file::RulesFileError {
+    rules_file::RulesFileError {
+        offending_blocks: vec![overlap_offending_block(a, b), overlap_offending_block(b, a)],
+    }
+}
+
+/// Parses a recursive-wildcard pattern's own FIXED PREFIX text into segments
+/// (US-04) — `""` (the project-wide catch-all case) is the empty prefix,
+/// never passed to `rules_file::parse_path_segments` (which rejects an empty
+/// match path as a plain syntax error; that error is about the OUTER `.rules`
+/// grammar, not about this feature's own valid, deliberately-empty prefix
+/// representation).
+fn parse_recursive_prefix(fixed_prefix_pattern: &str) -> Vec<rules_file::PathSegment> {
+    if fixed_prefix_pattern.is_empty() {
+        Vec::new()
+    } else {
+        rules_file::parse_path_segments(fixed_prefix_pattern)
+            .expect("fixed_prefix_pattern was produced by decompose() or a prior import")
+    }
+}
+
 /// Whole-file overlap validation pass (Slice 04, US-04, ADR-063 § Decision —
-/// Overlap Detection) — runs BEFORE any storage write (`import_rules_file`
-/// calls this immediately after `decompose()` succeeds), mirroring
-/// `decompose()`'s own validate-then-apply atomicity discipline (DISCUSS
-/// Resolution 2): on any overlap, zero `upsert_access_rule_pattern` calls
-/// are made and every existing pattern/rule is left untouched (AC-17-220).
+/// Overlap Detection; widened for recursive-wildcard patterns by
+/// `security-rules-cel-recursive-wildcards`, Slice 04, US-04, ADR-064 §
+/// Decision — Overlap Detection, Generalized) — runs BEFORE any storage
+/// write (`import_rules_file` calls this immediately after `decompose()`
+/// succeeds), mirroring `decompose()`'s own validate-then-apply atomicity
+/// discipline (DISCUSS Resolution 2): on any overlap, zero
+/// `upsert_access_rule_pattern` calls are made and every existing
+/// pattern/rule is left untouched (AC-17-220/AC-17-252).
 ///
+/// 4b-vs-4b (equal-length only, ADR-063, UNCHANGED):
 /// 1. **Intra-file**: pairwise `path_routing::structurally_overlap` against
 ///    every other multi-segment pattern in the SAME import (AC-17-219).
 /// 2. **Cross-import**: `structurally_overlap` against every ALREADY-STORED
@@ -1323,10 +1356,19 @@ fn overlap_offending_block(path_pattern: &str, other: &str) -> rules_file::Offen
 ///    text is byte-identical to the candidate is skipped — that is an
 ///    idempotent re-import (AC-17-205/222), never an overlap.
 ///
-/// Both steps reuse `path_routing::structurally_overlap` — the SAME
-/// `positions_compatible` primitive `path_routing::bind_ancestor` (request
-/// -time routing, Slice 02) is built on, never a second, independently
-/// -maintained matching implementation (DDD-PM-4).
+/// Recursive-wildcard-involving (US-04, ADR-064, NEW): the SAME
+/// `path_routing::classify_prefix_relation` — `AmbiguousOverlap` rejects both
+/// (naming them via `PATTERN_OVERLAP`, reused unchanged), `Contains`/
+/// `Disjoint` both import — is applied to every pair where at least one side
+/// is a recursive-wildcard pattern: recursive-vs-recursive (a genuine
+/// same-specificity tie, AC-17-250/251) and recursive-vs-4b (an
+/// unrelated-shape overlap, AC-17-253's own "no containment relationship"
+/// pass-through), both intra-file and cross-import (against
+/// `list_all_access_rule_patterns` — this feature's own new, project-wide,
+/// import-time-only scan; 4b's own reverse direction — a NEW 4b pattern
+/// against an already-stored recursive pattern — is checked here too,
+/// Decision Driver 3: one shared classification, never two independently
+/// -maintained rules that could silently disagree).
 async fn check_pattern_overlap(
     state: &UserAdminState,
     project_id: &str,
@@ -1336,16 +1378,17 @@ async fn check_pattern_overlap(
         .iter()
         .filter_map(|t| match t {
             rules_file::DecomposedTarget::MultiSegmentPattern(p) => Some(p),
-            rules_file::DecomposedTarget::SingleCollection(_) => None,
-            // security-rules-cel-recursive-wildcards (Slice 01, ADR-064):
-            // precedence/overlap detection involving a recursive-wildcard
-            // pattern is Slice 04's own concern (US-04, `classify_prefix_
-            // relation`) — this slice stores recursive patterns without any
-            // overlap check, deliberately out of scope.
-            rules_file::DecomposedTarget::RecursiveWildcardPattern(_) => None,
+            _ => None,
         })
         .collect();
-    if patterns.is_empty() {
+    let recursive_patterns: Vec<&rules_file::DecomposedRecursivePattern> = decomposed
+        .iter()
+        .filter_map(|t| match t {
+            rules_file::DecomposedTarget::RecursiveWildcardPattern(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    if patterns.is_empty() && recursive_patterns.is_empty() {
         return Ok(None);
     }
 
@@ -1356,26 +1399,55 @@ async fn check_pattern_overlap(
                 .expect("collection_path_pattern was produced by decompose() itself")
         })
         .collect();
+    let recursive_prefixes: Vec<Vec<rules_file::PathSegment>> = recursive_patterns
+        .iter()
+        .map(|p| parse_recursive_prefix(&p.fixed_prefix_pattern))
+        .collect();
 
+    // --- Intra-file, 4b-vs-4b (UNCHANGED) ---
     for i in 0..patterns.len() {
         for j in (i + 1)..patterns.len() {
             if path_routing::structurally_overlap(&ancestors[i], &ancestors[j]) {
-                return Ok(Some(rules_file::RulesFileError {
-                    offending_blocks: vec![
-                        overlap_offending_block(
-                            &patterns[i].collection_path_pattern,
-                            &patterns[j].collection_path_pattern,
-                        ),
-                        overlap_offending_block(
-                            &patterns[j].collection_path_pattern,
-                            &patterns[i].collection_path_pattern,
-                        ),
-                    ],
-                }));
+                return Ok(Some(overlap_rejection(
+                    &patterns[i].collection_path_pattern,
+                    &patterns[j].collection_path_pattern,
+                )));
             }
         }
     }
 
+    // --- Intra-file, recursive-vs-recursive (NEW, AC-17-250/251) ---
+    for i in 0..recursive_prefixes.len() {
+        for j in (i + 1)..recursive_prefixes.len() {
+            if path_routing::classify_prefix_relation(
+                &recursive_prefixes[i],
+                &recursive_prefixes[j],
+            ) == path_routing::PrefixRelation::AmbiguousOverlap
+            {
+                return Ok(Some(overlap_rejection(
+                    &recursive_patterns[i].fixed_prefix_pattern,
+                    &recursive_patterns[j].fixed_prefix_pattern,
+                )));
+            }
+        }
+    }
+
+    // --- Intra-file, recursive-vs-4b (NEW, AC-17-253's pass-through case) ---
+    for (r_prefix, r_pattern) in recursive_prefixes.iter().zip(recursive_patterns.iter()) {
+        for (ancestor, pattern) in ancestors.iter().zip(patterns.iter()) {
+            let full_reach = path_routing::fixed_depth_full_reach(ancestor);
+            if path_routing::classify_prefix_relation(r_prefix, &full_reach)
+                == path_routing::PrefixRelation::AmbiguousOverlap
+            {
+                return Ok(Some(overlap_rejection(
+                    &r_pattern.fixed_prefix_pattern,
+                    &pattern.collection_path_pattern,
+                )));
+            }
+        }
+    }
+
+    // --- Cross-import, 4b-vs-stored-4b (UNCHANGED) ---
     for (pattern, ancestor) in patterns.iter().zip(ancestors.iter()) {
         let stored = state
             .system_db
@@ -1398,18 +1470,65 @@ async fn check_pattern_overlap(
             let row_ancestor = rules_file::parse_path_segments(&row.collection_path_pattern)
                 .expect("stored collection_path_pattern was produced by decompose() itself");
             if path_routing::structurally_overlap(ancestor, &row_ancestor) {
-                return Ok(Some(rules_file::RulesFileError {
-                    offending_blocks: vec![
-                        overlap_offending_block(
-                            &pattern.collection_path_pattern,
-                            &row.collection_path_pattern,
-                        ),
-                        overlap_offending_block(
-                            &row.collection_path_pattern,
-                            &pattern.collection_path_pattern,
-                        ),
-                    ],
-                }));
+                return Ok(Some(overlap_rejection(
+                    &pattern.collection_path_pattern,
+                    &row.collection_path_pattern,
+                )));
+            }
+        }
+    }
+
+    // --- Cross-import, recursive-involving (NEW): a project-wide scan,
+    // reused for BOTH directions — a new recursive pattern against every
+    // already-stored pattern (either kind), AND a new 4b pattern against
+    // every already-stored RECURSIVE pattern (the reverse direction,
+    // ADR-064 § Decision — Overlap Detection, Generalized).
+    let all_stored = state
+        .system_db
+        .list_all_access_rule_patterns(project_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("import_rules_file list_all_access_rule_patterns error: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    for (r_prefix, r_pattern) in recursive_prefixes.iter().zip(recursive_patterns.iter()) {
+        for row in &all_stored {
+            if row.is_recursive && row.collection_path_pattern == r_pattern.fixed_prefix_pattern {
+                continue; // idempotent re-import of the SAME recursive pattern
+            }
+            let row_segments = if row.is_recursive {
+                parse_recursive_prefix(&row.collection_path_pattern)
+            } else {
+                let row_ancestor = rules_file::parse_path_segments(&row.collection_path_pattern)
+                    .expect("stored collection_path_pattern was produced by decompose() itself");
+                path_routing::fixed_depth_full_reach(&row_ancestor)
+            };
+            if path_routing::classify_prefix_relation(r_prefix, &row_segments)
+                == path_routing::PrefixRelation::AmbiguousOverlap
+            {
+                return Ok(Some(overlap_rejection(
+                    &r_pattern.fixed_prefix_pattern,
+                    &row.collection_path_pattern,
+                )));
+            }
+        }
+    }
+
+    for (ancestor, pattern) in ancestors.iter().zip(patterns.iter()) {
+        let full_reach = path_routing::fixed_depth_full_reach(ancestor);
+        for row in &all_stored {
+            if !row.is_recursive {
+                continue; // non-recursive already covered by the by-skeleton loop above
+            }
+            let row_prefix = parse_recursive_prefix(&row.collection_path_pattern);
+            if path_routing::classify_prefix_relation(&full_reach, &row_prefix)
+                == path_routing::PrefixRelation::AmbiguousOverlap
+            {
+                return Ok(Some(overlap_rejection(
+                    &pattern.collection_path_pattern,
+                    &row.collection_path_pattern,
+                )));
             }
         }
     }

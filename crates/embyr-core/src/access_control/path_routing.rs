@@ -147,6 +147,104 @@ pub fn bind_recursive_prefix(
     Some((bindings, concrete_full_path.len() - prefix.len()))
 }
 
+/// Directional generalization test (security-rules-cel-recursive-wildcards,
+/// Slice 04, US-04, ADR-064 § Decision — New Pure Primitives). "Does the
+/// `general` position's own constraint SUBSUME the `specific` position's own
+/// reach?" — the question CONTAINMENT needs, never the same question as
+/// [`positions_compatible`]'s own symmetric "could some concrete value
+/// satisfy BOTH" (the right question for overlap EXISTENCE, wrong one for
+/// containment). A `Literal` only generalizes an identical `Literal`; a
+/// `Wildcard` generalizes anything; a `Literal` never generalizes a
+/// `Wildcard` it doesn't control (the ADR-064 worked counter-example: a
+/// per-expedition literal catch-all does NOT contain a differently-scoped
+/// wildcard pattern, even though their reaches do overlap). A
+/// `RecursiveWildcard` never generalizes and is never generalized — it can
+/// never legally appear inside an already-decomposed prefix.
+fn generalizes(general: &PathSegment, specific: &PathSegment) -> bool {
+    match (general, specific) {
+        (PathSegment::Literal(x), PathSegment::Literal(y)) => x == y,
+        (PathSegment::Wildcard(_), _) => true,
+        (PathSegment::Literal(_), PathSegment::Wildcard(_)) => false,
+        (PathSegment::RecursiveWildcard, _) | (_, PathSegment::RecursiveWildcard) => false,
+    }
+}
+
+/// Reconstructs a stored 4b fixed-depth pattern's own FULL concrete-document
+/// reach shape (ancestor + one trailing document-ID position) for import-time
+/// containment/overlap comparison against a recursive prefix ONLY (US-04,
+/// ADR-064 § Decision — New Pure Primitives). The trailing position is
+/// always `Wildcard` — the captured name is never inspected by
+/// [`positions_compatible`]/[`generalizes`], so its own text is irrelevant.
+pub fn fixed_depth_full_reach(ancestor: &[PathSegment]) -> Vec<PathSegment> {
+    let mut reach = ancestor.to_vec();
+    reach.push(PathSegment::Wildcard(String::new()));
+    reach
+}
+
+/// Import-time precedence-containment classification (US-04, ADR-064 §
+/// Decision — New Pure Primitives) — Resolution 2's own locked 3-way outcome
+/// for a pair of prefixes (either two recursive prefixes, or a recursive
+/// prefix vs. a 4b pattern's own [`fixed_depth_full_reach`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixRelation {
+    /// Reaches never intersect — safe, both coexist.
+    Disjoint,
+    /// One prefix's reach is a structural superset of the other's —
+    /// precedence-resolvable; `deeper_is_b` names which argument is the
+    /// longer/deeper (contained) one.
+    Contains { deeper_is_b: bool },
+    /// Reaches intersect but neither structurally contains the other (or
+    /// they are identical-length with any overlap at all) — Resolution 2's
+    /// own "genuine tie / unrelated-shape overlap," rejected at import time,
+    /// never resolved by precedence.
+    AmbiguousOverlap,
+}
+
+/// Same-length pairs reuse [`structurally_overlap`] directly — the IDENTICAL
+/// function ADR-063 already shipped and already tests (`true` ->
+/// `AmbiguousOverlap`, Resolution 2's own "same-specificity conflicts...
+/// still rejected" carve-out; `false` -> `Disjoint`). Unequal-length pairs
+/// need the NEW, directional [`generalizes`] predicate, never
+/// [`positions_compatible`] reused for unequal lengths (ADR-064's own worked
+/// counter-example: a 2-segment literal-scoped recursive prefix and a
+/// 4-segment 4b full reach structurally OVERLAP but do not contain one
+/// another) — the shorter side's own positions are checked against the
+/// longer side's own leading positions (one position per shorter element);
+/// full [`generalizes`] agreement is containment, any [`positions_compatible`]
+/// agreement short of that is an unresolvable ambiguous overlap, and neither
+/// is a true disjoint reach.
+pub fn classify_prefix_relation(a: &[PathSegment], b: &[PathSegment]) -> PrefixRelation {
+    if a.len() == b.len() {
+        return if structurally_overlap(a, b) {
+            PrefixRelation::AmbiguousOverlap
+        } else {
+            PrefixRelation::Disjoint
+        };
+    }
+
+    let (shorter, longer, deeper_is_b) = if a.len() < b.len() {
+        (a, b, true)
+    } else {
+        (b, a, false)
+    };
+
+    if shorter
+        .iter()
+        .zip(longer.iter())
+        .all(|(g, s)| generalizes(g, s))
+    {
+        return PrefixRelation::Contains { deeper_is_b };
+    }
+    if shorter
+        .iter()
+        .zip(longer.iter())
+        .all(|(x, y)| positions_compatible(x, y))
+    {
+        return PrefixRelation::AmbiguousOverlap;
+    }
+    PrefixRelation::Disjoint
+}
+
 #[cfg(test)]
 mod tests {
     //! Test Budget: 7 behaviors — (1) compute the literal skeleton from an
@@ -169,6 +267,16 @@ mod tests {
     //! full path is shorter than the prefix, or any literal prefix position
     //! differs — x 2 = 14 budget; 7 tests used (parametrized variations per
     //! behavior).
+    //!
+    //! Slice 04 (US-04) adds `classify_prefix_relation`/`fixed_depth_full_reach`
+    //! Test Budget: 3 behaviors — (8) same-length pair delegates to
+    //! `structurally_overlap` (`AmbiguousOverlap`/`Disjoint`), (9)
+    //! unequal-length pair: full positional `generalizes` agreement on the
+    //! shorter side is `Contains` (with the correct `deeper_is_b`), partial
+    //! `positions_compatible` agreement short of that is `AmbiguousOverlap`
+    //! (ADR-064's own worked counter-example), and no compatibility at all is
+    //! `Disjoint`, (10) `fixed_depth_full_reach` appends a trailing `Wildcard`
+    //! reach position to the ancestor — x 2 = 6 budget; 3 tests used.
 
     use super::*;
 
@@ -383,5 +491,116 @@ mod tests {
             PathSegment::Literal("img-042".to_string()),
         ];
         assert_eq!(bind_recursive_prefix(&prefix, &wrong_literal), None);
+    }
+
+    /// AC-17-250: a same-length pair delegates directly to
+    /// `structurally_overlap` — a genuine same-specificity tie (two
+    /// recursive prefixes, identical skeleton, differently-named wildcard)
+    /// is `AmbiguousOverlap`; a same-length, non-overlapping pair (different
+    /// leaf literal, mirrors AC-17-221/AC-17-253) is `Disjoint`.
+    #[test]
+    fn classify_prefix_relation_same_length_delegates_to_structurally_overlap() {
+        let expedition_id = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expeditionId".to_string()),
+        ];
+        let expedition_id_renamed = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expedition_id".to_string()),
+        ];
+        assert_eq!(
+            classify_prefix_relation(&expedition_id, &expedition_id_renamed),
+            PrefixRelation::AmbiguousOverlap
+        );
+
+        let journal_entries_reach = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expeditionId".to_string()),
+            PathSegment::Literal("journal_entries".to_string()),
+            PathSegment::Wildcard(String::new()),
+        ];
+        let announcements_prefix = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expeditionId".to_string()),
+            PathSegment::Literal("announcements".to_string()),
+            PathSegment::Wildcard("announcementId".to_string()),
+        ];
+        assert_eq!(
+            classify_prefix_relation(&journal_entries_reach, &announcements_prefix),
+            PrefixRelation::Disjoint
+        );
+    }
+
+    /// AC-17-253 (containment) / ADR-064's own worked counter-example
+    /// (ambiguous overlap) / a genuinely unrelated pair (disjoint) — the
+    /// three unequal-length outcomes, driven by `generalizes` (full
+    /// agreement = `Contains`) vs `positions_compatible` (partial agreement
+    /// short of that = `AmbiguousOverlap`) vs neither (`Disjoint`).
+    #[test]
+    fn classify_prefix_relation_unequal_length_distinguishes_contains_ambiguous_and_disjoint() {
+        // Contains: the shorter, project-wide-scoped recursive prefix
+        // structurally generalizes every position of the longer 4b full
+        // reach — the evidenced Trailmark shape (a catch-all containing a
+        // specific pattern beneath it).
+        let expeditions_catch_all = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expeditionId".to_string()),
+        ];
+        let journal_entries_full_reach = fixed_depth_full_reach(&[
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expeditionId".to_string()),
+            PathSegment::Literal("journal_entries".to_string()),
+        ]);
+        assert_eq!(
+            classify_prefix_relation(&expeditions_catch_all, &journal_entries_full_reach),
+            PrefixRelation::Contains { deeper_is_b: true }
+        );
+        assert_eq!(
+            classify_prefix_relation(&journal_entries_full_reach, &expeditions_catch_all),
+            PrefixRelation::Contains { deeper_is_b: false }
+        );
+
+        // AmbiguousOverlap: ADR-064's own worked counter-example — a
+        // 2-segment, LITERAL-scoped recursive prefix and a 4-segment 4b full
+        // reach structurally overlap (both reach
+        // expeditions/trek-2026/journal_entries/*) but neither contains the
+        // other (a literal can never generalize a wildcard it doesn't
+        // control).
+        let trek_2026_only = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Literal("trek-2026".to_string()),
+        ];
+        assert_eq!(
+            classify_prefix_relation(&trek_2026_only, &journal_entries_full_reach),
+            PrefixRelation::AmbiguousOverlap
+        );
+
+        // Disjoint: an unequal-length pair with zero pairwise compatibility
+        // (different literal collection names at the very first position).
+        let photos_full_reach = fixed_depth_full_reach(&[
+            PathSegment::Literal("photos".to_string()),
+            PathSegment::Wildcard("photoId".to_string()),
+            PathSegment::Literal("comments".to_string()),
+        ]);
+        assert_eq!(
+            classify_prefix_relation(&expeditions_catch_all, &photos_full_reach),
+            PrefixRelation::Disjoint
+        );
+    }
+
+    /// `fixed_depth_full_reach` appends a trailing `Wildcard` reach position
+    /// (the leaf, whether or not the stored 4b pattern captured a name) to
+    /// the ancestor, unmodified otherwise.
+    #[test]
+    fn fixed_depth_full_reach_appends_a_trailing_wildcard_position() {
+        let ancestor = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expeditionId".to_string()),
+            PathSegment::Literal("journal_entries".to_string()),
+        ];
+        let reach = fixed_depth_full_reach(&ancestor);
+        assert_eq!(reach.len(), 4);
+        assert_eq!(reach[..3], ancestor[..]);
+        assert!(matches!(reach[3], PathSegment::Wildcard(_)));
     }
 }
