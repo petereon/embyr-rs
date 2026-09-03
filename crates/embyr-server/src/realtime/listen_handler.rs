@@ -140,6 +140,15 @@ pub async fn handle_add_target(
                     system_db,
                     &project_id,
                     &collection.collection_path,
+                    // security-rules-cel-recursive-wildcards (Slice 02,
+                    // ADR-064): step 3 (recursive-wildcard scan) deliberately
+                    // deferred here — this subscribe-time compliance gate has
+                    // no concrete document in scope at all (it governs a
+                    // whole-collection Listen target, not one document),
+                    // unlike every other call site. `None` preserves this
+                    // call site's exact pre-Slice-02 behavior, unaffected;
+                    // Slice 03's own job to design its own per-event value.
+                    None,
                 )
                 .await?;
                 match routed {

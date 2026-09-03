@@ -640,10 +640,24 @@ impl FirestoreService {
     /// this same routing lookup for its own subscribe-time fallback
     /// (closing `OQ-CP-04`) — the identical function, never a second,
     /// independently-maintained copy.
+    ///
+    /// security-rules-cel-recursive-wildcards (Slice 02, US-02, ADR-064 §
+    /// Decision — `resolve_access_rule_pattern` Extended): `document_id`
+    /// gates a NEW step 3 (recursive-wildcard scan), reached ONLY on a step-2
+    /// miss — "4b always wins over a containing recursive wildcard" (AC-17-
+    /// 239) falls out of mere composition ORDER, zero runtime containment
+    /// check. `document_id: Some(_)` — a concrete document is known, step 3
+    /// runs (wired into `handle_get_document` this slice; a write handler or
+    /// `handle_add_target` passes `None` until Slice 03 threads its own
+    /// per-call value, preserving their exact pre-Slice-02 behavior
+    /// unaffected in the meantime — a deliberate narrowing of ADR-064's own
+    /// literal `document_id: &str` signature, since `handle_add_target`'s own
+    /// subscribe-time call has no concrete document in scope at all).
     pub(crate) async fn resolve_access_rule_pattern(
         system_db: &SystemDb,
         project_id: &str,
         collection_path: &str,
+        document_id: Option<&str>,
     ) -> Result<
         Option<(
             crate::adapters::system_db::AccessRulePatternRow,
@@ -686,7 +700,69 @@ impl FirestoreService {
             matched = Some((candidate, bindings));
         }
 
-        Ok(matched)
+        if matched.is_some() {
+            return Ok(matched);
+        }
+
+        // Step 3 (NEW, security-rules-cel-recursive-wildcards, Slice 02,
+        // ADR-064): recursive-wildcard scan — reached ONLY on a step-2 miss,
+        // and ONLY when a concrete document is known.
+        let Some(document_id) = document_id else {
+            return Ok(None);
+        };
+
+        let mut concrete_full_path = concrete_ancestor.clone();
+        concrete_full_path.push(embyr_core::access_control::rules_file::PathSegment::Literal(
+            document_id.to_string(),
+        ));
+
+        let recursive_candidates = system_db
+            .list_recursive_access_rule_patterns_up_to(project_id, concrete_full_path.len() as i16)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut best: Option<(
+            crate::adapters::system_db::AccessRulePatternRow,
+            std::collections::BTreeMap<String, String>,
+            usize,
+        )> = None;
+        for candidate in recursive_candidates {
+            // ADR-064 § Decision — New Pure Primitives: the empty-fixed
+            // -prefix (project-wide catch-all, AC-17-237) case renders to
+            // `""`, which `parse_path_segments` would reject as "empty match
+            // path" — special-cased to the empty prefix directly.
+            let prefix_segments = if candidate.collection_path_pattern.is_empty() {
+                Vec::new()
+            } else {
+                embyr_core::access_control::rules_file::parse_path_segments(
+                    &candidate.collection_path_pattern,
+                )
+                .map_err(|e| {
+                    Status::internal(format!("stored recursive pattern failed to re-parse: {e:?}"))
+                })?
+            };
+            let Some((bindings, _remainder)) = embyr_core::access_control::path_routing::bind_recursive_prefix(
+                &prefix_segments,
+                &concrete_full_path,
+            ) else {
+                continue;
+            };
+            match &best {
+                Some((_, _, best_len)) if *best_len > prefix_segments.len() => {}
+                Some((_, _, best_len)) if *best_len == prefix_segments.len() => {
+                    tracing::error!(
+                        project_id,
+                        collection_path,
+                        "security_rules.routing_invariant_violated: two recursive-wildcard \
+                         patterns matched the same concrete path at the SAME depth"
+                    );
+                    return Err(Status::permission_denied("access denied: routing invariant violated"));
+                }
+                _ => best = Some((candidate, bindings, prefix_segments.len())),
+            }
+        }
+
+        Ok(best.map(|(row, bindings, _)| (row, bindings)))
     }
 
     /// Evaluate one write's write-path security rule, shared by
@@ -1101,9 +1177,18 @@ impl FirestoreService {
             // returning `None` reaches the identical match arm the
             // no-rule-at-all case always has.
             None => {
-                let routed =
-                    Self::resolve_access_rule_pattern(&self.system_db, &project_id, &path.collection_path)
-                        .await?;
+                let routed = Self::resolve_access_rule_pattern(
+                    &self.system_db,
+                    &project_id,
+                    &path.collection_path,
+                    // security-rules-cel-recursive-wildcards (Slice 02,
+                    // ADR-064): the document's own already-known ID — zero
+                    // new I/O, the SAME `path` this handler already parsed
+                    // above. Enables step 3's own recursive-wildcard scan
+                    // for THIS call site (in scope this slice).
+                    Some(path.document_id.as_str()),
+                )
+                .await?;
                 match routed {
                     None => match doc_opt {
                         None => Err(Status::not_found(format!("{name} not found"))),
@@ -1387,6 +1472,13 @@ impl FirestoreService {
                     &self.system_db,
                     &project_id_str,
                     &req.collection_id,
+                    // security-rules-cel-recursive-wildcards (Slice 02,
+                    // ADR-064): step 3 (recursive-wildcard scan) deliberately
+                    // deferred for write handlers — Slice 03's own job to
+                    // flip to `Some(path.document_id.as_str())` plus add its
+                    // own AT coverage. `None` preserves this call site's
+                    // exact pre-Slice-02 behavior, unaffected.
+                    None,
                 )
                 .await?;
                 if let Some((pattern_row, ancestor_bindings)) = routed {
@@ -1578,6 +1670,13 @@ impl FirestoreService {
                     &self.system_db,
                     &project_id_str,
                     &path.collection_path,
+                    // security-rules-cel-recursive-wildcards (Slice 02,
+                    // ADR-064): step 3 (recursive-wildcard scan) deliberately
+                    // deferred for write handlers — Slice 03's own job to
+                    // flip to `Some(path.document_id.as_str())` plus add its
+                    // own AT coverage. `None` preserves this call site's
+                    // exact pre-Slice-02 behavior, unaffected.
+                    None,
                 )
                 .await?;
                 if let Some((pattern_row, ancestor_bindings)) = routed {
@@ -1768,6 +1867,13 @@ impl FirestoreService {
                     &self.system_db,
                     &project_id_str,
                     &path.collection_path,
+                    // security-rules-cel-recursive-wildcards (Slice 02,
+                    // ADR-064): step 3 (recursive-wildcard scan) deliberately
+                    // deferred for write handlers — Slice 03's own job to
+                    // flip to `Some(path.document_id.as_str())` plus add its
+                    // own AT coverage. `None` preserves this call site's
+                    // exact pre-Slice-02 behavior, unaffected.
+                    None,
                 )
                 .await?;
                 if let Some((pattern_row, ancestor_bindings)) = routed {

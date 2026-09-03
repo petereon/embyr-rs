@@ -105,9 +105,51 @@ pub fn bind_ancestor(
     Some(bindings)
 }
 
+/// Request-time routing primitive (security-rules-cel-recursive-wildcards,
+/// Slice 02, US-02, ADR-064 § Decision — New Pure Primitives). `prefix` is a
+/// stored recursive-wildcard pattern's own FIXED PREFIX segments (always
+/// even length, the terminal `RecursiveWildcard` segment already stripped).
+/// `concrete_full_path` is a CONCRETE document's own FULL path segments
+/// (ancestor + document ID joined, always `Literal`-only, always even
+/// length) — NOT the ancestor alone: unlike [`bind_ancestor`]'s hard
+/// equal-length precondition, a recursive wildcard's own zero-remaining
+/// -segments case can land EXACTLY at the prefix's own boundary document,
+/// which `DocumentPath.collection_path` alone cannot represent (Resolution 1,
+/// `rules_version = '2'` semantics, feature-delta.md). `Some((bindings,
+/// remainder_len))` iff `concrete_full_path` is at least as long as `prefix`
+/// and every prefix position is compatible with the SAME
+/// [`positions_compatible`] predicate [`bind_ancestor`]/[`structurally_overlap`]
+/// already use — never a third, independently-invented compatibility test
+/// (Decision Driver 1). `remainder_len` is always even automatically: both
+/// `prefix` (Resolution 3, locked) and `concrete_full_path` (a real document
+/// path) are always even-length, so their difference is even — no separate
+/// parity check is needed. `None` = no structural match (too short, or a
+/// literal position within the prefix whose value differs).
+pub fn bind_recursive_prefix(
+    prefix: &[PathSegment],
+    concrete_full_path: &[PathSegment],
+) -> Option<(BTreeMap<String, String>, usize)> {
+    if concrete_full_path.len() < prefix.len() {
+        return None;
+    }
+
+    let mut bindings = BTreeMap::new();
+    for (pattern_seg, concrete_seg) in prefix.iter().zip(concrete_full_path.iter()) {
+        if !positions_compatible(pattern_seg, concrete_seg) {
+            return None;
+        }
+        if let (PathSegment::Wildcard(name), PathSegment::Literal(value)) =
+            (pattern_seg, concrete_seg)
+        {
+            bindings.insert(name.clone(), value.clone());
+        }
+    }
+    Some((bindings, concrete_full_path.len() - prefix.len()))
+}
+
 #[cfg(test)]
 mod tests {
-    //! Test Budget: 5 behaviors — (1) compute the literal skeleton from an
+    //! Test Budget: 7 behaviors — (1) compute the literal skeleton from an
     //! ancestor segment sequence, (2) `bind_ancestor` binds every wildcard
     //! position by name on a structural match (including the all-literal,
     //! zero-wildcard case), (3) `bind_ancestor` returns `None` on any
@@ -118,8 +160,15 @@ mod tests {
     //! `structurally_overlap` returns `false` on a different length or any
     //! differing-literal position (AC-17-221: a different leaf/collection
     //! literal name never overlaps, regardless of shared wildcard positions
-    //! earlier in the path) — x 2 = 10 budget; 5 tests used (parametrized
-    //! variations per behavior).
+    //! earlier in the path), (6) `bind_recursive_prefix` matches a concrete
+    //! full path at or beyond the prefix's own length (zero remainder landing
+    //! exactly at the prefix's own boundary document, AND a positive
+    //! remainder reaching a descendant), binding every wildcard prefix
+    //! position by name — including the empty-prefix (project-wide catch-all)
+    //! case, (7) `bind_recursive_prefix` returns `None` when the concrete
+    //! full path is shorter than the prefix, or any literal prefix position
+    //! differs — x 2 = 14 budget; 7 tests used (parametrized variations per
+    //! behavior).
 
     use super::*;
 
@@ -261,5 +310,78 @@ mod tests {
 
         let shorter = vec![PathSegment::Literal("expeditions".to_string())];
         assert!(!structurally_overlap(&journal_entries, &shorter));
+    }
+
+    /// AC-17-238/240/241: a concrete full path structurally matching a
+    /// recursive-wildcard pattern's own fixed prefix binds every wildcard
+    /// prefix position by name, whether the match lands EXACTLY at the
+    /// prefix's own boundary document (zero remainder) or reaches a
+    /// descendant (positive remainder) — including the empty-prefix
+    /// (project-wide catch-all) case, which matches ANY full path.
+    #[test]
+    fn bind_recursive_prefix_matches_at_or_beyond_the_prefix_and_binds_wildcards() {
+        let prefix = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expeditionId".to_string()),
+        ];
+
+        // Zero remainder: the full path lands EXACTLY at the prefix's own
+        // boundary document (Resolution 1's own locked `rules_version = '2'`
+        // zero-or-more semantics).
+        let at_boundary = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Literal("trek-2026".to_string()),
+        ];
+        let (bindings, remainder) =
+            bind_recursive_prefix(&prefix, &at_boundary).expect("must structurally match");
+        assert_eq!(bindings.get("expeditionId").map(String::as_str), Some("trek-2026"));
+        assert_eq!(remainder, 0);
+
+        // Positive remainder: the full path reaches a descendant one full
+        // collection+document pair beyond the prefix.
+        let descendant = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Literal("trek-2026".to_string()),
+            PathSegment::Literal("photos".to_string()),
+            PathSegment::Literal("img-042".to_string()),
+        ];
+        let (bindings, remainder) =
+            bind_recursive_prefix(&prefix, &descendant).expect("must structurally match");
+        assert_eq!(bindings.get("expeditionId").map(String::as_str), Some("trek-2026"));
+        assert_eq!(remainder, 2);
+
+        // Empty prefix (project-wide catch-all, AC-17-237's own routing
+        // counterpart): matches ANY full path, binding nothing.
+        let (bindings, remainder) = bind_recursive_prefix(&[], &descendant).expect("empty prefix always matches");
+        assert!(bindings.is_empty());
+        assert_eq!(remainder, 4);
+    }
+
+    /// AC-17-238: no structural match (the concrete full path is shorter
+    /// than the prefix, or any literal prefix position differs) returns
+    /// `None`.
+    #[test]
+    fn bind_recursive_prefix_returns_none_when_shorter_than_prefix_or_mismatched() {
+        let prefix = vec![
+            PathSegment::Literal("expeditions".to_string()),
+            PathSegment::Wildcard("expeditionId".to_string()),
+        ];
+
+        // Shorter than the prefix — can never structurally match, even
+        // though the pure function itself must still fail closed
+        // defensively (no candidate this short is even queried against in
+        // production, `list_recursive_access_rule_patterns_up_to`'s own
+        // narrowing).
+        let too_short = vec![PathSegment::Literal("expeditions".to_string())];
+        assert_eq!(bind_recursive_prefix(&prefix, &too_short), None);
+
+        // Same length as the prefix's own boundary, but a DIFFERENT literal
+        // collection name at the prefix's own even (collection-name)
+        // position.
+        let wrong_literal = vec![
+            PathSegment::Literal("photos".to_string()),
+            PathSegment::Literal("img-042".to_string()),
+        ];
+        assert_eq!(bind_recursive_prefix(&prefix, &wrong_literal), None);
     }
 }

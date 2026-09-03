@@ -841,6 +841,14 @@ path = "../../tests/security_rules_cel_path_matching/acceptance/pm06_simulate_mu
 name = "security_rules_cel_recursive_wildcards_rw01_import_recursive_wildcard_patterns"
 path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw01_import_recursive_wildcard_patterns.rs"
 
+# security-rules-cel-recursive-wildcards (Slice 02, Walking Skeleton, US-02,
+# ADR-064) — route a concrete document path to the single most-specific
+# applicable pattern across exact-match (4a), 4b fixed-depth, and this
+# feature's own recursive-wildcard candidates; wired into GetDocument only.
+[[test]]
+name = "security_rules_cel_recursive_wildcards_rw02_route_with_precedence_on_read"
+path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw02_route_with_precedence_on_read.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
