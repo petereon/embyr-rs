@@ -635,7 +635,12 @@ impl FirestoreService {
     /// more than one ever does (a bug or a concurrent-import race), this
     /// fails closed (`PermissionDenied`) and logs
     /// `security_rules.routing_invariant_violated`, rather than guessing.
-    async fn resolve_access_rule_pattern(
+    /// `pub(crate)` (security-rules-cel-path-matching, Slice 03, US-03,
+    /// ADR-063): `realtime::listen_handler::handle_add_target` also needs
+    /// this same routing lookup for its own subscribe-time fallback
+    /// (closing `OQ-CP-04`) — the identical function, never a second,
+    /// independently-maintained copy.
+    pub(crate) async fn resolve_access_rule_pattern(
         system_db: &SystemDb,
         project_id: &str,
         collection_path: &str,
@@ -1321,50 +1326,112 @@ impl FirestoreService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        if let Some(write_rule_row) = write_rule_row {
-            let condition =
-                embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
-                    .map_err(|e| {
-                        Status::internal(format!("stored write rule failed to re-parse: {e:?}"))
-                    })?;
-            let auth_ctx = verified_identity
-                .as_ref()
-                .map(|v| embyr_core::access_control::AuthContext {
-                    uid: v.end_user_id.clone(),
-                    // custom-claims (US-03, ADR-034): real claims propagate
-                    // from the verified identity into the evaluator,
-                    // mirroring `handle_get_document`'s own Slice 02 wiring
-                    // exactly — the write-path reuse proof.
-                    claims: v.claims.clone(),
-                });
+        match write_rule_row {
+            Some(write_rule_row) => {
+                let condition =
+                    embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
+                        .map_err(|e| {
+                            Status::internal(format!("stored write rule failed to re-parse: {e:?}"))
+                        })?;
+                let auth_ctx = verified_identity
+                    .as_ref()
+                    .map(|v| embyr_core::access_control::AuthContext {
+                        uid: v.end_user_id.clone(),
+                        // custom-claims (US-03, ADR-034): real claims propagate
+                        // from the verified identity into the evaluator,
+                        // mirroring `handle_get_document`'s own Slice 02 wiring
+                        // exactly — the write-path reuse proof.
+                        claims: v.claims.clone(),
+                    });
 
-            // Create: `resource_fields` is empty (no document exists yet —
-            // AC-17-28's fail-closed mechanism reuse); `request_resource_fields`
-            // is the proposed new document already parsed above, no new I/O.
-            let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
-                std::collections::BTreeMap::new();
+                // Create: `resource_fields` is empty (no document exists yet —
+                // AC-17-28's fail-closed mechanism reuse); `request_resource_fields`
+                // is the proposed new document already parsed above, no new I/O.
+                let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
+                    std::collections::BTreeMap::new();
 
-            // security-rules-cel-parity (Slice 03, US-03, AC-17-184/186,
-            // ADR-062): the document's own already-known target ID
-            // (`path.document_id`) — for Create this is the TARGET path
-            // being written to, not fetched content (nothing exists yet to
-            // fetch), zero new I/O. Mirrors `handle_get_document`'s own
-            // Slice 02 wiring exactly.
-            match embyr_core::access_control::evaluate(
-                &condition,
-                auth_ctx.as_ref(),
-                &empty_resource_fields,
-                &fields,
-                Some(path.document_id.as_str()),
-                // security-rules-cel-path-matching (Slice 02, ADR-063):
-                // mechanical empty-map argument — write-path routing wiring
-                // is Slice 03's own job (OUT of this slice's scope).
-                &std::collections::BTreeMap::new(),
-            ) {
-                embyr_core::access_control::EvaluationOutcome::Deny => {
-                    return Err(Status::permission_denied("access denied by write rule"));
+                // security-rules-cel-parity (Slice 03, US-03, AC-17-184/186,
+                // ADR-062): the document's own already-known target ID
+                // (`path.document_id`) — for Create this is the TARGET path
+                // being written to, not fetched content (nothing exists yet to
+                // fetch), zero new I/O. Mirrors `handle_get_document`'s own
+                // Slice 02 wiring exactly.
+                match embyr_core::access_control::evaluate(
+                    &condition,
+                    auth_ctx.as_ref(),
+                    &empty_resource_fields,
+                    &fields,
+                    Some(path.document_id.as_str()),
+                    // security-rules-cel-path-matching (ADR-063): this rule
+                    // row is an EXACT-MATCH row, no ancestor wildcard concept
+                    // at all (mirrors `handle_get_document`'s own exact-match
+                    // branch, US-05 zero-regression guardrail).
+                    &std::collections::BTreeMap::new(),
+                ) {
+                    embyr_core::access_control::EvaluationOutcome::Deny => {
+                        return Err(Status::permission_denied("access denied by write rule"));
+                    }
+                    embyr_core::access_control::EvaluationOutcome::Allow => {}
                 }
-                embyr_core::access_control::EvaluationOutcome::Allow => {}
+            }
+            // security-rules-cel-path-matching (Slice 03, US-03,
+            // AC-17-213/214/215, ADR-063 § Decision — Routing Composition):
+            // no EXACT-MATCH write rule — try the multi-segment pattern
+            // routing fallback, mirroring `handle_get_document`'s own Slice
+            // 02 wiring exactly. A collection with no rule/pattern of any
+            // kind pays zero additional cost beyond this one indexed lookup
+            // and proceeds exactly as before this feature (US-05
+            // zero-regression guardrail).
+            None => {
+                let routed = Self::resolve_access_rule_pattern(
+                    &self.system_db,
+                    &project_id_str,
+                    &req.collection_id,
+                )
+                .await?;
+                if let Some((pattern_row, ancestor_bindings)) = routed {
+                    // `None` on the matched pattern's own `write_condition`
+                    // column means UNRESTRICTED for writes — the same
+                    // composition rule an absent row means today (mirrors
+                    // `handle_get_document`'s own `read_condition` handling).
+                    if let Some(write_condition_source) = pattern_row.write_condition {
+                        let condition = embyr_core::access_control::parse_condition(
+                            &write_condition_source,
+                        )
+                        .map_err(|e| {
+                            Status::internal(format!(
+                                "stored access rule pattern's write condition failed to re-parse: {e:?}"
+                            ))
+                        })?;
+                        let auth_ctx = verified_identity.as_ref().map(|v| {
+                            embyr_core::access_control::AuthContext {
+                                uid: v.end_user_id.clone(),
+                                claims: v.claims.clone(),
+                            }
+                        });
+                        let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
+                            std::collections::BTreeMap::new();
+
+                        // AC-17-215: `path.document_id` — the request's own
+                        // TARGET path, zero new I/O — resolves identically
+                        // whether or not a document already exists.
+                        match embyr_core::access_control::evaluate(
+                            &condition,
+                            auth_ctx.as_ref(),
+                            &empty_resource_fields,
+                            &fields,
+                            Some(path.document_id.as_str()),
+                            &ancestor_bindings,
+                        ) {
+                            embyr_core::access_control::EvaluationOutcome::Deny => {
+                                return Err(Status::permission_denied(
+                                    "access denied by write rule",
+                                ));
+                            }
+                            embyr_core::access_control::EvaluationOutcome::Allow => {}
+                        }
+                    }
+                }
             }
         }
 
@@ -1438,66 +1505,128 @@ impl FirestoreService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        if let Some(write_rule_row) = write_rule_row {
-            let condition =
-                embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
-                    .map_err(|e| {
-                        Status::internal(format!("stored write rule failed to re-parse: {e:?}"))
-                    })?;
-            let auth_ctx = verified_identity
-                .as_ref()
-                .map(|v| embyr_core::access_control::AuthContext {
-                    uid: v.end_user_id.clone(),
-                    // custom-claims (US-03, ADR-034): real claims propagate
-                    // from the verified identity into the evaluator,
-                    // mirroring `handle_get_document`'s own Slice 02 wiring
-                    // exactly — the write-path reuse proof.
-                    claims: v.claims.clone(),
-                });
+        match write_rule_row {
+            Some(write_rule_row) => {
+                let condition =
+                    embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
+                        .map_err(|e| {
+                            Status::internal(format!("stored write rule failed to re-parse: {e:?}"))
+                        })?;
+                let auth_ctx = verified_identity
+                    .as_ref()
+                    .map(|v| embyr_core::access_control::AuthContext {
+                        uid: v.end_user_id.clone(),
+                        // custom-claims (US-03, ADR-034): real claims propagate
+                        // from the verified identity into the evaluator,
+                        // mirroring `handle_get_document`'s own Slice 02 wiring
+                        // exactly — the write-path reuse proof.
+                        claims: v.claims.clone(),
+                    });
 
-            // Pre-write state (DIFFERENT from Create): reuses the existing,
-            // already-probed `BackendAdapter::get_document` — no new port.
-            // Paid only when a write rule is defined for the target
-            // collection (gated behind the cheap lookup above).
-            //
-            // AC-17-34 (existence non-leakage, mirrors ADR-029's own
-            // mechanism verbatim): the fetch happens BEFORE the Allow/Deny
-            // decision, `resource_fields` falls back to an empty map when
-            // the document does not exist, and `evaluate()` is called
-            // UNCONDITIONALLY — `Deny` always produces the identical
-            // `PermissionDenied` response regardless of whether `doc_opt`
-            // was `Some` or `None`.
-            let doc_opt = adapter
-                .get_document(&path)
-                .await
-                .map_err(core_error_to_status)?;
-            let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
-                std::collections::BTreeMap::new();
-            let resource_fields =
-                doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_resource_fields);
+                // Pre-write state (DIFFERENT from Create): reuses the existing,
+                // already-probed `BackendAdapter::get_document` — no new port.
+                // Paid only when a write rule is defined for the target
+                // collection (gated behind the cheap lookup above).
+                //
+                // AC-17-34 (existence non-leakage, mirrors ADR-029's own
+                // mechanism verbatim): the fetch happens BEFORE the Allow/Deny
+                // decision, `resource_fields` falls back to an empty map when
+                // the document does not exist, and `evaluate()` is called
+                // UNCONDITIONALLY — `Deny` always produces the identical
+                // `PermissionDenied` response regardless of whether `doc_opt`
+                // was `Some` or `None`.
+                let doc_opt = adapter
+                    .get_document(&path)
+                    .await
+                    .map_err(core_error_to_status)?;
+                let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
+                    std::collections::BTreeMap::new();
+                let resource_fields =
+                    doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_resource_fields);
 
-            // Proposed new state: the already-parsed update body fields, no
-            // new I/O — the two-value old-vs-new comparison this slice
-            // exists to prove.
-            // security-rules-cel-parity (Slice 03, US-03, AC-17-184/186,
-            // ADR-062): the document's own already-known target ID
-            // (`path.document_id`) — zero new I/O. Mirrors
-            // `handle_get_document`'s own Slice 02 wiring exactly.
-            match embyr_core::access_control::evaluate(
-                &condition,
-                auth_ctx.as_ref(),
-                resource_fields,
-                &fields,
-                Some(path.document_id.as_str()),
-                // security-rules-cel-path-matching (Slice 02, ADR-063):
-                // mechanical empty-map argument — write-path routing wiring
-                // is Slice 03's own job (OUT of this slice's scope).
-                &std::collections::BTreeMap::new(),
-            ) {
-                embyr_core::access_control::EvaluationOutcome::Deny => {
-                    return Err(Status::permission_denied("access denied by write rule"));
+                // Proposed new state: the already-parsed update body fields, no
+                // new I/O — the two-value old-vs-new comparison this slice
+                // exists to prove.
+                // security-rules-cel-parity (Slice 03, US-03, AC-17-184/186,
+                // ADR-062): the document's own already-known target ID
+                // (`path.document_id`) — zero new I/O. Mirrors
+                // `handle_get_document`'s own Slice 02 wiring exactly.
+                match embyr_core::access_control::evaluate(
+                    &condition,
+                    auth_ctx.as_ref(),
+                    resource_fields,
+                    &fields,
+                    Some(path.document_id.as_str()),
+                    // security-rules-cel-path-matching (ADR-063): this rule
+                    // row is an EXACT-MATCH row, no ancestor wildcard concept
+                    // at all (mirrors `handle_get_document`'s own exact-match
+                    // branch, US-05 zero-regression guardrail).
+                    &std::collections::BTreeMap::new(),
+                ) {
+                    embyr_core::access_control::EvaluationOutcome::Deny => {
+                        return Err(Status::permission_denied("access denied by write rule"));
+                    }
+                    embyr_core::access_control::EvaluationOutcome::Allow => {}
                 }
-                embyr_core::access_control::EvaluationOutcome::Allow => {}
+            }
+            // security-rules-cel-path-matching (Slice 03, US-03,
+            // AC-17-213/214/215, ADR-063): no EXACT-MATCH write rule — try
+            // the multi-segment pattern routing fallback, mirroring
+            // `handle_get_document`'s own Slice 02 wiring exactly.
+            None => {
+                let routed = Self::resolve_access_rule_pattern(
+                    &self.system_db,
+                    &project_id_str,
+                    &path.collection_path,
+                )
+                .await?;
+                if let Some((pattern_row, ancestor_bindings)) = routed {
+                    if let Some(write_condition_source) = pattern_row.write_condition {
+                        let condition = embyr_core::access_control::parse_condition(
+                            &write_condition_source,
+                        )
+                        .map_err(|e| {
+                            Status::internal(format!(
+                                "stored access rule pattern's write condition failed to re-parse: {e:?}"
+                            ))
+                        })?;
+                        let auth_ctx = verified_identity.as_ref().map(|v| {
+                            embyr_core::access_control::AuthContext {
+                                uid: v.end_user_id.clone(),
+                                claims: v.claims.clone(),
+                            }
+                        });
+
+                        let doc_opt = adapter
+                            .get_document(&path)
+                            .await
+                            .map_err(core_error_to_status)?;
+                        let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
+                            std::collections::BTreeMap::new();
+                        let resource_fields = doc_opt
+                            .as_ref()
+                            .map(|d| &d.fields)
+                            .unwrap_or(&empty_resource_fields);
+
+                        // AC-17-215: `path.document_id` — the request's own
+                        // TARGET path, zero new I/O.
+                        match embyr_core::access_control::evaluate(
+                            &condition,
+                            auth_ctx.as_ref(),
+                            resource_fields,
+                            &fields,
+                            Some(path.document_id.as_str()),
+                            &ancestor_bindings,
+                        ) {
+                            embyr_core::access_control::EvaluationOutcome::Deny => {
+                                return Err(Status::permission_denied(
+                                    "access denied by write rule",
+                                ));
+                            }
+                            embyr_core::access_control::EvaluationOutcome::Allow => {}
+                        }
+                    }
+                }
             }
         }
 
@@ -1565,67 +1694,127 @@ impl FirestoreService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        if let Some(write_rule_row) = write_rule_row {
-            let condition =
-                embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
-                    .map_err(|e| {
-                        Status::internal(format!("stored write rule failed to re-parse: {e:?}"))
-                    })?;
-            let auth_ctx = verified_identity
-                .as_ref()
-                .map(|v| embyr_core::access_control::AuthContext {
-                    uid: v.end_user_id.clone(),
-                    // custom-claims (US-03, ADR-034): real claims propagate
-                    // from the verified identity into the evaluator,
-                    // mirroring `handle_get_document`'s own Slice 02 wiring
-                    // exactly — the write-path reuse proof.
-                    claims: v.claims.clone(),
-                });
+        match write_rule_row {
+            Some(write_rule_row) => {
+                let condition =
+                    embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
+                        .map_err(|e| {
+                            Status::internal(format!("stored write rule failed to re-parse: {e:?}"))
+                        })?;
+                let auth_ctx = verified_identity
+                    .as_ref()
+                    .map(|v| embyr_core::access_control::AuthContext {
+                        uid: v.end_user_id.clone(),
+                        // custom-claims (US-03, ADR-034): real claims propagate
+                        // from the verified identity into the evaluator,
+                        // mirroring `handle_get_document`'s own Slice 02 wiring
+                        // exactly — the write-path reuse proof.
+                        claims: v.claims.clone(),
+                    });
 
-            // Pre-write state: reuses the existing, already-probed
-            // `BackendAdapter::get_document` — no new port. Paid only when a
-            // write rule is defined for the target collection (gated behind
-            // the cheap lookup above).
-            //
-            // AC-17-38 (existence non-leakage, mirrors AC-17-34/ADR-029's
-            // own mechanism verbatim): the fetch happens BEFORE the
-            // Allow/Deny decision, `resource_fields` falls back to an empty
-            // map when the document does not exist, and `evaluate()` is
-            // called UNCONDITIONALLY — `Deny` always produces the identical
-            // `PermissionDenied` response regardless of whether `doc_opt`
-            // was `Some` or `None`.
-            let doc_opt = adapter
-                .get_document(&path)
-                .await
-                .map_err(core_error_to_status)?;
-            let empty_fields: std::collections::BTreeMap<String, FieldValue> =
-                std::collections::BTreeMap::new();
-            let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+                // Pre-write state: reuses the existing, already-probed
+                // `BackendAdapter::get_document` — no new port. Paid only when a
+                // write rule is defined for the target collection (gated behind
+                // the cheap lookup above).
+                //
+                // AC-17-38 (existence non-leakage, mirrors AC-17-34/ADR-029's
+                // own mechanism verbatim): the fetch happens BEFORE the
+                // Allow/Deny decision, `resource_fields` falls back to an empty
+                // map when the document does not exist, and `evaluate()` is
+                // called UNCONDITIONALLY — `Deny` always produces the identical
+                // `PermissionDenied` response regardless of whether `doc_opt`
+                // was `Some` or `None`.
+                let doc_opt = adapter
+                    .get_document(&path)
+                    .await
+                    .map_err(core_error_to_status)?;
+                let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                    std::collections::BTreeMap::new();
+                let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
 
-            // Proposed new state: ALWAYS empty — a delete has no request
-            // body to parse into fields (DIFFERENT from Create/Update).
-            let request_resource_fields: std::collections::BTreeMap<String, FieldValue> =
-                std::collections::BTreeMap::new();
+                // Proposed new state: ALWAYS empty — a delete has no request
+                // body to parse into fields (DIFFERENT from Create/Update).
+                let request_resource_fields: std::collections::BTreeMap<String, FieldValue> =
+                    std::collections::BTreeMap::new();
 
-            // security-rules-cel-parity (Slice 03, US-03, AC-17-184,
-            // ADR-062): the document's own already-known target ID
-            // (`path.document_id`) — zero new I/O. Mirrors
-            // `handle_get_document`'s own Slice 02 wiring exactly.
-            match embyr_core::access_control::evaluate(
-                &condition,
-                auth_ctx.as_ref(),
-                resource_fields,
-                &request_resource_fields,
-                Some(path.document_id.as_str()),
-                // security-rules-cel-path-matching (Slice 02, ADR-063):
-                // mechanical empty-map argument — write-path routing wiring
-                // is Slice 03's own job (OUT of this slice's scope).
-                &std::collections::BTreeMap::new(),
-            ) {
-                embyr_core::access_control::EvaluationOutcome::Deny => {
-                    return Err(Status::permission_denied("access denied by write rule"));
+                // security-rules-cel-parity (Slice 03, US-03, AC-17-184,
+                // ADR-062): the document's own already-known target ID
+                // (`path.document_id`) — zero new I/O. Mirrors
+                // `handle_get_document`'s own Slice 02 wiring exactly.
+                match embyr_core::access_control::evaluate(
+                    &condition,
+                    auth_ctx.as_ref(),
+                    resource_fields,
+                    &request_resource_fields,
+                    Some(path.document_id.as_str()),
+                    // security-rules-cel-path-matching (ADR-063): this rule
+                    // row is an EXACT-MATCH row, no ancestor wildcard concept
+                    // at all (mirrors `handle_get_document`'s own exact-match
+                    // branch, US-05 zero-regression guardrail).
+                    &std::collections::BTreeMap::new(),
+                ) {
+                    embyr_core::access_control::EvaluationOutcome::Deny => {
+                        return Err(Status::permission_denied("access denied by write rule"));
+                    }
+                    embyr_core::access_control::EvaluationOutcome::Allow => {}
                 }
-                embyr_core::access_control::EvaluationOutcome::Allow => {}
+            }
+            // security-rules-cel-path-matching (Slice 03, US-03,
+            // AC-17-213/214, ADR-063): no EXACT-MATCH write rule — try the
+            // multi-segment pattern routing fallback, mirroring
+            // `handle_get_document`'s own Slice 02 wiring exactly.
+            None => {
+                let routed = Self::resolve_access_rule_pattern(
+                    &self.system_db,
+                    &project_id_str,
+                    &path.collection_path,
+                )
+                .await?;
+                if let Some((pattern_row, ancestor_bindings)) = routed {
+                    if let Some(write_condition_source) = pattern_row.write_condition {
+                        let condition = embyr_core::access_control::parse_condition(
+                            &write_condition_source,
+                        )
+                        .map_err(|e| {
+                            Status::internal(format!(
+                                "stored access rule pattern's write condition failed to re-parse: {e:?}"
+                            ))
+                        })?;
+                        let auth_ctx = verified_identity.as_ref().map(|v| {
+                            embyr_core::access_control::AuthContext {
+                                uid: v.end_user_id.clone(),
+                                claims: v.claims.clone(),
+                            }
+                        });
+
+                        let doc_opt = adapter
+                            .get_document(&path)
+                            .await
+                            .map_err(core_error_to_status)?;
+                        let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                            std::collections::BTreeMap::new();
+                        let resource_fields =
+                            doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+                        let request_resource_fields: std::collections::BTreeMap<String, FieldValue> =
+                            std::collections::BTreeMap::new();
+
+                        match embyr_core::access_control::evaluate(
+                            &condition,
+                            auth_ctx.as_ref(),
+                            resource_fields,
+                            &request_resource_fields,
+                            Some(path.document_id.as_str()),
+                            &ancestor_bindings,
+                        ) {
+                            embyr_core::access_control::EvaluationOutcome::Deny => {
+                                return Err(Status::permission_denied(
+                                    "access denied by write rule",
+                                ));
+                            }
+                            embyr_core::access_control::EvaluationOutcome::Allow => {}
+                        }
+                    }
+                }
             }
         }
 

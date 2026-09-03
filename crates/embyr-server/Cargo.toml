@@ -794,6 +794,14 @@ path = "../../tests/security_rules_cel_path_matching/acceptance/pm01_import_mult
 name = "security_rules_cel_path_matching_pm02_route_and_evaluate_on_read"
 path = "../../tests/security_rules_cel_path_matching/acceptance/pm02_route_and_evaluate_on_read.rs"
 
+# security-rules-cel-path-matching acceptance tests (Slice 03, Walking
+# Skeleton, US-03, ADR-063) — extend the same routing+binding mechanism to
+# CreateDocument/UpdateDocument/DeleteDocument and Listen's per-event
+# Changed/Removed re-check, closing 4a's own deferred OQ-CP-04.
+[[test]]
+name = "security_rules_cel_path_matching_pm03_write_and_listen_parity"
+path = "../../tests/security_rules_cel_path_matching/acceptance/pm03_write_and_listen_parity.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

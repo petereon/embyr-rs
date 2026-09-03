@@ -115,27 +115,66 @@ pub async fn handle_add_target(
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-    // `condition` is retained for the REST OF THIS FUNCTION's lifetime — see
-    // ADR-033 § Decision — Per-Event Composition (Slice 04's own extension
-    // point, not consumed here).
-    let condition: Option<Condition> = match rule_row {
-        None => None, // US-06: no rule -> unrestricted, both subscribe-time and per-event.
-        Some(row) => {
-            let condition = parse_condition(&row.condition_source).map_err(|e| {
-                Status::internal(format!("stored access rule failed to re-parse: {e:?}"))
-            })?;
-            match check_query_compliance(&condition, filter.as_ref(), auth_ctx.as_ref()) {
-                QueryComplianceOutcome::Admitted => {}
-                // AC-17-116: SAME query_compliance_rejection() RunQuery
-                // already uses -> Status::permission_denied with the SAME
-                // [REASON_CODE] convention -> distinguishable from
-                // authenticate()'s own Status::unauthenticated and from
-                // Status::internal (genuine server error).
-                outcome => return Err(query_compliance_rejection(&outcome)),
+    // `condition`/`ancestor_bindings` are retained for the REST OF THIS
+    // FUNCTION's lifetime — see ADR-033 § Decision — Per-Event Composition
+    // (Slice 04's own extension point) and security-rules-cel-path-matching
+    // (Slice 03, US-03, ADR-063 § Decision — Routing Composition): the
+    // per-event `Changed`/`Removed` re-check below reuses these SAME
+    // loop-lifetime locals, never re-resolving per event.
+    let (condition, ancestor_bindings): (Option<Condition>, BTreeMap<String, String>) =
+        match rule_row {
+            // security-rules-cel-path-matching (Slice 03, US-03, AC-17-216,
+            // ADR-063): no EXACT-MATCH rule — try the multi-segment pattern
+            // routing fallback (`resolve_access_rule_pattern`, the SAME
+            // helper `handle_get_document`/the 3 write handlers already
+            // call), closing 4a's own deferred `OQ-CP-04` for
+            // pattern-routed collections. Deliberately does NOT extend
+            // `check_query_compliance`'s own subscribe-time compliance gate
+            // to patterns (OQ-PM-07/DDD-PM-7 — a named, separate scope
+            // boundary: the INITIAL SNAPSHOT for a pattern-only collection
+            // remains unfiltered, exactly as before this slice) — only the
+            // per-event `evaluate()` re-check below consumes this
+            // `condition`/`ancestor_bindings` pair.
+            None => {
+                let routed = crate::grpc::handler::FirestoreService::resolve_access_rule_pattern(
+                    system_db,
+                    &project_id,
+                    &collection.collection_path,
+                )
+                .await?;
+                match routed {
+                    None => (None, BTreeMap::new()), // US-06: no rule/pattern -> unrestricted.
+                    Some((pattern_row, bindings)) => match pattern_row.read_condition {
+                        None => (None, BTreeMap::new()),
+                        Some(read_condition_source) => {
+                            let condition = parse_condition(&read_condition_source).map_err(|e| {
+                                Status::internal(format!(
+                                    "stored access rule pattern failed to re-parse: {e:?}"
+                                ))
+                            })?;
+                            (Some(condition), bindings)
+                        }
+                    },
+                }
             }
-            Some(condition)
-        }
-    };
+            Some(row) => {
+                let condition = parse_condition(&row.condition_source).map_err(|e| {
+                    Status::internal(format!("stored access rule failed to re-parse: {e:?}"))
+                })?;
+                match check_query_compliance(&condition, filter.as_ref(), auth_ctx.as_ref()) {
+                    QueryComplianceOutcome::Admitted => {}
+                    // AC-17-116: SAME query_compliance_rejection() RunQuery
+                    // already uses -> Status::permission_denied with the SAME
+                    // [REASON_CODE] convention -> distinguishable from
+                    // authenticate()'s own Status::unauthenticated and from
+                    // Status::internal (genuine server error).
+                    outcome => return Err(query_compliance_rejection(&outcome)),
+                }
+                // Exact-match row: no ancestor wildcard concept at all
+                // (mirrors `handle_get_document`'s own exact-match branch).
+                (Some(condition), BTreeMap::new())
+            }
+        };
 
     // Decode resume token: fresh (<=24h) tokens enable delta delivery.
     let since_update_time = resume_token
@@ -260,22 +299,23 @@ pub async fn handle_add_target(
                             // no "proposed new document" concept, mirrors
                             // handle_get_document exactly (AC-17-120).
                             //
-                            // security-rules-cel-parity (Slice 02, ADR-062 §
-                            // Decision — Listen's Per-Event Re-Check Is
-                            // Deliberately Not Wired): `None`, deliberately —
-                            // a `PathVariable`-referencing rule's per-event
-                            // re-check fails closed (OQ-CP-04), not a gap.
-                            // security-rules-cel-path-matching (Slice 02,
-                            // ADR-063): mechanical empty-map argument —
-                            // Listen's own per-event routing wiring is
-                            // Slice 03's job (OUT of this slice's scope).
+                            // security-rules-cel-path-matching (Slice 03,
+                            // US-03, AC-17-216, ADR-063): `Some(doc.path
+                            // .document_id.as_str())` — the changed
+                            // document's own already-known leaf ID, zero new
+                            // I/O — closes 4a's own deferred `OQ-CP-04`
+                            // (previously always `None`, permanently
+                            // fail-closed for any `PathVariable`-referencing
+                            // rule). `ancestor_bindings` is the SAME
+                            // loop-lifetime local resolved once at subscribe
+                            // time above.
                             if evaluate(
                                 condition,
                                 auth_ctx.as_ref(),
                                 &doc.fields,
                                 &empty_fields,
-                                None,
-                                &BTreeMap::new(),
+                                Some(doc.path.document_id.as_str()),
+                                &ancestor_bindings,
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-04: withheld, never sent, never a crash (AC-17-118/119).
@@ -308,20 +348,19 @@ pub async fn handle_add_target(
                         // as `evaluate()`'s own decision input.
                         if let Some(condition) = &condition {
                             let empty_fields: BTreeMap<String, FieldValue> = BTreeMap::new();
-                            // security-rules-cel-parity (Slice 02, ADR-062 §
-                            // Decision — Listen's Per-Event Re-Check Is
-                            // Deliberately Not Wired): `None`, deliberately.
-                            // security-rules-cel-path-matching (Slice 02,
-                            // ADR-063): mechanical empty-map argument —
-                            // Listen's own per-event routing wiring is
-                            // Slice 03's job (OUT of this slice's scope).
+                            // security-rules-cel-path-matching (Slice 03,
+                            // US-03, AC-17-216, ADR-063): `Some(path
+                            // .document_id.as_str())` — the deleted
+                            // document's own already-known leaf ID, zero new
+                            // I/O — closes 4a's own deferred `OQ-CP-04`,
+                            // mirroring the `Changed` arm's own fix above.
                             if evaluate(
                                 condition,
                                 auth_ctx.as_ref(),
                                 &fields,
                                 &empty_fields,
-                                None,
-                                &BTreeMap::new(),
+                                Some(path.document_id.as_str()),
+                                &ancestor_bindings,
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-05: withheld, never sent.
