@@ -57,7 +57,7 @@ use super::handlers::access_rules::{
     define_access_rule, define_group_access_rule, define_write_access_rule,
     get_access_rule_history, get_group_access_rule_history, get_write_access_rule_history,
     import_rules_file, simulate_access_rule, simulate_group_query_compliance,
-    simulate_query_compliance,
+    simulate_query_compliance, simulate_routed_access_rule,
 };
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
@@ -316,6 +316,14 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/access_rules/import",
             post(import_rules_file),
+        )
+        // security-rules-cel-path-matching (US-06, LAST slice, ADR-063):
+        // simulate a candidate multi-segment pattern's own ROUTING (any
+        // role, read-only, gated in-handler) — a NEW, DISTINCT sibling
+        // route to simulate_access_rule, not a branch on it (DDD-PM-9).
+        .route(
+            "/admin/v1/projects/:project_id/access_rules/simulate_route",
+            post(simulate_routed_access_rule),
         )
         .route(
             "/admin/v1/projects/:project_id/metrics",

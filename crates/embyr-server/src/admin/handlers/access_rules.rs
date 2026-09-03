@@ -47,6 +47,21 @@
 //!   security-rules-collection-group-rules, step 07-01, US-07 — LAST slice
 //!   of this feature).
 //!
+//! simulate_routed_access_rule (POST /admin/v1/projects/:project_id/access_rules/simulate_route):
+//!   Session auth, ANY role (US-06, read-only, zero writes — AC-17-231). A
+//!   NEW sibling handler to `simulate_access_rule` (never an extension of
+//!   it — the response contract genuinely differs, DDD-PM-9): accepts a
+//!   candidate multi-segment `pattern`, a candidate `condition`, a synthetic
+//!   identity/resource, and a synthetic CONCRETE `concrete_path` to route
+//!   against. Reuses `path_routing::bind_ancestor` (the SAME primitive real
+//!   routing's `resolve_access_rule_pattern` calls) and `evaluate()` — never
+//!   a second, independently-maintained implementation of either. 200
+//!   `{outcome: "allow"|"deny"|"no_matching_pattern", bindings}` — a
+//!   structural non-match (AC-17-230) is a distinct 3rd outcome, never a
+//!   false "deny". Implemented (DELIVER, feature
+//!   security-rules-cel-path-matching, Slice 06, US-06, ADR-063 — LAST
+//!   slice of this feature).
+//!
 //! Both handlers implemented (DELIVER steps 01-01 through 06-01) — mirrors
 //! `client_identity.rs`'s own doc-comment convention of marking each handler
 //! "Implemented" once its RED scaffolds (`embyr_core::access_control::
@@ -951,6 +966,169 @@ pub async fn simulate_access_rule(
                 EvaluationOutcome::Allow => "allow",
                 EvaluationOutcome::Deny => "deny",
             },
+        }),
+    )
+        .into_response())
+}
+
+/// Body for POST /admin/v1/projects/:project_id/access_rules/simulate_route
+/// (security-rules-cel-path-matching, Slice 06, US-06, ADR-063 § Decision —
+/// Admin Surface Extensions / DDD-PM-9). A NEW, sibling request type to
+/// `SimulateAccessRuleBody` — genuinely different contract: `pattern` +
+/// `concrete_path` exercise ROUTING itself
+/// (`embyr_core::access_control::path_routing::bind_ancestor`), not merely
+/// leaf-value evaluation (see module doc comment).
+#[derive(Deserialize)]
+pub struct SimulateRoutedAccessRuleBody {
+    /// The candidate multi-segment pattern's own full path text, e.g.
+    /// `"expeditions/{expeditionId}/journal_entries/{entryId}"` — never
+    /// read from or written to `access_rule_patterns`.
+    pub pattern: String,
+    /// The candidate condition, in already-evaluator-ready form
+    /// (`request.path.<name>` for every ancestor/leaf wildcard the pattern
+    /// captures) — mirrors `SimulateAccessRuleBody.condition`'s identical
+    /// convention (cp06 precedent).
+    pub condition: String,
+    pub auth: Option<SimulatedAuth>,
+    #[serde(default)]
+    pub resource: BTreeMap<String, serde_json::Value>,
+    /// The synthetic CONCRETE path to route against (AC-17-229) — e.g.
+    /// `"expeditions/test-expedition/journal_entries/test-entry"`. NEW vs.
+    /// 4a's own `SimulateAccessRuleBody.path_variable: Option<String>` — a
+    /// full concrete path routing must resolve, not a single pre-known
+    /// document ID.
+    pub concrete_path: String,
+}
+
+/// Response for POST .../access_rules/simulate_route — 200. Genuinely
+/// different contract from `SimulateAccessRuleResponse` (DDD-PM-9): a 3rd
+/// `"no_matching_pattern"` outcome (AC-17-230) the 2-state
+/// `SimulateAccessRuleResponse` cannot express, plus the routing's own
+/// resolved bindings (AC-17-228, ancestor + leaf, name-keyed) — empty when
+/// unmatched.
+#[derive(Serialize)]
+pub struct SimulateRoutedAccessRuleResponse {
+    pub outcome: &'static str,
+    #[serde(default)]
+    pub bindings: BTreeMap<String, String>,
+}
+
+/// POST /admin/v1/projects/:project_id/access_rules/simulate_route
+/// (security-rules-cel-path-matching, Slice 06, US-06, LAST slice of this
+/// feature, ADR-063 § Decision — Admin Surface Extensions).
+///
+/// Any role (mirrors `simulate_access_rule`'s identical any-role, read-only
+/// shape — AC-17-231: read-only by construction, never calls
+/// `upsert_access_rule_pattern`, never touches a live document or a stored
+/// pattern row). Reuses `path_routing::bind_ancestor` — the SAME routing
+/// primitive real enforcement's own `resolve_access_rule_pattern`
+/// (`grpc::handler`) is built on — and the SAME `evaluate()` real
+/// enforcement/`simulate_access_rule` use, never a second,
+/// independently-maintained implementation of either (DDD-PM-9).
+pub async fn simulate_routed_access_rule(
+    Path(project_id): Path<String>,
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+    Json(body): Json<SimulateRoutedAccessRuleBody>,
+) -> Result<Response, StatusCode> {
+    let pool = state.system_db.pool();
+    verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    let pattern_segments = match rules_file::parse_path_segments(&body.pattern) {
+        Ok(s) => s,
+        Err(e) => return Ok(rules_file_rejection_response(e)),
+    };
+    let concrete_segments = match rules_file::parse_path_segments(&body.concrete_path) {
+        Ok(s) => s,
+        Err(e) => return Ok(rules_file_rejection_response(e)),
+    };
+    // A routed pattern requires at least one ancestor segment plus a leaf
+    // (document-ID) segment — defensive shape guard, not itself an AC this
+    // slice targets (every domain example supplies a well-formed 4-segment
+    // pattern).
+    if pattern_segments.len() < 2 || concrete_segments.len() < 2 {
+        return Ok(rules_file_rejection_response(rules_file::RulesFileError {
+            offending_blocks: vec![rules_file::OffendingBlock {
+                path_pattern: body.pattern.clone(),
+                construct: "SYNTAX_ERROR",
+                detail: "a routed pattern requires at least an ancestor segment and a leaf segment"
+                    .to_string(),
+            }],
+        }));
+    }
+
+    let (pattern_ancestor, pattern_leaf) = pattern_segments.split_at(pattern_segments.len() - 1);
+    let (concrete_ancestor, concrete_leaf) =
+        concrete_segments.split_at(concrete_segments.len() - 1);
+
+    // AC-17-230: a structural ancestor mismatch is a DISTINCT 3rd outcome,
+    // never a false "deny" — bindings stay empty, the condition is never
+    // even parsed/evaluated. The SAME `bind_ancestor` primitive real
+    // request-time routing (`resolve_access_rule_pattern`) calls.
+    let Some(ancestor_bindings) = path_routing::bind_ancestor(pattern_ancestor, concrete_ancestor)
+    else {
+        return Ok((
+            StatusCode::OK,
+            Json(SimulateRoutedAccessRuleResponse {
+                outcome: "no_matching_pattern",
+                bindings: BTreeMap::new(),
+            }),
+        )
+            .into_response());
+    };
+
+    let leaf_variable = match pattern_leaf.first() {
+        Some(rules_file::PathSegment::Wildcard(name)) => Some(name.clone()),
+        _ => None,
+    };
+    let leaf_value = match concrete_leaf.first() {
+        Some(rules_file::PathSegment::Literal(v)) => Some(v.clone()),
+        _ => None,
+    };
+
+    let condition = match parse_condition(&body.condition) {
+        Ok(c) => c,
+        Err(e) => return Ok(condition_parse_error_response(e)),
+    };
+    let auth_ctx = body.auth.map(simulated_auth_to_context);
+    let resource_fields: BTreeMap<String, FieldValue> = body
+        .resource
+        .iter()
+        .map(|(k, v)| (k.clone(), json_value_to_field_value(v)))
+        .collect();
+    // A routed simulation has no "proposed new document" concept, mirroring
+    // `simulate_access_rule`'s own GetDocument-shaped simulation.
+    let empty_request_resource: BTreeMap<String, FieldValue> = BTreeMap::new();
+
+    // The SAME evaluate() real enforcement/simulate_access_rule call — the
+    // leaf capture threads through the UNCHANGED `path_variable_value` slot
+    // (ADR-062), the NEW ancestor bindings thread through the 6th
+    // parameter (ADR-063), identical to real routed GetDocument evaluation.
+    let outcome = evaluate(
+        &condition,
+        auth_ctx.as_ref(),
+        &resource_fields,
+        &empty_request_resource,
+        leaf_value.as_deref(),
+        &ancestor_bindings,
+    );
+
+    // AC-17-228: report EVERY bound variable value, ancestor and leaf alike
+    // — matching the domain example's own expectation
+    // (`expeditionId="test-expedition", entryId="test-entry"`).
+    let mut bindings = ancestor_bindings;
+    if let (Some(name), Some(value)) = (leaf_variable, leaf_value) {
+        bindings.insert(name, value);
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(SimulateRoutedAccessRuleResponse {
+            outcome: match outcome {
+                EvaluationOutcome::Allow => "allow",
+                EvaluationOutcome::Deny => "deny",
+            },
+            bindings,
         }),
     )
         .into_response())

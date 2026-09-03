@@ -821,6 +821,16 @@ path = "../../tests/security_rules_cel_path_matching/acceptance/pm04_reject_stru
 name = "security_rules_cel_path_matching_pm05_non_regression_guardrail"
 path = "../../tests/security_rules_cel_path_matching/acceptance/pm05_non_regression_guardrail.rs"
 
+# security-rules-cel-path-matching acceptance tests (Slice 06, US-06,
+# Release 2, ADR-063 § Decision — Admin Surface Extensions / DDD-PM-9) —
+# simulate a candidate multi-segment pattern's own ROUTING (not merely
+# evaluation) against a synthetic identity/concrete-path pair, via the new
+# sibling `simulate_routed_access_rule` handler/route. LAST slice of this
+# feature.
+[[test]]
+name = "security_rules_cel_path_matching_pm06_simulate_multi_segment_pattern"
+path = "../../tests/security_rules_cel_path_matching/acceptance/pm06_simulate_multi_segment_pattern.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
