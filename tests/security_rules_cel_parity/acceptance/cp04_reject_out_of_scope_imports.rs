@@ -40,16 +40,34 @@ use common::SecurityRulesAdminContext;
 
 /// Journey:
 ///   Given: project `trailmark-prod` exists, no rules imported yet
-///   When:  Alex imports a file containing a nested-subcollection block
-///          (`expeditions/{expeditionId}/journal_entries/{entryId}`)
+///   When:  Alex imports a file containing a block whose collection-name
+///          position is itself a wildcard (`/{expeditionId}/journal_entries`)
 ///   Then:  the whole import is rejected, naming that block as NESTED_PATH,
 ///          and no rule is stored for it
+///
+/// SUPERSEDED SCENARIO NOTE (fixed as part of `security-rules-cel-path-
+/// matching` Slice 05, AC-17-224 non-regression audit): this test originally
+/// asserted that a nested/multi-segment subcollection path
+/// (`expeditions/{expeditionId}/journal_entries/{entryId}`) was ALWAYS
+/// rejected as NESTED_PATH. That assumption was true under 4a's own locked
+/// v1 scope (single top-level collection only) but is INTENTIONALLY
+/// superseded by this feature's own Slice 01 (ADR-063): a fixed-depth
+/// multi-segment pattern is now a supported, first-class import shape
+/// (`DecomposedTarget::MultiSegmentPattern`), not rejected — confirmed
+/// directly via `rules_file::decompose_block`'s widened
+/// `validate_segment_shape` (`crates/embyr-core/src/access_control/
+/// rules_file.rs`), which only rejects NESTED_PATH when a COLLECTION-NAME
+/// position (an even segment index) is itself non-literal, never merely for
+/// having more than 2 segments. This test is repurposed (not silently
+/// deleted, matching this codebase's own "superseded, not silently deleted"
+/// precedent) to assert the ONE remaining, genuinely-still-invalid NESTED_PATH
+/// trigger: a wildcard sitting at a collection-name position.
 ///
 /// AC-17-188
 ///
 /// @error @driving_port @real-io @US-04 @AC-17-188
 #[tokio::test]
-async fn a_nested_subcollection_path_is_rejected_naming_that_block() {
+async fn a_wildcard_at_a_collection_name_position_is_rejected_naming_that_block() {
     let ctx = SecurityRulesAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     ctx.insert_project("trailmark-prod").await;
@@ -57,8 +75,8 @@ async fn a_nested_subcollection_path_is_rejected_naming_that_block() {
     let rules_file = r#"
         service cloud.firestore {
           match /databases/{database}/documents {
-            match /expeditions/{expeditionId}/journal_entries/{entryId} {
-              allow read: if request.auth.uid == resource.data.owner_id;
+            match /{expeditionId}/journal_entries {
+              allow read: if true;
             }
           }
         }
@@ -79,7 +97,7 @@ async fn a_nested_subcollection_path_is_rejected_naming_that_block() {
     let offending = body["offending_blocks"].as_array().expect("offending_blocks must be an array");
     assert_eq!(offending.len(), 1);
     assert_eq!(offending[0]["construct"], "NESTED_PATH", "AC-17-188: must be named NESTED_PATH specifically");
-    assert_eq!(offending[0]["path_pattern"], "/expeditions/{expeditionId}/journal_entries/{entryId}");
+    assert_eq!(offending[0]["path_pattern"], "/{expeditionId}/journal_entries");
 
     assert_eq!(
         ctx.access_rule_condition_source("trailmark-prod", "expeditions").await,
@@ -136,11 +154,20 @@ async fn a_recursive_wildcard_path_is_rejected_naming_that_block() {
 /// Journey (feature-delta.md UAT "Multiple offending blocks are all named in
 /// a single response"):
 ///   Given: project `trailmark-prod` exists
-///   When:  Alex imports a file containing a nested-path block, a
+///   When:  Alex imports a file containing a wildcard-at-collection-position
+///          block (still NESTED_PATH — see supersession note above), a
 ///          custom-function-call block (`isEditor()`), and a `get()`-call
 ///          block
 ///   Then:  the rejection response names all three, each with its own
 ///          specific reason — not just the first one found
+///
+/// SUPERSEDED SCENARIO NOTE: the original offending block here was a
+/// nested/multi-segment path (`expeditions/{expeditionId}/journal_entries/
+/// {entryId}`), which this feature (Epic 4b) now accepts (see the
+/// supersession note on the test above). Repurposed to a
+/// wildcard-at-collection-position block — the surviving NESTED_PATH
+/// trigger — so this test still proves 3 independently-offending blocks are
+/// ALL named in one response, not just 2.
 ///
 /// AC-17-190, AC-17-191
 ///
@@ -154,8 +181,8 @@ async fn multiple_offending_blocks_are_all_named_in_a_single_rejection_response(
     let rules_file = r#"
         service cloud.firestore {
           match /databases/{database}/documents {
-            match /expeditions/{expeditionId}/journal_entries/{entryId} {
-              allow read: if request.auth.uid == resource.data.owner_id;
+            match /{expeditionId}/journal_entries {
+              allow read: if true;
             }
             match /trail_guides/{guideId} {
               allow write: if isEditor();
@@ -200,12 +227,19 @@ async fn multiple_offending_blocks_are_all_named_in_a_single_rejection_response(
 /// rules completely unchanged"):
 ///   Given: `trail_guides` already has an active rule (unrelated to this
 ///          import) and `profiles` has no rule yet
-///   When:  Alex imports a file naming `profiles` (in-scope) and
-///          `expeditions/.../journal_entries` (nested-path, out-of-scope)
+///   When:  Alex imports a file naming `profiles` (in-scope) and a
+///          wildcard-at-collection-position block (still out-of-scope, see
+///          supersession note above)
 ///   Then:  the whole import is rejected; `trail_guides`'s pre-existing rule
 ///          is completely unaffected, AND `profiles`'s own in-scope block
 ///          from THIS SAME file received no rule either (zero partial
 ///          application within one rejected import)
+///
+/// SUPERSEDED SCENARIO NOTE: the original offending block here was a
+/// nested/multi-segment path, which this feature (Epic 4b) now accepts (see
+/// the supersession note above). Repurposed to a
+/// wildcard-at-collection-position block — the surviving NESTED_PATH
+/// trigger — so this test still proves AC-17-192's atomicity guarantee.
 ///
 /// AC-17-192
 ///
@@ -223,8 +257,8 @@ async fn a_rejected_import_leaves_every_existing_and_would_be_rule_completely_un
             match /profiles/{userId} {
               allow read, write: if request.auth.uid == userId;
             }
-            match /expeditions/{expeditionId}/journal_entries/{entryId} {
-              allow read: if request.auth.uid == resource.data.owner_id;
+            match /{expeditionId}/journal_entries {
+              allow read: if true;
             }
           }
         }
