@@ -86,6 +86,7 @@ use embyr_core::access_control::{
     ConditionParseError, EvaluationOutcome, QueryComplianceOutcome,
 };
 use embyr_core::admin::account::Role;
+use embyr_core::domain::document::{DocumentPath, FirestoreDocument};
 use embyr_core::domain::field_value::FieldValue;
 use embyr_core::domain::query::{FieldFilter, FilterOp, QueryFilter};
 
@@ -312,6 +313,19 @@ pub struct SimulateAccessRuleBody {
     /// entirely.
     #[serde(default)]
     pub request_time: Option<i64>,
+    /// NEW (security-rules-cel-cross-document-reads, Slice 05, US-05,
+    /// ADR-066): a caller-supplied SYNTHETIC set of referenced documents
+    /// (concrete path -> synthetic field map) for a `get()`/`exists()`
+    /// -referencing candidate condition — a simulation has no real other
+    /// document to fetch (mirrors `request_time`'s own identical
+    /// synthetic-input discipline from 4c's own Slice 07). A path
+    /// referenced by the candidate condition but ABSENT from this map
+    /// simulates identically to a real nonexistent document. `None`/absent
+    /// threads through to `evaluate()`'s `cross_document_reads` param as an
+    /// empty map; a candidate condition with no `CrossDocumentExists`/
+    /// `CrossDocumentGet` operand ignores it entirely.
+    #[serde(default)]
+    pub cross_document_reads: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 /// Response for POST .../access_rules/simulate — 200. `outcome` is
@@ -982,6 +996,47 @@ pub async fn simulate_access_rule(
     // in a simulated candidate.
     let request_time_field = body.request_time.map(|secs| FieldValue::Timestamp(secs, 0));
 
+    // security-rules-cel-cross-document-reads (Slice 05, US-05, AC-CDR-13/14,
+    // ADR-066): the caller-supplied SYNTHETIC referenced-document set —
+    // translated via the SAME `json_value_to_field_value` helper as
+    // `resource`/`request_resource` above (reused, not duplicated), never a
+    // real fetch. `path`/`create_time`/`update_time`/`version` are dummy —
+    // `resolve_field_value`'s `CrossDocumentExists`/`CrossDocumentGet` arms
+    // only ever read `.fields`. AC-CDR-14: a path referenced by the
+    // candidate condition but absent from this map is simply absent from
+    // the resulting `BTreeMap` too, so `evaluate()`'s own existing
+    // `FieldMissing` fail-closed mechanism (Slice 01/02) handles it
+    // identically to a real nonexistent document — no separate "absent"
+    // code path here.
+    let cross_document_reads: BTreeMap<String, Option<FirestoreDocument>> = body
+        .cross_document_reads
+        .iter()
+        .map(|(path, fields)| {
+            let doc_fields: BTreeMap<String, FieldValue> = fields
+                .iter()
+                .map(|(k, v)| (k.clone(), json_value_to_field_value(v)))
+                .collect();
+            let (collection_path, document_id) = match path.rsplit_once('/') {
+                Some((collection, doc_id)) => (collection.to_string(), doc_id.to_string()),
+                None => (String::new(), path.clone()),
+            };
+            (
+                path.clone(),
+                Some(FirestoreDocument {
+                    path: DocumentPath {
+                        project_id: embyr_core::domain::project::ProjectId(project_id.clone()),
+                        collection_path,
+                        document_id,
+                    },
+                    fields: doc_fields,
+                    create_time: (0, 0),
+                    update_time: (0, 0),
+                    version: 0,
+                }),
+            )
+        })
+        .collect();
+
     // security-rules-cel-parity (Slice 06, US-06, ADR-062): `evaluate()`'s
     // 5th parameter, now threaded from the caller-supplied synthetic
     // document ID — the identical mechanism `handle_get_document`/the 3
@@ -999,12 +1054,7 @@ pub async fn simulate_access_rule(
         // (Release 2, `simulate_route`), out of this slice's scope.
         &std::collections::BTreeMap::new(),
         request_time_field.as_ref(),
-        // security-rules-cel-cross-document-reads (Slice 01, ADR-066):
-        // mechanical empty-map — a candidate `get()`/`exists()` condition
-        // always simulates as denied for now (no matching path in an
-        // empty map); real synthetic-input support is Slice 05's own
-        // locked scope.
-        &std::collections::BTreeMap::new(),
+        &cross_document_reads,
     );
 
     Ok((

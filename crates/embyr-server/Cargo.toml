@@ -944,6 +944,11 @@ path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr03_sam
 name = "security_rules_cel_cross_document_reads_cdr04_write_path_parity"
 path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr04_write_path_parity.rs"
 
+# security-rules-cel-cross-document-reads (Slice 05, US-05, Release 2, LAST slice). AC-CDR-13/14.
+[[test]]
+name = "security_rules_cel_cross_document_reads_cdr05_simulate_cross_document_candidate"
+path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr05_simulate_cross_document_candidate.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
