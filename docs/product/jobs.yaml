@@ -1173,6 +1173,28 @@ jobs:
     # separate features. See
     # docs/feature/security-rules-cel-expression-grammar/feature-delta.md
     # § Job Discovery Framing Resolution.
+    # NOTE (security-rules-cel-cross-document-reads DISCUSS, 2026-09-04):
+    # JOB-17 now also covers a narrowly-scoped, single-level cross-document
+    # `get()`/`exists()` role-lookup idiom (e.g.
+    # `get(/databases/$(database)/documents/organizations/
+    # $(request.auth.uid)).data.role == "admin"`) in a real Firestore
+    # `.rules` file — same job, same persona, not a new job (12th
+    # realization). Closes the construct security-rules-cel-parity's own
+    # DISCUSS named and deferred by id ("Epic 4d"). The FIRST realization
+    # of this job requiring `evaluate()` itself to gain a genuinely new
+    # I/O-adjacent capability: a two-phase (path-discovery → fetch →
+    # evaluate) mechanism, `evaluate()`'s pure-computation call graph
+    # never performing I/O itself (embyr-core stays zero-IO,
+    # deny.toml-enforced) — the referenced document is pre-fetched by the
+    # caller (embyr-server) and threaded in exactly like
+    # `path_variable_value`/`request_time`. Locked v1 scope: single-level
+    # only (no chaining — a `get()`'s own result never feeds another
+    # `get()`'s own path), `$(request.auth.uid)`/`$(request.path.<var>)`
+    # substitution only (no general expression substitution), read+write
+    # parity (Listen's own per-event re-check explicitly deferred — a real
+    # per-event I/O cost multiplier). See
+    # docs/feature/security-rules-cel-cross-document-reads/feature-delta.md
+    # § Job Discovery Framing Resolution.
 
   - id: JOB-18
     name: embyr-hosted-identity
