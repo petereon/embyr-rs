@@ -964,6 +964,11 @@ path = "../../tests/security_rules_cel_functions/acceptance/cf02_write_path_pari
 name = "security_rules_cel_functions_cf03_simulation_parity"
 path = "../../tests/security_rules_cel_functions/acceptance/cf03_simulation_parity.rs"
 
+# security-rules-cel-functions (Slice 04, US-04, Release 2, LAST slice). AC-CF-07/08/09/10/11.
+[[test]]
+name = "security_rules_cel_functions_cf04_multiple_functions_and_named_rejections"
+path = "../../tests/security_rules_cel_functions/acceptance/cf04_multiple_functions_and_named_rejections.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
