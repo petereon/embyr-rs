@@ -984,6 +984,11 @@ path = "../../tests/firestore_composite_indexes_admin_api/acceptance/cix02_list_
 name = "firestore_composite_indexes_admin_api_cix03_delete_index"
 path = "../../tests/firestore_composite_indexes_admin_api/acceptance/cix03_delete_index.rs"
 
+# composite-index-requirement-rules (Slice 01, US-01, Release 1, Walking Skeleton). AC-CIR-01/02/03.
+[[test]]
+name = "composite_index_requirement_rules_cir01_multi_field_orderby"
+path = "../../tests/composite_index_requirement_rules/acceptance/cir01_multi_field_orderby.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -575,6 +575,16 @@ impl FirestoreService {
     /// A composite index is required when there is at least one field filter
     /// AND at least one orderBy on a field that differs from the filtered field.
     fn requires_composite_index(query: &StructuredQuery) -> bool {
+        // composite-index-requirement-rules (Slice 01, US-01, AC-CIR-01/02):
+        // real Firestore always requires a composite index for 2+ orderBy
+        // fields, regardless of any filter — checked first, unconditionally,
+        // so a filter-only-looking bypass (no filter at all, or every
+        // orderBy field coincidentally already filtered) can never suppress
+        // it.
+        if query.order_by.len() >= 2 {
+            return true;
+        }
+
         let Some(filter) = &query.filter else { return false };
         if query.order_by.is_empty() {
             return false;
@@ -3998,5 +4008,108 @@ mod client_identity_extension_tests {
             .metadata_mut()
             .insert("authorization", "Bearer some-api-key".parse().unwrap());
         assert_eq!(FirestoreService::extract_client_identity_token(&request), None);
+    }
+}
+
+#[cfg(test)]
+mod composite_index_requirement_tests {
+    //! composite-index-requirement-rules (Slice 01, US-01) — pure, IO-free
+    //! unit coverage for `requires_composite_index`. Mirrors `client_
+    //! identity_extension_tests`'s own established pattern in this file
+    //! (`use super::FirestoreService;`).
+    use super::FirestoreService;
+    use embyr_core::domain::query::{
+        FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter, StructuredQuery,
+    };
+
+    fn base_query() -> StructuredQuery {
+        StructuredQuery {
+            collection_id: "products".to_string(),
+            all_descendants: false,
+            filter: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            start_at: None,
+            end_at: None,
+            since_update_time: None,
+        }
+    }
+
+    fn order_by(field: &str) -> OrderBy {
+        OrderBy { field_path: field.to_string(), direction: OrderDirection::Ascending }
+    }
+
+    fn equal_filter(field: &str) -> QueryFilter {
+        QueryFilter::Field(FieldFilter {
+            field_path: field.to_string(),
+            op: FilterOp::Equal,
+            value: embyr_core::domain::field_value::FieldValue::String("x".to_string()),
+        })
+    }
+
+    /// AC-CIR-01: 2+ orderBy fields with NO filter at all still requires a
+    /// composite index — real Firestore's own "regardless of filters" rule.
+    #[test]
+    fn two_order_by_fields_with_no_filter_requires_composite_index() {
+        let mut q = base_query();
+        q.order_by = vec![order_by("category"), order_by("score")];
+        assert!(FirestoreService::requires_composite_index(&q));
+    }
+
+    /// AC-CIR-02: 2+ orderBy fields where EVERY orderBy field is already a
+    /// filtered field STILL requires a composite index — proving the fix is
+    /// not merely a field-membership widening of the old single-field check.
+    #[test]
+    fn two_order_by_fields_that_are_both_already_filtered_still_requires_composite_index() {
+        let mut q = base_query();
+        q.filter = Some(QueryFilter::Composite(vec![
+            equal_filter("category"),
+            equal_filter("score"),
+        ]));
+        q.order_by = vec![order_by("category"), order_by("score")];
+        assert!(FirestoreService::requires_composite_index(&q));
+    }
+
+    /// AC-CIR-03 (regression guard): the pre-existing single-orderBy-field,
+    /// different-field-from-filter shape (`category==`/`score`-orderBy, the
+    /// codebase's own original evidenced example) is UNCHANGED — still
+    /// requires composite (live-verified Firestore-accurate, § Resolution 2).
+    #[test]
+    fn single_order_by_field_different_from_an_equality_filter_still_requires_composite_index() {
+        let mut q = base_query();
+        q.filter = Some(equal_filter("category"));
+        q.order_by = vec![order_by("score")];
+        assert!(FirestoreService::requires_composite_index(&q));
+    }
+
+    /// AC-CIR-03 (regression guard, converse): a single orderBy field that
+    /// MATCHES its own equality filter's field needs no composite index —
+    /// unchanged.
+    #[test]
+    fn single_order_by_field_matching_the_filtered_field_does_not_require_composite_index() {
+        let mut q = base_query();
+        q.filter = Some(equal_filter("category"));
+        q.order_by = vec![order_by("category")];
+        assert!(!FirestoreService::requires_composite_index(&q));
+    }
+
+    /// A single orderBy field with NO filter at all needs no composite index
+    /// — single-field index sufficient, unchanged.
+    #[test]
+    fn single_order_by_field_with_no_filter_does_not_require_composite_index() {
+        let mut q = base_query();
+        q.order_by = vec![order_by("score")];
+        assert!(!FirestoreService::requires_composite_index(&q));
+    }
+
+    /// No orderBy at all, any filter shape: never requires composite via
+    /// this rule family (the filter-only IN+range rule is Slice 02's own
+    /// concern, not exercised here).
+    #[test]
+    fn no_order_by_at_all_does_not_require_composite_index() {
+        let mut q = base_query();
+        q.filter = Some(equal_filter("category"));
+        assert!(!FirestoreService::requires_composite_index(&q));
     }
 }
