@@ -957,6 +957,10 @@ pub async fn simulate_access_rule(
         // variable rules only; a routed-pattern simulation is US-06
         // (Release 2, `simulate_route`), out of this slice's scope.
         &std::collections::BTreeMap::new(),
+        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
+        // mechanical `None` — timestamp/duration simulation is US-07
+        // (Release 3), out of this slice's own locked scope.
+        None,
     );
 
     Ok((
@@ -1134,6 +1138,10 @@ pub async fn simulate_routed_access_rule(
         &empty_request_resource,
         leaf_value.as_deref(),
         &ancestor_bindings,
+        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
+        // mechanical `None` — timestamp/duration simulation is US-07,
+        // out of this slice's own locked scope.
+        None,
     );
 
     // AC-17-228: report EVERY bound variable value, ancestor and leaf alike
@@ -1314,6 +1322,10 @@ async fn simulate_recursive_wildcard_candidate(
         &empty_request_resource,
         None,
         &candidate_bindings,
+        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
+        // mechanical `None` — timestamp/duration simulation is US-07,
+        // out of this slice's own locked scope.
+        None,
     );
 
     Ok((
@@ -1373,6 +1385,10 @@ fn evaluate_stored_pattern_outcome(
         &empty_request_resource,
         None,
         &bindings,
+        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
+        // mechanical `None` — timestamp/duration simulation is US-07,
+        // out of this slice's own locked scope.
+        None,
     );
 
     Ok((

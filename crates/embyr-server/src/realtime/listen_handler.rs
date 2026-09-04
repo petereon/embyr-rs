@@ -364,6 +364,11 @@ pub async fn handle_add_target(
                                 &empty_fields,
                                 Some(doc.path.document_id.as_str()),
                                 &event_bindings,
+                                // security-rules-cel-expression-grammar
+                                // (Slice 06, ADR-065): mechanical `None` —
+                                // Listen's per-event re-check is out of
+                                // this feature's own locked scope.
+                                None,
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-04: withheld, never sent, never a crash (AC-17-118/119).
@@ -424,6 +429,11 @@ pub async fn handle_add_target(
                                 &empty_fields,
                                 Some(path.document_id.as_str()),
                                 &event_bindings,
+                                // security-rules-cel-expression-grammar
+                                // (Slice 06, ADR-065): mechanical `None` —
+                                // Listen's per-event re-check is out of
+                                // this feature's own locked scope.
+                                None,
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-05: withheld, never sent.

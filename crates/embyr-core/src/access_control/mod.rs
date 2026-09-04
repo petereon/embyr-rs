@@ -136,6 +136,54 @@ pub enum Operand {
     /// own right-hand operand, by parser construction (never reachable
     /// standalone or as a `Compare` operand).
     ListLiteral(Vec<Operand>),
+    /// `request.time` — the request's own server timestamp (security-rules-
+    /// cel-expression-grammar, Slice 06, US-06, ADR-065). Resolves to a
+    /// caller-supplied `FieldValue::Timestamp` threaded through
+    /// `evaluate()`'s own new `request_time` parameter, mirroring
+    /// `path_variable_value`'s zero-new-I/O precedent exactly.
+    RequestTime,
+    /// `<left> +/- <right>` — non-nested (neither side is itself an
+    /// `Arithmetic`), the ONLY arithmetic shape this feature builds
+    /// (ADR-065 § Decision Driver 4). Legal pairings, checked at
+    /// `evaluate()` time (never parse time — the parser doesn't know
+    /// operand runtime types, mirroring every other operand): `Integer +/-
+    /// Integer`, `Double +/- Double`, `Timestamp +/- Duration`.
+    Arithmetic(Box<Operand>, ArithmeticOp, Box<Operand>),
+    /// `duration.value(N, unit)` — never resolves to a `FieldValue` on its
+    /// own (real Firestore's own `duration` is not a stored/returned
+    /// type); only ever legal as `Arithmetic`'s own right-hand operand
+    /// against a `Timestamp`-typed left operand — reachable from the
+    /// parser ONLY in that position.
+    DurationLiteral(i64, DurationUnit),
+}
+
+/// security-rules-cel-expression-grammar (Slice 06, ADR-065).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithmeticOp {
+    Add,
+    Sub,
+}
+
+/// security-rules-cel-expression-grammar (Slice 06, ADR-065). Real
+/// Firestore's own `duration.value` unit vocabulary, this feature's own
+/// locked subset: seconds/minutes/hours/days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurationUnit {
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+}
+
+impl DurationUnit {
+    fn as_seconds(self, amount: i64) -> i64 {
+        match self {
+            DurationUnit::Seconds => amount,
+            DurationUnit::Minutes => amount * 60,
+            DurationUnit::Hours => amount * 3600,
+            DurationUnit::Days => amount * 86400,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,16 +334,32 @@ fn detect_unsupported_construct(source: &str) -> Option<ConditionParseError> {
     // Call-shaped syntax: an identifier immediately followed by '('. Never
     // reachable from valid grammar (the grammar's own '(' is only used for
     // grouping, never directly preceded by an identifier character).
+    //
+    // security-rules-cel-expression-grammar (Slice 06, ADR-065 § Decision —
+    // Parser): the identifier scan now also includes '.' — the ONLY
+    // dotted call-shaped construct this feature's own grammar ever
+    // legally admits is `duration.value(...)` (never reachable any other
+    // way — `resource.data.<field>`/`request.resource.data.<field>` are
+    // never themselves followed by '(', by grammar construction), checked
+    // as an explicit allow-list exception BEFORE the get/exists/generic
+    // rejection below — mirrors the REAL tokenizer's own already-existing
+    // dotted-word scanning exactly, never a second, divergent identifier
+    // definition.
     let chars: Vec<char> = masked.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
             let start = i;
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+            {
                 i += 1;
             }
             let ident: String = chars[start..i].iter().collect();
             if i < chars.len() && chars[i] == '(' {
+                if ident == "duration.value" {
+                    continue;
+                }
                 return Some(if ident == "get" || ident == "exists" {
                     ConditionParseError::UnsupportedConstruct {
                         construct: UnsupportedConstruct::CrossDocumentRead,
@@ -344,6 +408,18 @@ enum Token {
     LBracket,
     RBracket,
     Comma,
+    /// security-rules-cel-expression-grammar (Slice 06, ADR-065):
+    /// arithmetic operator tokens.
+    Plus,
+    Minus,
+    /// A single-quoted `duration.value(...)` unit string, e.g. `'h'` — a
+    /// SEPARATE token kind from `Token::StringLiteral` (which is double-
+    /// quote-only, ADR-034) rather than widening that token's own quote
+    /// character, since a double-quoted `StringLiteral` and this single-
+    /// quoted unit have genuinely different grammar positions (any operand
+    /// vs. `duration.value`'s own 2nd argument only) and no domain example
+    /// anywhere needs a single-quoted STRING OPERAND.
+    SingleQuotedUnit(String),
 }
 
 fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
@@ -418,12 +494,22 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
                 tokens.push(Token::Gt);
                 i += 1;
             }
+            // security-rules-cel-expression-grammar (Slice 06, ADR-065):
+            // '+' and '-' as arithmetic operators — checked AFTER the
+            // negative-literal case below (a '-' immediately followed by a
+            // digit, no space, still lexes as one negative literal token,
+            // exactly as Slice 01 established; every domain example this
+            // feature's own grammar targets spaces its arithmetic operator
+            // the same way every other binary operator already is, `a - 5`
+            // never `a -5`, so this is not a practical ambiguity).
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
             // security-rules-cel-expression-grammar (Slice 01, ADR-065):
             // a numeric literal — a digit run, or '-' immediately followed
-            // by a digit (a negative literal; this feature builds no
-            // general '-' arithmetic operator yet, so '-' is unambiguous
-            // here). An optional '.' followed by at least one more digit
-            // selects Double over Int.
+            // by a digit (a negative literal). An optional '.' followed by
+            // at least one more digit selects Double over Int.
             c if c.is_ascii_digit()
                 || (c == '-' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())) =>
             {
@@ -461,6 +547,14 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
                     tokens.push(Token::IntLiteral(value));
                 }
             }
+            // security-rules-cel-expression-grammar (Slice 06, ADR-065): a
+            // '-' NOT immediately followed by a digit (the negative-
+            // literal case above already consumed that shape) is the
+            // arithmetic subtraction operator.
+            '-' => {
+                tokens.push(Token::Minus);
+                i += 1;
+            }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
                 while i < chars.len()
@@ -491,6 +585,41 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
                 i += 1;
                 tokens.push(Token::StringLiteral(content));
             }
+            // security-rules-cel-expression-grammar (Slice 06, ADR-065):
+            // `duration.value(...)`'s own single-quoted unit argument —
+            // see `Token::SingleQuotedUnit`'s own doc comment for why this
+            // is a separate token kind, not `Token::StringLiteral` widened.
+            '\'' => {
+                let start = i;
+                i += 1;
+                let content_start = i;
+                while i < chars.len() && chars[i] != '\'' {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return Err(syntax_error(format!(
+                        "unterminated single-quoted unit starting at position {start}"
+                    )));
+                }
+                let content: String = chars[content_start..i].iter().collect();
+                i += 1;
+                tokens.push(Token::SingleQuotedUnit(content));
+            }
+            // security-rules-cel-expression-grammar (Slice 06, ADR-065, AC-
+            // CEG-19): `*`/`/`/`%` are recognized-but-out-of-this-feature's
+            // -own-locked-scope arithmetic operators (Resolution 4 —
+            // `+`/`-` only) — a NAMED rejection, never falling through to
+            // the generic "unexpected character" `SyntaxError` below.
+            '*' | '/' | '%' => {
+                return Err(ConditionParseError::UnsupportedConstruct {
+                    construct: UnsupportedConstruct::UnsupportedExpressionGrammar,
+                    detail: format!(
+                        "the arithmetic operator '{other}' is not supported in v1 — only '+' \
+                         and '-' are",
+                        other = c
+                    ),
+                });
+            }
             other => {
                 return Err(syntax_error(format!(
                     "unexpected character '{other}' at position {i}"
@@ -506,6 +635,8 @@ fn word_to_operand(word: &str) -> Result<Operand, ConditionParseError> {
         "request.auth.uid" => Ok(Operand::AuthUid),
         "request.auth" => Ok(Operand::AuthNullSentinel),
         "null" => Ok(Operand::NullLiteral),
+        // security-rules-cel-expression-grammar (Slice 06, US-06, ADR-065).
+        "request.time" => Ok(Operand::RequestTime),
         // custom-claims (ADR-034 § Finding — latent grammar gap): required,
         // bundled fix — `word_to_operand()` had NO "true"/"false" arm before
         // this feature, so `<operand> == true`/`!= false` (comparison
@@ -631,6 +762,37 @@ impl<'a> Parser<'a> {
     /// (list literals, `duration.value(...)`, Slice 04/06) has exactly one
     /// call site to extend, never two drifting copies.
     fn parse_operand(&mut self) -> Result<Operand, ConditionParseError> {
+        let base = self.parse_base_operand()?;
+        // security-rules-cel-expression-grammar (Slice 06, ADR-065 §
+        // Decision Driver 4): non-nested `+`/`-` arithmetic — checked ONCE,
+        // right after the base operand. A SECOND consecutive `+`/`-` is a
+        // NAMED rejection (Resolution 4's own locked non-nesting rule,
+        // enforced structurally here, not by convention).
+        if matches!(self.peek(), Some(Token::Plus) | Some(Token::Minus)) {
+            let op = match self.advance() {
+                Some(Token::Plus) => ArithmeticOp::Add,
+                Some(Token::Minus) => ArithmeticOp::Sub,
+                _ => unreachable!("peek() already confirmed Plus or Minus"),
+            };
+            let right = self.parse_arithmetic_rhs()?;
+            if matches!(self.peek(), Some(Token::Plus) | Some(Token::Minus)) {
+                return Err(ConditionParseError::UnsupportedConstruct {
+                    construct: UnsupportedConstruct::UnsupportedExpressionGrammar,
+                    detail: "nested arithmetic (more than one '+'/'-' per comparison operand) \
+                              is not supported in v1"
+                        .to_string(),
+                });
+            }
+            return Ok(Operand::Arithmetic(Box::new(base), op, Box::new(right)));
+        }
+        Ok(base)
+    }
+
+    /// security-rules-cel-expression-grammar (Slice 01/04/06, ADR-065): the
+    /// leaf operand sources — never itself recognizes `+`/`-` (that's
+    /// `parse_operand`'s own job, one level up), so this is safely reused
+    /// both for a comparison's LHS/RHS and for arithmetic's own left side.
+    fn parse_base_operand(&mut self) -> Result<Operand, ConditionParseError> {
         match self.advance() {
             Some(Token::Word(w)) => word_to_operand(w),
             // custom-claims (US-06, ADR-034): a string literal is a second
@@ -642,6 +804,77 @@ impl<'a> Parser<'a> {
             Some(Token::DoubleLiteral(v)) => Ok(Operand::DoubleLiteral(*v)),
             _ => Err(syntax_error("expected an operand")),
         }
+    }
+
+    /// security-rules-cel-expression-grammar (Slice 06, ADR-065 § Decision
+    /// — Parser): arithmetic's own right-hand side — the ONLY position
+    /// `duration.value(...)` is ever syntactically legal in. Any other
+    /// operand source (word/string/numeric literal) is equally legal here
+    /// (the `Timestamp +/- Duration`/`Integer +/- Integer`/`Double +/-
+    /// Double` type-pairing check happens at `evaluate()` time, never
+    /// parse time — mirrors how every other operand's runtime type is
+    /// never parse-time checked in this grammar).
+    fn parse_arithmetic_rhs(&mut self) -> Result<Operand, ConditionParseError> {
+        if let Some(Token::Word(w)) = self.peek() {
+            if w == "duration.value" {
+                return self.parse_duration_value();
+            }
+        }
+        self.parse_base_operand()
+    }
+
+    /// Consumes `duration.value` `(` `<int literal>` `,` `'<unit>'` `)`.
+    /// security-rules-cel-expression-grammar (Slice 06, ADR-065). Note the
+    /// unit is single-quoted (`'h'`) per real Firestore's own syntax — this
+    /// grammar's existing `StringLiteral` tokenizing is DOUBLE-quote-only
+    /// (ADR-034), so the unit is scanned here directly from the raw
+    /// identifier-adjacent text via a dedicated single-quote scan, not
+    /// reused from `Token::StringLiteral`.
+    fn parse_duration_value(&mut self) -> Result<Operand, ConditionParseError> {
+        self.advance(); // consumes the "duration.value" word token
+        match self.advance() {
+            Some(Token::LParen) => {}
+            _ => return Err(syntax_error("expected '(' after 'duration.value'")),
+        }
+        let amount = match self.advance() {
+            Some(Token::IntLiteral(v)) => *v,
+            _ => return Err(syntax_error("expected an integer literal amount in 'duration.value(...)'")),
+        };
+        match self.advance() {
+            Some(Token::Comma) => {}
+            _ => return Err(syntax_error("expected ',' in 'duration.value(...)'")),
+        }
+        let unit_text = match self.advance() {
+            Some(Token::SingleQuotedUnit(u)) => u.clone(),
+            _ => {
+                return Err(ConditionParseError::UnsupportedConstruct {
+                    construct: UnsupportedConstruct::UnsupportedExpressionGrammar,
+                    detail: "'duration.value(...)' requires a single-quoted unit string \
+                              ('s'/'m'/'h'/'d')"
+                        .to_string(),
+                })
+            }
+        };
+        let unit = match unit_text.as_str() {
+            "s" => DurationUnit::Seconds,
+            "m" => DurationUnit::Minutes,
+            "h" => DurationUnit::Hours,
+            "d" => DurationUnit::Days,
+            other => {
+                return Err(ConditionParseError::UnsupportedConstruct {
+                    construct: UnsupportedConstruct::UnsupportedExpressionGrammar,
+                    detail: format!(
+                        "unrecognized duration unit '{other}' — only 's'/'m'/'h'/'d' are \
+                         supported in v1"
+                    ),
+                })
+            }
+        };
+        match self.advance() {
+            Some(Token::RParen) => {}
+            _ => return Err(syntax_error("expected ')' to close 'duration.value(...)'")),
+        }
+        Ok(Operand::DurationLiteral(amount, unit))
     }
 
     fn parse_comparison(&mut self) -> Result<Condition, ConditionParseError> {
@@ -748,6 +981,17 @@ pub fn evaluate(
     // exact-match branch) passes `&BTreeMap::new()`, mechanically, zero
     // behavior change.
     ancestor_path_variable_values: &BTreeMap<String, String>,
+    // security-rules-cel-expression-grammar (Slice 06, US-06, ADR-065 §
+    // Decision — evaluate() Signature): NEW 7th parameter — the request's
+    // own server timestamp, resolved by `Operand::RequestTime`. Mirrors
+    // `path_variable_value`'s own zero-new-I/O precedent exactly: every
+    // real call site already has (or trivially computes) a `chrono::
+    // Utc::now()` value; `None` at every call site not yet wired (every
+    // call site except this feature's own Slice 06/07 CreateDocument/
+    // UpdateDocument/GetDocument/simulate_access_rule sites) fails
+    // `RequestTime` closed via the existing `FieldMissing` short-circuit,
+    // never a new control-flow shape.
+    request_time: Option<&FieldValue>,
 ) -> EvaluationOutcome {
     match eval_bool(
         condition,
@@ -756,6 +1000,7 @@ pub fn evaluate(
         request_resource_fields,
         path_variable_value,
         ancestor_path_variable_values,
+        request_time,
     ) {
         Ok(true) => EvaluationOutcome::Allow,
         Ok(false) | Err(FieldMissing) => EvaluationOutcome::Deny,
@@ -780,6 +1025,7 @@ fn eval_bool(
     request_resource_fields: &BTreeMap<String, FieldValue>,
     path_variable_value: Option<&str>,
     ancestor_path_variable_values: &BTreeMap<String, String>,
+    request_time: Option<&FieldValue>,
 ) -> Result<bool, FieldMissing> {
     match condition {
         Condition::Literal(value) => Ok(*value),
@@ -790,6 +1036,7 @@ fn eval_bool(
             request_resource_fields,
             path_variable_value,
             ancestor_path_variable_values,
+            request_time,
         )?),
         Condition::And(left, right) => Ok(eval_bool(
             left,
@@ -798,6 +1045,7 @@ fn eval_bool(
             request_resource_fields,
             path_variable_value,
             ancestor_path_variable_values,
+            request_time,
         )? && eval_bool(
             right,
             auth,
@@ -805,6 +1053,7 @@ fn eval_bool(
             request_resource_fields,
             path_variable_value,
             ancestor_path_variable_values,
+            request_time,
         )?),
         Condition::Or(left, right) => {
             // custom-claims (US-02, ADR-034, AC-17-142): a claim reference is
@@ -829,6 +1078,7 @@ fn eval_bool(
                 request_resource_fields,
                 path_variable_value,
                 ancestor_path_variable_values,
+                request_time,
             );
             if let Ok(true) = left_result {
                 return Ok(true);
@@ -840,6 +1090,7 @@ fn eval_bool(
                 request_resource_fields,
                 path_variable_value,
                 ancestor_path_variable_values,
+                request_time,
             );
             match (left_result, right_result) {
                 (_, Ok(true)) => Ok(true),
@@ -857,6 +1108,7 @@ fn eval_bool(
                     request_resource_fields,
                     path_variable_value,
                     ancestor_path_variable_values,
+                    request_time,
                 )?;
                 Ok(match op {
                     CompareOp::Eq => equal,
@@ -883,6 +1135,7 @@ fn eval_bool(
                     request_resource_fields,
                     path_variable_value,
                     ancestor_path_variable_values,
+                    request_time,
                 )?;
                 let right_value = resolve_field_value(
                     right,
@@ -891,6 +1144,7 @@ fn eval_bool(
                     request_resource_fields,
                     path_variable_value,
                     ancestor_path_variable_values,
+                    request_time,
                 )?;
                 Ok(compare_relational(*op, &left_value, &right_value))
             }
@@ -908,6 +1162,7 @@ fn eval_bool(
                 request_resource_fields,
                 path_variable_value,
                 ancestor_path_variable_values,
+                request_time,
             )?;
             let Operand::ListLiteral(items) = list else {
                 // Parser invariant: the RHS is always a ListLiteral —
@@ -922,6 +1177,7 @@ fn eval_bool(
                     request_resource_fields,
                     path_variable_value,
                     ancestor_path_variable_values,
+                    request_time,
                 )
                 .map(|v| v == left_value)
                 .unwrap_or(false)
@@ -946,6 +1202,7 @@ fn compare_operands(
     request_resource_fields: &BTreeMap<String, FieldValue>,
     path_variable_value: Option<&str>,
     ancestor_path_variable_values: &BTreeMap<String, String>,
+    request_time: Option<&FieldValue>,
 ) -> Result<bool, FieldMissing> {
     match (left, right) {
         (Operand::AuthUid, Operand::ResourceField(name))
@@ -977,6 +1234,7 @@ fn compare_operands(
                 request_resource_fields,
                 path_variable_value,
                 ancestor_path_variable_values,
+                request_time,
             )?;
             let right_value = resolve_field_value(
                 right,
@@ -985,6 +1243,7 @@ fn compare_operands(
                 request_resource_fields,
                 path_variable_value,
                 ancestor_path_variable_values,
+                request_time,
             )?;
             Ok(left_value == right_value)
         }
@@ -998,6 +1257,7 @@ fn resolve_field_value(
     request_resource_fields: &BTreeMap<String, FieldValue>,
     path_variable_value: Option<&str>,
     ancestor_path_variable_values: &BTreeMap<String, String>,
+    request_time: Option<&FieldValue>,
 ) -> Result<FieldValue, FieldMissing> {
     match operand {
         Operand::ResourceField(name) => resource_fields.get(name).cloned().ok_or(FieldMissing),
@@ -1056,6 +1316,77 @@ fn resolve_field_value(
         // other operand position; falls closed defensively rather than
         // panicking, consistent with `evaluate()`'s total guarantee.
         Operand::ListLiteral(_) => Err(FieldMissing),
+        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
+        // `request.time` resolves to the caller-supplied "now" value —
+        // `FieldMissing` (fails closed) at any call site not yet wired to
+        // thread a real value, the identical shape `path_variable_value`
+        // already uses.
+        Operand::RequestTime => request_time.cloned().ok_or(FieldMissing),
+        // security-rules-cel-expression-grammar (Slice 06, ADR-065 §
+        // Decision — evaluate() comparison logic): both sides resolve
+        // recursively (the right side may itself be a `DurationLiteral`,
+        // which only ever means something paired against a resolved
+        // `Timestamp` left side here); the concrete numeric-vs-numeric or
+        // Timestamp-vs-Duration pairing is decided HERE, at evaluate()
+        // time — never parse time, mirroring every other operand's
+        // runtime type never being parse-time checked.
+        Operand::Arithmetic(left, op, right) => {
+            let left_value = resolve_field_value(
+                left,
+                auth,
+                resource_fields,
+                request_resource_fields,
+                path_variable_value,
+                ancestor_path_variable_values,
+                request_time,
+            )?;
+            match (&left_value, right.as_ref()) {
+                (FieldValue::Timestamp(secs, nanos), Operand::DurationLiteral(amount, unit)) => {
+                    let offset_secs = unit.as_seconds(*amount);
+                    let new_secs = match op {
+                        ArithmeticOp::Add => secs + offset_secs,
+                        ArithmeticOp::Sub => secs - offset_secs,
+                    };
+                    Ok(FieldValue::Timestamp(new_secs, *nanos))
+                }
+                _ => {
+                    let right_value = resolve_field_value(
+                        right,
+                        auth,
+                        resource_fields,
+                        request_resource_fields,
+                        path_variable_value,
+                        ancestor_path_variable_values,
+                        request_time,
+                    )?;
+                    match (&left_value, &right_value) {
+                        (FieldValue::Integer(l), FieldValue::Integer(r)) => {
+                            Ok(FieldValue::Integer(match op {
+                                ArithmeticOp::Add => l + r,
+                                ArithmeticOp::Sub => l - r,
+                            }))
+                        }
+                        (FieldValue::Double(l), FieldValue::Double(r)) => {
+                            Ok(FieldValue::Double(match op {
+                                ArithmeticOp::Add => l + r,
+                                ArithmeticOp::Sub => l - r,
+                            }))
+                        }
+                        // A type-mismatched pairing (e.g. Timestamp +/-
+                        // Integer, String +/- anything) is not a value
+                        // this arithmetic ever legally produces — falls
+                        // closed via FieldMissing, never a panic
+                        // (evaluate() stays total by construction).
+                        _ => Err(FieldMissing),
+                    }
+                }
+            }
+        }
+        // A `DurationLiteral` reached directly (never as `Arithmetic`'s own
+        // right side, the ONLY position the parser ever produces one in)
+        // is unreachable in practice — falls closed defensively, mirroring
+        // `ListLiteral`'s own identical discipline above.
+        Operand::DurationLiteral(_, _) => Err(FieldMissing),
     }
 }
 
@@ -1073,7 +1404,30 @@ fn numeric_value(value: &FieldValue) -> Option<f64> {
 
 /// AC-CEG-05: a non-numeric pairing (either side) is `false` (Deny), never
 /// a panic — `evaluate()` stays total by construction.
+///
+/// security-rules-cel-expression-grammar (Slice 06, US-06, ADR-065): a
+/// `Timestamp`/`Timestamp` pairing (the time-window idiom, `request.time <
+/// resource.data.<field> +/- duration.value(...)`) is compared directly
+/// on `(seconds, nanos)`, never routed through `numeric_value`'s own
+/// `f64` conversion — nanosecond precision would be silently lost past
+/// `f64`'s ~52-bit mantissa for large-enough second counts, and this is
+/// the ONLY relational-comparison pairing this feature's own grammar ever
+/// produces for `Timestamp` (Resolution 4 locks `Timestamp +/- Duration`
+/// as the sole non-numeric arithmetic result).
 fn compare_relational(op: CompareOp, left: &FieldValue, right: &FieldValue) -> bool {
+    if let (FieldValue::Timestamp(l_secs, l_nanos), FieldValue::Timestamp(r_secs, r_nanos)) =
+        (left, right)
+    {
+        let l = (*l_secs, *l_nanos);
+        let r = (*r_secs, *r_nanos);
+        return match op {
+            CompareOp::Lt => l < r,
+            CompareOp::Le => l <= r,
+            CompareOp::Gt => l > r,
+            CompareOp::Ge => l >= r,
+            CompareOp::Eq | CompareOp::Ne => unreachable!("only called for relational operators"),
+        };
+    }
     let (Some(l), Some(r)) = (numeric_value(left), numeric_value(right)) else {
         return false;
     };
@@ -1574,7 +1928,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new()), EvaluationOutcome::Allow);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Allow);
     }
 
     #[test]
@@ -1587,7 +1941,7 @@ mod tests {
         let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
     }
 
     #[test]
@@ -1600,7 +1954,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new(); // owner_id absent
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
     }
 
     // ── evaluate: request.resource.data.<field> (security-rules-write-path, ADR-030) ──
@@ -1620,7 +1974,7 @@ mod tests {
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new()),
+            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new(), None),
             EvaluationOutcome::Allow
         );
     }
@@ -1639,7 +1993,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1660,7 +2014,7 @@ mod tests {
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new()),
+            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1675,14 +2029,14 @@ mod tests {
         );
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-        assert_eq!(evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
     }
 
     #[test]
     fn bare_true_literal_allows_regardless_of_auth_or_resource_ac_17_12() {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
         assert_eq!(
-            evaluate(&Condition::Literal(true), None, &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&Condition::Literal(true), None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Allow
         );
     }
@@ -1714,7 +2068,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Allow
         );
     }
@@ -1728,7 +2082,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1743,7 +2097,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1753,7 +2107,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), None, &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&is_moderator_condition(), None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Deny
         );
     }
@@ -1778,7 +2132,7 @@ mod tests {
             claims: claims_with("is_moderator", FieldValue::Boolean(true)),
         };
         assert_eq!(
-            evaluate(&condition, Some(&priya), &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, Some(&priya), &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Allow,
             "a moderator must be admitted via the claim disjunct"
         );
@@ -1786,7 +2140,7 @@ mod tests {
         // Maria: satisfies the ownership disjunct, has no moderator claim.
         let maria = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         assert_eq!(
-            evaluate(&condition, Some(&maria), &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, Some(&maria), &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Allow,
             "the document owner must be admitted via the ownership disjunct"
         );
@@ -1794,7 +2148,7 @@ mod tests {
         // Dana: satisfies neither disjunct.
         let dana = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
         assert_eq!(
-            evaluate(&condition, Some(&dana), &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, Some(&dana), &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Deny,
             "neither a moderator nor the owner — must deny"
         );
@@ -1819,7 +2173,7 @@ mod tests {
         let matching_ticket =
             resource_with("department", FieldValue::String("billing".to_string()));
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &matching_ticket, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, Some(&jordan), &matching_ticket, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Allow,
             "AC-17-143: matching department claim/field must allow"
         );
@@ -1827,7 +2181,7 @@ mod tests {
         let other_ticket =
             resource_with("department", FieldValue::String("engineering".to_string()));
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Deny,
             "AC-17-143: mismatched department claim/field must deny"
         );
@@ -1855,7 +2209,7 @@ mod tests {
             claims: claims_with("department", FieldValue::String("billing".to_string())),
         };
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, Some(&jordan), &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Allow,
             "AC-17-151: a matching department claim/string-literal must allow"
         );
@@ -1865,7 +2219,7 @@ mod tests {
             claims: claims_with("department", FieldValue::String("engineering".to_string())),
         };
         assert_eq!(
-            evaluate(&condition, Some(&sam), &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, Some(&sam), &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Deny,
             "AC-17-151: a mismatched department claim/string-literal must deny"
         );
@@ -1883,7 +2237,7 @@ mod tests {
         let resource = resource_with("status", FieldValue::String("published".to_string()));
 
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new()),
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
             EvaluationOutcome::Allow,
             "AC-17-152: a matching resource-field/string-literal comparison must allow, \
              independent of any claim or verified caller"
@@ -1913,7 +2267,7 @@ mod tests {
             let auth = AuthContext { uid, claims: BTreeMap::new() };
             let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
         }
 
         /// Property (AC-17-10's underlying mechanism): for ANY
@@ -1937,7 +2291,7 @@ mod tests {
             let mut resource = resource_with("owner_id", FieldValue::String(owner_uid));
             resource.insert("title".to_string(), FieldValue::String(unrelated_value));
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
         }
     }
 
