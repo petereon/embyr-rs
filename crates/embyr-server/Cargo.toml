@@ -949,6 +949,11 @@ path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr04_wri
 name = "security_rules_cel_cross_document_reads_cdr05_simulate_cross_document_candidate"
 path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr05_simulate_cross_document_candidate.rs"
 
+# security-rules-cel-functions (Slice 01, US-01, Release 1, Walking Skeleton). AC-CF-01/02/03/04.
+[[test]]
+name = "security_rules_cel_functions_cf01_named_helper_function_walking_skeleton"
+path = "../../tests/security_rules_cel_functions/acceptance/cf01_named_helper_function_walking_skeleton.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

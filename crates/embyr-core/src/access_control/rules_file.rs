@@ -38,6 +38,8 @@
 //! and 4a's own single-collection shape (`== 1` segment ⇒
 //! `DecomposedTarget::SingleCollection`, `DecomposedRule` unchanged).
 
+use std::collections::BTreeMap;
+
 use crate::access_control::path_routing;
 use crate::access_control::{parse_condition, ConditionParseError, UnsupportedConstruct};
 
@@ -235,6 +237,15 @@ pub fn parse_rules_file(source: &str) -> Result<Vec<MatchBlock>, RulesFileError>
     }
     let service_body = after_service[1..close1].trim();
 
+    // security-rules-cel-functions (Slice 01, US-01, ADR-067 § Decision —
+    // Threading): zero or more `function <name>() { return <expr>; }`
+    // blocks, siblings of the `match /databases/{database}/documents { ...
+    // }` sub-block, mirroring real Firestore's own declaration position
+    // (§ Reading Confirmation). Consumed FIRST, leaving the remaining text
+    // for the existing `match /databases/{database}/documents` shell check
+    // below, completely unmodified.
+    let (functions, service_body) = parse_function_blocks(service_body)?;
+
     let after_match = service_body
         .strip_prefix("match /databases/{database}/documents")
         .map(str::trim_start)
@@ -251,7 +262,245 @@ pub fn parse_rules_file(source: &str) -> Result<Vec<MatchBlock>, RulesFileError>
     }
     let documents_body = after_match[1..close2].trim();
 
-    parse_match_blocks(documents_body)
+    parse_match_blocks(documents_body, &functions)
+}
+
+/// security-rules-cel-functions (Slice 01, US-01, ADR-067 § Decision —
+/// Types): repeatedly scans the LEADING portion of `service_body` for
+/// `function <name>() { return <expr>; }` blocks — reuses
+/// `find_matching_close` unchanged for the `{...}` body, mirroring
+/// `parse_nested_match_blocks`'s own "repeatedly scan a keyword-prefixed
+/// block until exhausted" loop shape exactly, just for a flat
+/// (non-nesting) result and a different keyword. Stops at the first
+/// non-`function`-prefixed content (the `match /databases/{database}/
+/// documents { ... }` sub-block, in every well-formed file) and returns
+/// that REMAINING slice unmodified, alongside the consumed definitions.
+///
+/// A function body is validated via the UNCHANGED `parse_condition` at
+/// THIS scan step (fail-fast, before any `match` block is even reached) —
+/// this is what makes nesting/recursion structurally impossible
+/// (Resolution 3): a body containing a call-shaped identifier is rejected
+/// by `detect_unsupported_construct`'s own existing, unmodified scan,
+/// since no expansion pass is ever applied to a function body itself.
+fn parse_function_blocks(service_body: &str) -> Result<(BTreeMap<String, String>, &str), RulesFileError> {
+    let mut functions = BTreeMap::new();
+    let mut body = service_body;
+    loop {
+        body = body.trim_start();
+        let after_function = match body.strip_prefix("function").filter(|rest| rest.starts_with(char::is_whitespace)) {
+            Some(rest) => rest.trim_start(),
+            None => break,
+        };
+        let paren_open = after_function
+            .find('(')
+            .ok_or_else(|| shell_syntax_error("expected '(' after a function name"))?;
+        let name = after_function[..paren_open].trim();
+        if name.is_empty() || !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(shell_syntax_error(&format!("'{name}' is not a valid function name")));
+        }
+        if matches!(name, "get" | "exists" | "duration" | "true" | "false" | "in") {
+            return Err(shell_syntax_error(&format!(
+                "'{name}' collides with an existing reserved word/construct and cannot be used as \
+                 a function name"
+            )));
+        }
+        let paren_close = after_function[paren_open..]
+            .find(')')
+            .map(|i| paren_open + i)
+            .ok_or_else(|| shell_syntax_error(&format!("unterminated '(' in function '{name}'")))?;
+        let params = after_function[paren_open + 1..paren_close].trim();
+        if !params.is_empty() {
+            return Err(RulesFileError::single(
+                String::new(),
+                "FUNCTION_PARAMETERS_UNSUPPORTED",
+                format!(
+                    "function '{name}' declares parameter(s) ('{params}') — only zero-parameter \
+                     functions are supported in v1"
+                ),
+            ));
+        }
+        let after_params = after_function[paren_close + 1..].trim_start();
+        if !after_params.starts_with('{') {
+            return Err(shell_syntax_error(&format!("expected '{{' after function '{name}'s own '()'")));
+        }
+        let close_idx = find_matching_close(after_params, 0)
+            .ok_or_else(|| shell_syntax_error(&format!("unbalanced '{{' in function '{name}'")))?;
+        let fn_body = after_params[1..close_idx].trim();
+
+        let expr = fn_body
+            .strip_prefix("return")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .map(str::trim)
+            .and_then(|rest| rest.strip_suffix(';'))
+            .map(str::trim)
+            .ok_or_else(|| {
+                shell_syntax_error(&format!(
+                    "function '{name}'s own body must be exactly 'return <expr>;' — no 'let' \
+                     bindings, no other statements, in v1"
+                ))
+            })?;
+        if expr.is_empty() {
+            return Err(shell_syntax_error(&format!("function '{name}'s own 'return' has no expression")));
+        }
+        // Validated via the UNCHANGED parse_condition — fail-fast on a
+        // malformed body, and structurally forbids nesting/recursion (a
+        // call-shaped identifier inside `expr` is rejected here, unchanged,
+        // by `detect_unsupported_construct`).
+        parse_condition(expr).map_err(|e| {
+            RulesFileError::single(String::new(), construct_for(&e), format!("function '{name}': {}", detail_for(e)))
+        })?;
+
+        if functions.insert(name.to_string(), expr.to_string()).is_some() {
+            return Err(RulesFileError::single(
+                String::new(),
+                "DUPLICATE_FUNCTION",
+                format!("function '{name}' is defined more than once"),
+            ));
+        }
+
+        body = &after_params[close_idx + 1..];
+    }
+    Ok((functions, body))
+}
+
+/// security-rules-cel-functions (Slice 01, US-01, ADR-067 § Decision —
+/// Types): a single quote-aware linear scan over `condition_text`, splicing
+/// `(<body>)` in place of each `<name>()` call site found OUTSIDE a `"..."`
+/// or `'...'` literal, for every `name` present in `functions`. Mirrors
+/// `tokenize`'s own quote-handling discipline as a DESIGN PRINCIPLE (track
+/// literal-state, skip scanning inside it) — not shared code, this scanner
+/// operates on raw text at a structurally earlier pipeline stage.
+///
+/// Applied EXACTLY ONCE per condition, never recursively: a function body
+/// is pre-validated flat by `parse_function_blocks`'s own `parse_condition`
+/// call, so the spliced-in body text can never itself contain a further
+/// `name()` needing expansion.
+fn expand_function_calls(
+    condition_text: &str,
+    functions: &BTreeMap<String, String>,
+    path_pattern: &str,
+) -> Result<String, RulesFileError> {
+    let chars: Vec<char> = condition_text.chars().collect();
+    let mut out = String::with_capacity(condition_text.len());
+    let mut i = 0;
+    let mut in_string: Option<char> = None;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(quote) = in_string {
+            out.push(c);
+            if c == quote {
+                in_string = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            in_string = Some(c);
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            // Includes '.' as a continuation character — mirrors
+            // `tokenize`'s own dotted-identifier Word scan exactly, so a
+            // compound name (`duration.value`, `resource.data.role`,
+            // `request.auth.uid`) is always captured as ONE ident here too,
+            // never mis-split into a bare trailing segment that could be
+            // mistaken for its own standalone function-call candidate
+            // (`value(` inside `duration.value(24, 'h')`, e.g.).
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+            {
+                i += 1;
+            }
+            let ident: String = chars[start..i].iter().collect();
+            let followed_by_call = chars.get(i) == Some(&'(');
+
+            if let Some(body) = functions.get(&ident) {
+                if followed_by_call {
+                    let close = find_char_paren_close(&chars, i).ok_or_else(|| {
+                        RulesFileError::single(
+                            path_pattern,
+                            "SYNTAX_ERROR",
+                            format!("unterminated '(' in call to function '{ident}'"),
+                        )
+                    })?;
+                    let args = chars[i + 1..close].iter().collect::<String>();
+                    if !args.trim().is_empty() {
+                        return Err(RulesFileError::single(
+                            path_pattern,
+                            "FUNCTION_PARAMETERS_UNSUPPORTED",
+                            format!(
+                                "call to function '{ident}' passes argument(s) ('{}') — only \
+                                 zero-argument calls are supported in v1",
+                                args.trim()
+                            ),
+                        ));
+                    }
+                    out.push('(');
+                    out.push_str(body);
+                    out.push(')');
+                    i = close + 1;
+                    continue;
+                }
+                // A bare reference to a known function name with no
+                // following '(' at all — left untouched; the existing
+                // grammar handles (or rejects) it exactly as it already
+                // does today.
+                out.push_str(&ident);
+                continue;
+            }
+
+            // Not a known function. `get`/`exists`/`duration.value` are
+            // ALSO call-shaped identifiers, but pre-existing, tokenizer
+            // -level constructs (never this feature's own concern) — passed
+            // through unchanged, exactly like today. Any OTHER call-shaped
+            // identifier is a call to an UNDEFINED function — named here,
+            // distinguishable from the generic `CUSTOM_FUNCTION` rejection
+            // a bare, non-imported condition still gets (Resolution 1's own
+            // safety-net corollary covers the case this check does NOT
+            // catch: a bug that leaves a KNOWN function's own call site
+            // unexpanded — structurally impossible here, since every
+            // `followed_by_call` branch above always either expands or
+            // returns `Err` before reaching this point).
+            if followed_by_call && ident != "get" && ident != "exists" && ident != "duration.value" {
+                return Err(RulesFileError::single(
+                    path_pattern,
+                    "UNDEFINED_FUNCTION",
+                    format!("no function named '{ident}' is defined in this file"),
+                ));
+            }
+            out.push_str(&ident);
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    Ok(out)
+}
+
+/// Bounds-safe: finds the `)` matching the `(` at `chars[open_idx]`,
+/// honoring nesting — mirrors `access_control::mod`'s own
+/// `find_matching_paren` shape exactly, for a `Vec<char>` scan over raw
+/// (pre-tokenized) rules-file text rather than a condition string.
+fn find_char_paren_close(chars: &[char], open_idx: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, &c) in chars.iter().enumerate().skip(open_idx) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Find the byte index of the `}` matching the `{` at `open_idx` in `s`, by
@@ -283,8 +532,8 @@ fn find_matching_close(s: &str, open_idx: usize) -> Option<usize> {
 /// }` blocks, in order, until exhausted. Entry point — always the
 /// top-level scan, no ancestor to prepend (ADR-063 § Decision — Nested
 /// Match-Block Flattening).
-fn parse_match_blocks(body: &str) -> Result<Vec<MatchBlock>, RulesFileError> {
-    let blocks = parse_nested_match_blocks(body, "", &[])?;
+fn parse_match_blocks(body: &str, functions: &BTreeMap<String, String>) -> Result<Vec<MatchBlock>, RulesFileError> {
+    let blocks = parse_nested_match_blocks(body, "", &[], functions)?;
     if blocks.is_empty() {
         return Err(shell_syntax_error("expected at least one 'match /<path> { ... }' block"));
     }
@@ -301,6 +550,7 @@ fn parse_nested_match_blocks(
     mut body: &str,
     parent_path_text: &str,
     parent_segments: &[PathSegment],
+    functions: &BTreeMap<String, String>,
 ) -> Result<Vec<MatchBlock>, RulesFileError> {
     let mut blocks = Vec::new();
     loop {
@@ -336,7 +586,7 @@ fn parse_nested_match_blocks(
         let mut full_segments = parent_segments.to_vec();
         full_segments.extend(local_segments);
 
-        let mut nested = parse_block_body(block_body, &full_path_pattern, &full_segments)?;
+        let mut nested = parse_block_body(block_body, &full_path_pattern, &full_segments, functions)?;
         blocks.append(&mut nested);
 
         body = &rest[close_idx + 1..];
@@ -352,6 +602,7 @@ fn parse_block_body(
     block_body: &str,
     full_path_pattern: &str,
     full_segments: &[PathSegment],
+    functions: &BTreeMap<String, String>,
 ) -> Result<Vec<MatchBlock>, RulesFileError> {
     let trimmed = block_body.trim_start();
     let starts_with_nested_match = trimmed
@@ -359,10 +610,10 @@ fn parse_block_body(
         .is_some_and(|rest| rest.starts_with(char::is_whitespace));
 
     if starts_with_nested_match {
-        return parse_nested_match_blocks(block_body, full_path_pattern, full_segments);
+        return parse_nested_match_blocks(block_body, full_path_pattern, full_segments, functions);
     }
 
-    let allow_clauses = parse_allow_clauses(block_body, full_path_pattern)?;
+    let allow_clauses = parse_allow_clauses(block_body, full_path_pattern, functions)?;
     Ok(vec![MatchBlock {
         path_pattern: full_path_pattern.to_string(),
         segments: full_segments.to_vec(),
@@ -439,7 +690,11 @@ fn parse_one_segment(seg: &str, pattern: &str) -> Result<PathSegment, RulesFileE
 
 /// Split a match block's body on `;` into `allow <verbs>: if <condition>`
 /// clauses. Comments/blank clauses (empty after trim) are skipped.
-fn parse_allow_clauses(block_body: &str, path_pattern: &str) -> Result<Vec<(Vec<Verb>, String)>, RulesFileError> {
+fn parse_allow_clauses(
+    block_body: &str,
+    path_pattern: &str,
+    functions: &BTreeMap<String, String>,
+) -> Result<Vec<(Vec<Verb>, String)>, RulesFileError> {
     let mut clauses = Vec::new();
     for raw_clause in block_body.split(';') {
         let clause = raw_clause.trim();
@@ -478,7 +733,14 @@ fn parse_allow_clauses(block_body: &str, path_pattern: &str) -> Result<Vec<(Vec<
             return Err(RulesFileError::single(path_pattern, "SYNTAX_ERROR", "empty condition"));
         }
 
-        clauses.push((verbs, condition_text.to_string()));
+        // security-rules-cel-functions (Slice 01, US-01, ADR-067 § Decision
+        // — Threading): the LAST point before `condition_text` becomes
+        // `MatchBlock`'s own stored, owned data — every call site of a
+        // known function is expanded here, so `decompose()`/`evaluate()`
+        // never learn this feature exists.
+        let expanded = expand_function_calls(condition_text, functions, path_pattern)?;
+
+        clauses.push((verbs, expanded));
     }
 
     if clauses.is_empty() {
@@ -1318,5 +1580,210 @@ mod tests {
             }
             Ok(_) => panic!("expected SYNTAX_ERROR: a match block body may not mix 'allow' with nested 'match'"),
         }
+    }
+
+    // ── security-rules-cel-functions (Slice 01, US-01, ADR-067) ──
+
+    const EDITOR_FILE: &str = r#"
+        service cloud.firestore {
+          function isEditor() {
+            return request.auth.uid == resource.data.editor_id;
+          }
+          match /databases/{database}/documents {
+            match /trail_guides/{guideId} {
+              allow write: if isEditor();
+            }
+          }
+        }
+    "#;
+
+    #[test]
+    fn a_function_call_site_expands_into_the_functions_own_body_wrapped_in_parens() {
+        let blocks = parse_rules_file(EDITOR_FILE).expect("must parse");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0].allow_clauses,
+            vec![(
+                vec![Verb::Write],
+                "(request.auth.uid == resource.data.editor_id)".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_call_to_an_undefined_function_is_a_named_rejection() {
+        let source = r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow write: if isEditor();
+                }
+              }
+            }
+        "#;
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "UNDEFINED_FUNCTION");
+                assert!(offending_blocks[0].detail.contains("isEditor"));
+            }
+            Ok(_) => panic!("expected UNDEFINED_FUNCTION"),
+        }
+    }
+
+    #[test]
+    fn two_function_definitions_sharing_the_same_name_is_a_named_rejection() {
+        let source = r#"
+            service cloud.firestore {
+              function isEditor() { return true; }
+              function isEditor() { return false; }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow write: if isEditor();
+                }
+              }
+            }
+        "#;
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "DUPLICATE_FUNCTION");
+            }
+            Ok(_) => panic!("expected DUPLICATE_FUNCTION"),
+        }
+    }
+
+    #[test]
+    fn a_function_definition_with_a_parameter_is_a_named_rejection() {
+        let source = r#"
+            service cloud.firestore {
+              function isEditor(userId) { return request.auth.uid == userId; }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow write: if isEditor();
+                }
+              }
+            }
+        "#;
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "FUNCTION_PARAMETERS_UNSUPPORTED");
+            }
+            Ok(_) => panic!("expected FUNCTION_PARAMETERS_UNSUPPORTED"),
+        }
+    }
+
+    #[test]
+    fn a_call_site_passing_an_argument_to_a_defined_zero_parameter_function_is_a_named_rejection() {
+        let source = r#"
+            service cloud.firestore {
+              function isEditor() { return request.auth.uid == resource.data.editor_id; }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow write: if isEditor(guideId);
+                }
+              }
+            }
+        "#;
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "FUNCTION_PARAMETERS_UNSUPPORTED");
+            }
+            Ok(_) => panic!("expected FUNCTION_PARAMETERS_UNSUPPORTED"),
+        }
+    }
+
+    #[test]
+    fn a_function_body_that_is_not_exactly_return_expr_is_a_syntax_error() {
+        let source = r#"
+            service cloud.firestore {
+              function isEditor() { let x = 1; return x == 1; }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow write: if isEditor();
+                }
+              }
+            }
+        "#;
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
+            }
+            Ok(_) => panic!("expected SYNTAX_ERROR: 'let' bindings are not supported in v1"),
+        }
+    }
+
+    #[test]
+    fn a_function_body_calling_another_function_is_rejected_via_the_pre_existing_custom_function_construct() {
+        // Resolution 3's own "no new detection code" guarantee: a function
+        // body is validated via the UNMODIFIED `parse_condition`, so a
+        // nested call is caught by `detect_unsupported_construct`'s own
+        // pre-existing, unmodified rejection — the SAME tag a bare,
+        // non-imported condition already gets today.
+        let source = r#"
+            service cloud.firestore {
+              function isOwner() { return true; }
+              function isEditor() { return isOwner(); }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow write: if isEditor();
+                }
+              }
+            }
+        "#;
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "CUSTOM_FUNCTION");
+            }
+            Ok(_) => panic!("expected CUSTOM_FUNCTION: function bodies may not call other functions in v1"),
+        }
+    }
+
+    #[test]
+    fn a_function_named_after_a_reserved_word_is_a_syntax_error() {
+        let source = r#"
+            service cloud.firestore {
+              function exists() { return true; }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow write: if true;
+                }
+              }
+            }
+        "#;
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
+            }
+            Ok(_) => panic!("expected SYNTAX_ERROR: 'exists' collides with a reserved construct"),
+        }
+    }
+
+    #[test]
+    fn expand_function_calls_leaves_exists_and_get_and_duration_value_untouched() {
+        let functions = BTreeMap::new();
+        let condition = "exists(/databases/$(database)/documents/organizations/$(request.auth.uid)) \
+                          && request.time < resource.data.submitted_at + duration.value(24, 'h')";
+        let expanded = expand_function_calls(condition, &functions, "").expect("must not error");
+        assert_eq!(expanded, condition, "no function calls present — text must be byte-for-byte unchanged");
+    }
+
+    #[test]
+    fn expand_function_calls_does_not_substitute_inside_a_string_literal() {
+        let mut functions = BTreeMap::new();
+        functions.insert("isEditor".to_string(), "true".to_string());
+        let condition = r#"resource.data.note == "isEditor()" && isEditor()"#;
+        let expanded = expand_function_calls(condition, &functions, "").expect("must not error");
+        assert_eq!(
+            expanded,
+            r#"resource.data.note == "isEditor()" && (true)"#,
+            "the string-literal occurrence must be left untouched; only the real call site expands"
+        );
+    }
+
+    #[test]
+    fn expand_function_calls_wraps_the_body_so_surrounding_negation_composes_correctly() {
+        let mut functions = BTreeMap::new();
+        functions.insert("isEditor".to_string(), "request.auth.uid == resource.data.editor_id".to_string());
+        let expanded = expand_function_calls("!isEditor()", &functions, "").expect("must not error");
+        assert_eq!(expanded, "!(request.auth.uid == resource.data.editor_id)");
     }
 }
