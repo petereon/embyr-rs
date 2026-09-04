@@ -1552,6 +1552,19 @@ impl FirestoreService {
                 let now = chrono::Utc::now();
                 let now_field =
                     FieldValue::Timestamp(now.timestamp(), now.timestamp_subsec_nanos() as i32);
+                // security-rules-cel-cross-document-reads (Slice 04, US-04,
+                // ADR-066): path-discovery (pure) then fetch (real I/O) —
+                // a condition with no cross-document operand produces an
+                // empty set here, zero extra fetch.
+                let cross_doc_paths = embyr_core::access_control::discover_cross_document_paths(
+                    &condition,
+                    auth_ctx.as_ref(),
+                    Some(path.document_id.as_str()),
+                    &std::collections::BTreeMap::new(),
+                );
+                let cross_document_reads =
+                    Self::fetch_cross_document_reads(&adapter, &path.project_id, &cross_doc_paths)
+                        .await?;
 
                 // security-rules-cel-parity (Slice 03, US-03, AC-17-184/186,
                 // ADR-062): the document's own already-known target ID
@@ -1571,7 +1584,7 @@ impl FirestoreService {
                     // branch, US-05 zero-regression guardrail).
                     &std::collections::BTreeMap::new(),
                     Some(&now_field),
-                    &std::collections::BTreeMap::new(),
+                    &cross_document_reads,
                 ) {
                     embyr_core::access_control::EvaluationOutcome::Deny => {
                         return Err(Status::permission_denied("access denied by write rule"));
@@ -1777,6 +1790,17 @@ impl FirestoreService {
                 let now = chrono::Utc::now();
                 let now_field =
                     FieldValue::Timestamp(now.timestamp(), now.timestamp_subsec_nanos() as i32);
+                // security-rules-cel-cross-document-reads (Slice 04, US-04,
+                // ADR-066): path-discovery (pure) then fetch (real I/O).
+                let cross_doc_paths = embyr_core::access_control::discover_cross_document_paths(
+                    &condition,
+                    auth_ctx.as_ref(),
+                    Some(path.document_id.as_str()),
+                    &std::collections::BTreeMap::new(),
+                );
+                let cross_document_reads =
+                    Self::fetch_cross_document_reads(&adapter, &path.project_id, &cross_doc_paths)
+                        .await?;
 
                 // security-rules-cel-parity (Slice 03, US-03, AC-17-184/186,
                 // ADR-062): the document's own already-known target ID
@@ -1794,7 +1818,7 @@ impl FirestoreService {
                     // branch, US-05 zero-regression guardrail).
                     &std::collections::BTreeMap::new(),
                     Some(&now_field),
-                    &std::collections::BTreeMap::new(),
+                    &cross_document_reads,
                 ) {
                     embyr_core::access_control::EvaluationOutcome::Deny => {
                         return Err(Status::permission_denied("access denied by write rule"));
