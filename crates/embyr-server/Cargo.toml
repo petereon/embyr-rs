@@ -994,6 +994,11 @@ path = "../../tests/composite_index_requirement_rules/acceptance/cir01_multi_fie
 name = "composite_index_requirement_rules_cir02_in_plus_range_filter_only"
 path = "../../tests/composite_index_requirement_rules/acceptance/cir02_in_plus_range_filter_only.rs"
 
+# composite-index-requirement-rules (Slice 03, US-03, Release 2, LAST slice). AC-CIR-07.
+[[test]]
+name = "composite_index_requirement_rules_cir03_name_the_missing_index"
+path = "../../tests/composite_index_requirement_rules/acceptance/cir03_name_the_missing_index.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

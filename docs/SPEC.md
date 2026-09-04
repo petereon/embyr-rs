@@ -143,7 +143,7 @@ Tombstones accumulate over time. A background sweep deletes tombstones older tha
 
 The `indexes` table stores composite index definitions per project (`project_id`, `id`, `collection`, `fields`, `state`).
 
-**Index enforcement**: complex queries (multi-field `orderBy`, inequality filters combined with `orderBy` on a different field, `array-contains-any`, `not-in`, `IN` with more than one equality constraint) require a matching composite index with `state=READY`. A query that would require an index but has no matching index returns `FailedPrecondition` with the Firestore standard error message format indicating which index is needed.
+**Index enforcement**: complex queries (multi-field `orderBy`, any filter — equality or inequality — combined with `orderBy` on a different field, `array-contains-any`, `not-in`, `IN` with more than one equality constraint) require a matching composite index with `state=READY`. A query that would require an index but has no matching index returns `FailedPrecondition` with the Firestore standard error message format indicating which index is needed.
 
 Single-field queries are always satisfied without an explicit index (implicit single-field auto-indexes).
 

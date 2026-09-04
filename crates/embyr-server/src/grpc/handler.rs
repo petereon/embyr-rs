@@ -47,6 +47,7 @@ use embyr_proto::firestore::{
 use tokio_stream::StreamExt as _;
 
 use crate::{
+    admin::handlers::composite_indexes::{IndexFieldOrder, IndexFieldSpec},
     adapters::{
         agent_backend::AgentBackendAdapter,
         aws_secret_fetcher::AwsSecretFetcher,
@@ -641,6 +642,41 @@ impl FirestoreService {
                 sub.iter().flat_map(Self::collect_filter_fields).collect()
             }
         }
+    }
+
+    /// composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
+    /// derives the `Vec<IndexFieldSpec>` a `CreateIndex` call would need
+    /// from the SAME `query.filter`/`query.order_by` data `requires_
+    /// composite_index` already inspected — no new query analysis. Filtered
+    /// fields (in filter order) come first as `Asc`, followed by any
+    /// `orderBy` fields not already included (in their own declared
+    /// direction) — matches real Firestore's own convention of listing
+    /// equality fields before the sort field(s) in a composite index
+    /// definition. Only ever called once `requires_composite_index` has
+    /// already returned `true` for the same query.
+    fn missing_index_fields(query: &StructuredQuery) -> Vec<IndexFieldSpec> {
+        let mut fields = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        if let Some(filter) = &query.filter {
+            for (field, _op) in Self::collect_filter_fields(filter) {
+                if seen.insert(field) {
+                    fields.push(IndexFieldSpec { field: field.to_string(), order: IndexFieldOrder::Asc });
+                }
+            }
+        }
+
+        for ob in &query.order_by {
+            if seen.insert(ob.field_path.as_str()) {
+                let order = match ob.direction {
+                    OrderDirection::Ascending => IndexFieldOrder::Asc,
+                    OrderDirection::Descending => IndexFieldOrder::Desc,
+                };
+                fields.push(IndexFieldSpec { field: ob.field_path.clone(), order });
+            }
+        }
+
+        fields
     }
 
     /// Build a proto `Document` from path, fields, create_time, and update_time.
@@ -3124,9 +3160,20 @@ impl FirestoreService {
                 .is_index_ready(&project_id_str, &collection.collection_path)
                 .await
         {
-            return Err(Status::failed_precondition(
-                "query requires a composite index; create the index before running this query",
-            ));
+            // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
+            // names the specific missing index (collection_path + fields)
+            // instead of a generic message — reuses the SAME `fields` JSON
+            // shape `POST /admin/v1/projects/:project_id/indexes`
+            // (firestore-composite-indexes-admin-api) expects, so Alex can
+            // copy it directly into a `CreateIndex` call.
+            let missing_fields = Self::missing_index_fields(&domain_query);
+            let fields_json = serde_json::to_string(&missing_fields)
+                .unwrap_or_else(|_| "[]".to_string());
+            return Err(Status::failed_precondition(format!(
+                "query requires a composite index on collection '{}' with fields {}; create it \
+                 via POST /admin/v1/projects/{{project_id}}/indexes",
+                collection.collection_path, fields_json
+            )));
         }
 
         let docs = adapter
@@ -4053,6 +4100,7 @@ mod composite_index_requirement_tests {
     //! identity_extension_tests`'s own established pattern in this file
     //! (`use super::FirestoreService;`).
     use super::FirestoreService;
+    use crate::admin::handlers::composite_indexes::{IndexFieldOrder, IndexFieldSpec};
     use embyr_core::domain::query::{
         FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter, StructuredQuery,
     };
@@ -4231,5 +4279,55 @@ mod composite_index_requirement_tests {
             range_filter("category", FilterOp::GreaterThan),
         ]));
         assert!(!FirestoreService::requires_composite_index(&q));
+    }
+
+    fn spec(field: &str, order: IndexFieldOrder) -> IndexFieldSpec {
+        IndexFieldSpec { field: field.to_string(), order }
+    }
+
+    /// AC-CIR-07 (multi-orderBy shape): filtered fields first (Asc), then
+    /// orderBy fields not already included, in their own declared direction.
+    #[test]
+    fn missing_index_fields_for_multi_order_by_lists_both_fields_in_their_own_directions() {
+        let mut q = base_query();
+        q.order_by = vec![
+            OrderBy { field_path: "category".to_string(), direction: OrderDirection::Ascending },
+            OrderBy { field_path: "score".to_string(), direction: OrderDirection::Descending },
+        ];
+        let fields = FirestoreService::missing_index_fields(&q);
+        assert_eq!(
+            fields,
+            vec![spec("category", IndexFieldOrder::Asc), spec("score", IndexFieldOrder::Desc)]
+        );
+    }
+
+    /// AC-CIR-07 (equality + different-orderBy shape): the filtered field
+    /// comes first as Asc, then the orderBy field in its own direction.
+    #[test]
+    fn missing_index_fields_for_equality_plus_different_order_by_lists_filter_then_order_by() {
+        let mut q = base_query();
+        q.filter = Some(equal_filter("category"));
+        q.order_by = vec![OrderBy { field_path: "score".to_string(), direction: OrderDirection::Descending }];
+        let fields = FirestoreService::missing_index_fields(&q);
+        assert_eq!(
+            fields,
+            vec![spec("category", IndexFieldOrder::Asc), spec("score", IndexFieldOrder::Desc)]
+        );
+    }
+
+    /// AC-CIR-07 (IN+range shape, no orderBy): both filtered fields listed
+    /// as Asc, no orderBy fields to append.
+    #[test]
+    fn missing_index_fields_for_in_plus_range_lists_both_filtered_fields() {
+        let mut q = base_query();
+        q.filter = Some(QueryFilter::Composite(vec![
+            in_filter("category"),
+            range_filter("population", FilterOp::GreaterThan),
+        ]));
+        let fields = FirestoreService::missing_index_fields(&q);
+        assert_eq!(
+            fields,
+            vec![spec("category", IndexFieldOrder::Asc), spec("population", IndexFieldOrder::Asc)]
+        );
     }
 }
