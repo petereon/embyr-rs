@@ -929,6 +929,16 @@ path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg07_times
 name = "security_rules_cel_cross_document_reads_cdr01_import_and_evaluate_exists_on_reads"
 path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr01_import_and_evaluate_exists_on_reads.rs"
 
+# security-rules-cel-cross-document-reads (Slice 02, US-02, Release 1). AC-CDR-05/06/07/08.
+[[test]]
+name = "security_rules_cel_cross_document_reads_cdr02_get_data_field_access_fail_closed"
+path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr02_get_data_field_access_fail_closed.rs"
+
+# security-rules-cel-cross-document-reads (Slice 03, US-03, Release 1). AC-CDR-09/10.
+[[test]]
+name = "security_rules_cel_cross_document_reads_cdr03_same_path_fetched_once"
+path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr03_same_path_fetched_once.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
