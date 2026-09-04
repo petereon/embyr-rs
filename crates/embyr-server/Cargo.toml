@@ -974,6 +974,16 @@ path = "../../tests/security_rules_cel_functions/acceptance/cf04_multiple_functi
 name = "firestore_composite_indexes_admin_api_cix01_create_index_walking_skeleton"
 path = "../../tests/firestore_composite_indexes_admin_api/acceptance/cix01_create_index_walking_skeleton.rs"
 
+# firestore-composite-indexes-admin-api (Slice 02, US-02, Release 1). AC-CIX-05/06.
+[[test]]
+name = "firestore_composite_indexes_admin_api_cix02_list_indexes"
+path = "../../tests/firestore_composite_indexes_admin_api/acceptance/cix02_list_indexes.rs"
+
+# firestore-composite-indexes-admin-api (Slice 03, US-03, Release 1, LAST slice). AC-CIX-07/08/09.
+[[test]]
+name = "firestore_composite_indexes_admin_api_cix03_delete_index"
+path = "../../tests/firestore_composite_indexes_admin_api/acceptance/cix03_delete_index.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
