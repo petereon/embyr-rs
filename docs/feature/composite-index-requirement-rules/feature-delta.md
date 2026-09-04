@@ -510,3 +510,88 @@ is explicitly named as genuinely undetermined and deferred (§ Resolution 4), no
 
 **Handoff To**: nw-solution-architect (DESIGN wave)
 **Deliverables**: this feature-delta.md, 5 locked Resolutions, 3-slice/2-release plan
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ This feature-delta.md's own DISCUSS sections in full, all 5 Resolutions.
+✓ `crates/embyr-core/src/domain/query.rs`, `FilterOp` (line 89) — confirmed the enum derives
+`Debug, Clone, PartialEq, Eq` but NOT `Copy` — the new per-operator classification logic this
+feature adds needs to inspect `FilterOp` values by reference across multiple filter fields without
+fighting borrow-checker lifetimes; adding `Copy` (safe for any field-less enum, zero behavior
+change) is the simplest fix, confirmed by direct read rather than assumed.
+✓ `crates/embyr-server/src/grpc/handler.rs`, `requires_composite_index`/`collect_filter_fields`
+(lines 577-599) — re-confirmed the exact control-flow this feature restructures: the CURRENT
+top-level `let Some(filter) = &query.filter else { return false }` then `if query.order_by.is_empty()
+{ return false }` ordering is what causes Slice 02's own bug (a filter-only query never reaches any
+filter-content inspection). This feature's own new rules must run BEFORE that early return, not
+patch around it.
+
+## Wave: DESIGN / [REF] Architecture Design
+
+Three additive changes, no new file, no new type beyond one reused (`IndexFieldSpec`/
+`IndexFieldOrder` from `firestore-composite-indexes-admin-api`):
+
+1. **`FilterOp` gains `Copy`** (`crates/embyr-core/src/domain/query.rs`) — zero behavior change,
+   unblocks per-operator classification without lifetime friction.
+2. **`collect_filter_fields` returns `Vec<(&str, FilterOp)>`** (was `Vec<&str>`) — the ONE signature
+   change this feature needs; every existing call site (there is exactly one, inside `requires_
+   composite_index` itself) is updated in the same commit.
+3. **`requires_composite_index` restructured** to check, IN ORDER:
+   a. `query.order_by.len() >= 2` → `true` (Slice 01, unconditional, checked first).
+   b. `IN` on field A + a range operator (`<`/`<=`/`>`/`>=`) on a DIFFERENT field → `true` (Slice
+      02, checked BEFORE any `order_by`-emptiness short-circuit — this is what fixes the filter
+      -only blind spot).
+   c. The ORIGINAL rule, unchanged: if `order_by` is non-empty and any `orderBy` field is absent
+      from the filtered-field set → `true` (covers equality AND inequality single-field-vs
+      -different-orderBy shapes, § Resolution 2/3 — no operator distinction needed here, confirmed
+      correct as-is).
+   d. Otherwise `false`.
+4. **A new pure function** `missing_index_fields(query: &StructuredQuery) -> Vec<IndexFieldSpec>`
+   (Slice 03) — derives the `Vec<IndexFieldSpec>` a caller would need to pass to `CreateIndex` from
+   the SAME `query.filter`/`query.order_by` data `requires_composite_index` already inspected (no
+   new query analysis): filtered-field paths (in filter order) as `Asc`, followed by any `orderBy`
+   fields not already included (in their own declared order/direction) — matches real Firestore's
+   own convention of listing equality fields before the sort field(s) in a composite index
+   definition.
+5. **The `FAILED_PRECONDITION` message** (line ~3082) is built from `missing_index_fields`'s own
+   output — reuses `IndexFieldSpec`'s existing `Serialize` impl (ADR-068) to render the shape
+   directly, e.g. `format!("query requires a composite index on {}/{:?}; create it via POST /admin/
+   v1/projects/{{project_id}}/indexes", collection_path, missing_index_fields(&domain_query))`.
+
+## Wave: DESIGN / [REF] Companion Fix
+
+`docs/SPEC.md` line 146: `"inequality filters combined with orderBy on a different field"` →
+`"any filter (equality or inequality) combined with orderBy on a different field"` — corrects the
+imprecise wording Resolution 2's own live verification found, applied during DELIVER alongside
+Slice 01 (documentation-only, zero behavior implication).
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] `FilterOp` gains `Copy` — the smallest possible unblock for per-operator classification,
+  zero behavior change (confirmed safe: a field-less enum).
+- [D2] `collect_filter_fields`'s signature widens to carry `FilterOp` — the ONE existing call site
+  is updated in the same commit, no parallel/duplicate helper.
+- [D3] The 2 new rules (multi-`orderBy`; `IN`+range) are checked BEFORE the original rule's own
+  `order_by`-emptiness path, not layered on top of it — directly fixes Slice 02's own root cause
+  (the ORIGINAL short-circuit ordering) rather than adding a second, parallel check path.
+- [D4] `missing_index_fields` is a NEW pure function, not a side effect bolted onto `requires_
+  composite_index` itself — keeps the boolean gate and the message-formatting concern separably
+  testable (mirrors this session's own "one function, one job" discipline throughout the CEL-parity
+  epics).
+
+### Constraints Established
+- No new dependency, no new bounded context, no new port/adapter trait method.
+- Zero change to `embyr-core`'s own `Operand`/`Condition`/`evaluate()` or `embyr-pg-storage`'s own
+  `run_query` — confirmed by construction.
+- Unit tests for `requires_composite_index` (all 5 trigger shapes + the false-positive regression
+  guards) and `missing_index_fields` are written DURING DELIVER; a `cargo-mutants --in-diff`
+  `--lib`-scoped pass is still budgeted at QUALITY_GATE regardless (this session's own established
+  discipline).
+
+## Wave: DESIGN / [REF] Next Wave
+
+**Handoff To**: nw-software-crafter (DELIVER wave, per this project's own established convention)
+**Deliverables**: this feature-delta.md's DESIGN section
