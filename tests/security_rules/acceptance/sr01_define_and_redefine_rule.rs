@@ -166,13 +166,25 @@ async fn a_condition_using_an_out_of_v1_scope_construct_is_rejected_naming_whats
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     ctx.insert_project("trailmark-prod").await;
 
+    // SUPERSEDED SCENARIO NOTE (found during `security-rules-cel-cross-
+    // document-reads` Slice 01, AC-CDR-01 full-baseline regression run):
+    // this test originally used a bare `get(/databases/(default)/
+    // documents/users/$(request.auth.uid)) != null` as its own illustrative
+    // "out-of-v1-scope construct". That construct is INTENTIONALLY
+    // superseded (ADR-066, Resolution 1): a narrowly-scoped `get()`/
+    // `exists()` idiom is now supported. Repurposed to prove the SAME
+    // distinguishability mechanism using a construct STILL genuinely out
+    // of scope: chaining (a `get()` whose own path is built from ANOTHER
+    // `get()`'s own result, Resolution 2) — the detail text still names
+    // "get()"/"exists()", preserving this test's own original message
+    // -content assertion below unchanged.
     let resp = ctx
         .client
         .post(ctx.url("/admin/v1/projects/trailmark-prod/access_rules"))
         .header("Cookie", &cookie)
         .json(&serde_json::json!({
             "collection_path": "journal_entries",
-            "condition": "get(/databases/(default)/documents/users/$(request.auth.uid)) != null",
+            "condition": "exists(/databases/$(database)/documents/orgs/$(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.orgId))",
         }))
         .send()
         .await

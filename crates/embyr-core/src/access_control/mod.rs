@@ -46,9 +46,10 @@
 //! grammar-file edit; widening requires a new AST variant, parser branch,
 //! and evaluator arm.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::domain::field_value::FieldValue;
+use crate::domain::document::FirestoreDocument;
 use crate::domain::query::QueryFilter;
 
 // security-rules-cel-parity (Slice 01, US-01, ADR-062): the outer
@@ -155,6 +156,38 @@ pub enum Operand {
     /// against a `Timestamp`-typed left operand — reachable from the
     /// parser ONLY in that position.
     DurationLiteral(i64, DurationUnit),
+    /// `exists(<path template>)` (security-rules-cel-cross-document-reads,
+    /// Slice 01, US-01, ADR-066).
+    CrossDocumentExists(PathTemplate),
+    /// `get(<path template>).data.<field>` (Slice 02, US-02, ADR-066) —
+    /// the `.data.<field>` suffix is REQUIRED syntax (locked v1 scope: no
+    /// arbitrary nested access, no bare `get(...)` operand).
+    CrossDocumentGet(PathTemplate, String),
+}
+
+/// A `get()`/`exists()` path argument, decomposed into alternating literal
+/// segments and substitutions (security-rules-cel-cross-document-reads,
+/// ADR-066 § Decision — Types) — mirrors `rules_file::PathSegment`'s own
+/// literal/wildcard-segment design, for a differently-shaped consumer (a
+/// runtime path-BUILDING template, not an import-time path-MATCHING
+/// pattern). The leading `/databases/$(database)/documents/` prefix is
+/// REQUIRED syntax but never stored as segments — `$(database)` always
+/// resolves to the current `project_id`, structurally, never via a stored
+/// substitution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathTemplate {
+    pub segments: Vec<PathTemplateSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathTemplateSegment {
+    Literal(String),
+    /// `$(request.auth.uid)`.
+    AuthUid,
+    /// `$(request.path.<var>)` — resolves against the SAME
+    /// `path_variable_value`/`ancestor_path_variable_values` bindings
+    /// every other `PathVariable`-consuming operand already uses.
+    PathVariable(String),
 }
 
 /// security-rules-cel-expression-grammar (Slice 06, ADR-065).
@@ -228,7 +261,14 @@ pub enum EvaluationOutcome {
 /// distinct from a generic `SyntaxError` (AC-17-04).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedConstruct {
-    CrossDocumentRead,
+    // `CrossDocumentRead` removed (security-rules-cel-cross-document-reads,
+    // Slice 01, ADR-066): `get()`/`exists()` are now real, parseable
+    // constructs (a narrowly-scoped subset — see `UnsupportedExpression
+    // Grammar`'s own detail text for what's STILL rejected, e.g. chaining
+    // or an unsupported `$(...)` substitution) — this variant's own single
+    // producer was removed, mirrors `security-rules-cel-recursive-
+    // wildcards`' own "superseded, not silently deleted" precedent
+    // (`cp04_reject_out_of_scope_imports.rs`).
     CustomFunction,
     WildcardPath,
     /// security-rules-cel-expression-grammar (Slice 04+, ADR-065): a
@@ -357,22 +397,21 @@ fn detect_unsupported_construct(source: &str) -> Option<ConditionParseError> {
             }
             let ident: String = chars[start..i].iter().collect();
             if i < chars.len() && chars[i] == '(' {
-                if ident == "duration.value" {
+                // security-rules-cel-cross-document-reads (Slice 01,
+                // ADR-066): `get`/`exists` are exempted from this scan's
+                // own unconditional rejection — the SAME "duration.value"
+                // precedent (4c, ADR-065) — a real construct now, parsed
+                // by the tokenizer's own dedicated `exists(`/`get(` scan,
+                // never reachable here as a `CustomFunction`/
+                // `CrossDocumentRead` false rejection.
+                if ident == "duration.value" || ident == "get" || ident == "exists" {
                     continue;
                 }
-                return Some(if ident == "get" || ident == "exists" {
-                    ConditionParseError::UnsupportedConstruct {
-                        construct: UnsupportedConstruct::CrossDocumentRead,
-                        detail: "cross-document reads (get()/exists()) are not supported in v1"
-                            .to_string(),
-                    }
-                } else {
-                    ConditionParseError::UnsupportedConstruct {
-                        construct: UnsupportedConstruct::CustomFunction,
-                        detail: format!(
-                            "custom function calls ('{ident}(...)') are not supported in v1"
-                        ),
-                    }
+                return Some(ConditionParseError::UnsupportedConstruct {
+                    construct: UnsupportedConstruct::CustomFunction,
+                    detail: format!(
+                        "custom function calls ('{ident}(...)') are not supported in v1"
+                    ),
                 });
             }
             continue;
@@ -420,6 +459,52 @@ enum Token {
     /// vs. `duration.value`'s own 2nd argument only) and no domain example
     /// anywhere needs a single-quoted STRING OPERAND.
     SingleQuotedUnit(String),
+    /// `exists(<raw path text>)` — security-rules-cel-cross-document-reads
+    /// (Slice 01, ADR-066). The path argument is scanned as raw text (a
+    /// dedicated whole-construct scan, never through the general
+    /// tokenizer — `/`/`$`/`(` inside a path have no meaning anywhere
+    /// else in this grammar), parsed into a `PathTemplate` separately.
+    ExistsCall(String),
+    /// `get(<raw path text>).data.<field>` — Slice 02, ADR-066. The
+    /// `.data.<field>` suffix is bundled into the SAME token (required
+    /// syntax, never a separate operand position).
+    GetCall(String, String),
+}
+
+/// security-rules-cel-cross-document-reads (Slice 01, ADR-066): does
+/// `chars[pos..]` start with `needle`? Bounds-safe (never panics on a
+/// `pos` near the end of `chars`).
+fn starts_with_at(chars: &[char], pos: usize, needle: &str) -> bool {
+    let needle_chars: Vec<char> = needle.chars().collect();
+    if pos + needle_chars.len() > chars.len() {
+        return false;
+    }
+    chars[pos..pos + needle_chars.len()] == needle_chars[..]
+}
+
+/// security-rules-cel-cross-document-reads (Slice 01, ADR-066): `start`
+/// points just past an already-consumed opening `(`; returns the index of
+/// its matching `)`, honoring nested parens (a path template's own `$(...)`
+/// substitutions nest one level deep). `Err` on an unterminated construct.
+fn find_matching_paren(chars: &[char], start: usize) -> Result<usize, ConditionParseError> {
+    let mut depth = 1;
+    let mut i = start;
+    while i < chars.len() {
+        match chars[i] {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(syntax_error(format!(
+        "unterminated '(' starting search at position {start}"
+    )))
 }
 
 fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
@@ -555,6 +640,47 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
                 tokens.push(Token::Minus);
                 i += 1;
             }
+            // security-rules-cel-cross-document-reads (Slice 01/02,
+            // ADR-066): `exists(...)`/`get(...).data.<field>` — a
+            // DEDICATED whole-construct scan, checked BEFORE the general
+            // alphabetic-identifier scan below (otherwise `exists`/`get`
+            // would just tokenize as an ordinary `Word`). `/`/`$`/`(`
+            // inside the path argument have no meaning anywhere else in
+            // this grammar, so the argument is captured as raw text here,
+            // parsed into a `PathTemplate` separately (`parse_path_
+            // template`), never through the general tokenizer.
+            _ if starts_with_at(&chars, i, "exists(") => {
+                let path_start = i + "exists(".len();
+                let close = find_matching_paren(&chars, path_start)?;
+                let raw_path: String = chars[path_start..close].iter().collect();
+                tokens.push(Token::ExistsCall(raw_path));
+                i = close + 1;
+            }
+            _ if starts_with_at(&chars, i, "get(") => {
+                let path_start = i + "get(".len();
+                let close = find_matching_paren(&chars, path_start)?;
+                let raw_path: String = chars[path_start..close].iter().collect();
+                let mut j = close + 1;
+                const SUFFIX: &str = ".data.";
+                if !starts_with_at(&chars, j, SUFFIX) {
+                    return Err(syntax_error(
+                        "expected '.data.<field>' immediately after 'get(...)'",
+                    ));
+                }
+                j += SUFFIX.len();
+                let field_start = j;
+                while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                if j == field_start {
+                    return Err(syntax_error(
+                        "expected a field name after 'get(...).data.'",
+                    ));
+                }
+                let field: String = chars[field_start..j].iter().collect();
+                tokens.push(Token::GetCall(raw_path, field));
+                i = j;
+            }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
                 while i < chars.len()
@@ -628,6 +754,83 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
         }
     }
     Ok(tokens)
+}
+
+/// security-rules-cel-cross-document-reads (Slice 01, ADR-066 § Decision
+/// — Path-Template Parser): parses `/databases/$(database)/documents/
+/// <segments>` raw path text (as scanned by the tokenizer's own `exists(`/
+/// `get(` branches) into a `PathTemplate`. The `/databases/$(database)/
+/// documents/` prefix is REQUIRED, structurally checked and discarded —
+/// `$(database)` always resolves to the current `project_id`, never
+/// stored as a segment (ADR-066's own explicit choice). Any `$(...)`
+/// content beyond `request.auth.uid`/`request.path.<var>` (Resolution 3
+/// — a nested `get()`, an arbitrary expression) is a NAMED
+/// `UnsupportedExpressionGrammar` rejection, never silently mis-parsed.
+///
+/// Splitting naively on `/` is sufficient given Resolution 2's own
+/// locked "no chaining" scope: a nested `get(...)`/`exists(...)` inside
+/// `$(...)` (whose own path argument ALSO contains `/`) produces a
+/// malformed-looking segment like `"$(get("` — caught by the `contains
+/// ('$')` fallback below as "not a well-formed substitution", the SAME
+/// named rejection a cleaner, chaining-aware parser would produce. Never
+/// silently misparsed as a valid literal segment, never a panic — proven
+/// directly (`cp04_reject_out_of_scope_imports.rs`'s own superseded-
+/// scenario test, `security-rules-cel-parity`).
+fn parse_path_template(raw_path: &str) -> Result<PathTemplate, ConditionParseError> {
+    let all_segments: Vec<&str> = raw_path.split('/').filter(|s| !s.is_empty()).collect();
+    let expected_prefix = ["databases", "$(database)", "documents"];
+    if all_segments.len() < expected_prefix.len()
+        || all_segments[..expected_prefix.len()] != expected_prefix
+    {
+        return Err(syntax_error(
+            "a get()/exists() path must start with '/databases/$(database)/documents/'",
+        ));
+    }
+    if all_segments.len() == expected_prefix.len() {
+        return Err(syntax_error(
+            "a get()/exists() path must reference at least one collection/document segment",
+        ));
+    }
+    let mut segments = Vec::new();
+    for raw_segment in &all_segments[expected_prefix.len()..] {
+        if let Some(inner) = raw_segment.strip_prefix("$(").and_then(|s| s.strip_suffix(')')) {
+            match inner {
+                "request.auth.uid" => segments.push(PathTemplateSegment::AuthUid),
+                w if w.starts_with("request.path.") => {
+                    let name = &w["request.path.".len()..];
+                    if name.is_empty() {
+                        return Err(syntax_error(
+                            "'request.path.' inside '$(...)' requires a variable name",
+                        ));
+                    }
+                    segments.push(PathTemplateSegment::PathVariable(name.to_string()));
+                }
+                _ => {
+                    return Err(ConditionParseError::UnsupportedConstruct {
+                        construct: UnsupportedConstruct::UnsupportedExpressionGrammar,
+                        detail: format!(
+                            "'$({inner})' is not supported in a get()/exists() path — only \
+                             '$(request.auth.uid)' and '$(request.path.<var>)' are, in v1"
+                        ),
+                    })
+                }
+            }
+        } else if raw_segment.contains('$') {
+            // A malformed/partial substitution (e.g. a stray '$' not
+            // forming a well-shaped '$(...)') — named, not silently
+            // treated as a literal segment containing '$'.
+            return Err(ConditionParseError::UnsupportedConstruct {
+                construct: UnsupportedConstruct::UnsupportedExpressionGrammar,
+                detail: format!(
+                    "'{raw_segment}' is not a well-formed '$(...)' substitution in a \
+                     get()/exists() path"
+                ),
+            });
+        } else {
+            segments.push(PathTemplateSegment::Literal((*raw_segment).to_string()));
+        }
+    }
+    Ok(PathTemplate { segments })
 }
 
 fn word_to_operand(word: &str) -> Result<Operand, ConditionParseError> {
@@ -750,7 +953,24 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Condition::Literal(false))
             }
-            Some(Token::Word(_)) => self.parse_comparison(),
+            // security-rules-cel-cross-document-reads (Slice 01, ADR-066):
+            // a BARE `exists(...)` is itself boolean-valued (the ONE
+            // evidenced domain example — `allow read: if exists(...);`,
+            // never `exists(...) == true` explicitly) — mirrors `true`/
+            // `false`'s own special-cased shape exactly: consumed here,
+            // wrapped in an implicit `== true`, so `!exists(...)`
+            // (`parse_unary`'s own pre-existing `Not` wrapping) composes
+            // for free with zero new code. `exists(...) == false` or any
+            // other EXPLICIT comparison form remains reachable too, since
+            // `parse_base_operand` also handles `ExistsCall` — but that
+            // path is only reached from `parse_comparison`'s own operand
+            // position (i.e. as the RHS of some OTHER LHS), never as this
+            // condition's own first token (unevidenced, not built).
+            Some(Token::ExistsCall(_)) => {
+                let operand = self.parse_base_operand()?;
+                Ok(Condition::Compare(operand, CompareOp::Eq, Operand::BoolLiteral(true)))
+            }
+            Some(Token::Word(_)) | Some(Token::GetCall(..)) => self.parse_comparison(),
             _ => Err(syntax_error("expected a condition (operand, 'true'/'false', or '(')")),
         }
     }
@@ -802,6 +1022,19 @@ impl<'a> Parser<'a> {
             Some(Token::StringLiteral(s)) => Ok(Operand::StringLiteral(s.clone())),
             Some(Token::IntLiteral(v)) => Ok(Operand::IntLiteral(*v)),
             Some(Token::DoubleLiteral(v)) => Ok(Operand::DoubleLiteral(*v)),
+            // security-rules-cel-cross-document-reads (Slice 01/02,
+            // ADR-066): `exists(...)`/`get(...).data.<field>` — the raw
+            // path text the tokenizer already captured is parsed into a
+            // `PathTemplate` here, at PARSE time (never deferred to
+            // evaluation), consistent with every other operand's own
+            // eager-parse discipline.
+            Some(Token::ExistsCall(raw_path)) => {
+                Ok(Operand::CrossDocumentExists(parse_path_template(raw_path)?))
+            }
+            Some(Token::GetCall(raw_path, field)) => Ok(Operand::CrossDocumentGet(
+                parse_path_template(raw_path)?,
+                field.clone(),
+            )),
             _ => Err(syntax_error("expected an operand")),
         }
     }
@@ -992,6 +1225,19 @@ pub fn evaluate(
     // `RequestTime` closed via the existing `FieldMissing` short-circuit,
     // never a new control-flow shape.
     request_time: Option<&FieldValue>,
+    // security-rules-cel-cross-document-reads (Slice 01, US-01, ADR-066 §
+    // Decision — evaluate() Signature): NEW 8th parameter — the
+    // pre-fetched cross-document read results, keyed by the SAME concrete
+    // path strings `discover_cross_document_paths` produces. Mirrors
+    // `request_time`'s own zero-new-I/O precedent exactly (embyr-core
+    // itself never fetches — the caller pre-resolves and threads the
+    // result in): `&BTreeMap::new()` at every call site not yet wired
+    // fails `CrossDocumentExists`/`CrossDocumentGet` closed via the
+    // existing `FieldMissing` short-circuit (`CrossDocumentExists`
+    // resolves to `false`, never `FieldMissing`, matching real
+    // Firestore's own `exists()` always returning a clean boolean) — a
+    // condition with no cross-document operand is completely unaffected.
+    cross_document_reads: &BTreeMap<String, Option<FirestoreDocument>>,
 ) -> EvaluationOutcome {
     match eval_bool(
         condition,
@@ -1001,6 +1247,7 @@ pub fn evaluate(
         path_variable_value,
         ancestor_path_variable_values,
         request_time,
+        cross_document_reads,
     ) {
         Ok(true) => EvaluationOutcome::Allow,
         Ok(false) | Err(FieldMissing) => EvaluationOutcome::Deny,
@@ -1026,6 +1273,7 @@ fn eval_bool(
     path_variable_value: Option<&str>,
     ancestor_path_variable_values: &BTreeMap<String, String>,
     request_time: Option<&FieldValue>,
+    cross_document_reads: &BTreeMap<String, Option<FirestoreDocument>>,
 ) -> Result<bool, FieldMissing> {
     match condition {
         Condition::Literal(value) => Ok(*value),
@@ -1037,6 +1285,7 @@ fn eval_bool(
             path_variable_value,
             ancestor_path_variable_values,
             request_time,
+            cross_document_reads,
         )?),
         Condition::And(left, right) => Ok(eval_bool(
             left,
@@ -1046,6 +1295,7 @@ fn eval_bool(
             path_variable_value,
             ancestor_path_variable_values,
             request_time,
+            cross_document_reads,
         )? && eval_bool(
             right,
             auth,
@@ -1054,6 +1304,7 @@ fn eval_bool(
             path_variable_value,
             ancestor_path_variable_values,
             request_time,
+            cross_document_reads,
         )?),
         Condition::Or(left, right) => {
             // custom-claims (US-02, ADR-034, AC-17-142): a claim reference is
@@ -1079,6 +1330,7 @@ fn eval_bool(
                 path_variable_value,
                 ancestor_path_variable_values,
                 request_time,
+                cross_document_reads,
             );
             if let Ok(true) = left_result {
                 return Ok(true);
@@ -1091,6 +1343,7 @@ fn eval_bool(
                 path_variable_value,
                 ancestor_path_variable_values,
                 request_time,
+                cross_document_reads,
             );
             match (left_result, right_result) {
                 (_, Ok(true)) => Ok(true),
@@ -1109,6 +1362,7 @@ fn eval_bool(
                     path_variable_value,
                     ancestor_path_variable_values,
                     request_time,
+                    cross_document_reads,
                 )?;
                 Ok(match op {
                     CompareOp::Eq => equal,
@@ -1136,6 +1390,7 @@ fn eval_bool(
                     path_variable_value,
                     ancestor_path_variable_values,
                     request_time,
+                    cross_document_reads,
                 )?;
                 let right_value = resolve_field_value(
                     right,
@@ -1145,6 +1400,7 @@ fn eval_bool(
                     path_variable_value,
                     ancestor_path_variable_values,
                     request_time,
+                    cross_document_reads,
                 )?;
                 Ok(compare_relational(*op, &left_value, &right_value))
             }
@@ -1163,6 +1419,7 @@ fn eval_bool(
                 path_variable_value,
                 ancestor_path_variable_values,
                 request_time,
+                cross_document_reads,
             )?;
             let Operand::ListLiteral(items) = list else {
                 // Parser invariant: the RHS is always a ListLiteral —
@@ -1178,6 +1435,7 @@ fn eval_bool(
                     path_variable_value,
                     ancestor_path_variable_values,
                     request_time,
+                    cross_document_reads,
                 )
                 .map(|v| v == left_value)
                 .unwrap_or(false)
@@ -1203,6 +1461,7 @@ fn compare_operands(
     path_variable_value: Option<&str>,
     ancestor_path_variable_values: &BTreeMap<String, String>,
     request_time: Option<&FieldValue>,
+    cross_document_reads: &BTreeMap<String, Option<FirestoreDocument>>,
 ) -> Result<bool, FieldMissing> {
     match (left, right) {
         (Operand::AuthUid, Operand::ResourceField(name))
@@ -1235,6 +1494,7 @@ fn compare_operands(
                 path_variable_value,
                 ancestor_path_variable_values,
                 request_time,
+                cross_document_reads,
             )?;
             let right_value = resolve_field_value(
                 right,
@@ -1244,6 +1504,7 @@ fn compare_operands(
                 path_variable_value,
                 ancestor_path_variable_values,
                 request_time,
+                cross_document_reads,
             )?;
             Ok(left_value == right_value)
         }
@@ -1258,6 +1519,7 @@ fn resolve_field_value(
     path_variable_value: Option<&str>,
     ancestor_path_variable_values: &BTreeMap<String, String>,
     request_time: Option<&FieldValue>,
+    cross_document_reads: &BTreeMap<String, Option<FirestoreDocument>>,
 ) -> Result<FieldValue, FieldMissing> {
     match operand {
         Operand::ResourceField(name) => resource_fields.get(name).cloned().ok_or(FieldMissing),
@@ -1339,6 +1601,7 @@ fn resolve_field_value(
                 path_variable_value,
                 ancestor_path_variable_values,
                 request_time,
+                cross_document_reads,
             )?;
             match (&left_value, right.as_ref()) {
                 (FieldValue::Timestamp(secs, nanos), Operand::DurationLiteral(amount, unit)) => {
@@ -1358,6 +1621,7 @@ fn resolve_field_value(
                         path_variable_value,
                         ancestor_path_variable_values,
                         request_time,
+                        cross_document_reads,
                     )?;
                     match (&left_value, &right_value) {
                         (FieldValue::Integer(l), FieldValue::Integer(r)) => {
@@ -1387,6 +1651,237 @@ fn resolve_field_value(
         // is unreachable in practice — falls closed defensively, mirroring
         // `ListLiteral`'s own identical discipline above.
         Operand::DurationLiteral(_, _) => Err(FieldMissing),
+        // security-rules-cel-cross-document-reads (Slice 01, ADR-066 §
+        // Decision — evaluate() comparison logic): resolves the template
+        // via the SAME `resolve_path_template` helper `discover_cross_
+        // document_paths` already uses (never a second, divergent
+        // resolution routine), looks up the pre-fetched map. A resolved
+        // template ALWAYS produces a definite boolean, never `FieldMissing`
+        // — mirrors real Firestore's own `exists()` always returning a
+        // clean true/false (independently web-verified, DISCUSS § Reading
+        // Confirmation).
+        Operand::CrossDocumentExists(template) => {
+            let path = resolve_path_template(
+                template,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+            )?;
+            Ok(FieldValue::Boolean(
+                cross_document_reads.get(&path).is_some_and(|doc| doc.is_some()),
+            ))
+        }
+        // A missing document, or a document missing the named field, both
+        // fail closed via FieldMissing — the IDENTICAL mechanism AC-17-09
+        // already uses for any other missing field, zero new control-flow
+        // shape (independently web-verified: real Firestore's own `get()`
+        // -then-`.data` access on a nonexistent document throws, which
+        // composes with real Firestore's own fail-closed-on-error
+        // semantics to the SAME Deny outcome).
+        Operand::CrossDocumentGet(template, field) => {
+            let path = resolve_path_template(
+                template,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+            )?;
+            cross_document_reads
+                .get(&path)
+                .and_then(|doc| doc.as_ref())
+                .and_then(|doc| doc.fields.get(field))
+                .cloned()
+                .ok_or(FieldMissing)
+        }
+    }
+}
+
+/// security-rules-cel-cross-document-reads (Slice 01, ADR-066 § Decision
+/// — Path-Template Parser): resolves a `PathTemplate`'s own segments
+/// against already-known bindings into a concrete path string (e.g.
+/// `"organizations/uid123"`) — the SHARED helper both
+/// `resolve_field_value` (during real evaluation) and
+/// `discover_cross_document_paths` (before evaluation, to know what to
+/// fetch) call, never a second, divergent resolution routine (ADR-066 §
+/// Decision — Fetch). `Err(FieldMissing)` when a substitution's own
+/// binding is absent (e.g. `$(request.auth.uid)` with an anonymous
+/// caller) — the SAME fail-closed shape every other operand family
+/// already uses.
+fn resolve_path_template(
+    template: &PathTemplate,
+    auth: Option<&AuthContext>,
+    path_variable_value: Option<&str>,
+    ancestor_path_variable_values: &BTreeMap<String, String>,
+) -> Result<String, FieldMissing> {
+    let mut parts = Vec::with_capacity(template.segments.len());
+    for segment in &template.segments {
+        match segment {
+            PathTemplateSegment::Literal(s) => parts.push(s.clone()),
+            PathTemplateSegment::AuthUid => {
+                parts.push(auth.ok_or(FieldMissing)?.uid.clone());
+            }
+            PathTemplateSegment::PathVariable(name) => {
+                let value = ancestor_path_variable_values
+                    .get(name)
+                    .cloned()
+                    .or_else(|| path_variable_value.map(|v| v.to_string()))
+                    .ok_or(FieldMissing)?;
+                parts.push(value);
+            }
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+/// security-rules-cel-cross-document-reads (Slice 01, US-01, ADR-066 §
+/// Decision — Path-Discovery): walks a parsed `Condition` tree, resolving
+/// every `CrossDocumentExists`/`CrossDocumentGet` operand's own
+/// `PathTemplate` (via the SAME `resolve_path_template` helper
+/// `resolve_field_value` itself calls during real evaluation) into the
+/// SET of distinct concrete paths a real evaluation will need — so the
+/// caller (`embyr-server`, which has I/O) knows what to fetch BEFORE ever
+/// calling `evaluate()`. `pub`, not `pub(crate)`: the ONE function in
+/// this feature that must be called cross-crate, mirroring why
+/// `evaluate()`/`parse_condition` are already `pub`.
+///
+/// Deliberately INFALLIBLE (`BTreeSet<String>`, never a `Result`) — a
+/// template segment that cannot resolve here (e.g. `$(request.auth.uid)`
+/// against an anonymous caller) is simply SKIPPED, adding nothing to the
+/// returned set. The real fail-closed decision is made later, uniformly,
+/// by `evaluate()` itself hitting the IDENTICAL unresolvable-segment case
+/// via `resolve_field_value`'s own `FieldMissing` short-circuit — never a
+/// second, discovery-time-only error path. A `Condition` with zero
+/// cross-document operands anywhere returns an empty set immediately,
+/// zero cost on the hot path (ADR-066 § Decision Driver 4).
+pub fn discover_cross_document_paths(
+    condition: &Condition,
+    auth: Option<&AuthContext>,
+    path_variable_value: Option<&str>,
+    ancestor_path_variable_values: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    walk_condition_for_cross_document_paths(
+        condition,
+        auth,
+        path_variable_value,
+        ancestor_path_variable_values,
+        &mut paths,
+    );
+    paths
+}
+
+fn walk_condition_for_cross_document_paths(
+    condition: &Condition,
+    auth: Option<&AuthContext>,
+    path_variable_value: Option<&str>,
+    ancestor_path_variable_values: &BTreeMap<String, String>,
+    paths: &mut BTreeSet<String>,
+) {
+    match condition {
+        Condition::Literal(_) => {}
+        Condition::Not(inner) => walk_condition_for_cross_document_paths(
+            inner,
+            auth,
+            path_variable_value,
+            ancestor_path_variable_values,
+            paths,
+        ),
+        Condition::And(left, right) | Condition::Or(left, right) => {
+            walk_condition_for_cross_document_paths(
+                left,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+                paths,
+            );
+            walk_condition_for_cross_document_paths(
+                right,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+                paths,
+            );
+        }
+        Condition::Compare(left, _, right) => {
+            walk_operand_for_cross_document_paths(
+                left,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+                paths,
+            );
+            walk_operand_for_cross_document_paths(
+                right,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+                paths,
+            );
+        }
+        Condition::In(left, list) => {
+            walk_operand_for_cross_document_paths(
+                left,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+                paths,
+            );
+            walk_operand_for_cross_document_paths(
+                list,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+                paths,
+            );
+        }
+    }
+}
+
+fn walk_operand_for_cross_document_paths(
+    operand: &Operand,
+    auth: Option<&AuthContext>,
+    path_variable_value: Option<&str>,
+    ancestor_path_variable_values: &BTreeMap<String, String>,
+    paths: &mut BTreeSet<String>,
+) {
+    match operand {
+        Operand::CrossDocumentExists(template) | Operand::CrossDocumentGet(template, _) => {
+            if let Ok(path) = resolve_path_template(
+                template,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+            ) {
+                paths.insert(path);
+            }
+        }
+        Operand::Arithmetic(left, _, right) => {
+            walk_operand_for_cross_document_paths(
+                left,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+                paths,
+            );
+            walk_operand_for_cross_document_paths(
+                right,
+                auth,
+                path_variable_value,
+                ancestor_path_variable_values,
+                paths,
+            );
+        }
+        Operand::ListLiteral(items) => {
+            for item in items {
+                walk_operand_for_cross_document_paths(
+                    item,
+                    auth,
+                    path_variable_value,
+                    ancestor_path_variable_values,
+                    paths,
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1745,21 +2240,47 @@ mod tests {
         assert_eq!(result, Ok(Condition::Literal(true)));
     }
 
+    /// SUPERSEDED SCENARIO NOTE (found during `security-rules-cel-
+    /// cross-document-reads` Slice 01): this test originally asserted that
+    /// ANY `get()`/`exists()` call was unconditionally rejected as
+    /// `CrossDocumentRead` (AC-17-03). That assumption was true under 4a's
+    /// own locked v1 scope but is INTENTIONALLY superseded here (ADR-066,
+    /// Resolution 1): a narrowly-scoped, single-level `get()`/`exists()`
+    /// idiom is now a supported, first-class construct. The bare
+    /// `CrossDocumentRead` rejection construct this test asserted no
+    /// longer exists in the implementation (mirrors
+    /// `security-rules-cel-recursive-wildcards`' own "superseded, not
+    /// silently deleted" precedent, `cp04_reject_out_of_scope_imports.rs`)
+    /// — repurposed to lock the NEW behavior: a well-formed `exists(...)`
+    /// call now parses successfully; a MALFORMED path (missing the
+    /// required `$(database)` prefix, this test's own original fixture
+    /// text) is a plain `SyntaxError`, never a special construct.
     #[test]
-    fn cross_document_read_call_syntax_is_rejected_as_unsupported_not_syntax_error() {
-        // AC-17-03: `get()`/`exists()` must be a NAMED unsupported
-        // construct, distinguishable from a plain syntax error (AC-17-04).
+    fn a_well_formed_exists_call_parses_successfully_superseding_the_original_rejection() {
         let result = parse_condition(
-            "get(/databases/(default)/documents/users/$(request.auth.uid)) != null",
+            "exists(/databases/$(database)/documents/organizations/$(request.auth.uid))",
         );
         assert_eq!(
             result,
-            Err(ConditionParseError::UnsupportedConstruct {
-                construct: UnsupportedConstruct::CrossDocumentRead,
-                detail: "cross-document reads (get()/exists()) are not supported in v1"
-                    .to_string(),
-            })
+            Ok(Condition::Compare(
+                Operand::CrossDocumentExists(PathTemplate {
+                    segments: vec![
+                        PathTemplateSegment::Literal("organizations".to_string()),
+                        PathTemplateSegment::AuthUid,
+                    ],
+                }),
+                CompareOp::Eq,
+                Operand::BoolLiteral(true),
+            ))
         );
+    }
+
+    #[test]
+    fn a_malformed_cross_document_path_missing_the_database_prefix_is_a_syntax_error() {
+        let result = parse_condition(
+            "get(/databases/(default)/documents/users/$(request.auth.uid)).data.role != null",
+        );
+        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
     }
 
     #[test]
@@ -2009,7 +2530,7 @@ mod tests {
                     Operand::IntLiteral(b),
                 );
                 let outcome =
-                    evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None);
+                    evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new());
                 assert_eq!(
                     outcome,
                     if expected { EvaluationOutcome::Allow } else { EvaluationOutcome::Deny },
@@ -2028,7 +2549,7 @@ mod tests {
             Operand::IntLiteral(20),
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2116,7 +2637,7 @@ mod tests {
             ]),
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow
         );
     }
@@ -2132,7 +2653,7 @@ mod tests {
             ]),
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2280,7 +2801,7 @@ mod tests {
             Operand::RequestTime,
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), Some(&now)),
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), Some(&now), &BTreeMap::new()),
             EvaluationOutcome::Allow
         );
     }
@@ -2300,7 +2821,7 @@ mod tests {
             Operand::RequestTime,
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), Some(&now)),
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), Some(&now), &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2310,7 +2831,7 @@ mod tests {
         let resource = resource_with("created_at", FieldValue::Timestamp(1_000_000, 0));
         let condition = Condition::Compare(Operand::RequestTime, CompareOp::Gt, Operand::ResourceField("created_at".to_string()));
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2321,6 +2842,400 @@ mod tests {
         assert_eq!(DurationUnit::Minutes.as_seconds(2), 120);
         assert_eq!(DurationUnit::Hours.as_seconds(3), 10800);
         assert_eq!(DurationUnit::Days.as_seconds(1), 86400);
+    }
+
+    // ── parse_condition: get()/exists() cross-document reads ──
+    // (security-rules-cel-cross-document-reads, Slice 01, US-01, ADR-066)
+
+    #[test]
+    fn get_data_field_access_parses_into_a_cross_document_get_ast() {
+        let result = parse_condition(
+            "get(/databases/$(database)/documents/organizations/$(request.auth.uid)).data.role \
+             == \"admin\"",
+        );
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::CrossDocumentGet(
+                    PathTemplate {
+                        segments: vec![
+                            PathTemplateSegment::Literal("organizations".to_string()),
+                            PathTemplateSegment::AuthUid,
+                        ],
+                    },
+                    "role".to_string(),
+                ),
+                CompareOp::Eq,
+                Operand::StringLiteral("admin".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn request_path_variable_substitution_parses_correctly() {
+        let result = parse_condition(
+            "exists(/databases/$(database)/documents/expeditions/$(request.path.expeditionId))",
+        );
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::CrossDocumentExists(PathTemplate {
+                    segments: vec![
+                        PathTemplateSegment::Literal("expeditions".to_string()),
+                        PathTemplateSegment::PathVariable("expeditionId".to_string()),
+                    ],
+                }),
+                CompareOp::Eq,
+                Operand::BoolLiteral(true),
+            ))
+        );
+    }
+
+    #[test]
+    fn a_path_missing_the_required_prefix_is_a_syntax_error() {
+        let result = parse_condition("exists(/organizations/$(request.auth.uid))");
+        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+    }
+
+    #[test]
+    fn a_substitution_beyond_auth_uid_or_path_variable_is_a_named_rejection() {
+        // Resolution 2: chaining (a nested get() feeding another path) is
+        // out of this feature's own locked scope — named, not silently
+        // mis-parsed.
+        let result = parse_condition(
+            "exists(/databases/$(database)/documents/orgs/\
+             $(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.orgId))",
+        );
+        match result {
+            Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
+                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+            }
+            other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_without_a_data_field_suffix_is_a_syntax_error() {
+        let result = parse_condition("get(/databases/$(database)/documents/organizations/x) == null");
+        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+    }
+
+    // ── evaluate: get()/exists() cross-document reads ──
+    // (security-rules-cel-cross-document-reads, Slice 01/02, ADR-066)
+
+    fn org_doc(fields: BTreeMap<String, FieldValue>) -> FirestoreDocument {
+        FirestoreDocument {
+            path: crate::domain::document::DocumentPath {
+                project_id: crate::domain::project::ProjectId("test-project".to_string()),
+                collection_path: "organizations".to_string(),
+                document_id: "maria-santos".to_string(),
+            },
+            fields,
+            create_time: (0, 0),
+            update_time: (0, 0),
+            version: 1,
+        }
+    }
+
+    #[test]
+    fn exists_resolves_true_when_the_referenced_document_is_present() {
+        let condition = Condition::Compare(
+            Operand::CrossDocumentExists(PathTemplate {
+                segments: vec![
+                    PathTemplateSegment::Literal("organizations".to_string()),
+                    PathTemplateSegment::AuthUid,
+                ],
+            }),
+            CompareOp::Eq,
+            Operand::BoolLiteral(true),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let mut cross_document_reads = BTreeMap::new();
+        cross_document_reads.insert(
+            "organizations/maria-santos".to_string(),
+            Some(org_doc(BTreeMap::new())),
+        );
+        assert_eq!(
+            evaluate(
+                &condition,
+                Some(&auth),
+                &empty_fields(),
+                &empty_fields(),
+                None,
+                &BTreeMap::new(),
+                None,
+                &cross_document_reads,
+            ),
+            EvaluationOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn exists_resolves_false_when_the_referenced_document_is_absent() {
+        let condition = Condition::Compare(
+            Operand::CrossDocumentExists(PathTemplate {
+                segments: vec![
+                    PathTemplateSegment::Literal("organizations".to_string()),
+                    PathTemplateSegment::AuthUid,
+                ],
+            }),
+            CompareOp::Eq,
+            Operand::BoolLiteral(true),
+        );
+        let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        // "organizations/dana-kim" is deliberately absent from the map —
+        // mirrors a real backend fetch that found nothing.
+        let cross_document_reads = BTreeMap::new();
+        assert_eq!(
+            evaluate(
+                &condition,
+                Some(&auth),
+                &empty_fields(),
+                &empty_fields(),
+                None,
+                &BTreeMap::new(),
+                None,
+                &cross_document_reads,
+            ),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn exists_denies_when_auth_is_none_the_auth_uid_substitution_cannot_resolve() {
+        let condition = Condition::Compare(
+            Operand::CrossDocumentExists(PathTemplate {
+                segments: vec![
+                    PathTemplateSegment::Literal("organizations".to_string()),
+                    PathTemplateSegment::AuthUid,
+                ],
+            }),
+            CompareOp::Eq,
+            Operand::BoolLiteral(true),
+        );
+        assert_eq!(
+            evaluate(
+                &condition,
+                None,
+                &empty_fields(),
+                &empty_fields(),
+                None,
+                &BTreeMap::new(),
+                None,
+                &BTreeMap::new(),
+            ),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn get_data_field_resolves_the_real_value_when_present() {
+        let condition = Condition::Compare(
+            Operand::CrossDocumentGet(
+                PathTemplate {
+                    segments: vec![
+                        PathTemplateSegment::Literal("organizations".to_string()),
+                        PathTemplateSegment::AuthUid,
+                    ],
+                },
+                "role".to_string(),
+            ),
+            CompareOp::Eq,
+            Operand::StringLiteral("admin".to_string()),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let mut cross_document_reads = BTreeMap::new();
+        let mut fields = BTreeMap::new();
+        fields.insert("role".to_string(), FieldValue::String("admin".to_string()));
+        cross_document_reads
+            .insert("organizations/maria-santos".to_string(), Some(org_doc(fields)));
+        assert_eq!(
+            evaluate(
+                &condition,
+                Some(&auth),
+                &empty_fields(),
+                &empty_fields(),
+                None,
+                &BTreeMap::new(),
+                None,
+                &cross_document_reads,
+            ),
+            EvaluationOutcome::Allow
+        );
+    }
+
+    /// AC-CDR-07: `get()` on a missing document fails closed via the
+    /// existing `FieldMissing` mechanism — never a panic.
+    #[test]
+    fn get_data_field_denies_when_the_referenced_document_is_missing() {
+        let condition = Condition::Compare(
+            Operand::CrossDocumentGet(
+                PathTemplate {
+                    segments: vec![
+                        PathTemplateSegment::Literal("organizations".to_string()),
+                        PathTemplateSegment::AuthUid,
+                    ],
+                },
+                "role".to_string(),
+            ),
+            CompareOp::Eq,
+            Operand::StringLiteral("admin".to_string()),
+        );
+        let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        let cross_document_reads = BTreeMap::new();
+        assert_eq!(
+            evaluate(
+                &condition,
+                Some(&auth),
+                &empty_fields(),
+                &empty_fields(),
+                None,
+                &BTreeMap::new(),
+                None,
+                &cross_document_reads,
+            ),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    /// AC-CDR-08: the referenced document exists but the field is absent
+    /// or mismatched — an ordinary comparison-mismatch Deny.
+    #[test]
+    fn get_data_field_denies_when_the_field_is_present_but_mismatched() {
+        let condition = Condition::Compare(
+            Operand::CrossDocumentGet(
+                PathTemplate {
+                    segments: vec![
+                        PathTemplateSegment::Literal("organizations".to_string()),
+                        PathTemplateSegment::AuthUid,
+                    ],
+                },
+                "role".to_string(),
+            ),
+            CompareOp::Eq,
+            Operand::StringLiteral("admin".to_string()),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let mut cross_document_reads = BTreeMap::new();
+        let mut fields = BTreeMap::new();
+        fields.insert("role".to_string(), FieldValue::String("member".to_string()));
+        cross_document_reads
+            .insert("organizations/maria-santos".to_string(), Some(org_doc(fields)));
+        assert_eq!(
+            evaluate(
+                &condition,
+                Some(&auth),
+                &empty_fields(),
+                &empty_fields(),
+                None,
+                &BTreeMap::new(),
+                None,
+                &cross_document_reads,
+            ),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    // ── discover_cross_document_paths (Slice 01/03, ADR-066) ──
+
+    #[test]
+    fn discover_returns_empty_set_for_a_condition_with_no_cross_document_operand() {
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let paths = discover_cross_document_paths(&condition, None, None, &BTreeMap::new());
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn discover_finds_a_single_referenced_path() {
+        let condition = Condition::Compare(
+            Operand::CrossDocumentExists(PathTemplate {
+                segments: vec![
+                    PathTemplateSegment::Literal("organizations".to_string()),
+                    PathTemplateSegment::AuthUid,
+                ],
+            }),
+            CompareOp::Eq,
+            Operand::BoolLiteral(true),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let paths = discover_cross_document_paths(&condition, Some(&auth), None, &BTreeMap::new());
+        assert_eq!(paths.len(), 1);
+        assert!(paths.contains("organizations/maria-santos"));
+    }
+
+    /// AC-CDR-09/10 (the pure half — the real adapter-call-count proof is
+    /// an acceptance test, US-03): the SAME path referenced by BOTH
+    /// `exists()` and `get()` in one condition discovers as ONE distinct
+    /// path (`BTreeSet`'s own dedup); two DIFFERENT paths discover as two.
+    #[test]
+    fn discover_deduplicates_the_same_path_referenced_twice() {
+        let template = PathTemplate {
+            segments: vec![
+                PathTemplateSegment::Literal("organizations".to_string()),
+                PathTemplateSegment::AuthUid,
+            ],
+        };
+        let condition = Condition::And(
+            Box::new(Condition::Compare(
+                Operand::CrossDocumentExists(template.clone()),
+                CompareOp::Eq,
+                Operand::BoolLiteral(true),
+            )),
+            Box::new(Condition::Compare(
+                Operand::CrossDocumentGet(template, "role".to_string()),
+                CompareOp::Eq,
+                Operand::StringLiteral("admin".to_string()),
+            )),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let paths = discover_cross_document_paths(&condition, Some(&auth), None, &BTreeMap::new());
+        assert_eq!(paths.len(), 1, "the identical path must be discovered ONCE, not twice");
+    }
+
+    #[test]
+    fn discover_finds_two_distinct_paths_separately() {
+        let condition = Condition::And(
+            Box::new(Condition::Compare(
+                Operand::CrossDocumentExists(PathTemplate {
+                    segments: vec![PathTemplateSegment::Literal("organizations/a".to_string())],
+                }),
+                CompareOp::Eq,
+                Operand::BoolLiteral(true),
+            )),
+            Box::new(Condition::Compare(
+                Operand::CrossDocumentExists(PathTemplate {
+                    segments: vec![PathTemplateSegment::Literal("organizations/b".to_string())],
+                }),
+                CompareOp::Eq,
+                Operand::BoolLiteral(true),
+            )),
+        );
+        let paths = discover_cross_document_paths(&condition, None, None, &BTreeMap::new());
+        assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn discover_silently_skips_an_unresolvable_template_no_panic_no_error() {
+        // No auth -> $(request.auth.uid) cannot resolve. discover_cross_
+        // document_paths is infallible (never a Result) — the real
+        // fail-closed decision happens later, uniformly, inside
+        // evaluate() itself.
+        let condition = Condition::Compare(
+            Operand::CrossDocumentExists(PathTemplate {
+                segments: vec![
+                    PathTemplateSegment::Literal("organizations".to_string()),
+                    PathTemplateSegment::AuthUid,
+                ],
+            }),
+            CompareOp::Eq,
+            Operand::BoolLiteral(true),
+        );
+        let paths = discover_cross_document_paths(&condition, None, None, &BTreeMap::new());
+        assert!(paths.is_empty());
     }
 
     // ── evaluate: the four-way truth table DISCUSS's domain examples exercise ──
@@ -2335,7 +3250,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Allow);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Allow);
     }
 
     #[test]
@@ -2348,7 +3263,7 @@ mod tests {
         let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
     }
 
     #[test]
@@ -2361,7 +3276,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new(); // owner_id absent
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
     }
 
     // ── evaluate: request.resource.data.<field> (security-rules-write-path, ADR-030) ──
@@ -2381,7 +3296,7 @@ mod tests {
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow
         );
     }
@@ -2400,7 +3315,7 @@ mod tests {
         let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2421,7 +3336,7 @@ mod tests {
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2436,14 +3351,14 @@ mod tests {
         );
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-        assert_eq!(evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
+        assert_eq!(evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
     }
 
     #[test]
     fn bare_true_literal_allows_regardless_of_auth_or_resource_ac_17_12() {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
         assert_eq!(
-            evaluate(&Condition::Literal(true), None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&Condition::Literal(true), None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow
         );
     }
@@ -2475,7 +3390,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow
         );
     }
@@ -2489,7 +3404,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2504,7 +3419,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2514,7 +3429,7 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&is_moderator_condition(), None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny
         );
     }
@@ -2539,7 +3454,7 @@ mod tests {
             claims: claims_with("is_moderator", FieldValue::Boolean(true)),
         };
         assert_eq!(
-            evaluate(&condition, Some(&priya), &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&priya), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow,
             "a moderator must be admitted via the claim disjunct"
         );
@@ -2547,7 +3462,7 @@ mod tests {
         // Maria: satisfies the ownership disjunct, has no moderator claim.
         let maria = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
         assert_eq!(
-            evaluate(&condition, Some(&maria), &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&maria), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow,
             "the document owner must be admitted via the ownership disjunct"
         );
@@ -2555,7 +3470,7 @@ mod tests {
         // Dana: satisfies neither disjunct.
         let dana = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
         assert_eq!(
-            evaluate(&condition, Some(&dana), &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&dana), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny,
             "neither a moderator nor the owner — must deny"
         );
@@ -2580,7 +3495,7 @@ mod tests {
         let matching_ticket =
             resource_with("department", FieldValue::String("billing".to_string()));
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &matching_ticket, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&jordan), &matching_ticket, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow,
             "AC-17-143: matching department claim/field must allow"
         );
@@ -2588,7 +3503,7 @@ mod tests {
         let other_ticket =
             resource_with("department", FieldValue::String("engineering".to_string()));
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny,
             "AC-17-143: mismatched department claim/field must deny"
         );
@@ -2616,7 +3531,7 @@ mod tests {
             claims: claims_with("department", FieldValue::String("billing".to_string())),
         };
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&jordan), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow,
             "AC-17-151: a matching department claim/string-literal must allow"
         );
@@ -2626,7 +3541,7 @@ mod tests {
             claims: claims_with("department", FieldValue::String("engineering".to_string())),
         };
         assert_eq!(
-            evaluate(&condition, Some(&sam), &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, Some(&sam), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Deny,
             "AC-17-151: a mismatched department claim/string-literal must deny"
         );
@@ -2644,7 +3559,7 @@ mod tests {
         let resource = resource_with("status", FieldValue::String("published".to_string()));
 
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
             EvaluationOutcome::Allow,
             "AC-17-152: a matching resource-field/string-literal comparison must allow, \
              independent of any claim or verified caller"
@@ -2674,7 +3589,7 @@ mod tests {
             let auth = AuthContext { uid, claims: BTreeMap::new() };
             let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
         }
 
         /// Property (AC-17-10's underlying mechanism): for ANY
@@ -2698,7 +3613,7 @@ mod tests {
             let mut resource = resource_with("owner_id", FieldValue::String(owner_uid));
             resource.insert("title".to_string(), FieldValue::String(unrelated_value));
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
         }
     }
 

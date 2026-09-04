@@ -212,6 +212,27 @@ async fn multiple_offending_blocks_are_all_named_in_a_single_rejection_response(
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     ctx.insert_project("trailmark-prod").await;
 
+    // SUPERSEDED SCENARIO NOTE (found during `security-rules-cel-cross-
+    // document-reads` Slice 01, AC-CDR-01 full-baseline regression run):
+    // the 3rd `match` block below originally used
+    // `get(/databases/x/documents/users/y).data.admin` — a well-formed
+    // 4a-era CROSS_DOCUMENT_READ rejection fixture. That construct is
+    // INTENTIONALLY superseded (ADR-066, Resolution 1): a narrowly-scoped
+    // `get()`/`exists()` idiom is now a supported, first-class construct
+    // (confirmed directly via CDR01's own real enforcement test,
+    // AC-CDR-01/02, identical shape). The bare `CROSS_DOCUMENT_READ`
+    // rejection this test asserted no longer exists in the implementation
+    // (mirrors `security-rules-cel-recursive-wildcards`' own identical
+    // "superseded, not silently deleted" precedent applied to THIS SAME
+    // file already, `a_recursive_wildcard_path_is_now_accepted_
+    // superseding_the_original_rejection`, above). This test is
+    // repurposed to prove its OWN original claim ("every offending block
+    // in a multi-block rejection is named, not just the first") using a
+    // construct that IS still genuinely out of scope: chaining (a `get()`
+    // whose own path is built from ANOTHER `get()`'s own result,
+    // Resolution 2) — proven unsupported directly by CDR01's own unit
+    // test `a_substitution_beyond_auth_uid_or_path_variable_is_a_named_
+    // rejection`.
     let rules_file = r#"
         service cloud.firestore {
           match /databases/{database}/documents {
@@ -222,7 +243,7 @@ async fn multiple_offending_blocks_are_all_named_in_a_single_rejection_response(
               allow write: if isEditor();
             }
             match /journal_entries {
-              allow read: if get(/databases/x/documents/users/y).data.admin;
+              allow read: if exists(/databases/$(database)/documents/orgs/$(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.orgId));
             }
           }
         }
@@ -245,7 +266,10 @@ async fn multiple_offending_blocks_are_all_named_in_a_single_rejection_response(
     let constructs: Vec<&str> = offending.iter().map(|b| b["construct"].as_str().unwrap()).collect();
     assert!(constructs.contains(&"NESTED_PATH"), "AC-17-188 (within multi-block): {constructs:?}");
     assert!(constructs.contains(&"CUSTOM_FUNCTION"), "AC-17-190: custom function call: {constructs:?}");
-    assert!(constructs.contains(&"CROSS_DOCUMENT_READ"), "AC-17-190: get()/exists() call: {constructs:?}");
+    assert!(
+        constructs.contains(&"UNSUPPORTED_EXPRESSION_GRAMMAR"),
+        "AC-17-190 (superseded; see note above): a chained get() call: {constructs:?}"
+    );
 
     // AC-17-192: none of the 3 offending blocks' collections received a rule.
     for collection in ["expeditions", "trail_guides", "journal_entries"] {

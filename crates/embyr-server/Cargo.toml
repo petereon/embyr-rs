@@ -924,6 +924,11 @@ path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg06_times
 name = "security_rules_cel_expression_grammar_ceg07_timestamp_duration_read_and_simulation_parity"
 path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg07_timestamp_duration_read_and_simulation_parity.rs"
 
+# security-rules-cel-cross-document-reads (Slice 01, US-01, Release 1, Walking Skeleton). AC-CDR-01/02/03/04.
+[[test]]
+name = "security_rules_cel_cross_document_reads_cdr01_import_and_evaluate_exists_on_reads"
+path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr01_import_and_evaluate_exists_on_reads.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

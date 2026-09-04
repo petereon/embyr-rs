@@ -12,7 +12,7 @@ use tonic::{Request, Response, Status};
 use embyr_core::{
     auth::{argon2, blake3, ecies},
     domain::{
-        document::CollectionPath,
+        document::{CollectionPath, DocumentPath, FirestoreDocument},
         field_value::FieldValue,
         project::CredentialCacheKey,
         query::{
@@ -836,12 +836,65 @@ impl FirestoreService {
             // (OUT of this slice's scope).
             &std::collections::BTreeMap::new(),
             Some(&now_field),
+            // security-rules-cel-cross-document-reads (Slice 01, ADR-066):
+            // mechanical empty-map — the shared Commit write-path helper's
+            // own cross-document wiring is out of this slice's own locked
+            // scope (GetDocument only); revisit alongside Slice 04's own
+            // CreateDocument/UpdateDocument write-parity work if evidenced.
+            &std::collections::BTreeMap::new(),
         ) {
             embyr_core::access_control::EvaluationOutcome::Deny => {
                 Err(Status::permission_denied("access denied by write rule"))
             }
             embyr_core::access_control::EvaluationOutcome::Allow => Ok(()),
         }
+    }
+
+    /// security-rules-cel-cross-document-reads (Slice 01, ADR-066 §
+    /// Decision — Fetch): for each distinct path
+    /// `discover_cross_document_paths` returned, splits it into a
+    /// `DocumentPath` (the SAME last-segment-is-document-id split
+    /// `rules_file.rs`'s own ancestor/leaf discipline already uses) and
+    /// calls the EXISTING `get_document` unchanged — zero new port
+    /// method, zero new adapter capability. Sequential, not batched
+    /// (ADR-066 § Decision Driver 5 — real Firestore's own 10/20-read
+    /// ceiling and this feature's own single-level-only structural bound
+    /// both confirm the practical count per evaluation is small).
+    async fn fetch_cross_document_reads(
+        adapter: &SharedBackendAdapter,
+        project_id: &embyr_core::domain::project::ProjectId,
+        paths: &std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeMap<String, Option<FirestoreDocument>>, Status> {
+        let mut results = std::collections::BTreeMap::new();
+        for path in paths {
+            let (collection_path, document_id) = match path.rsplit_once('/') {
+                Some((collection, doc_id)) => (collection.to_string(), doc_id.to_string()),
+                None => {
+                    // A single-segment path (no '/' at all) has no
+                    // document-id position — never produced by a
+                    // well-formed `PathTemplate` (its own required
+                    // `/databases/$(database)/documents/` prefix, stripped
+                    // before storage, guarantees at least one collection
+                    // segment plus a document-id segment remain). Falls
+                    // closed (no document found) rather than panicking —
+                    // `evaluate()`'s own total-by-construction guarantee,
+                    // reapplied here at the fetch boundary.
+                    results.insert(path.clone(), None);
+                    continue;
+                }
+            };
+            let doc_path = DocumentPath {
+                project_id: project_id.clone(),
+                collection_path,
+                document_id,
+            };
+            let doc = adapter
+                .get_document(&doc_path)
+                .await
+                .map_err(core_error_to_status)?;
+            results.insert(path.clone(), doc);
+        }
+        Ok(results)
     }
 
     /// firestore-batch-write (Slice 01, ADR-048 § Decision 4): the per-write
@@ -1249,6 +1302,24 @@ impl FirestoreService {
                                 now.timestamp_subsec_nanos() as i32,
                             );
 
+                            // security-rules-cel-cross-document-reads
+                            // (Slice 01, US-01, ADR-066): path-discovery
+                            // (pure) then fetch (real I/O) — a condition
+                            // with no cross-document operand produces an
+                            // empty set here, zero extra fetch.
+                            let cross_doc_paths = embyr_core::access_control::discover_cross_document_paths(
+                                &condition,
+                                auth_ctx.as_ref(),
+                                Some(path.document_id.as_str()),
+                                &ancestor_bindings,
+                            );
+                            let cross_document_reads = Self::fetch_cross_document_reads(
+                                &adapter,
+                                &path.project_id,
+                                &cross_doc_paths,
+                            )
+                            .await?;
+
                             // security-rules-cel-path-matching (Slice 02,
                             // US-02, ADR-063 § Decision — Routing
                             // Composition, step 3): the leaf capture (if
@@ -1267,6 +1338,7 @@ impl FirestoreService {
                                 Some(path.document_id.as_str()),
                                 &ancestor_bindings,
                                 Some(&now_field),
+                                &cross_document_reads,
                             ) {
                                 embyr_core::access_control::EvaluationOutcome::Deny => {
                                     Err(Status::permission_denied("access denied by rule"))
@@ -1315,6 +1387,19 @@ impl FirestoreService {
                 // clock read, zero new I/O in the sense that matters.
                 let now = chrono::Utc::now();
                 let now_field = FieldValue::Timestamp(now.timestamp(), now.timestamp_subsec_nanos() as i32);
+                // security-rules-cel-cross-document-reads (Slice 01, US-01,
+                // ADR-066): path-discovery (pure) then fetch (real I/O) —
+                // a condition with no cross-document operand produces an
+                // empty set here, zero extra fetch.
+                let cross_doc_paths = embyr_core::access_control::discover_cross_document_paths(
+                    &condition,
+                    auth_ctx.as_ref(),
+                    Some(path.document_id.as_str()),
+                    &std::collections::BTreeMap::new(),
+                );
+                let cross_document_reads =
+                    Self::fetch_cross_document_reads(&adapter, &path.project_id, &cross_doc_paths)
+                        .await?;
 
                 // security-rules-write-path (ADR-030): one new argument at
                 // this existing call site — an empty map for the new
@@ -1346,6 +1431,7 @@ impl FirestoreService {
                     // zero-regression guardrail).
                     &std::collections::BTreeMap::new(),
                     Some(&now_field),
+                    &cross_document_reads,
                 ) {
                     // AC-17-10: `Deny` ALWAYS produces the identical
                     // `PermissionDenied` response — never distinguishes
@@ -1485,6 +1571,7 @@ impl FirestoreService {
                     // branch, US-05 zero-regression guardrail).
                     &std::collections::BTreeMap::new(),
                     Some(&now_field),
+                    &std::collections::BTreeMap::new(),
                 ) {
                     embyr_core::access_control::EvaluationOutcome::Deny => {
                         return Err(Status::permission_denied("access denied by write rule"));
@@ -1558,6 +1645,7 @@ impl FirestoreService {
                             Some(path.document_id.as_str()),
                             &ancestor_bindings,
                             Some(&now_field),
+                            &std::collections::BTreeMap::new(),
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Deny => {
                                 return Err(Status::permission_denied(
@@ -1706,6 +1794,7 @@ impl FirestoreService {
                     // branch, US-05 zero-regression guardrail).
                     &std::collections::BTreeMap::new(),
                     Some(&now_field),
+                    &std::collections::BTreeMap::new(),
                 ) {
                     embyr_core::access_control::EvaluationOutcome::Deny => {
                         return Err(Status::permission_denied("access denied by write rule"));
@@ -1778,6 +1867,7 @@ impl FirestoreService {
                             Some(path.document_id.as_str()),
                             &ancestor_bindings,
                             Some(&now_field),
+                            &std::collections::BTreeMap::new(),
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Deny => {
                                 return Err(Status::permission_denied(
@@ -1918,6 +2008,11 @@ impl FirestoreService {
                     // requires a time-window check on Delete; out of this
                     // feature's own locked scope entirely.
                     None,
+                    // security-rules-cel-cross-document-reads (Slice 01,
+                    // ADR-066): mechanical empty-map — Delete's own
+                    // cross-document wiring is out of this feature's own
+                    // locked scope (never evidenced, § Out of Scope).
+                    &std::collections::BTreeMap::new(),
                 ) {
                     embyr_core::access_control::EvaluationOutcome::Deny => {
                         return Err(Status::permission_denied("access denied by write rule"));
@@ -1982,6 +2077,7 @@ impl FirestoreService {
                             // 06, ADR-065): mechanical `None` — out of this
                             // feature's own locked scope for Delete.
                             None,
+                            &std::collections::BTreeMap::new(),
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Deny => {
                                 return Err(Status::permission_denied(
@@ -2166,6 +2262,7 @@ impl FirestoreService {
                             // 06, ADR-065): mechanical `None` — out of this
                             // feature's own locked scope (`ListDocuments`).
                             None,
+                            &std::collections::BTreeMap::new(),
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Allow => {
                                 all_docs.push(doc);
@@ -2413,6 +2510,7 @@ impl FirestoreService {
                         // ADR-065): mechanical `None` — out of this
                         // feature's own locked scope (`BatchGetDocuments`).
                         None,
+                        &std::collections::BTreeMap::new(),
                     ) {
                         // ADR-042/DDD-BGD-5: `Deny` maps to a per-document
                         // `missing` item — the batch is NEVER aborted

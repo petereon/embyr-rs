@@ -369,6 +369,14 @@ pub async fn handle_add_target(
                                 // Listen's per-event re-check is out of
                                 // this feature's own locked scope.
                                 None,
+                                // security-rules-cel-cross-document-reads
+                                // (Slice 01, ADR-066): mechanical
+                                // empty-map — Listen's own per-event
+                                // re-check is explicitly out of this
+                                // feature's own locked scope too
+                                // (DISCUSS Resolution 5 — a real per-event
+                                // I/O cost multiplier).
+                                &std::collections::BTreeMap::new(),
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-04: withheld, never sent, never a crash (AC-17-118/119).
@@ -434,6 +442,7 @@ pub async fn handle_add_target(
                                 // Listen's per-event re-check is out of
                                 // this feature's own locked scope.
                                 None,
+                                &std::collections::BTreeMap::new(),
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-05: withheld, never sent.

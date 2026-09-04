@@ -350,8 +350,12 @@ async fn a_condition_outside_the_v1_grammar_is_rejected_with_the_established_tax
 
     let cases: &[(&str, &str)] = &[
         (
-            // Recognized-but-out-of-v1-scope shape.
-            "get(/databases/(default)/documents/users/$(request.auth.uid)) != null",
+            // Recognized-but-out-of-v1-scope shape. SUPERSEDED (found
+            // during `security-rules-cel-cross-document-reads` Slice 01):
+            // a bare `get()` is now a supported construct (ADR-066); this
+            // case uses chaining instead — still genuinely unsupported
+            // (Resolution 2).
+            "exists(/databases/$(database)/documents/orgs/$(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.orgId))",
             "UNSUPPORTED_CONSTRUCT",
         ),
         (

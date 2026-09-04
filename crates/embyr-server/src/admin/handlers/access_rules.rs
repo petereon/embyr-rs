@@ -999,6 +999,12 @@ pub async fn simulate_access_rule(
         // (Release 2, `simulate_route`), out of this slice's scope.
         &std::collections::BTreeMap::new(),
         request_time_field.as_ref(),
+        // security-rules-cel-cross-document-reads (Slice 01, ADR-066):
+        // mechanical empty-map — a candidate `get()`/`exists()` condition
+        // always simulates as denied for now (no matching path in an
+        // empty map); real synthetic-input support is Slice 05's own
+        // locked scope.
+        &std::collections::BTreeMap::new(),
     );
 
     Ok((
@@ -1180,6 +1186,10 @@ pub async fn simulate_routed_access_rule(
         // mechanical `None` — timestamp/duration simulation is US-07,
         // out of this slice's own locked scope.
         None,
+        // security-rules-cel-cross-document-reads (Slice 01, ADR-066):
+        // mechanical empty-map — this route's own cross-document
+        // synthetic-input support is Slice 05's own locked scope.
+        &std::collections::BTreeMap::new(),
     );
 
     // AC-17-228: report EVERY bound variable value, ancestor and leaf alike
@@ -1364,6 +1374,7 @@ async fn simulate_recursive_wildcard_candidate(
         // mechanical `None` — timestamp/duration simulation is US-07,
         // out of this slice's own locked scope.
         None,
+        &std::collections::BTreeMap::new(),
     );
 
     Ok((
@@ -1427,6 +1438,7 @@ fn evaluate_stored_pattern_outcome(
         // mechanical `None` — timestamp/duration simulation is US-07,
         // out of this slice's own locked scope.
         None,
+        &std::collections::BTreeMap::new(),
     );
 
     Ok((

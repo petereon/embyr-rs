@@ -162,10 +162,13 @@ pub enum DecomposedTarget {
 /// One offending `match` block, naming what about it is out of v1 scope.
 /// Slice 01 only ever produces `"SYNTAX_ERROR"` (a generic parse problem) —
 /// the richer named-construct vocabulary (`"NESTED_PATH"` /
-/// `"RECURSIVE_WILDCARD"` / `"CROSS_DOCUMENT_READ"` / `"CUSTOM_FUNCTION"` /
-/// `"CONFLICTING_VERB_CONDITIONS"`) is reachable from this same type
-/// (ADR-062's own accepted shape) but only exercised/tested starting Slice
-/// 04.
+/// `"RECURSIVE_WILDCARD"` / `"CUSTOM_FUNCTION"` /
+/// `"CONFLICTING_VERB_CONDITIONS"` / `"UNSUPPORTED_EXPRESSION_GRAMMAR"`) is
+/// reachable from this same type (ADR-062's own accepted shape) but only
+/// exercised/tested starting Slice 04. `"CROSS_DOCUMENT_READ"` was removed
+/// (security-rules-cel-cross-document-reads, ADR-066) — a narrowly-scoped
+/// `get()`/`exists()` idiom is now a supported construct, never
+/// unconditionally rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffendingBlock {
     pub path_pattern: String,
@@ -754,7 +757,6 @@ fn construct_for(e: &ConditionParseError) -> &'static str {
     match e {
         ConditionParseError::SyntaxError { .. } => "SYNTAX_ERROR",
         ConditionParseError::UnsupportedConstruct { construct, .. } => match construct {
-            UnsupportedConstruct::CrossDocumentRead => "CROSS_DOCUMENT_READ",
             UnsupportedConstruct::CustomFunction => "CUSTOM_FUNCTION",
             UnsupportedConstruct::WildcardPath => "NESTED_PATH",
             UnsupportedConstruct::UnsupportedExpressionGrammar => "UNSUPPORTED_EXPRESSION_GRAMMAR",

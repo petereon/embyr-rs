@@ -299,7 +299,11 @@ async fn an_invalid_restore_condition_is_rejected_via_the_existing_taxonomy() {
 
     for (invalid_condition, expected_reason) in [
         (
-            "get(/databases/(default)/documents/users/$(request.auth.uid)) != null",
+            // SUPERSEDED (found during `security-rules-cel-cross-document
+            // -reads` Slice 01): a bare `get()` is now a supported
+            // construct (ADR-066); this case uses chaining instead —
+            // still genuinely unsupported (Resolution 2).
+            "exists(/databases/$(database)/documents/orgs/$(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.orgId))",
             "UNSUPPORTED_CONSTRUCT",
         ),
         ("(request.auth.uid == resource.data.owner_id", "SYNTAX_ERROR"),
