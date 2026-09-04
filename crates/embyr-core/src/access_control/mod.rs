@@ -1916,6 +1916,413 @@ mod tests {
         );
     }
 
+    // ── parse_condition: numeric literals + relational comparison ──
+    // (security-rules-cel-expression-grammar, Slice 01, US-01, ADR-065)
+
+    #[test]
+    fn numeric_bound_condition_parses_into_a_compare_ast_with_int_literal() {
+        let result = parse_condition("resource.data.photo_count <= 20");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::ResourceField("photo_count".to_string()),
+                CompareOp::Le,
+                Operand::IntLiteral(20),
+            ))
+        );
+    }
+
+    #[test]
+    fn a_negative_integer_literal_parses_correctly() {
+        let result = parse_condition("resource.data.balance >= -5");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::ResourceField("balance".to_string()),
+                CompareOp::Ge,
+                Operand::IntLiteral(-5),
+            ))
+        );
+    }
+
+    #[test]
+    fn a_double_literal_parses_correctly() {
+        let result = parse_condition("resource.data.rating < 4.5");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::ResourceField("rating".to_string()),
+                CompareOp::Lt,
+                Operand::DoubleLiteral(4.5),
+            ))
+        );
+    }
+
+    /// Property: every one of the 4 new relational operators parses into
+    /// the matching `CompareOp`, closing every `<`/`<=`/`>`/`>=` mutant
+    /// this feature's own tokenizer/parser could otherwise silently
+    /// confuse for one another.
+    #[test]
+    fn every_relational_operator_parses_into_its_own_compare_op() {
+        let cases = [
+            ("<", CompareOp::Lt),
+            ("<=", CompareOp::Le),
+            (">", CompareOp::Gt),
+            (">=", CompareOp::Ge),
+        ];
+        for (op_text, expected_op) in cases {
+            let source = format!("resource.data.count {op_text} 10");
+            let result = parse_condition(&source);
+            assert_eq!(
+                result,
+                Ok(Condition::Compare(
+                    Operand::ResourceField("count".to_string()),
+                    expected_op,
+                    Operand::IntLiteral(10),
+                )),
+                "operator '{op_text}' parsed incorrectly"
+            );
+        }
+    }
+
+    // ── evaluate: numeric relational comparison ──
+    // (security-rules-cel-expression-grammar, Slice 01, ADR-065)
+
+    /// Every one of the 4 relational operators, both directions of the
+    /// pinned pair `(5, 10)`, produces the outcome real numeric ordering
+    /// predicts — closes every `</<=/>/>=`-confusion mutant in
+    /// `compare_relational` directly (not merely via the parser).
+    #[test]
+    fn numeric_relational_comparison_matches_real_ordering_in_both_directions() {
+        for (a, b) in [(5i64, 10i64), (10, 5), (7, 7)] {
+            let resource = resource_with("n", FieldValue::Integer(a));
+            let cases = [
+                (CompareOp::Lt, a < b),
+                (CompareOp::Le, a <= b),
+                (CompareOp::Gt, a > b),
+                (CompareOp::Ge, a >= b),
+            ];
+            for (op, expected) in cases {
+                let condition = Condition::Compare(
+                    Operand::ResourceField("n".to_string()),
+                    op,
+                    Operand::IntLiteral(b),
+                );
+                let outcome =
+                    evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None);
+                assert_eq!(
+                    outcome,
+                    if expected { EvaluationOutcome::Allow } else { EvaluationOutcome::Deny },
+                    "a={a} op={op:?} b={b} expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn comparing_a_numeric_operand_against_a_non_numeric_field_denies() {
+        let resource = resource_with("title", FieldValue::String("Day One".to_string()));
+        let condition = Condition::Compare(
+            Operand::ResourceField("title".to_string()),
+            CompareOp::Le,
+            Operand::IntLiteral(20),
+        );
+        assert_eq!(
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn timestamp_relational_comparison_compares_seconds_then_nanos() {
+        let earlier = FieldValue::Timestamp(1000, 500);
+        let later = FieldValue::Timestamp(1000, 501);
+        let much_later = FieldValue::Timestamp(1001, 0);
+        assert!(compare_relational(CompareOp::Lt, &earlier, &later));
+        assert!(!compare_relational(CompareOp::Lt, &later, &earlier));
+        assert!(compare_relational(CompareOp::Lt, &later, &much_later));
+        assert!(compare_relational(CompareOp::Le, &earlier, &earlier));
+        assert!(!compare_relational(CompareOp::Lt, &earlier, &earlier));
+        // AC-CEG mutation-hardening: Gt/Ge on an EQUAL pair distinguishes
+        // '>' from '>=' (a strict-vs-inclusive mutant is otherwise
+        // invisible whenever the two operands already differ).
+        assert!(!compare_relational(CompareOp::Gt, &earlier, &earlier));
+        assert!(compare_relational(CompareOp::Ge, &earlier, &earlier));
+        assert!(compare_relational(CompareOp::Gt, &later, &earlier));
+        assert!(!compare_relational(CompareOp::Ge, &earlier, &later));
+    }
+
+    #[test]
+    fn numeric_value_resolves_integer_and_double_only() {
+        assert_eq!(numeric_value(&FieldValue::Integer(5)), Some(5.0));
+        assert_eq!(numeric_value(&FieldValue::Double(2.5)), Some(2.5));
+        assert_eq!(numeric_value(&FieldValue::String("5".to_string())), None);
+        assert_eq!(numeric_value(&FieldValue::Boolean(true)), None);
+        assert_eq!(numeric_value(&FieldValue::Null), None);
+    }
+
+    // ── parse_condition: `in` + list literals ──
+    // (security-rules-cel-expression-grammar, Slice 04, US-04, ADR-065)
+
+    #[test]
+    fn in_condition_with_a_list_literal_parses_into_an_in_ast() {
+        let result = parse_condition("request.resource.data.status in [\"draft\", \"published\"]");
+        assert_eq!(
+            result,
+            Ok(Condition::In(
+                Operand::RequestResourceField("status".to_string()),
+                Operand::ListLiteral(vec![
+                    Operand::StringLiteral("draft".to_string()),
+                    Operand::StringLiteral("published".to_string()),
+                ]),
+            ))
+        );
+    }
+
+    #[test]
+    fn an_empty_list_literal_parses_correctly() {
+        let result = parse_condition("resource.data.tag in []");
+        assert_eq!(
+            result,
+            Ok(Condition::In(
+                Operand::ResourceField("tag".to_string()),
+                Operand::ListLiteral(vec![]),
+            ))
+        );
+    }
+
+    #[test]
+    fn in_against_a_non_list_literal_rhs_is_a_named_rejection() {
+        let result = parse_condition("resource.data.status in resource.data.other");
+        match result {
+            Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
+                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+            }
+            other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
+        }
+    }
+
+    // ── evaluate: `in` membership ──
+    // (security-rules-cel-expression-grammar, Slice 04, ADR-065)
+
+    #[test]
+    fn in_evaluates_true_when_the_field_matches_a_list_member() {
+        let resource = resource_with("status", FieldValue::String("published".to_string()));
+        let condition = Condition::In(
+            Operand::ResourceField("status".to_string()),
+            Operand::ListLiteral(vec![
+                Operand::StringLiteral("draft".to_string()),
+                Operand::StringLiteral("published".to_string()),
+            ]),
+        );
+        assert_eq!(
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            EvaluationOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn in_evaluates_false_when_the_field_matches_no_list_member() {
+        let resource = resource_with("status", FieldValue::String("deleted".to_string()));
+        let condition = Condition::In(
+            Operand::ResourceField("status".to_string()),
+            Operand::ListLiteral(vec![
+                Operand::StringLiteral("draft".to_string()),
+                Operand::StringLiteral("published".to_string()),
+            ]),
+        );
+        assert_eq!(
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    // ── parse_condition: timestamp/duration + arithmetic ──
+    // (security-rules-cel-expression-grammar, Slice 06, US-06, ADR-065)
+
+    #[test]
+    fn request_time_parses_into_request_time_operand() {
+        let result = parse_condition("request.time > resource.data.created_at");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::RequestTime,
+                CompareOp::Gt,
+                Operand::ResourceField("created_at".to_string()),
+            ))
+        );
+    }
+
+    #[test]
+    fn timestamp_plus_duration_parses_into_an_arithmetic_ast() {
+        let result = parse_condition("resource.data.created_at + duration.value(24, 'h') > request.time");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::Arithmetic(
+                    Box::new(Operand::ResourceField("created_at".to_string())),
+                    ArithmeticOp::Add,
+                    Box::new(Operand::DurationLiteral(24, DurationUnit::Hours)),
+                ),
+                CompareOp::Gt,
+                Operand::RequestTime,
+            ))
+        );
+    }
+
+    #[test]
+    fn timestamp_minus_duration_parses_with_the_sub_operator() {
+        let result = parse_condition("resource.data.expires_at - duration.value(1, 'd') < request.time");
+        assert_eq!(
+            result,
+            Ok(Condition::Compare(
+                Operand::Arithmetic(
+                    Box::new(Operand::ResourceField("expires_at".to_string())),
+                    ArithmeticOp::Sub,
+                    Box::new(Operand::DurationLiteral(1, DurationUnit::Days)),
+                ),
+                CompareOp::Lt,
+                Operand::RequestTime,
+            ))
+        );
+    }
+
+    #[test]
+    fn every_duration_unit_parses_correctly() {
+        let cases = [
+            ("s", DurationUnit::Seconds),
+            ("m", DurationUnit::Minutes),
+            ("h", DurationUnit::Hours),
+            ("d", DurationUnit::Days),
+        ];
+        for (unit_text, expected_unit) in cases {
+            let source = format!("resource.data.x + duration.value(1, '{unit_text}') > request.time");
+            let result = parse_condition(&source);
+            assert_eq!(
+                result,
+                Ok(Condition::Compare(
+                    Operand::Arithmetic(
+                        Box::new(Operand::ResourceField("x".to_string())),
+                        ArithmeticOp::Add,
+                        Box::new(Operand::DurationLiteral(1, expected_unit)),
+                    ),
+                    CompareOp::Gt,
+                    Operand::RequestTime,
+                )),
+                "unit '{unit_text}' parsed incorrectly"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_duration_unit_is_a_named_rejection() {
+        let result = parse_condition("resource.data.x + duration.value(1, 'weeks') > request.time");
+        match result {
+            Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
+                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+            }
+            other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duration_value_standalone_without_arithmetic_context_is_a_syntax_error() {
+        // `duration.value(...)` is only ever syntactically legal as an
+        // arithmetic RHS (parse_arithmetic_rhs's own exclusive entry
+        // point) — reached any other way, it's not even recognized as a
+        // call at all (detect_unsupported_construct's own allow-list
+        // exemption), so a bare `duration.value(...)` comparison operand
+        // is a plain syntax error, not a special construct rejection.
+        let result = parse_condition("duration.value(1, 'h') == resource.data.x");
+        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+    }
+
+    #[test]
+    fn nested_arithmetic_is_a_named_rejection() {
+        let result = parse_condition("resource.data.a + 1 + 2 <= 20");
+        match result {
+            Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
+                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+            }
+            other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unsupported_arithmetic_operator_is_a_named_rejection() {
+        for op in ["*", "/", "%"] {
+            let source = format!("resource.data.a {op} 2 <= 20");
+            let result = parse_condition(&source);
+            match result {
+                Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
+                    assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+                }
+                other => panic!("operator '{op}': expected UnsupportedExpressionGrammar, got {other:?}"),
+            }
+        }
+    }
+
+    // ── evaluate: arithmetic + request_time ──
+    // (security-rules-cel-expression-grammar, Slice 06/07, ADR-065)
+
+    #[test]
+    fn timestamp_plus_duration_evaluates_to_the_correctly_offset_timestamp() {
+        let resource = resource_with("created_at", FieldValue::Timestamp(1_000_000, 0));
+        // request.time = created_at + 100s (well within a 24h window).
+        let now = FieldValue::Timestamp(1_000_100, 0);
+        let condition = Condition::Compare(
+            Operand::Arithmetic(
+                Box::new(Operand::ResourceField("created_at".to_string())),
+                ArithmeticOp::Add,
+                Box::new(Operand::DurationLiteral(24, DurationUnit::Hours)),
+            ),
+            CompareOp::Gt,
+            Operand::RequestTime,
+        );
+        assert_eq!(
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), Some(&now)),
+            EvaluationOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn a_stale_timestamp_outside_the_duration_window_denies() {
+        let resource = resource_with("created_at", FieldValue::Timestamp(1_000_000, 0));
+        // request.time = created_at + 25 hours (past a 24h window).
+        let now = FieldValue::Timestamp(1_000_000 + 25 * 3600, 0);
+        let condition = Condition::Compare(
+            Operand::Arithmetic(
+                Box::new(Operand::ResourceField("created_at".to_string())),
+                ArithmeticOp::Add,
+                Box::new(Operand::DurationLiteral(24, DurationUnit::Hours)),
+            ),
+            CompareOp::Gt,
+            Operand::RequestTime,
+        );
+        assert_eq!(
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), Some(&now)),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn request_time_absent_from_evaluate_call_fails_closed() {
+        let resource = resource_with("created_at", FieldValue::Timestamp(1_000_000, 0));
+        let condition = Condition::Compare(Operand::RequestTime, CompareOp::Gt, Operand::ResourceField("created_at".to_string()));
+        assert_eq!(
+            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None),
+            EvaluationOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn every_duration_unit_converts_to_the_correct_second_count() {
+        assert_eq!(DurationUnit::Seconds.as_seconds(5), 5);
+        assert_eq!(DurationUnit::Minutes.as_seconds(2), 120);
+        assert_eq!(DurationUnit::Hours.as_seconds(3), 10800);
+        assert_eq!(DurationUnit::Days.as_seconds(1), 86400);
+    }
+
     // ── evaluate: the four-way truth table DISCUSS's domain examples exercise ──
 
     #[test]
