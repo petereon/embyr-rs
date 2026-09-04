@@ -894,6 +894,16 @@ path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw06_simul
 name = "security_rules_cel_expression_grammar_ceg01_numeric_literals_and_relational_comparison"
 path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg01_numeric_literals_and_relational_comparison.rs"
 
+# security-rules-cel-expression-grammar (Slice 02, US-02, Release 1). AC-CEG-06/07.
+[[test]]
+name = "security_rules_cel_expression_grammar_ceg02_numeric_comparison_write_parity"
+path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg02_numeric_comparison_write_parity.rs"
+
+# security-rules-cel-expression-grammar (Slice 03, US-03, Release 1). AC-CEG-08.
+[[test]]
+name = "security_rules_cel_expression_grammar_ceg03_numeric_comparison_simulation"
+path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg03_numeric_comparison_simulation.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
