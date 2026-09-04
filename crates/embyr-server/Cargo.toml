@@ -904,6 +904,11 @@ path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg02_numer
 name = "security_rules_cel_expression_grammar_ceg03_numeric_comparison_simulation"
 path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg03_numeric_comparison_simulation.rs"
 
+# security-rules-cel-expression-grammar (Slice 04, US-04, Release 2). AC-CEG-09/10/11/12.
+[[test]]
+name = "security_rules_cel_expression_grammar_ceg04_in_and_list_literals"
+path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg04_in_and_list_literals.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

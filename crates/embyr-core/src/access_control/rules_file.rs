@@ -757,6 +757,7 @@ fn construct_for(e: &ConditionParseError) -> &'static str {
             UnsupportedConstruct::CrossDocumentRead => "CROSS_DOCUMENT_READ",
             UnsupportedConstruct::CustomFunction => "CUSTOM_FUNCTION",
             UnsupportedConstruct::WildcardPath => "NESTED_PATH",
+            UnsupportedConstruct::UnsupportedExpressionGrammar => "UNSUPPORTED_EXPRESSION_GRAMMAR",
         },
     }
 }

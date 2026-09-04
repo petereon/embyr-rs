@@ -76,6 +76,12 @@ pub enum Condition {
     And(Box<Condition>, Box<Condition>),
     Or(Box<Condition>, Box<Condition>),
     Not(Box<Condition>),
+    /// `<operand> in <list literal>` — membership, not equality/relational
+    /// comparison (security-rules-cel-expression-grammar, Slice 04, US-04,
+    /// ADR-065). The RHS is always an `Operand::ListLiteral` by parser
+    /// construction (`parse_comparison` never builds this variant any
+    /// other way).
+    In(Operand, Operand),
 }
 
 /// The four operand shapes the locked v1 grammar admits. `ResourceField`
@@ -124,6 +130,12 @@ pub enum Operand {
     IntLiteral(i64),
     /// A bare decimal literal, e.g. `4.5` (same feature/slice).
     DoubleLiteral(f64),
+    /// A bracketed, comma-separated list of literals, e.g. `["draft",
+    /// "published", "archived"]` (security-rules-cel-expression-grammar,
+    /// Slice 04, US-04, ADR-065) — only ever legal as `Condition::In`'s
+    /// own right-hand operand, by parser construction (never reachable
+    /// standalone or as a `Compare` operand).
+    ListLiteral(Vec<Operand>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +183,14 @@ pub enum UnsupportedConstruct {
     CrossDocumentRead,
     CustomFunction,
     WildcardPath,
+    /// security-rules-cel-expression-grammar (Slice 04+, ADR-065): a
+    /// recognized-but-out-of-this-feature's-own-locked-scope expression
+    /// shape — map literals, nested map-field traversal, `in` against a
+    /// non-list-literal RHS, an unsupported/nested arithmetic operator, or
+    /// an unrecognized duration unit. One shared variant for all 5 named
+    /// sites (DISCUSS/ADR-065 § Decision Driver 5) — `detail` distinguishes
+    /// which.
+    UnsupportedExpressionGrammar,
 }
 
 /// `parse_condition()`'s error type. `SyntaxError` = plain invalid syntax
@@ -319,6 +339,11 @@ enum Token {
     Le,
     Gt,
     Ge,
+    /// security-rules-cel-expression-grammar (Slice 04, ADR-065): list-
+    /// literal structural tokens.
+    LBracket,
+    RBracket,
+    Comma,
 }
 
 fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
@@ -338,6 +363,20 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
             }
             ')' => {
                 tokens.push(Token::RParen);
+                i += 1;
+            }
+            // security-rules-cel-expression-grammar (Slice 04, ADR-065):
+            // list-literal structural tokens.
+            '[' => {
+                tokens.push(Token::LBracket);
+                i += 1;
+            }
+            ']' => {
+                tokens.push(Token::RBracket);
+                i += 1;
+            }
+            ',' => {
+                tokens.push(Token::Comma);
                 i += 1;
             }
             '&' if chars.get(i + 1) == Some(&'&') => {
@@ -607,6 +646,25 @@ impl<'a> Parser<'a> {
 
     fn parse_comparison(&mut self) -> Result<Condition, ConditionParseError> {
         let left = self.parse_operand()?;
+        // security-rules-cel-expression-grammar (Slice 04, ADR-065): `in`
+        // is recognized the same way `true`/`false` are — a `Token::Word`
+        // whose text is checked, not a new dedicated token. Only a
+        // bracketed list literal is a legal RHS in this feature's own
+        // locked scope (AC-CEG-12); anything else (e.g. `in` against
+        // another field reference — map-key membership, out of scope) is a
+        // NAMED rejection, never a bare SyntaxError.
+        if matches!(self.peek(), Some(Token::Word(w)) if w == "in") {
+            self.advance();
+            if !matches!(self.peek(), Some(Token::LBracket)) {
+                return Err(ConditionParseError::UnsupportedConstruct {
+                    construct: UnsupportedConstruct::UnsupportedExpressionGrammar,
+                    detail: "'in' is only supported against a bracketed list literal in v1"
+                        .to_string(),
+                });
+            }
+            let list = self.parse_list_literal()?;
+            return Ok(Condition::In(left, list));
+        }
         let op = match self.advance() {
             Some(Token::Eq) => CompareOp::Eq,
             Some(Token::Ne) => CompareOp::Ne,
@@ -618,6 +676,29 @@ impl<'a> Parser<'a> {
         };
         let right = self.parse_operand()?;
         Ok(Condition::Compare(left, op, right))
+    }
+
+    /// security-rules-cel-expression-grammar (Slice 04, ADR-065): consumes
+    /// `[` `<operand> (',' <operand>)*` `]` — empty list allowed.
+    fn parse_list_literal(&mut self) -> Result<Operand, ConditionParseError> {
+        match self.advance() {
+            Some(Token::LBracket) => {}
+            _ => return Err(syntax_error("expected '[' to start a list literal")),
+        }
+        let mut items = Vec::new();
+        if matches!(self.peek(), Some(Token::RBracket)) {
+            self.advance();
+            return Ok(Operand::ListLiteral(items));
+        }
+        loop {
+            items.push(self.parse_operand()?);
+            match self.advance() {
+                Some(Token::Comma) => continue,
+                Some(Token::RBracket) => break,
+                _ => return Err(syntax_error("expected ',' or ']' in list literal")),
+            }
+        }
+        Ok(Operand::ListLiteral(items))
     }
 }
 
@@ -814,6 +895,38 @@ fn eval_bool(
                 Ok(compare_relational(*op, &left_value, &right_value))
             }
         },
+        // security-rules-cel-expression-grammar (Slice 04, ADR-065): `in`
+        // — the left operand fails closed exactly like any other missing
+        // field; each list item resolves independently, a per-item
+        // resolution failure just means "this item can't match" (never
+        // aborts the whole membership check) — `evaluate()` stays total.
+        Condition::In(left, list) => {
+            let left_value = resolve_field_value(
+                left,
+                auth,
+                resource_fields,
+                request_resource_fields,
+                path_variable_value,
+                ancestor_path_variable_values,
+            )?;
+            let Operand::ListLiteral(items) = list else {
+                // Parser invariant: the RHS is always a ListLiteral —
+                // unreachable in practice, falls closed defensively.
+                return Ok(false);
+            };
+            Ok(items.iter().any(|item| {
+                resolve_field_value(
+                    item,
+                    auth,
+                    resource_fields,
+                    request_resource_fields,
+                    path_variable_value,
+                    ancestor_path_variable_values,
+                )
+                .map(|v| v == left_value)
+                .unwrap_or(false)
+            }))
+        }
     }
 }
 
@@ -935,6 +1048,14 @@ fn resolve_field_value(
         // `BoolLiteral`/`NullLiteral`/`StringLiteral` above exactly.
         Operand::IntLiteral(value) => Ok(FieldValue::Integer(*value)),
         Operand::DoubleLiteral(value) => Ok(FieldValue::Double(*value)),
+        // security-rules-cel-expression-grammar (Slice 04, ADR-065): a
+        // `ListLiteral` is only ever meaningful as `Condition::In`'s own
+        // right-hand operand, consumed directly by `eval_bool`'s `In` arm
+        // (never through this generic resolver) — unreachable in
+        // practice, since the parser never PRODUCES a `ListLiteral` in any
+        // other operand position; falls closed defensively rather than
+        // panicking, consistent with `evaluate()`'s total guarantee.
+        Operand::ListLiteral(_) => Err(FieldMissing),
     }
 }
 
