@@ -195,3 +195,49 @@ async fn a_non_admin_role_cannot_delete_an_index() {
         .expect("delete_composite_index request failed");
     assert_eq!(resp.status().as_u16(), 403, "AC-CIX-09: a Viewer role must be rejected");
 }
+
+/// AC-CIX-09's own boundary: `Admin` (not `Owner`) is also allowed — mirrors
+/// CIX01's own identical `an_admin_role_exactly_can_create_an_index` proof.
+///
+/// @driving_port @real-io @US-03 @AC-CIX-09
+#[tokio::test]
+async fn an_admin_role_exactly_can_delete_an_index() {
+    let ctx = SecurityRulesFullContext::new("trailmark-prod-cix03-admin-role").await;
+    let owner_cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+    let index_id = create_index(&ctx, &owner_cookie).await;
+
+    let admin_cookie = ctx.seed_session("priya@trailmark.example", "Admin").await;
+    let resp = reqwest::Client::new()
+        .delete(ctx.admin_url(&format!(
+            "/admin/v1/projects/{}/indexes/{}",
+            ctx.project_id, index_id
+        )))
+        .header("Cookie", &admin_cookie)
+        .send()
+        .await
+        .expect("delete request failed");
+    assert_eq!(resp.status().as_u16(), 204, "an exact Admin role must be allowed to delete");
+}
+
+/// Deleting a never-created (but well-formed) index id is a clean 404 —
+/// `result.rows_affected() == 0` must be observably distinguishable from
+/// the successful-delete path, never silently treated as success.
+///
+/// @error @driving_port @real-io @US-03
+#[tokio::test]
+async fn deleting_a_nonexistent_index_id_returns_404() {
+    let ctx = SecurityRulesFullContext::new("trailmark-prod-cix03-nonexistent").await;
+    let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+
+    let never_created_id = uuid::Uuid::new_v4();
+    let resp = reqwest::Client::new()
+        .delete(ctx.admin_url(&format!(
+            "/admin/v1/projects/{}/indexes/{}",
+            ctx.project_id, never_created_id
+        )))
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .expect("delete request failed");
+    assert_eq!(resp.status().as_u16(), 404, "deleting a never-created index id must be a clean 404");
+}

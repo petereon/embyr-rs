@@ -236,3 +236,27 @@ async fn a_non_admin_role_cannot_create_an_index() {
         .expect("create request failed");
     assert_eq!(resp.status().as_u16(), 403, "AC-CIX-04: a Viewer role must be rejected");
 }
+
+/// AC-CIX-04's own boundary: `Admin` (not `Owner`) is also allowed — the
+/// role check is `role < Role::Admin`, never previously exercised with the
+/// EXACT `Admin` role by any other test here (only `Owner`/`Viewer`), the
+/// one input shape that distinguishes `<` from `<=`.
+///
+/// @driving_port @real-io @US-01 @AC-CIX-04
+#[tokio::test]
+async fn an_admin_role_exactly_can_create_an_index() {
+    let ctx = SecurityRulesFullContext::new("trailmark-prod-cix01-admin-role").await;
+    let cookie = ctx.seed_session("priya@trailmark.example", "Admin").await;
+
+    let resp = reqwest::Client::new()
+        .post(ctx.admin_url(&format!("/admin/v1/projects/{}/indexes", ctx.project_id)))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({
+            "collection_path": "products",
+            "fields": [{"field": "category", "order": "ASC"}],
+        }))
+        .send()
+        .await
+        .expect("create request failed");
+    assert_eq!(resp.status().as_u16(), 200, "an exact Admin role must be allowed to create");
+}

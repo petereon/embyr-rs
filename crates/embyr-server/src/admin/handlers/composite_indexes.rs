@@ -194,3 +194,73 @@ pub async fn delete_composite_index(
     }
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_field_order_round_trips_through_the_exact_fixture_strings() {
+        assert_eq!(
+            serde_json::to_value(IndexFieldOrder::Asc).unwrap(),
+            serde_json::json!("ASC")
+        );
+        assert_eq!(
+            serde_json::to_value(IndexFieldOrder::Desc).unwrap(),
+            serde_json::json!("DESC")
+        );
+        assert_eq!(
+            serde_json::from_value::<IndexFieldOrder>(serde_json::json!("ASC")).unwrap(),
+            IndexFieldOrder::Asc
+        );
+        assert_eq!(
+            serde_json::from_value::<IndexFieldOrder>(serde_json::json!("DESC")).unwrap(),
+            IndexFieldOrder::Desc
+        );
+    }
+
+    #[test]
+    fn a_lowercase_or_unrecognized_order_value_fails_to_deserialize() {
+        assert!(serde_json::from_value::<IndexFieldOrder>(serde_json::json!("asc")).is_err());
+        assert!(serde_json::from_value::<IndexFieldOrder>(serde_json::json!("SIDEWAYS")).is_err());
+    }
+
+    #[test]
+    fn index_field_spec_round_trips_the_exact_shape_used_by_the_existing_fixture() {
+        let spec = IndexFieldSpec { field: "category".to_string(), order: IndexFieldOrder::Asc };
+        let json = serde_json::to_value(&spec).unwrap();
+        assert_eq!(json, serde_json::json!({"field": "category", "order": "ASC"}));
+        let round_tripped: IndexFieldSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, spec);
+    }
+
+    #[test]
+    fn into_response_translates_valid_fields_json_correctly() {
+        let row = CompositeIndexRow {
+            id: "abc".to_string(),
+            project_id: "trailmark-prod".to_string(),
+            collection_path: "products".to_string(),
+            fields: serde_json::json!([{"field": "category", "order": "ASC"}]),
+            status: "ready".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        let response = row.into_response().expect("valid fields JSON must translate");
+        assert_eq!(response.fields.len(), 1);
+        assert_eq!(response.fields[0].field, "category");
+        assert_eq!(response.fields[0].order, IndexFieldOrder::Asc);
+    }
+
+    #[test]
+    fn into_response_fails_closed_on_malformed_fields_json() {
+        let row = CompositeIndexRow {
+            id: "abc".to_string(),
+            project_id: "trailmark-prod".to_string(),
+            collection_path: "products".to_string(),
+            fields: serde_json::json!("not an array of field specs"),
+            status: "ready".to_string(),
+            created_at: chrono::Utc::now(),
+        };
+        let result = row.into_response();
+        assert_eq!(result.unwrap_err(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}
