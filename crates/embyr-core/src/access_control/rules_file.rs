@@ -1758,6 +1758,58 @@ mod tests {
     }
 
     #[test]
+    fn a_function_name_starting_with_a_digit_is_a_syntax_error() {
+        let source = r#"
+            service cloud.firestore {
+              function 1abc() { return true; }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow read: if true;
+                }
+              }
+            }
+        "#;
+        match parse_rules_file(source) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
+            }
+            Ok(_) => panic!("expected SYNTAX_ERROR: '1abc' does not start with a letter or underscore"),
+        }
+    }
+
+    #[test]
+    fn a_function_name_starting_with_an_underscore_is_valid() {
+        let source = r#"
+            service cloud.firestore {
+              function _helper() { return true; }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow read: if _helper();
+                }
+              }
+            }
+        "#;
+        let blocks = parse_rules_file(source).expect("a leading underscore must be a valid function name");
+        assert_eq!(blocks[0].allow_clauses, vec![(vec![Verb::Read], "(true)".to_string())]);
+    }
+
+    #[test]
+    fn a_function_name_containing_an_underscore_is_valid() {
+        let source = r#"
+            service cloud.firestore {
+              function is_editor() { return true; }
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow read: if is_editor();
+                }
+              }
+            }
+        "#;
+        let blocks = parse_rules_file(source).expect("an underscore mid-name must be valid");
+        assert_eq!(blocks[0].allow_clauses, vec![(vec![Verb::Read], "(true)".to_string())]);
+    }
+
+    #[test]
     fn expand_function_calls_leaves_exists_and_get_and_duration_value_untouched() {
         let functions = BTreeMap::new();
         let condition = "exists(/databases/$(database)/documents/organizations/$(request.auth.uid)) \
