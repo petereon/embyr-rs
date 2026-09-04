@@ -28,12 +28,23 @@ internal LOGIC, mirroring `security-rules-cel-functions`'s own "zero new type, p
 -body change" cleanliness from earlier this session.
 ✓ `crates/embyr-pg-storage/src/backend_adapter.rs::run_query` + `crates/embyr-pg-storage/src/
 encoding/query.rs::append_filter`/`order_by_expr` — confirmed directly: the ACTUAL Postgres query
-execution already handles every filter operator and every `orderBy` field COUNT correctly via
-generic SQL translation (`ArrayContains`/`In`/`NotIn`/multi-field `ORDER BY` all already work end
--to-end) — `requires_composite_index` is PURELY a Firestore-parity SIMULATION gate layered on top
-of an already-fully-functional backend, never a real query-plan necessity (confirms and reuses
-ADR-068's own "metadata-only" finding, now extended: not just index CREATE is metadata-only, the
-GATE ITSELF governs a backend that needs no real index for correctness).
+execution already handles multi-field `orderBy` correctly (a loop over every `OrderBy` clause) via
+generic SQL translation — `requires_composite_index` is PURELY a Firestore-parity SIMULATION gate
+for that shape, never a real query-plan necessity.
+**Correction, discovered during this feature's own DELIVER (not caught at DISCUSS time — an
+under-verified claim in this Reading Confirmation's own first draft)**: `append_field_filter`
+(`crates/embyr-pg-storage/src/encoding/query.rs`, line ~44) does NOT actually support every
+`FilterOp` — its match arm covers only `LessThan/LessThanOrEqual/GreaterThan/GreaterThanOrEqual/
+Equal/NotEqual` (plus `IsNan`/`IsNotNan` special-cased above it); `ArrayContains`/`In`/`NotIn`/
+`ArrayContainsAny` all hit its own `_ => panic!("unsupported filter op: {:?}", f.op)` arm. This is
+a REAL, PRE-EXISTING, SEVERE bug (any real Alex app using `.where('x', 'in', [...])` today crashes
+the specific gRPC request task, confirmed via a genuine test failure during Slice 02's own DELIVER,
+not by re-reading) — completely independent of this feature (which never touches `run_query`/
+`append_filter` at all) but discovered BECAUSE this feature's own Slice 02 acceptance tests needed
+these operators to actually execute to prove their own "no false positive, query succeeds" claim.
+Named explicitly in § Discovered Gap below, NOT fixed here (out of this feature's own scope —
+fixing the query executor's own operator support is a materially different, larger, separately
+-evidenced feature).
 ✓ `docs/SPEC.md` § Indexes Table (lines 144-146) — **the critical, load-bearing finding this
 DISCUSS's own central Resolution is built on**: this codebase ALREADY has a locally-documented
 target contract for composite-index enforcement, written by a prior wave: "complex queries
@@ -332,12 +343,16 @@ Firebase too, not just `orderBy`-bearing ones.
 - [ ] AC-CIR-04: a real, filter-only (no `orderBy`) `RunQuery` combining `IN` on one field with a
       range comparison (`<`/`<=`/`>`/`>=`) on a DIFFERENT field is rejected `FAILED_PRECONDITION`
       when no matching composite index exists.
-- [ ] AC-CIR-05 (regression guard, false-positive check): a real, filter-only `RunQuery` combining
-      `IN` on one field with an EQUALITY filter on a different field (compound-equality-only, live
-      -verified NOT to need composite) SUCCEEDS with no index required — proving Slice 02 doesn't
-      over-widen the gate.
-- [ ] AC-CIR-06 (regression guard): a real, filter-only `RunQuery` using a lone `array-contains-any`
-      or a lone `not-in` (no other filter) SUCCEEDS with no index required — unchanged from today.
+- [x] AC-CIR-05 (regression guard, false-positive check, UNIT-LEVEL — see § Discovered Gap): `IN`
+      on one field combined with an EQUALITY filter on a different field (compound-equality-only,
+      live-verified NOT to need composite) does NOT require a composite index — proving Slice 02
+      doesn't over-widen the gate. Proven at the unit level
+      (`in_filter_plus_a_separate_equality_filter_does_not_require_composite_index`); an end-to-end
+      `RunQuery` proof is blocked by a pre-existing, unrelated query-executor gap (§ Discovered Gap).
+- [x] AC-CIR-06 (regression guard, UNIT-LEVEL — see § Discovered Gap): a lone `array-contains-any`
+      or a lone `not-in` (no other filter) does NOT require a composite index — unchanged from
+      today. Proven at the unit level (`lone_array_contains_any_does_not_require_composite_index`,
+      `lone_not_in_does_not_require_composite_index`); same end-to-end blocker as AC-CIR-05.
 
 ### US-03: The Rejection Names the Specific Missing Index
 
@@ -373,8 +388,45 @@ already-correct shapes — and name the missing index in the rejection, closing 
 |---|---|---|
 | SPEC.md-documented trigger shapes correctly detected | 5 of 5 (up from 3 of 5) | Direct: AC-CIR-01/02/04's own end-to-end proofs, cross-checked against AC-CIR-03/05/06's own regression guards |
 | Regression on the existing evidenced domain example | 0 | AC-CIR-03, full `us_04_query_collection.rs` re-run clean |
-| False positives introduced (a query that should NOT need composite, now wrongly gated) | 0 | AC-CIR-05/06's own explicit false-positive proofs |
+| False positives introduced (a query that should NOT need composite, now wrongly gated) | 0 | AC-CIR-05/06's own explicit false-positive proofs (unit-level, § Discovered Gap) |
 | Mutation-testing kill rate on the widened pure function | 100% effective (this session's own established bar) | `cargo-mutants --in-diff`, `--lib`-scoped |
+
+## Wave: DELIVER / [REF] Discovered Gap — Query Executor Does Not Support Every `FilterOp`
+
+Discovered mid-DELIVER (Slice 02), via a REAL test failure, not a re-read: `crates/embyr-pg-storage/
+src/encoding/query.rs::append_field_filter` implements only `LessThan/LessThanOrEqual/GreaterThan/
+GreaterThanOrEqual/Equal/NotEqual` (plus `IsNan`/`IsNotNan`) — `ArrayContains`/`In`/`NotIn`/
+`ArrayContainsAny` all hit its own `panic!("unsupported filter op: {:?}", f.op)` fallback arm. This
+directly contradicts this feature's own initial DISCUSS Reading Confirmation, which incorrectly
+claimed (from insufficiently verifying `append_field_filter`'s full match arms, only its generic
+dispatch shape) that every operator "already works end-to-end" — corrected in place above, not left
+standing.
+
+**Severity**: real and pre-existing, independent of this feature. Any live Alex application issuing
+a `.where(field, 'in', [...])`/`.where(field, 'not-in', [...])`/`.where(field, 'array-contains-any',
+[...])` query against embyr today crashes the specific gRPC request task with an unrecovered Rust
+panic (confirmed directly: the client observes a raw `h2 protocol error`/`Cancelled` transport
+reset, not a clean gRPC status code) — worse than a clean error response, though confirmed
+NON-fatal to the server process or other connections (the panic unwinds only the one task).
+
+**Why not fixed here**: implementing correct SQL translation for `IN`/`NOT IN`/`array-contains`
+-family operators (`= ANY($1)`, JSONB `@>`/array-overlap, `NOT IN` semantics) is a materially
+different, larger, separately-evidenced feature — fixing the QUERY EXECUTOR's own operator support,
+not widening the composite-index REQUIREMENT-DETECTION heuristic this feature is scoped to. Folding
+it in here would violate this feature's own Elephant Carpaccio thin-slice discipline for a
+completely orthogonal reason.
+
+**Impact on this feature's own ACs**: AC-CIR-05/AC-CIR-06 (the `IN`+equality and lone-`array
+-contains-any`/`not-in` false-positive regression guards) are proven at the UNIT level only — the
+pure `requires_composite_index` function's own boolean decision is correct and directly tested
+(passing); an end-to-end `RunQuery` proof of "succeeds with no index required" is not currently
+possible for these specific operators, for a reason entirely outside this feature's own code.
+
+**Recommended follow-up**: a candidate feature (e.g. `firestore-query-filter-operator-support`) to
+implement `In`/`NotIn`/`ArrayContains`/`ArrayContainsAny` SQL translation — HIGHER priority than
+this feature's own remaining slices, arguably, since it is an active crash risk today, not merely an
+accuracy gap. Flagged explicitly to the user, not silently deferred into an easy-to-miss Out-of
+-Scope bullet.
 
 ## Wave: DISCUSS / [REF] Out of Scope
 

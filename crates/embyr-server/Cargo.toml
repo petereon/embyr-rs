@@ -989,6 +989,11 @@ path = "../../tests/firestore_composite_indexes_admin_api/acceptance/cix03_delet
 name = "composite_index_requirement_rules_cir01_multi_field_orderby"
 path = "../../tests/composite_index_requirement_rules/acceptance/cir01_multi_field_orderby.rs"
 
+# composite-index-requirement-rules (Slice 02, US-02, Release 1). AC-CIR-04/05/06.
+[[test]]
+name = "composite_index_requirement_rules_cir02_in_plus_range_filter_only"
+path = "../../tests/composite_index_requirement_rules/acceptance/cir02_in_plus_range_filter_only.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

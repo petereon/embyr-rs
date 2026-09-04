@@ -586,22 +586,57 @@ impl FirestoreService {
         }
 
         let Some(filter) = &query.filter else { return false };
+        let filter_fields = Self::collect_filter_fields(filter);
+
+        // composite-index-requirement-rules (Slice 02, US-02, AC-CIR-04):
+        // an `IN` filter combined with a range comparison (</<=/>/>=) on a
+        // DIFFERENT field requires a composite index, independent of
+        // whether an orderBy is even present — checked BEFORE the
+        // order_by-emptiness early return below, which is exactly the
+        // short-circuit that let this shape through uncaught before this
+        // slice. A compound-equality-only combination (IN + a SEPARATE
+        // EQUALITY filter, live-verified NOT to need composite, AC-CIR-05)
+        // is correctly left alone: only the presence of a RANGE operator on
+        // a field the IN filter doesn't already cover trips this rule.
+        let in_fields: Vec<&str> = filter_fields
+            .iter()
+            .filter(|(_, op)| matches!(op, FilterOp::In))
+            .map(|(f, _)| *f)
+            .collect();
+        if !in_fields.is_empty() {
+            let has_range_on_a_different_field = filter_fields.iter().any(|(f, op)| {
+                matches!(
+                    op,
+                    FilterOp::LessThan
+                        | FilterOp::LessThanOrEqual
+                        | FilterOp::GreaterThan
+                        | FilterOp::GreaterThanOrEqual
+                ) && !in_fields.contains(f)
+            });
+            if has_range_on_a_different_field {
+                return true;
+            }
+        }
+
         if query.order_by.is_empty() {
             return false;
         }
-        // Collect filtered field paths.
-        let filter_fields = Self::collect_filter_fields(filter);
         // If any orderBy field is NOT in the filter fields, composite index required.
         query
             .order_by
             .iter()
-            .any(|ob| !filter_fields.contains(&ob.field_path.as_str()))
+            .any(|ob| !filter_fields.iter().any(|(f, _)| *f == ob.field_path.as_str()))
     }
 
-    /// Collect all field paths referenced by a filter (recursively).
-    fn collect_filter_fields(filter: &QueryFilter) -> Vec<&str> {
+    /// Collect all (field path, operator) pairs referenced by a filter
+    /// (recursively). Carries the operator (Slice 02, composite-index
+    /// -requirement-rules) so `requires_composite_index` can distinguish
+    /// `IN`/range/equality for the compound-filter rule above — the
+    /// original single-`orderBy`-field-vs-filter-field rule below remains
+    /// operator-agnostic, unchanged.
+    fn collect_filter_fields(filter: &QueryFilter) -> Vec<(&str, FilterOp)> {
         match filter {
-            QueryFilter::Field(ff) => vec![ff.field_path.as_str()],
+            QueryFilter::Field(ff) => vec![(ff.field_path.as_str(), ff.op)],
             QueryFilter::Composite(sub) => {
                 sub.iter().flat_map(Self::collect_filter_fields).collect()
             }
@@ -4110,6 +4145,91 @@ mod composite_index_requirement_tests {
     fn no_order_by_at_all_does_not_require_composite_index() {
         let mut q = base_query();
         q.filter = Some(equal_filter("category"));
+        assert!(!FirestoreService::requires_composite_index(&q));
+    }
+
+    fn in_filter(field: &str) -> QueryFilter {
+        QueryFilter::Field(FieldFilter {
+            field_path: field.to_string(),
+            op: FilterOp::In,
+            value: embyr_core::domain::field_value::FieldValue::String("x".to_string()),
+        })
+    }
+
+    fn range_filter(field: &str, op: FilterOp) -> QueryFilter {
+        QueryFilter::Field(FieldFilter {
+            field_path: field.to_string(),
+            op,
+            value: embyr_core::domain::field_value::FieldValue::Integer(1),
+        })
+    }
+
+    /// AC-CIR-04: a filter-only (no orderBy) `IN` + range-on-a-different
+    /// -field query requires a composite index — the top-level `order_by.
+    /// is_empty()` short-circuit must not swallow this.
+    #[test]
+    fn in_filter_plus_a_range_filter_on_a_different_field_requires_composite_index_with_no_order_by() {
+        let mut q = base_query();
+        q.filter = Some(QueryFilter::Composite(vec![
+            in_filter("category"),
+            range_filter("population", FilterOp::GreaterThan),
+        ]));
+        assert!(FirestoreService::requires_composite_index(&q));
+    }
+
+    /// AC-CIR-05 (false-positive regression guard): `IN` + a SEPARATE
+    /// EQUALITY filter on a different field (compound-equality-only) does
+    /// NOT require a composite index — live-verified real-Firestore
+    /// behavior, proving Slice 02 doesn't over-widen the gate.
+    #[test]
+    fn in_filter_plus_a_separate_equality_filter_does_not_require_composite_index() {
+        let mut q = base_query();
+        q.filter = Some(QueryFilter::Composite(vec![
+            in_filter("category"),
+            equal_filter("status"),
+        ]));
+        assert!(!FirestoreService::requires_composite_index(&q));
+    }
+
+    /// AC-CIR-06 (regression guard): a lone `array-contains-any` (no other
+    /// filter, no orderBy) does not require a composite index — unchanged.
+    #[test]
+    fn lone_array_contains_any_does_not_require_composite_index() {
+        let mut q = base_query();
+        q.filter = Some(QueryFilter::Field(FieldFilter {
+            field_path: "tags".to_string(),
+            op: FilterOp::ArrayContainsAny,
+            value: embyr_core::domain::field_value::FieldValue::String("x".to_string()),
+        }));
+        assert!(!FirestoreService::requires_composite_index(&q));
+    }
+
+    /// AC-CIR-06 (regression guard): a lone `not-in` (no other filter, no
+    /// orderBy) does not require a composite index — unchanged.
+    #[test]
+    fn lone_not_in_does_not_require_composite_index() {
+        let mut q = base_query();
+        q.filter = Some(QueryFilter::Field(FieldFilter {
+            field_path: "category".to_string(),
+            op: FilterOp::NotIn,
+            value: embyr_core::domain::field_value::FieldValue::String("x".to_string()),
+        }));
+        assert!(!FirestoreService::requires_composite_index(&q));
+    }
+
+    /// `IN` on a field, with a RANGE filter on the SAME field (not a
+    /// different one) — this is a degenerate/unusual shape (real Firestore
+    /// itself disallows combining `in` with a range on the exact same
+    /// field), but this function must not false-positive on it: the "range
+    /// on a DIFFERENT field" check must correctly exclude the IN field
+    /// itself.
+    #[test]
+    fn in_filter_plus_a_range_filter_on_the_same_field_does_not_trigger_the_in_plus_range_rule() {
+        let mut q = base_query();
+        q.filter = Some(QueryFilter::Composite(vec![
+            in_filter("category"),
+            range_filter("category", FilterOp::GreaterThan),
+        ]));
         assert!(!FirestoreService::requires_composite_index(&q));
     }
 }
