@@ -969,6 +969,11 @@ path = "../../tests/security_rules_cel_functions/acceptance/cf03_simulation_pari
 name = "security_rules_cel_functions_cf04_multiple_functions_and_named_rejections"
 path = "../../tests/security_rules_cel_functions/acceptance/cf04_multiple_functions_and_named_rejections.rs"
 
+# firestore-composite-indexes-admin-api (Slice 01, US-01, Release 1, Walking Skeleton). AC-CIX-01/02/03/04.
+[[test]]
+name = "firestore_composite_indexes_admin_api_cix01_create_index_walking_skeleton"
+path = "../../tests/firestore_composite_indexes_admin_api/acceptance/cix01_create_index_walking_skeleton.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

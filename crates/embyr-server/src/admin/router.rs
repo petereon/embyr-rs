@@ -59,6 +59,9 @@ use super::handlers::access_rules::{
     import_rules_file, simulate_access_rule, simulate_group_query_compliance,
     simulate_query_compliance, simulate_routed_access_rule,
 };
+use super::handlers::composite_indexes::{
+    create_composite_index, delete_composite_index, list_composite_indexes,
+};
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
@@ -324,6 +327,20 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/access_rules/simulate_route",
             post(simulate_routed_access_rule),
+        )
+        // firestore-composite-indexes-admin-api (Slice 01, US-01, ADR-068):
+        // Create/List a project's own composite indexes — closes the
+        // last-mile gap in the query path's own existing, unmodified
+        // `IndexManager::is_index_ready` gate (Owner/Admin for create, any
+        // role read-only for list, mirrors `define_access_rule`'s/
+        // `get_access_rule_history`'s identical gate shapes).
+        .route(
+            "/admin/v1/projects/:project_id/indexes",
+            get(list_composite_indexes).post(create_composite_index),
+        )
+        .route(
+            "/admin/v1/projects/:project_id/indexes/:index_id",
+            delete(delete_composite_index),
         )
         .route(
             "/admin/v1/projects/:project_id/metrics",
