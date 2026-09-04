@@ -553,3 +553,104 @@ equivalent uncertainty in-wave instead.
 
 **Handoff To**: nw-solution-architect (DESIGN wave)
 **Deliverables**: this feature-delta.md, 5 locked Resolutions, 5-slice/2-release plan
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ This feature-delta.md's own DISCUSS sections in full, all 5 Resolutions.
+✓ `crates/embyr-core/src/storage/backend_adapter.rs` — direct read, confirming the CENTRAL
+DESIGN question before locking anything: `BackendAdapter::get_document(&self, path:
+&DocumentPath)` already accepts an ARBITRARY `DocumentPath`, not restricted to the request's own
+current document. **No new port method or adapter capability is needed** — the fetch step this
+feature builds is a new CALL SITE for an EXISTING method. This directly resolves Slice 01's own
+Pre-Slice SPIKE question, confirmed, not assumed.
+✓ `crates/embyr-core/src/domain/document.rs` — `DocumentPath {project_id, collection_path,
+document_id}`'s own exact shape, confirming a resolved path string (e.g. `"organizations/uid123"`)
+splits cleanly via the SAME last-segment-is-document-id discipline `rules_file.rs`'s own
+ancestor/leaf split already uses.
+✓ `docs/product/architecture/adr-002-bounded-contexts.md` § BC-4 Access Control,
+`adr-029-access-control-composition-and-bounded-context.md` — BC-4's own CURRENT "read-only,
+non-transactional" dependency-shape characterization on BC-2, re-verified (not violated) by this
+feature's own extension: the NEW dependency edge (an arbitrary-path fetch, vs. the current
+single-known-document fetch) is STILL read-only, STILL non-transactional — only the SET of
+documents reachable widens, not the nature of the dependency.
+✓ `crates/embyr-core/src/access_control/mod.rs` — full re-read (re-verifying, per this project's
+own "DESIGN re-verifies structurally, never assumes DISCUSS's own summary" discipline): the exact
+`Operand`/`Condition`/`detect_unsupported_construct` shape to extend, and every existing
+`evaluate()` call site (12 in `handler.rs`, 4 in `access_rules.rs`, 2 in `listen_handler.rs`) that
+will need the new 8th parameter threaded through, `&BTreeMap::new()` at every site not wired this
+feature (mirrors `request_time`'s own rollout exactly).
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Existing mechanism | Reused unchanged for this feature? |
+|---|---|
+| `BackendAdapter::get_document` | Yes — zero new port method, zero new adapter capability (confirmed by direct read, not assumed) |
+| `evaluate()`'s "pre-resolve, thread as a parameter" pattern (3 prior precedents: `path_variable_value`, `ancestor_path_variable_values`, `request_time`) | Yes — the 8th parameter follows the identical shape |
+| `FieldMissing`'s fail-closed short-circuit | Yes — `CrossDocumentGet`'s own missing-document/missing-field case reuses it unchanged, zero new control-flow shape |
+| `detect_unsupported_construct`'s call-syntax scan | Yes, NARROWED — `get`/`exists` are removed from its unconditional-rejection list, replaced by real parsing; every OTHER identifier (including `duration.value`, per 4c's own precedent) is unaffected |
+| `json_value_to_field_value` (simulation's synthetic-input translation) | Yes — `cross_document_reads`'s own synthetic map reuses it unchanged |
+| `rules_file.rs`'s own literal/substitution-segment parsing discipline | Reused STRUCTURALLY (the SAME two-kind-of-segment design), not the same CODE — `PathTemplate` is a runtime path-BUILDING template, `rules_file::PathSegment` is an import-time path-MATCHING pattern; genuinely different consumers, same design shape |
+
+**Nothing in this feature requires a new bounded context (BC-4 already exists), a new admin route,
+or a new port/adapter trait method** — confirmed by direct code read before locking ADR-066, not
+assumed from the epic's own naming.
+
+## Wave: DESIGN / [REF] Architecture Design
+
+See ADR-066 (`docs/product/architecture/adr-066-cross-document-reads-two-phase-evaluation.md`) for
+the full type/mechanism design. Summary of the 6 extension points, each independently additive
+(confirmed in ADR-066 § Decision sections):
+
+1. **Types**: `PathTemplate`/`PathTemplateSegment` (literal + `$(request.auth.uid)`/
+   `$(request.path.<var>)` substitutions), `Operand::CrossDocumentExists`/`CrossDocumentGet`.
+2. **Path-discovery**: a NEW pure `embyr-core` function (`discover_cross_document_paths`) walking
+   the parsed `Condition` tree, resolving every cross-document operand's own template against
+   already-known bindings, returning a `BTreeSet<String>` of distinct paths — zero cost when no
+   such operand exists anywhere in the tree.
+3. **Fetch**: a NEW shared `embyr-server` helper (`fetch_cross_document_reads`), splitting each
+   discovered path into a `DocumentPath` and calling the EXISTING `get_document` unchanged —
+   sequential, not batched (accepted trade-off, small counts by structural design).
+4. **`evaluate()` signature**: 8th parameter `cross_document_reads: &BTreeMap<String,
+   Option<FirestoreDocument>>`, `&BTreeMap::new()` at every pre-existing call site, mirroring
+   `request_time`'s own identical rollout discipline.
+5. **Simulation**: `SimulateAccessRuleBody.cross_document_reads` (synthetic path→fields map,
+   translated via the existing `json_value_to_field_value`) — zero real I/O, mirrors
+   `request_time`'s own synthetic-input precedent generalized from one value to a map.
+6. **Parser**: `exists`/`get` removed from `detect_unsupported_construct`'s unconditional
+   rejection list, replaced by real path-template parsing; any substitution shape beyond
+   `$(request.auth.uid)`/`$(request.path.<var>)` (or a `get()`-then-`get()` chain) is a NAMED
+   `UNSUPPORTED_EXPRESSION_GRAMMAR` rejection, never silently mis-parsed.
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] Zero new adapter/port capability — `get_document` already accepts an arbitrary
+  `DocumentPath`, confirmed by direct code read BEFORE any mechanism design was locked (avoided
+  designing a capability that turned out to already exist).
+- [D2] Path-discovery (pure) and fetch (I/O) are two DIFFERENT functions in two DIFFERENT crates,
+  never merged — the only way to keep `embyr-core` genuinely zero-IO while still needing a
+  data-dependent (condition-text-dependent) set of paths to fetch.
+- [D3] The path-template is resolved twice per evaluation in principle (once by path-discovery to
+  determine WHAT to fetch, once by `resolve_field_value` during actual evaluation to look up the
+  fetched result) — accepted as a known, minor, non-load-bearing inefficiency (pure string
+  building, not I/O), not optimized away this feature.
+- [D4] `discover_cross_document_paths` is `pub` (not `pub(crate)`) — the ONLY function this
+  feature adds that must be called cross-crate from `embyr-server`'s own new fetch call sites,
+  mirroring why `evaluate()`/`parse_condition` are already `pub` for the identical reason.
+
+### Constraints Established
+- No new dependency, no new bounded context, no new port/adapter trait method.
+- `embyr-core` stays genuinely zero-IO, confirmed by construction (every new function in this
+  feature's own `embyr-core` half is pure data + pure computation).
+- Unit tests for every new pure function are written DURING DELIVER (ADR-066 § Enforcement),
+  applying `security-rules-cel-expression-grammar`'s own QUALITY_GATE lesson from the start,
+  never deferred to a post-hoc fix.
+
+## Wave: DESIGN / [REF] Next Wave
+
+**Handoff To**: nw-software-crafter (DELIVER wave, per this project's own established convention —
+DISTILL folds into per-slice TDD, not a separate artifact, matching how the entire CEL family has
+actually been built)
+**Deliverables**: this feature-delta.md's DESIGN section, ADR-066
