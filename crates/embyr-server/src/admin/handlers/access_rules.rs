@@ -302,6 +302,16 @@ pub struct SimulateAccessRuleBody {
     /// `PathVariable` operand ignores it entirely.
     #[serde(default)]
     pub path_variable: Option<String>,
+    /// NEW (security-rules-cel-expression-grammar, Slice 07, US-07,
+    /// ADR-065): a synthetic "now" (Unix seconds) for a `request.time`
+    /// -referencing candidate condition — a simulation has no real request
+    /// to derive it from (mirrors `path_variable`'s own identical
+    /// synthetic-input discipline). `None`/absent threads through to
+    /// `evaluate()`'s `request_time` param as `None`; a candidate
+    /// condition with no `RequestTime`/`Arithmetic` operand ignores it
+    /// entirely.
+    #[serde(default)]
+    pub request_time: Option<i64>,
 }
 
 /// Response for POST .../access_rules/simulate — 200. `outcome` is
@@ -505,6 +515,29 @@ fn json_value_to_field_value(value: &serde_json::Value) -> FieldValue {
         }
         serde_json::Value::Array(items) => {
             FieldValue::Array(items.iter().map(json_value_to_field_value).collect())
+        }
+        // security-rules-cel-expression-grammar (Slice 07, US-07, ADR-065):
+        // a synthetic Timestamp — this generic translator otherwise has no
+        // way to represent one (a plain JSON number always maps to
+        // Integer/Double above), needed for a `request.time`-referencing
+        // candidate to be simulated against a resource field that is
+        // ALSO a timestamp (the time-window idiom's own evidenced shape).
+        // Reuses the IDENTICAL `{"t": "TS", "s": <seconds>, "n": <nanos>}`
+        // wire shape `embyr-pg-storage::encoding::field_value` already
+        // uses for real stored documents — never a second, divergent
+        // convention — checked BEFORE the generic `Map` fallback below (a
+        // real user map field named exactly `{"t": "TS", ...}` is
+        // vanishingly unlikely and, per this feature's own "recognized
+        // shape, not silently misinterpreted" discipline, would need its
+        // own DISCUSS if ever evidenced).
+        serde_json::Value::Object(map)
+            if map.get("t").and_then(|v| v.as_str()) == Some("TS")
+                && map.get("s").is_some_and(|v| v.is_i64() || v.is_u64())
+                && map.get("n").is_some_and(|v| v.is_i64() || v.is_u64()) =>
+        {
+            let secs = map["s"].as_i64().unwrap_or(0);
+            let nanos = map["n"].as_i64().unwrap_or(0) as i32;
+            FieldValue::Timestamp(secs, nanos)
         }
         serde_json::Value::Object(map) => FieldValue::Map(
             map.iter()
@@ -941,6 +974,14 @@ pub async fn simulate_access_rule(
     // `request_resource` are populated vs. empty drives create/update/delete
     // semantics identically to real enforcement — `body.operation` is never
     // read here.
+    // security-rules-cel-expression-grammar (Slice 07, US-07, ADR-065): the
+    // caller-supplied synthetic "now" — a simulation has no real request to
+    // derive it from, mirroring `path_variable`'s own identical synthetic-
+    // input discipline. Zero subsecond precision (the request body carries
+    // whole seconds only) — no domain example needs sub-second granularity
+    // in a simulated candidate.
+    let request_time_field = body.request_time.map(|secs| FieldValue::Timestamp(secs, 0));
+
     // security-rules-cel-parity (Slice 06, US-06, ADR-062): `evaluate()`'s
     // 5th parameter, now threaded from the caller-supplied synthetic
     // document ID — the identical mechanism `handle_get_document`/the 3
@@ -957,10 +998,7 @@ pub async fn simulate_access_rule(
         // variable rules only; a routed-pattern simulation is US-06
         // (Release 2, `simulate_route`), out of this slice's scope.
         &std::collections::BTreeMap::new(),
-        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
-        // mechanical `None` — timestamp/duration simulation is US-07
-        // (Release 3), out of this slice's own locked scope.
-        None,
+        request_time_field.as_ref(),
     );
 
     Ok((

@@ -919,6 +919,11 @@ path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg05_in_re
 name = "security_rules_cel_expression_grammar_ceg06_timestamp_and_duration"
 path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg06_timestamp_and_duration.rs"
 
+# security-rules-cel-expression-grammar (Slice 07, US-07, Release 3, LAST slice). AC-CEG-20/21.
+[[test]]
+name = "security_rules_cel_expression_grammar_ceg07_timestamp_duration_read_and_simulation_parity"
+path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg07_timestamp_duration_read_and_simulation_parity.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

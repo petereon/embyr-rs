@@ -1239,6 +1239,15 @@ impl FirestoreService {
                                 std::collections::BTreeMap::new();
                             let resource_fields =
                                 doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+                            // security-rules-cel-expression-grammar (Slice
+                            // 07, US-07, ADR-065): the request's own server
+                            // timestamp — a local clock read, zero new I/O
+                            // in the sense that matters.
+                            let now = chrono::Utc::now();
+                            let now_field = FieldValue::Timestamp(
+                                now.timestamp(),
+                                now.timestamp_subsec_nanos() as i32,
+                            );
 
                             // security-rules-cel-path-matching (Slice 02,
                             // US-02, ADR-063 § Decision — Routing
@@ -1257,11 +1266,7 @@ impl FirestoreService {
                                 &empty_fields,
                                 Some(path.document_id.as_str()),
                                 &ancestor_bindings,
-                                // security-rules-cel-expression-grammar
-                                // (Slice 06, ADR-065): mechanical `None` —
-                                // GetDocument's own request.time wiring is
-                                // Slice 07's own locked scope.
-                                None,
+                                Some(&now_field),
                             ) {
                                 embyr_core::access_control::EvaluationOutcome::Deny => {
                                     Err(Status::permission_denied("access denied by rule"))
@@ -1305,6 +1310,11 @@ impl FirestoreService {
                 let empty_fields: std::collections::BTreeMap<String, FieldValue> =
                     std::collections::BTreeMap::new();
                 let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+                // security-rules-cel-expression-grammar (Slice 07, US-07,
+                // ADR-065): the request's own server timestamp — a local
+                // clock read, zero new I/O in the sense that matters.
+                let now = chrono::Utc::now();
+                let now_field = FieldValue::Timestamp(now.timestamp(), now.timestamp_subsec_nanos() as i32);
 
                 // security-rules-write-path (ADR-030): one new argument at
                 // this existing call site — an empty map for the new
@@ -1335,10 +1345,7 @@ impl FirestoreService {
                     // no ancestor wildcard concept at all (US-05
                     // zero-regression guardrail).
                     &std::collections::BTreeMap::new(),
-                    // security-rules-cel-expression-grammar (Slice 06,
-                    // ADR-065): mechanical `None` — GetDocument's own
-                    // request.time wiring is Slice 07's own locked scope.
-                    None,
+                    Some(&now_field),
                 ) {
                     // AC-17-10: `Deny` ALWAYS produces the identical
                     // `PermissionDenied` response — never distinguishes
