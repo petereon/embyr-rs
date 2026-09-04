@@ -118,12 +118,27 @@ pub enum Operand {
     /// call site passes `None` for `evaluate()`'s `path_variable_value`
     /// parameter until its own slice wires it (write handlers — Slice 03).
     PathVariable(String),
+    /// A bare integer literal, e.g. `20` (security-rules-cel-expression-
+    /// grammar, Slice 01, US-01, ADR-065) — resolves `OQ-SR-04` for the
+    /// numeric half of the grammar.
+    IntLiteral(i64),
+    /// A bare decimal literal, e.g. `4.5` (same feature/slice).
+    DoubleLiteral(f64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
     Eq,
     Ne,
+    /// Relational comparison operators (security-rules-cel-expression-
+    /// grammar, Slice 01, US-01, ADR-065) — meaningful only between two
+    /// numeric operands; a non-numeric pairing evaluates to `false`
+    /// (Deny), never a panic (AC-CEG-05, `evaluate()` stays total by
+    /// construction).
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 /// The *only* shape `request.auth` presents to the evaluator (ADR-027 §
@@ -297,6 +312,13 @@ enum Token {
     /// (custom-claims US-06, ADR-034). No escape-sequence support (v1's own
     /// narrow scoping, reapplied).
     StringLiteral(String),
+    /// security-rules-cel-expression-grammar (Slice 01, ADR-065).
+    IntLiteral(i64),
+    DoubleLiteral(f64),
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
@@ -337,6 +359,68 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
             '!' => {
                 tokens.push(Token::Not);
                 i += 1;
+            }
+            // security-rules-cel-expression-grammar (Slice 01, ADR-065):
+            // relational comparison tokens, the SAME two-character
+            // lookahead pattern '=='/'!=' already use.
+            '<' if chars.get(i + 1) == Some(&'=') => {
+                tokens.push(Token::Le);
+                i += 2;
+            }
+            '<' => {
+                tokens.push(Token::Lt);
+                i += 1;
+            }
+            '>' if chars.get(i + 1) == Some(&'=') => {
+                tokens.push(Token::Ge);
+                i += 2;
+            }
+            '>' => {
+                tokens.push(Token::Gt);
+                i += 1;
+            }
+            // security-rules-cel-expression-grammar (Slice 01, ADR-065):
+            // a numeric literal — a digit run, or '-' immediately followed
+            // by a digit (a negative literal; this feature builds no
+            // general '-' arithmetic operator yet, so '-' is unambiguous
+            // here). An optional '.' followed by at least one more digit
+            // selects Double over Int.
+            c if c.is_ascii_digit()
+                || (c == '-' && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())) =>
+            {
+                let start = i;
+                if c == '-' {
+                    i += 1;
+                }
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let mut is_double = false;
+                if chars.get(i) == Some(&'.') {
+                    if chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()) {
+                        is_double = true;
+                        i += 1;
+                        while i < chars.len() && chars[i].is_ascii_digit() {
+                            i += 1;
+                        }
+                    } else {
+                        return Err(syntax_error(format!(
+                            "expected a digit after '.' in numeric literal at position {i}"
+                        )));
+                    }
+                }
+                let text: String = chars[start..i].iter().collect();
+                if is_double {
+                    let value: f64 = text
+                        .parse()
+                        .map_err(|_| syntax_error(format!("invalid double literal '{text}'")))?;
+                    tokens.push(Token::DoubleLiteral(value));
+                } else {
+                    let value: i64 = text
+                        .parse()
+                        .map_err(|_| syntax_error(format!("invalid integer literal '{text}'")))?;
+                    tokens.push(Token::IntLiteral(value));
+                }
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
@@ -501,26 +585,38 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_comparison(&mut self) -> Result<Condition, ConditionParseError> {
-        let left = match self.advance() {
-            Some(Token::Word(w)) => word_to_operand(w)?,
+    /// security-rules-cel-expression-grammar (Slice 01, ADR-065 § Decision
+    /// — Parser): factored out of `parse_comparison`'s own 2 previously
+    /// inline, identical match arms — widened here (and only here) to also
+    /// recognize numeric literals, so every future operand-source addition
+    /// (list literals, `duration.value(...)`, Slice 04/06) has exactly one
+    /// call site to extend, never two drifting copies.
+    fn parse_operand(&mut self) -> Result<Operand, ConditionParseError> {
+        match self.advance() {
+            Some(Token::Word(w)) => word_to_operand(w),
             // custom-claims (US-06, ADR-034): a string literal is a second
             // operand SOURCE, alongside `word_to_operand` — never itself
             // dispatched through `word_to_operand` (it carries no dotted
             // prefix to match against).
-            Some(Token::StringLiteral(s)) => Operand::StringLiteral(s.clone()),
-            _ => return Err(syntax_error("expected an operand")),
-        };
+            Some(Token::StringLiteral(s)) => Ok(Operand::StringLiteral(s.clone())),
+            Some(Token::IntLiteral(v)) => Ok(Operand::IntLiteral(*v)),
+            Some(Token::DoubleLiteral(v)) => Ok(Operand::DoubleLiteral(*v)),
+            _ => Err(syntax_error("expected an operand")),
+        }
+    }
+
+    fn parse_comparison(&mut self) -> Result<Condition, ConditionParseError> {
+        let left = self.parse_operand()?;
         let op = match self.advance() {
             Some(Token::Eq) => CompareOp::Eq,
             Some(Token::Ne) => CompareOp::Ne,
-            _ => return Err(syntax_error("expected '==' or '!='")),
+            Some(Token::Lt) => CompareOp::Lt,
+            Some(Token::Le) => CompareOp::Le,
+            Some(Token::Gt) => CompareOp::Gt,
+            Some(Token::Ge) => CompareOp::Ge,
+            _ => return Err(syntax_error("expected a comparison operator")),
         };
-        let right = match self.advance() {
-            Some(Token::Word(w)) => word_to_operand(w)?,
-            Some(Token::StringLiteral(s)) => Operand::StringLiteral(s.clone()),
-            _ => return Err(syntax_error("expected an operand")),
-        };
+        let right = self.parse_operand()?;
         Ok(Condition::Compare(left, op, right))
     }
 }
@@ -670,21 +766,54 @@ fn eval_bool(
                 _ => Err(FieldMissing),
             }
         }
-        Condition::Compare(left, op, right) => {
-            let equal = compare_operands(
-                left,
-                right,
-                auth,
-                resource_fields,
-                request_resource_fields,
-                path_variable_value,
-                ancestor_path_variable_values,
-            )?;
-            Ok(match op {
-                CompareOp::Eq => equal,
-                CompareOp::Ne => !equal,
-            })
-        }
+        Condition::Compare(left, op, right) => match op {
+            CompareOp::Eq | CompareOp::Ne => {
+                let equal = compare_operands(
+                    left,
+                    right,
+                    auth,
+                    resource_fields,
+                    request_resource_fields,
+                    path_variable_value,
+                    ancestor_path_variable_values,
+                )?;
+                Ok(match op {
+                    CompareOp::Eq => equal,
+                    CompareOp::Ne => !equal,
+                    CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
+                        unreachable!("outer match arm already narrowed to Eq/Ne")
+                    }
+                })
+            }
+            // security-rules-cel-expression-grammar (Slice 01, ADR-065 §
+            // Decision — evaluate() comparison logic): relational
+            // comparison resolves BOTH sides to a `FieldValue` (never the
+            // `compare_operands` identity-special-case pairings above,
+            // which are Eq/Ne-only idioms — `request.auth == null` has no
+            // relational-comparison meaning) then compares numerically.
+            // Neither side missing is `FieldMissing` (fails closed); a
+            // present-but-non-numeric value on either side is `false`
+            // (Deny), never a panic — AC-CEG-05, `evaluate()` stays total.
+            CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
+                let left_value = resolve_field_value(
+                    left,
+                    auth,
+                    resource_fields,
+                    request_resource_fields,
+                    path_variable_value,
+                    ancestor_path_variable_values,
+                )?;
+                let right_value = resolve_field_value(
+                    right,
+                    auth,
+                    resource_fields,
+                    request_resource_fields,
+                    path_variable_value,
+                    ancestor_path_variable_values,
+                )?;
+                Ok(compare_relational(*op, &left_value, &right_value))
+            }
+        },
     }
 }
 
@@ -801,6 +930,38 @@ fn resolve_field_value(
             .map(FieldValue::String)
             .or_else(|| path_variable_value.map(|v| FieldValue::String(v.to_string())))
             .ok_or(FieldMissing),
+        // security-rules-cel-expression-grammar (Slice 01, ADR-065): a
+        // literal always resolves — never `FieldMissing`, mirroring
+        // `BoolLiteral`/`NullLiteral`/`StringLiteral` above exactly.
+        Operand::IntLiteral(value) => Ok(FieldValue::Integer(*value)),
+        Operand::DoubleLiteral(value) => Ok(FieldValue::Double(*value)),
+    }
+}
+
+/// security-rules-cel-expression-grammar (Slice 01, ADR-065 § Decision —
+/// evaluate() comparison logic): `Integer`/`Double` both resolve to `f64`
+/// for relational comparison — any other `FieldValue` shape is not
+/// numeric, `None`.
+fn numeric_value(value: &FieldValue) -> Option<f64> {
+    match value {
+        FieldValue::Integer(i) => Some(*i as f64),
+        FieldValue::Double(d) => Some(*d),
+        _ => None,
+    }
+}
+
+/// AC-CEG-05: a non-numeric pairing (either side) is `false` (Deny), never
+/// a panic — `evaluate()` stays total by construction.
+fn compare_relational(op: CompareOp, left: &FieldValue, right: &FieldValue) -> bool {
+    let (Some(l), Some(r)) = (numeric_value(left), numeric_value(right)) else {
+        return false;
+    };
+    match op {
+        CompareOp::Lt => l < r,
+        CompareOp::Le => l <= r,
+        CompareOp::Gt => l > r,
+        CompareOp::Ge => l >= r,
+        CompareOp::Eq | CompareOp::Ne => unreachable!("only called for relational operators"),
     }
 }
 

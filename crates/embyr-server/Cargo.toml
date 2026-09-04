@@ -887,6 +887,13 @@ path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw05_non_r
 name = "security_rules_cel_recursive_wildcards_rw06_simulate_recursive_wildcard_precedence"
 path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw06_simulate_recursive_wildcard_precedence.rs"
 
+# security-rules-cel-expression-grammar (Slice 01, US-01, Release 1 Walking
+# Skeleton, ADR-065) — numeric literals + relational comparison operators,
+# real GetDocument enforcement proof. AC-CEG-01 through AC-CEG-05.
+[[test]]
+name = "security_rules_cel_expression_grammar_ceg01_numeric_literals_and_relational_comparison"
+path = "../../tests/security_rules_cel_expression_grammar/acceptance/ceg01_numeric_literals_and_relational_comparison.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
