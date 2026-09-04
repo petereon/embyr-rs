@@ -228,6 +228,36 @@ jobs:
     # mechanism (Ping carries no version field) — escalated to DESIGN once,
     # referenced not re-litigated in the 2 smaller sibling features. See each
     # feature's own § Handoff Package.
+    # NOTE (firestore-composite-indexes-admin-api DISCUSS, 2026-09-04, applied
+    # late during composite-index-requirement-rules DISCUSS — a back
+    # -propagation gap: this NOTE was promised in that feature's own
+    # feature-delta.md § SSOT Updates but never actually applied to this
+    # file): JOB-01 now also covers a composite-index admin CRUD surface
+    # (Create/List/Delete), closing a documented-but-unbuilt gap — the
+    # `composite_indexes` table + `IndexManager`/`requires_composite_index`
+    # gating have existed, correctly wired, since the original walking
+    # skeleton (04-02) — with no way for Alex to ever satisfy the resulting
+    # `FAILED_PRECONDITION` until that feature. Same job, same persona, not a
+    # new job. See docs/evolution/2026-09-04-firestore-composite-indexes
+    # -admin-api.md.
+    # NOTE (composite-index-requirement-rules DISCUSS, 2026-09-04): JOB-01
+    # now also covers accurate composite-index REQUIREMENT DETECTION —
+    # widening `requires_composite_index`'s own heuristic to match all 5 of
+    # `docs/SPEC.md`'s own documented trigger shapes (multi-field `orderBy`;
+    # inequality-or-equality filter + `orderBy` on a different field;
+    # `array-contains-any`; `not-in`; `IN` with more than one equality
+    # constraint), up from 3 of 5 previously correctly detected — plus naming
+    # the specific missing index in the rejection, closing the loop
+    # `firestore-composite-indexes-admin-api` opened. Same job, same
+    # persona, not a new job. Central finding, reversing this DISCUSS's own
+    # initial hypothesis: the codebase's OWN existing evidenced test
+    # (equality filter + different-field `orderBy`) was ALREADY Firestore
+    # -accurate, confirmed by live web verification against firebase.
+    # google.com — the genuine gaps were multi-field `orderBy` (uncaught
+    # entirely) and `IN`+range-on-a-different-field when filter-only
+    # (bypassed by a top-level `order_by.is_empty()` short-circuit). See
+    # docs/feature/composite-index-requirement-rules/feature-delta.md
+    # § Resolution 2/3.
 
   - id: JOB-02
     name: tenant-provision
