@@ -2283,6 +2283,91 @@ mod tests {
         assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
     }
 
+    /// A generic, non-`get`/`exists`/`duration.value` function-call-shaped
+    /// identifier is still rejected as `CustomFunction` — proves the
+    /// get/exists exemption (Slice 01) is narrow, not a blanket bypass of
+    /// `detect_unsupported_construct`'s own scan.
+    #[test]
+    fn a_generic_custom_function_call_is_still_rejected() {
+        let result = parse_condition("foo(1) == 1");
+        match result {
+            Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
+                assert_eq!(construct, UnsupportedConstruct::CustomFunction);
+            }
+            other => panic!("expected UnsupportedConstruct::CustomFunction, got {other:?}"),
+        }
+    }
+
+    /// `starts_with_at`'s own exact-length boundary: a needle that reaches
+    /// PRECISELY the end of `chars` (neither short nor overflowing) must
+    /// still match — proven directly against the private helper.
+    #[test]
+    fn starts_with_at_matches_a_needle_ending_exactly_at_the_slice_boundary() {
+        let chars: Vec<char> = "xyzdata.".chars().collect();
+        assert!(starts_with_at(&chars, 3, "data."));
+    }
+
+    /// `find_matching_paren` on an unterminated `exists(...)` construct
+    /// must return a syntax error, never panic (the loop's own bounds
+    /// check at the very last character).
+    #[test]
+    fn an_unterminated_exists_call_is_a_syntax_error_not_a_panic() {
+        let result = parse_condition("exists(/databases/$(database)/documents/orgs/x");
+        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+    }
+
+    /// The tokenizer's `get(...).data.<field>` field-name scan, when the
+    /// field name runs all the way to the END of the condition string
+    /// (nothing trailing) — the loop's own bounds check at the very last
+    /// character.
+    #[test]
+    fn a_get_call_field_name_reaching_the_end_of_the_condition_parses_correctly() {
+        let result = parse_condition(
+            "resource.data.expected == get(/databases/$(database)/documents/organizations/x).data.role",
+        );
+        match result {
+            Ok(Condition::Compare(_, _, Operand::CrossDocumentGet(_, field))) => {
+                assert_eq!(field, "role");
+            }
+            other => panic!("expected a successfully parsed CrossDocumentGet(.., \"role\"), got {other:?}"),
+        }
+    }
+
+    /// `parse_path_template`'s exact-prefix-only case (no collection/
+    /// document segment at all after `/databases/$(database)/documents`)
+    /// must produce its OWN distinct message, not the "missing prefix"
+    /// message the too-short case produces.
+    #[test]
+    fn a_path_with_only_the_required_prefix_and_no_segment_names_the_specific_error() {
+        let result = parse_condition("exists(/databases/$(database)/documents)");
+        match result {
+            Err(ConditionParseError::SyntaxError { detail }) => {
+                assert!(
+                    detail.contains("at least one collection/document segment"),
+                    "expected the exact-prefix-only message, got: {detail}"
+                );
+            }
+            other => panic!("expected SyntaxError, got {other:?}"),
+        }
+    }
+
+    /// A well-formed, single (non-chained) `$(...)` substitution whose
+    /// inner content is neither `request.auth.uid` nor `request.path.<var>`
+    /// is a named `UnsupportedExpressionGrammar` rejection — distinct from
+    /// `a_substitution_beyond_auth_uid_or_path_variable_is_a_named_rejection`
+    /// above, which exercises the MALFORMED-substitution fallback instead
+    /// (a chained `get()` never cleanly strip_prefix/suffix's as `$(...)`).
+    #[test]
+    fn a_cleanly_parenthesized_unsupported_substitution_is_a_named_rejection() {
+        let result = parse_condition("exists(/databases/$(database)/documents/orgs/$(request.auth.email))");
+        match result {
+            Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
+                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+            }
+            other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
+        }
+    }
+
     #[test]
     fn wildcard_path_condition_is_rejected_as_unsupported_not_syntax_error() {
         // AC-17-03 (mutation-testing gap, security-rules DELIVER Phase 5):
@@ -3216,6 +3301,45 @@ mod tests {
         );
         let paths = discover_cross_document_paths(&condition, None, None, &BTreeMap::new());
         assert_eq!(paths.len(), 2);
+    }
+
+    /// `walk_operand_for_cross_document_paths`'s own `Arithmetic`/
+    /// `ListLiteral` recursion arms — a cross-document operand nested
+    /// inside an arithmetic expression or a list literal must still be
+    /// discovered (e.g. `get(...).data.count + 1` or `x in [get(...).data.y]`).
+    #[test]
+    fn discover_walks_into_arithmetic_and_list_literal_operands() {
+        let template = PathTemplate {
+            segments: vec![PathTemplateSegment::Literal("organizations/a".to_string())],
+        };
+        let arithmetic_condition = Condition::Compare(
+            Operand::Arithmetic(
+                Box::new(Operand::CrossDocumentGet(template.clone(), "count".to_string())),
+                ArithmeticOp::Add,
+                Box::new(Operand::IntLiteral(1)),
+            ),
+            CompareOp::Eq,
+            Operand::IntLiteral(2),
+        );
+        let paths = discover_cross_document_paths(&arithmetic_condition, None, None, &BTreeMap::new());
+        assert_eq!(
+            paths.len(),
+            1,
+            "a cross-document operand nested inside Arithmetic must still be discovered"
+        );
+        assert!(paths.contains("organizations/a"));
+
+        let list_condition = Condition::In(
+            Operand::StringLiteral("x".to_string()),
+            Operand::ListLiteral(vec![Operand::CrossDocumentExists(template)]),
+        );
+        let paths = discover_cross_document_paths(&list_condition, None, None, &BTreeMap::new());
+        assert_eq!(
+            paths.len(),
+            1,
+            "a cross-document operand nested inside a ListLiteral must still be discovered"
+        );
+        assert!(paths.contains("organizations/a"));
     }
 
     #[test]
