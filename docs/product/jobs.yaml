@@ -1156,6 +1156,23 @@ jobs:
     # mechanical propagation" precedent exactly. See
     # docs/feature/security-rules-cel-parity/feature-delta.md § Changed
     # Assumptions and § Job Discovery Framing Resolution.
+    # NOTE (security-rules-cel-expression-grammar DISCUSS, 2026-09-04): JOB-17
+    # now also covers numeric-bound (`resource.data.photo_count <= 20`),
+    # whitelist/`in` (`request.resource.data.status in ["draft",
+    # "published", "archived"]`), and timestamp/duration-window
+    # (`request.time < resource.data.created_at + duration.value(24, 'h')`)
+    # validation clauses in a real Firestore `.rules` file — same job, same
+    # persona, not a new job (11th realization). Closes the construct
+    # security-rules-cel-parity's own DISCUSS named and deferred by id
+    # ("Epic 4c"). Confirmed by direct code read: `FieldValue::Integer/
+    # Double/Timestamp/Array` already exist at the domain-storage level —
+    # the entire gap is in the condition GRAMMAR (parser/evaluator) only,
+    # zero new storage schema. One feature, 3 dependency-ordered releases
+    # (numeric+relational, then in/list, then timestamp+duration — the
+    # latter needs arithmetic, which the first release builds), not 3
+    # separate features. See
+    # docs/feature/security-rules-cel-expression-grammar/feature-delta.md
+    # § Job Discovery Framing Resolution.
 
   - id: JOB-18
     name: embyr-hosted-identity
