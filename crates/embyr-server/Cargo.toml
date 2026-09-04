@@ -954,6 +954,16 @@ path = "../../tests/security_rules_cel_cross_document_reads/acceptance/cdr05_sim
 name = "security_rules_cel_functions_cf01_named_helper_function_walking_skeleton"
 path = "../../tests/security_rules_cel_functions/acceptance/cf01_named_helper_function_walking_skeleton.rs"
 
+# security-rules-cel-functions (Slice 02, US-02, Release 1, confirmatory). AC-CF-05.
+[[test]]
+name = "security_rules_cel_functions_cf02_write_path_parity"
+path = "../../tests/security_rules_cel_functions/acceptance/cf02_write_path_parity.rs"
+
+# security-rules-cel-functions (Slice 03, US-03, Release 1, confirmatory, Release 1 complete). AC-CF-06.
+[[test]]
+name = "security_rules_cel_functions_cf03_simulation_parity"
+path = "../../tests/security_rules_cel_functions/acceptance/cf03_simulation_parity.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
