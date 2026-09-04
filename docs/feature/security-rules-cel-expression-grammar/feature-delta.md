@@ -567,3 +567,88 @@ file, same job, same persona, not a new job (11th realization)."
 
 **Handoff To**: nw-solution-architect (DESIGN wave)
 **Deliverables**: this feature-delta.md, 4 locked Resolutions, `OQ-CEG-01`, 3-release/7-slice plan
+
+---
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ This feature-delta.md's own DISCUSS sections in full, all 4 Resolutions.
+✓ `crates/embyr-core/src/access_control/mod.rs` — full re-read (already done during DISCUSS,
+re-confirmed here per this project's own "DESIGN re-verifies structurally, never assumes DISCUSS's
+own summary" discipline) — the exact `Operand`/`Condition`/`CompareOp`/tokenizer/parser shape to
+extend, and every existing call site of `evaluate()` (6, confirmed by grep: `handle_get_document`,
+3 write handlers, `handle_add_target`'s 2 Listen arms, `simulate_access_rule`) that will need the
+new 7th parameter threaded through, `None` at every site not wired this feature.
+✓ `crates/embyr-core/src/domain/field_value.rs` — confirmed `Timestamp(i64, i32)` representation
+(seconds + subsecond nanos) for the `Operand::Arithmetic` timestamp-offset design below.
+✓ `docs/product/architecture/adr-062-...md`, `adr-063-...md`, `adr-034-...md` — the 3 direct
+precedents this design reuses (new-parameter rollout discipline, new-operand-family precedent,
+tokenizer-addition precedent).
+
+## Wave: DESIGN / [REF] Reuse Analysis
+
+| Existing mechanism | Reused unchanged for this feature? |
+|---|---|
+| `Condition::Compare` (the AST node) | Yes — relational comparison (`<`/`<=`/`>`/`>=`) is a NEW `CompareOp` variant on the SAME node, not a new `Condition` shape |
+| `evaluate()`'s fail-closed `FieldMissing` short-circuit | Yes — every new operand (numeric literal excepted, which never fails) resolves through the SAME `resolve_field_value`/`compare_operands` fail-closed path |
+| `parse_condition`'s 3-call-site sharing (define/redefine, real enforcement, simulation) | Yes — zero new call sites, the SAME 3 already share whatever `parse_condition` accepts |
+| `detect_unsupported_construct`'s pre-tokenize, quote-aware scan | Yes, EXTENDED (2 new checks) — not replaced |
+| `AccessRulePatternRow`/`access_rules`/`access_rule_patterns` storage shape | Unchanged — condition text is already an opaque string column |
+| Admin routes (`define_access_rule`, `simulate_access_rule`, `import_rules_file`) | Unchanged — zero new routes, zero new request/response fields |
+
+**Nothing in this feature requires a new bounded context, a new table, a new admin route, or a
+change to any of the 5 prior JOB-17 epics' own already-shipped call sites beyond the SAME
+mechanical `evaluate()` 7th-parameter threading every prior signature-widening epic has already
+done twice (`path_variable_value`, ADR-062; `ancestor_path_variable_values`, ADR-063).**
+
+## Wave: DESIGN / [REF] Architecture Design
+
+See ADR-065 (`docs/product/architecture/adr-065-expression-grammar-numeric-in-list-timestamp-
+duration.md`) for the full type/tokenizer/parser/`evaluate()`-signature design. Summary of the 6
+extension points, each independently additive (confirmed in ADR-065 § Decision sections):
+
+1. **Types**: 5 new `Operand` variants (`IntLiteral`, `DoubleLiteral`, `ListLiteral`,
+   `RequestTime`, `Arithmetic`, `DurationLiteral` — 6, correction), 1 new `Condition` variant
+   (`In`), 4 new `CompareOp` variants, 1 new `UnsupportedConstruct` variant (shared across all 5
+   named out-of-scope rejection sites).
+2. **Tokenizer**: digit-run scanning, `[`/`]`/`,`, `<`/`<=`/`>`/`>=`, `+`/`-` (position-
+   disambiguated from the existing negative-literal case).
+3. **Parser**: a factored `parse_operand` helper (replacing the 2 existing inline `Word => word_
+   to_operand` call sites in `parse_comparison`), extended for numeric/list/arithmetic/`in`
+   recognition; `duration.value(...)` recognized syntactically only in arithmetic-RHS position.
+4. **`evaluate()` signature**: 7th parameter `request_time: Option<FieldValue>`, `None` at every
+   pre-existing call site, mirroring `path_variable_value`'s/`ancestor_path_variable_values`'s own
+   identical rollout discipline.
+5. **Rejection discipline**: 5 named-but-out-of-scope shapes (map literals, nested map-field
+   traversal, `in`-against-non-list, unsupported/nested arithmetic, unrecognized duration unit)
+   each get an explicit branch into `UnsupportedExpressionGrammar`, never a fallthrough
+   `SyntaxError`.
+6. **Zero storage/admin-route change** — confirmed by Reuse Analysis above.
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] `evaluate()` gains a 7th parameter (`request_time`), not a new function or a struct-of-
+  params refactor — mirrors the SAME incremental-parameter-growth precedent 2 prior epics already
+  established; a struct-of-params refactor is explicitly NOT triggered by this feature alone
+  (named as a future-DESIGN reconsideration point if a 5th/6th grammar-extension epic ever pushes
+  the parameter count materially higher, not decided here).
+- [D2] `duration.value(...)`'s legality is checked SYNTACTICALLY (parse-time position), not
+  semantically (runtime type) — consistent with how every other operand's runtime type is already
+  never parse-time checked in this grammar.
+- [D3] One shared `UnsupportedExpressionGrammar` variant for 5 distinct named-rejection sites,
+  distinguished by `detail` text, not 5 new enum variants — smallest correct extension of
+  `UnsupportedConstruct`, mirrors `ConditionParseError::SyntaxError`'s own single-variant-many-
+  details shape.
+
+### Constraints Established
+- No new `embyr-core` dependency (timestamp arithmetic uses whatever the crate already has
+  available for `FieldValue::Timestamp` construction/comparison — confirmed available, no new
+  crate needed, per the Slice 06 Pre-Slice SPIKE).
+- Parser non-nesting enforcement for arithmetic is structural (parse-time rejection), not type-
+  level — an accepted, named limitation (ADR-065 § Consequences).
+
+## Wave: DESIGN / [REF] Next Wave
+
+**Handoff To**: nw-acceptance-designer (DISTILL wave)
+**Deliverables**: this feature-delta.md's DESIGN section, ADR-065
