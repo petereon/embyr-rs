@@ -1192,6 +1192,37 @@ mod tests {
         );
     }
 
+    /// Mutation-testing gap closed (security-rules-cel-recursive-wildcards,
+    /// Slice 06 QUALITY_GATE): the recursive branch's own copy of the
+    /// same-bucket conflicting-condition guard (`decompose_block`'s
+    /// `Some(existing) if *existing != rewritten`, fixed-prefix loop) had
+    /// no test exercising a genuine conflict — two `allow read` clauses in
+    /// the SAME recursive-wildcard block with DIFFERENT conditions.
+    #[test]
+    fn decompose_rejects_conflicting_conditions_for_the_same_verb_bucket_in_a_recursive_wildcard_block()
+    {
+        let blocks = parse_rules_file(
+            r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /expeditions/{expeditionId}/{path=**} {
+                  allow read: if expeditionId == "trek-2026";
+                  allow read: if expeditionId == "trek-2027";
+                }
+              }
+            }
+        "#,
+        )
+        .expect("must parse");
+
+        match decompose(blocks) {
+            Err(RulesFileError { offending_blocks }) => {
+                assert_eq!(offending_blocks[0].construct, "CONFLICTING_VERB_CONDITIONS");
+            }
+            Ok(_) => panic!("expected CONFLICTING_VERB_CONDITIONS rejection"),
+        }
+    }
+
     #[test]
     fn decompose_rejects_a_recursive_wildcard_that_is_not_the_final_segment() {
         let blocks = parse_rules_file(
