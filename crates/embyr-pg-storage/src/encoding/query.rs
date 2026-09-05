@@ -49,8 +49,16 @@ pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
         FilterOp::LessThanOrEqual => push_scalar_comparison(qb, &f.field_path, "<=", &f.value),
         FilterOp::GreaterThan => push_scalar_comparison(qb, &f.field_path, ">", &f.value),
         FilterOp::GreaterThanOrEqual => push_scalar_comparison(qb, &f.field_path, ">=", &f.value),
-        FilterOp::Equal => push_scalar_comparison(qb, &f.field_path, "=", &f.value),
-        FilterOp::NotEqual => push_scalar_comparison(qb, &f.field_path, "!=", &f.value),
+        // firestore-equal-notequal-value-type-support (Slice 01, US-01,
+        // AC-ENV-01 through AC-ENV-07): reuses `push_value_equality`
+        // (built for `In`/`NotIn`) instead of `push_scalar_comparison` —
+        // equality/inequality never needed type-specific casting, only a
+        // match against the value AS STORED, which whole-object JSON
+        // comparison already provides uniformly for every `FieldValue`
+        // variant (including `Timestamp`/`Bytes`/`Reference`/`Array`/`Map`,
+        // which `push_scalar_comparison`'s own narrower match panics on).
+        FilterOp::Equal => push_value_equality(qb, &f.field_path, &f.value, false),
+        FilterOp::NotEqual => push_value_equality(qb, &f.field_path, &f.value, true),
         // firestore-query-filter-operator-support (Slice 01, US-01,
         // AC-QFO-01/02/03): `f.value` is the single scalar being searched
         // for inside the array field — JSONB `@>` containment against a
@@ -147,13 +155,21 @@ pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
 
 /// firestore-query-filter-operator-support (Slice 03, US-03, ADR — Design):
 /// extracted from `append_field_filter`'s own original inline match — a
-/// pure refactor, zero behavior change for the 6 pre-existing operators
-/// (`LessThan` through `NotEqual`), which it continues to serve exclusively
-/// — `In`/`NotIn` use `push_value_equality` instead (below), NOT this
-/// function, since range comparisons need the unwrapped, type-cast `->>'v'`
-/// extraction this function provides, while equality/inequality against a
-/// whole stored value does not (and, as discovered via AC-QFO-10's own
-/// failing test, must NOT use it — see `push_value_equality`'s own doc).
+/// pure refactor, zero behavior change for the 4 range operators
+/// (`LessThan` through `GreaterThanOrEqual`), which it continues to serve
+/// exclusively — `In`/`NotIn`/`Equal`/`NotEqual` all use `push_value_
+/// equality` instead (below, widened by firestore-equal-notequal-value
+/// -type-support to cover `Equal`/`NotEqual` too), NOT this function, since
+/// range comparisons need the unwrapped, type-cast `->>'v'` extraction this
+/// function provides, while equality/inequality against a whole stored
+/// value does not (and, as discovered via AC-QFO-10's own failing test,
+/// must NOT use it — see `push_value_equality`'s own doc). This function's
+/// own `_ => panic!(...)` fallback still fires for `Timestamp`/`Bytes`/
+/// `Reference`/`Array`/`Map`-valued RANGE-comparison targets — a real,
+/// separately-evidenced, deferred gap (candidate id `firestore-range
+/// -operator-value-type-support`), since range comparisons need ordering,
+/// not equality, and whole-object JSON comparison has no meaningful
+/// "less than" for a composite type.
 fn push_scalar_comparison(qb: &mut QueryBuilder<Postgres>, field_path: &str, op: &str, value: &FieldValue) {
     match value {
         FieldValue::Integer(v) => {
@@ -188,11 +204,17 @@ fn push_array_contains(qb: &mut QueryBuilder<Postgres>, field_path: &str, target
     qb.push("::jsonb");
 }
 
-/// firestore-query-filter-operator-support (Slice 03/04, US-03/US-04):
-/// used by `In`/`NotIn` — compares the field's own FULL discriminated
-/// -union JSON value (`{"t": ..., "v": ...}`, via `field_value_to_json`)
-/// against `target`'s own identical encoding, rather than extracting and
-/// casting the unwrapped `"v"` the way `push_scalar_comparison` does.
+/// firestore-query-filter-operator-support (Slice 03/04, US-03/US-04),
+/// widened by firestore-equal-notequal-value-type-support (Slice 01,
+/// US-01) to cover `Equal`/`NotEqual` too: used by `In`/`NotIn`/`Equal`/
+/// `NotEqual` — compares the field's own FULL discriminated-union JSON
+/// value (`{"t": ..., "v": ...}`, via `field_value_to_json`) against
+/// `target`'s own identical encoding, rather than extracting and casting
+/// the unwrapped `"v"` the way `push_scalar_comparison` does. This is what
+/// makes it work UNIFORMLY for every `FieldValue` variant with zero
+/// per-type dispatch — `field_value_to_json` already covers all 10,
+/// including `Timestamp`/`Bytes`/`Reference`/`Array`/`Map` (the 5 types
+/// `push_scalar_comparison`'s own narrower match panics on).
 ///
 /// This distinction is load-bearing, not stylistic: a field explicitly
 /// stored as `FieldValue::Null` encodes to `{"t":"N"}` — a real JSONB
@@ -390,10 +412,64 @@ mod tests {
     /// Regression guard (AC-QFO-07): `Equal`'s own generated SQL is
     /// unchanged after the `push_scalar_comparison` extraction.
     #[test]
-    fn equal_still_generates_the_same_shape_as_before_the_refactor() {
+    fn equal_compares_the_whole_field_value_after_firestore_equal_notequal_value_type_support() {
+        // Superseded scenario (firestore-equal-notequal-value-type-support,
+        // Slice 01): before this feature, `Equal` used `push_scalar_
+        // comparison`'s own `->>'v'`-extraction shape
+        // (`fields->'category'->>'v' = $1`); it now uses `push_value_
+        // equality`'s own whole-object shape, matching `In`/`NotIn`'s own
+        // pattern (and, unlike the old shape, working uniformly for every
+        // `FieldValue` type, not just the 4 scalar ones).
         let f = filter("category", FilterOp::Equal, FieldValue::String("B".to_string()));
         let sql = generated_sql(&f);
-        assert_eq!(sql.trim(), "fields->'category'->>'v' = $1");
+        assert_eq!(sql.trim(), "fields->'category' = $1::jsonb");
+    }
+
+    /// AC-ENV-06 (regression guard, type-matched case): a type-matched
+    /// `NotEqual` still correctly excludes the matching value.
+    #[test]
+    fn not_equal_compares_the_whole_field_value() {
+        let f = filter("category", FilterOp::NotEqual, FieldValue::String("B".to_string()));
+        let sql = generated_sql(&f);
+        assert_eq!(sql.trim(), "fields->'category' != $1::jsonb");
+    }
+
+    /// AC-ENV-01/02/03/04: `Equal` no longer panics on `Timestamp`/`Bytes`/
+    /// `Reference`/`Array`/`Map` — the exact 5 types that crashed before
+    /// this feature.
+    #[test]
+    fn equal_does_not_panic_on_previously_crashing_value_types() {
+        let cases = vec![
+            FieldValue::Timestamp(1_700_000_000, 0),
+            FieldValue::Bytes(vec![1, 2, 3]),
+            FieldValue::Reference("projects/p/databases/(default)/documents/c/d".to_string()),
+            FieldValue::Array(vec![FieldValue::String("a".to_string())]),
+            FieldValue::Map(std::collections::BTreeMap::from([(
+                "k".to_string(),
+                FieldValue::String("v".to_string()),
+            )])),
+        ];
+        for value in cases {
+            let f = filter("field", FilterOp::Equal, value.clone());
+            let sql = generated_sql(&f);
+            assert_eq!(sql.trim(), "fields->'field' = $1::jsonb", "failed for {value:?}");
+        }
+    }
+
+    /// AC-ENV-07 (documented behavior tightening, Resolution 2): a
+    /// cross-numeric-type target no longer relies on the old permissive
+    /// `->>'v'`-text-cast coercion — the generated SQL now compares whole
+    /// JSON values, so an `Integer(5)` target and a `Double(5.0)` target
+    /// produce DIFFERENT bound JSON (proving they'd no longer accidentally
+    /// match a cross-typed stored value the way the old shape could).
+    #[test]
+    fn equal_on_cross_numeric_types_binds_distinct_json_values() {
+        let int_target = field_value_to_json(&FieldValue::Integer(5));
+        let double_target = field_value_to_json(&FieldValue::Double(5.0));
+        assert_ne!(
+            int_target, double_target,
+            "an Integer(5) and a Double(5.0) target must bind as distinct JSON values"
+        );
     }
 
     #[test]
@@ -414,12 +490,16 @@ mod tests {
     /// than one this feature introduced.
     #[test]
     fn push_scalar_comparison_covers_every_operator_and_value_type() {
+        // firestore-equal-notequal-value-type-support (Slice 01): `NotEqual`
+        // no longer routes through `push_scalar_comparison` (it uses
+        // `push_value_equality` now, covered separately by `not_equal_
+        // compares_the_whole_field_value` above) — this test now covers
+        // only the 4 range operators `push_scalar_comparison` still serves.
         let cases: Vec<(FilterOp, &str, FieldValue, &str)> = vec![
             (FilterOp::LessThan, "<", FieldValue::Integer(5), "::bigint"),
             (FilterOp::LessThanOrEqual, "<=", FieldValue::Double(5.5), "::float8"),
             (FilterOp::GreaterThan, ">", FieldValue::Boolean(true), "::boolean"),
             (FilterOp::GreaterThanOrEqual, ">=", FieldValue::Integer(5), "::bigint"),
-            (FilterOp::NotEqual, "!=", FieldValue::Double(5.5), "::float8"),
         ];
         for (op, op_str, value, cast) in cases {
             let f = filter("n", op, value);

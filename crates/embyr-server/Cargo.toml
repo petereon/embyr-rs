@@ -1019,6 +1019,11 @@ path = "../../tests/firestore_query_filter_operator_support/acceptance/qfo03_in.
 name = "firestore_query_filter_operator_support_qfo04_not_in"
 path = "../../tests/firestore_query_filter_operator_support/acceptance/qfo04_not_in.rs"
 
+# firestore-equal-notequal-value-type-support (Slice 01, US-01, Walking Skeleton, entire feature). AC-ENV-01 through AC-ENV-07.
+[[test]]
+name = "firestore_equal_notequal_value_type_support_env01_equal_notequal_every_value_type"
+path = "../../tests/firestore_equal_notequal_value_type_support/acceptance/env01_equal_notequal_every_value_type.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
