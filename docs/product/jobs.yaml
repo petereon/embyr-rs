@@ -258,6 +258,20 @@ jobs:
     # (bypassed by a top-level `order_by.is_empty()` short-circuit). See
     # docs/feature/composite-index-requirement-rules/feature-delta.md
     # § Resolution 2/3.
+    # NOTE (firestore-query-filter-operator-support DISCUSS, 2026-09-05):
+    # JOB-01 now also covers 4 previously-panicking Firestore query filter
+    # operators (`in`/`not-in`/`array-contains`/`array-contains-any`) — same
+    # job, same persona, not a new job. The highest-severity realization of
+    # this job's own "make it real" pattern this session: closes an active
+    # production CRASH, not merely an accuracy gap. Discovered as a flagged
+    # follow-up from `composite-index-requirement-rules`'s own FINALIZE
+    # (2026-09-05). Central design finding: `not-in`'s own live-verified
+    # field-must-exist rule requires zero explicit existence-check code for
+    # the non-empty-list case — it falls out of Postgres's own `NULL`
+    # three-valued-logic propagation, identically to how the pre-existing
+    # `!=` operator already gets this right by accident. See
+    # docs/feature/firestore-query-filter-operator-support/feature-delta.md
+    # § Resolution 2.
 
   - id: JOB-02
     name: tenant-provision
