@@ -263,19 +263,27 @@ mod tests {
         assert!(sql.contains("::jsonb"), "got: {sql}");
     }
 
+    /// Uses 3 targets (not 2) so the join-boundary logic (`if i > 0`) is
+    /// exercised across BOTH boundaries, not just one — catches a mutant
+    /// that flips `>` to `==`/`>=` and shifts WHERE the separator lands
+    /// (e.g. before the first item instead of between items) without
+    /// changing the separator's own overall PRESENCE or total occurrence
+    /// count, which a looser `contains(" OR ")`-only assertion would miss.
     #[test]
-    fn array_contains_any_ors_one_containment_check_per_target() {
+    fn array_contains_any_ors_exactly_n_minus_one_separators_between_n_targets() {
         let f = filter(
             "tags",
             FilterOp::ArrayContainsAny,
             FieldValue::Array(vec![
-                FieldValue::String("urgent".to_string()),
-                FieldValue::String("important".to_string()),
+                FieldValue::String("a".to_string()),
+                FieldValue::String("b".to_string()),
+                FieldValue::String("c".to_string()),
             ]),
         );
         let sql = generated_sql(&f);
-        assert_eq!(sql.matches("@>").count(), 2, "expected 2 containment checks, got: {sql}");
-        assert!(sql.contains(" OR "), "got: {sql}");
+        assert_eq!(sql.matches("@>").count(), 3, "expected 3 containment checks, got: {sql}");
+        assert_eq!(sql.matches(" OR ").count(), 2, "expected exactly 2 separators for 3 targets, got: {sql}");
+        assert!(!sql.trim_start().starts_with("( OR"), "must not lead with a separator, got: {sql}");
     }
 
     #[test]
@@ -284,19 +292,22 @@ mod tests {
         assert_eq!(generated_sql(&f).trim(), "FALSE");
     }
 
+    /// 3 targets, exact separator count — same join-boundary rationale as
+    /// `array_contains_any_ors_exactly_n_minus_one_separators_between_n_targets`.
     #[test]
-    fn in_ors_one_equality_check_per_target() {
+    fn in_ors_exactly_n_minus_one_separators_between_n_targets() {
         let f = filter(
             "status",
             FilterOp::In,
             FieldValue::Array(vec![
-                FieldValue::String("open".to_string()),
-                FieldValue::String("pending".to_string()),
+                FieldValue::String("a".to_string()),
+                FieldValue::String("b".to_string()),
+                FieldValue::String("c".to_string()),
             ]),
         );
         let sql = generated_sql(&f);
-        assert_eq!(sql.matches(" = ").count(), 2, "expected 2 equality checks, got: {sql}");
-        assert!(sql.contains(" OR "), "got: {sql}");
+        assert_eq!(sql.matches(" = ").count(), 3, "expected 3 equality checks, got: {sql}");
+        assert_eq!(sql.matches(" OR ").count(), 2, "expected exactly 2 separators for 3 targets, got: {sql}");
     }
 
     #[test]
@@ -332,15 +343,22 @@ mod tests {
         assert!(sql.contains("fields->'status' = "), "got: {sql}");
     }
 
+    /// 3 targets, exact separator count — same join-boundary rationale as
+    /// `array_contains_any_ors_exactly_n_minus_one_separators_between_n_targets`.
     #[test]
-    fn not_in_ands_one_inequality_check_per_target() {
+    fn not_in_ands_exactly_n_minus_one_separators_between_n_targets() {
         let f = filter(
             "status",
             FilterOp::NotIn,
-            FieldValue::Array(vec![FieldValue::String("closed".to_string())]),
+            FieldValue::Array(vec![
+                FieldValue::String("a".to_string()),
+                FieldValue::String("b".to_string()),
+                FieldValue::String("c".to_string()),
+            ]),
         );
         let sql = generated_sql(&f);
-        assert!(sql.contains(" != "), "got: {sql}");
+        assert_eq!(sql.matches(" != ").count(), 3, "expected 3 inequality checks, got: {sql}");
+        assert_eq!(sql.matches(" AND ").count(), 2, "expected exactly 2 separators for 3 targets, got: {sql}");
     }
 
     #[test]
@@ -383,5 +401,34 @@ mod tests {
     fn in_with_a_non_array_value_panics_with_a_named_message() {
         let f = filter("status", FilterOp::In, FieldValue::String("not-an-array".to_string()));
         generated_sql(&f);
+    }
+
+    /// Coverage for `push_scalar_comparison`'s own 4 typed-cast match arms
+    /// (`Integer`/`String`/`Double`/`Boolean`) and all 6 pre-existing
+    /// comparison operators it serves — this file's own PRE-EXISTING
+    /// behavior (unchanged by this feature's own refactor, AC-QFO-07's own
+    /// regression-guard scope), but previously untested by ANY unit test in
+    /// this module (only `Equal`+`String` had direct coverage before this
+    /// feature's own QUALITY_GATE) — a gap this feature's own diff exposed
+    /// (the refactor moved these lines into scope for `--in-diff`) rather
+    /// than one this feature introduced.
+    #[test]
+    fn push_scalar_comparison_covers_every_operator_and_value_type() {
+        let cases: Vec<(FilterOp, &str, FieldValue, &str)> = vec![
+            (FilterOp::LessThan, "<", FieldValue::Integer(5), "::bigint"),
+            (FilterOp::LessThanOrEqual, "<=", FieldValue::Double(5.5), "::float8"),
+            (FilterOp::GreaterThan, ">", FieldValue::Boolean(true), "::boolean"),
+            (FilterOp::GreaterThanOrEqual, ">=", FieldValue::Integer(5), "::bigint"),
+            (FilterOp::NotEqual, "!=", FieldValue::Double(5.5), "::float8"),
+        ];
+        for (op, op_str, value, cast) in cases {
+            let f = filter("n", op, value);
+            let sql = generated_sql(&f);
+            assert!(
+                sql.contains(&format!(" {op_str} ")),
+                "expected operator '{op_str}' in generated SQL, got: {sql}"
+            );
+            assert!(sql.contains(cast), "expected cast '{cast}' in generated SQL, got: {sql}");
+        }
     }
 }
