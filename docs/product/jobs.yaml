@@ -272,6 +272,21 @@ jobs:
     # `!=` operator already gets this right by accident. See
     # docs/feature/firestore-query-filter-operator-support/feature-delta.md
     # § Resolution 2.
+    # NOTE (firestore-equal-notequal-value-type-support DISCUSS, 2026-09-05):
+    # JOB-01 now also covers `Equal`/`NotEqual` support for every
+    # `FieldValue` type (`Timestamp`/`Bytes`/`Reference`/`Array`/`Map`,
+    # previously panicking) — same job, same persona, not a new job. Direct
+    # continuation of `firestore-query-filter-operator-support`'s own
+    # flagged follow-up. Zero new production logic: routes both operators
+    # to that feature's own already-existing `push_value_equality` helper.
+    # Side effect: a previously-permissive cross-numeric-type coercion
+    # (`Equal(Integer)` matching a stored `Double`) is now correctly type
+    # -strict, matching real Firestore's own semantics more precisely.
+    # Range-operator support for these same 5 types is a separate, real,
+    # deferred gap (candidate id
+    # `firestore-range-operator-value-type-support`). See
+    # docs/feature/firestore-equal-notequal-value-type-support/
+    # feature-delta.md § Resolution 2/3.
 
   - id: JOB-02
     name: tenant-provision
