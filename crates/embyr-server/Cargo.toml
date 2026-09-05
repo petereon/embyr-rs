@@ -999,6 +999,26 @@ path = "../../tests/composite_index_requirement_rules/acceptance/cir02_in_plus_r
 name = "composite_index_requirement_rules_cir03_name_the_missing_index"
 path = "../../tests/composite_index_requirement_rules/acceptance/cir03_name_the_missing_index.rs"
 
+# firestore-query-filter-operator-support (Slice 01, US-01, Release 1, Walking Skeleton). AC-QFO-01/02/03.
+[[test]]
+name = "firestore_query_filter_operator_support_qfo01_array_contains"
+path = "../../tests/firestore_query_filter_operator_support/acceptance/qfo01_array_contains.rs"
+
+# firestore-query-filter-operator-support (Slice 02, US-02, Release 1). AC-QFO-04/05.
+[[test]]
+name = "firestore_query_filter_operator_support_qfo02_array_contains_any"
+path = "../../tests/firestore_query_filter_operator_support/acceptance/qfo02_array_contains_any.rs"
+
+# firestore-query-filter-operator-support (Slice 03, US-03, Release 1). AC-QFO-06/07.
+[[test]]
+name = "firestore_query_filter_operator_support_qfo03_in"
+path = "../../tests/firestore_query_filter_operator_support/acceptance/qfo03_in.rs"
+
+# firestore-query-filter-operator-support (Slice 04, US-04, Release 1, LAST slice). AC-QFO-08/09/10.
+[[test]]
+name = "firestore_query_filter_operator_support_qfo04_not_in"
+path = "../../tests/firestore_query_filter_operator_support/acceptance/qfo04_not_in.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

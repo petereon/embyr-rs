@@ -4,6 +4,8 @@ use embyr_core::domain::{
 };
 use sqlx::{Postgres, QueryBuilder};
 
+use crate::encoding::field_value::field_value_to_json;
+
 /// Append a `QueryFilter` to the builder as a SQL predicate.
 ///
 /// Composite (AND) filters are expanded recursively.
@@ -42,34 +44,177 @@ pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
         _ => {}
     }
 
-    let op = match f.op {
-        FilterOp::LessThan => "<",
-        FilterOp::LessThanOrEqual => "<=",
-        FilterOp::GreaterThan => ">",
-        FilterOp::GreaterThanOrEqual => ">=",
-        FilterOp::Equal => "=",
-        FilterOp::NotEqual => "!=",
+    match f.op {
+        FilterOp::LessThan => push_scalar_comparison(qb, &f.field_path, "<", &f.value),
+        FilterOp::LessThanOrEqual => push_scalar_comparison(qb, &f.field_path, "<=", &f.value),
+        FilterOp::GreaterThan => push_scalar_comparison(qb, &f.field_path, ">", &f.value),
+        FilterOp::GreaterThanOrEqual => push_scalar_comparison(qb, &f.field_path, ">=", &f.value),
+        FilterOp::Equal => push_scalar_comparison(qb, &f.field_path, "=", &f.value),
+        FilterOp::NotEqual => push_scalar_comparison(qb, &f.field_path, "!=", &f.value),
+        // firestore-query-filter-operator-support (Slice 01, US-01,
+        // AC-QFO-01/02/03): `f.value` is the single scalar being searched
+        // for inside the array field — JSONB `@>` containment against a
+        // one-element array checks "does the array field contain this
+        // element", reusing `field_value_to_json` unchanged.
+        FilterOp::ArrayContains => push_array_contains(qb, &f.field_path, &f.value),
+        // firestore-query-filter-operator-support (Slice 02, US-02,
+        // AC-QFO-04/05): `f.value` is a `FieldValue::Array` of targets —
+        // OR of `push_array_contains` checks, one per target ("contains AT
+        // LEAST ONE"). Resolution 3: an empty target list matches nothing.
+        FilterOp::ArrayContainsAny => {
+            let FieldValue::Array(targets) = &f.value else {
+                panic!("unsupported filter value type for ArrayContainsAny: {:?}", f.value)
+            };
+            if targets.is_empty() {
+                qb.push("FALSE");
+            } else {
+                qb.push("(");
+                for (i, target) in targets.iter().enumerate() {
+                    if i > 0 {
+                        qb.push(" OR ");
+                    }
+                    push_array_contains(qb, &f.field_path, target);
+                }
+                qb.push(")");
+            }
+        }
+        // firestore-query-filter-operator-support (Slice 03, US-03,
+        // AC-QFO-06/07): `f.value` is a `FieldValue::Array` of targets —
+        // OR of whole-value equality checks, one per target ("equals
+        // ANY"). Resolution 3: an empty target list matches nothing.
+        FilterOp::In => {
+            let FieldValue::Array(targets) = &f.value else {
+                panic!("unsupported filter value type for In: {:?}", f.value)
+            };
+            if targets.is_empty() {
+                qb.push("FALSE");
+            } else {
+                qb.push("(");
+                for (i, target) in targets.iter().enumerate() {
+                    if i > 0 {
+                        qb.push(" OR ");
+                    }
+                    push_value_equality(qb, &f.field_path, target, false);
+                }
+                qb.push(")");
+            }
+        }
+        // firestore-query-filter-operator-support (Slice 04, US-04,
+        // AC-QFO-08/09/10): `f.value` is a `FieldValue::Array` of excluded
+        // targets — AND of whole-value inequality checks, one per target
+        // ("not equal to ANY"). Real Firestore's own live-verified
+        // field-must-exist rule (a document missing the field entirely is
+        // excluded from `not-in` results) falls out of Postgres's own NULL
+        // three-valued-logic propagation for free here: if the field is
+        // absent, `fields->'{f}'` (the WHOLE discriminated-union value,
+        // not just its unwrapped "v") is SQL NULL, so EVERY per-target
+        // `!=` comparison is NULL, so the AND-chain is NULL, so the row is
+        // excluded from WHERE. Comparing the WHOLE `{"t":...,"v":...}`
+        // object (via `push_value_equality`), rather than extracting `->>
+        // 'v'` the way `push_scalar_comparison` does for the pre-existing
+        // operators, is what correctly distinguishes a field explicitly
+        // set to `Null` (`{"t":"N"}`, a real JSONB value, not equal to any
+        // non-null target) from a field that is entirely ABSENT (`fields
+        // ->'{f}'` itself is SQL NULL) — extracting `->>'v'` first would
+        // conflate the two (a `Null`-valued field has no "v" key either,
+        // so `->>'v'` is NULL in BOTH cases), discovered via a real,
+        // failing acceptance test during this slice's own DELIVER
+        // (AC-QFO-10). Resolution 3: an empty target list means "not equal
+        // to any of zero excluded values", vacuously true for any EXISTING
+        // field — the one case needing an explicit fallback, since there's
+        // no per-target clause left to derive the field-must-exist
+        // property from.
+        FilterOp::NotIn => {
+            let FieldValue::Array(targets) = &f.value else {
+                panic!("unsupported filter value type for NotIn: {:?}", f.value)
+            };
+            if targets.is_empty() {
+                qb.push(format!("fields->'{}' IS NOT NULL", f.field_path));
+            } else {
+                qb.push("(");
+                for (i, target) in targets.iter().enumerate() {
+                    if i > 0 {
+                        qb.push(" AND ");
+                    }
+                    push_value_equality(qb, &f.field_path, target, true);
+                }
+                qb.push(")");
+            }
+        }
         _ => panic!("unsupported filter op: {:?}", f.op),
-    };
-    match &f.value {
+    }
+}
+
+/// firestore-query-filter-operator-support (Slice 03, US-03, ADR — Design):
+/// extracted from `append_field_filter`'s own original inline match — a
+/// pure refactor, zero behavior change for the 6 pre-existing operators
+/// (`LessThan` through `NotEqual`), which it continues to serve exclusively
+/// — `In`/`NotIn` use `push_value_equality` instead (below), NOT this
+/// function, since range comparisons need the unwrapped, type-cast `->>'v'`
+/// extraction this function provides, while equality/inequality against a
+/// whole stored value does not (and, as discovered via AC-QFO-10's own
+/// failing test, must NOT use it — see `push_value_equality`'s own doc).
+fn push_scalar_comparison(qb: &mut QueryBuilder<Postgres>, field_path: &str, op: &str, value: &FieldValue) {
+    match value {
         FieldValue::Integer(v) => {
-            qb.push(format!("(fields->'{}'->>'v')::bigint {} ", f.field_path, op));
+            qb.push(format!("(fields->'{field_path}'->>'v')::bigint {op} "));
             qb.push_bind(*v);
         }
         FieldValue::String(s) => {
-            qb.push(format!("fields->'{}'->>'v' {} ", f.field_path, op));
+            qb.push(format!("fields->'{field_path}'->>'v' {op} "));
             qb.push_bind(s.clone());
         }
         FieldValue::Double(d) => {
-            qb.push(format!("(fields->'{}'->>'v')::float8 {} ", f.field_path, op));
+            qb.push(format!("(fields->'{field_path}'->>'v')::float8 {op} "));
             qb.push_bind(*d);
         }
         FieldValue::Boolean(b) => {
-            qb.push(format!("(fields->'{}'->>'v')::boolean {} ", f.field_path, op));
+            qb.push(format!("(fields->'{field_path}'->>'v')::boolean {op} "));
             qb.push_bind(*b);
         }
-        _ => panic!("unsupported filter value type: {:?}", f.value),
+        _ => panic!("unsupported filter value type: {:?}", value),
     }
+}
+
+/// firestore-query-filter-operator-support (Slice 01, US-01, ADR —
+/// Design): does the array field at `field_path` contain `target` as one
+/// of its own elements — JSONB `@>` containment against a one-element
+/// array, reusing `field_value_to_json` (the SAME discriminated-union
+/// encoding every document field is already stored with) so the bound
+/// JSON structurally matches an existing array element exactly.
+fn push_array_contains(qb: &mut QueryBuilder<Postgres>, field_path: &str, target: &FieldValue) {
+    qb.push(format!("fields->'{field_path}'->'v' @> "));
+    qb.push_bind(serde_json::json!([field_value_to_json(target)]));
+    qb.push("::jsonb");
+}
+
+/// firestore-query-filter-operator-support (Slice 03/04, US-03/US-04):
+/// used by `In`/`NotIn` — compares the field's own FULL discriminated
+/// -union JSON value (`{"t": ..., "v": ...}`, via `field_value_to_json`)
+/// against `target`'s own identical encoding, rather than extracting and
+/// casting the unwrapped `"v"` the way `push_scalar_comparison` does.
+///
+/// This distinction is load-bearing, not stylistic: a field explicitly
+/// stored as `FieldValue::Null` encodes to `{"t":"N"}` — a real JSONB
+/// value with no `"v"` key at all. Extracting `->>'v'` first (as `push_
+/// scalar_comparison` does) would yield SQL `NULL` for a `Null`-valued
+/// field, INDISTINGUISHABLE from a field that is entirely ABSENT (where
+/// `fields->'{field_path}'` itself is `NULL`) — silently breaking
+/// `NotIn`'s own live-verified field-must-exist rule (a present-but-null
+/// field would be wrongly excluded, identically to an absent one).
+/// Comparing the WHOLE object instead means only genuine absence produces
+/// SQL `NULL`; a `Null`-valued field compares as a real, distinct JSONB
+/// value, correctly satisfying `!=` against any non-null target. Found via
+/// a real, failing acceptance test (AC-QFO-10) during this feature's own
+/// DELIVER, not by inspection alone. A useful side effect: this comparison
+/// supports every `FieldValue` variant (no per-type dispatch, no
+/// "unsupported filter value type" panic) since `field_value_to_json`
+/// already covers all of them.
+fn push_value_equality(qb: &mut QueryBuilder<Postgres>, field_path: &str, target: &FieldValue, negate: bool) {
+    let op = if negate { "!=" } else { "=" };
+    qb.push(format!("fields->'{field_path}' {op} "));
+    qb.push_bind(field_value_to_json(target));
+    qb.push("::jsonb");
 }
 
 /// Return a raw SQL ORDER BY expression for a single `OrderBy` clause.
@@ -87,4 +232,156 @@ pub fn order_by_expr(ob: &OrderBy) -> String {
 /// Return a raw SQL ORDER BY expression with explicit bigint cast (for integer fields).
 pub fn order_by_expr_bigint(field_path: &str, dir: &str) -> String {
     format!("(fields->'{}'->>'v')::bigint {}", field_path, dir)
+}
+
+#[cfg(test)]
+mod tests {
+    //! firestore-query-filter-operator-support (Slices 01-04) — pure, IO
+    //! -free unit coverage for `append_field_filter`'s own SQL generation.
+    //! `QueryBuilder::sql()` exposes the generated SQL text without needing
+    //! a live DB connection — used here to verify shape (never a panic,
+    //! correct composition/parenthesization) directly; real EXECUTION
+    //! correctness is proven separately by this feature's own Docker
+    //! -backed acceptance tests.
+    use super::*;
+
+    fn filter(field: &str, op: FilterOp, value: FieldValue) -> FieldFilter {
+        FieldFilter { field_path: field.to_string(), op, value }
+    }
+
+    fn generated_sql(f: &FieldFilter) -> String {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("");
+        append_field_filter(&mut qb, f);
+        qb.sql().to_string()
+    }
+
+    #[test]
+    fn array_contains_generates_a_single_jsonb_containment_check() {
+        let f = filter("tags", FilterOp::ArrayContains, FieldValue::String("urgent".to_string()));
+        let sql = generated_sql(&f);
+        assert!(sql.contains("fields->'tags'->'v' @>"), "got: {sql}");
+        assert!(sql.contains("::jsonb"), "got: {sql}");
+    }
+
+    #[test]
+    fn array_contains_any_ors_one_containment_check_per_target() {
+        let f = filter(
+            "tags",
+            FilterOp::ArrayContainsAny,
+            FieldValue::Array(vec![
+                FieldValue::String("urgent".to_string()),
+                FieldValue::String("important".to_string()),
+            ]),
+        );
+        let sql = generated_sql(&f);
+        assert_eq!(sql.matches("@>").count(), 2, "expected 2 containment checks, got: {sql}");
+        assert!(sql.contains(" OR "), "got: {sql}");
+    }
+
+    #[test]
+    fn array_contains_any_with_an_empty_target_list_generates_false() {
+        let f = filter("tags", FilterOp::ArrayContainsAny, FieldValue::Array(vec![]));
+        assert_eq!(generated_sql(&f).trim(), "FALSE");
+    }
+
+    #[test]
+    fn in_ors_one_equality_check_per_target() {
+        let f = filter(
+            "status",
+            FilterOp::In,
+            FieldValue::Array(vec![
+                FieldValue::String("open".to_string()),
+                FieldValue::String("pending".to_string()),
+            ]),
+        );
+        let sql = generated_sql(&f);
+        assert_eq!(sql.matches(" = ").count(), 2, "expected 2 equality checks, got: {sql}");
+        assert!(sql.contains(" OR "), "got: {sql}");
+    }
+
+    #[test]
+    fn in_with_an_empty_target_list_generates_false() {
+        let f = filter("status", FilterOp::In, FieldValue::Array(vec![]));
+        assert_eq!(generated_sql(&f).trim(), "FALSE");
+    }
+
+    /// `In` compares the WHOLE discriminated-union JSON value (not the
+    /// unwrapped `->>'v'`), so a heterogeneous target list needs no
+    /// per-type dispatch at all — every target, regardless of its own
+    /// `FieldValue` variant, compares uniformly via `field_value_to_json`.
+    #[test]
+    fn in_with_a_heterogeneous_target_list_compares_whole_values_uniformly() {
+        let f = filter(
+            "value",
+            FilterOp::In,
+            FieldValue::Array(vec![FieldValue::Integer(1), FieldValue::String("two".to_string())]),
+        );
+        let sql = generated_sql(&f);
+        assert_eq!(sql.matches("fields->'value' = ").count(), 2, "got: {sql}");
+        assert_eq!(sql.matches("::jsonb").count(), 2, "got: {sql}");
+    }
+
+    /// A target list containing `FieldValue::Null` — an exotic type that
+    /// would panic under the OLD `push_scalar_comparison`-based design
+    /// (`_ => panic!("unsupported filter value type")`) — now works, since
+    /// `push_value_equality` supports every `FieldValue` variant uniformly.
+    #[test]
+    fn in_with_a_null_target_does_not_panic() {
+        let f = filter("status", FilterOp::In, FieldValue::Array(vec![FieldValue::Null]));
+        let sql = generated_sql(&f);
+        assert!(sql.contains("fields->'status' = "), "got: {sql}");
+    }
+
+    #[test]
+    fn not_in_ands_one_inequality_check_per_target() {
+        let f = filter(
+            "status",
+            FilterOp::NotIn,
+            FieldValue::Array(vec![FieldValue::String("closed".to_string())]),
+        );
+        let sql = generated_sql(&f);
+        assert!(sql.contains(" != "), "got: {sql}");
+    }
+
+    #[test]
+    fn not_in_with_an_empty_target_list_generates_a_field_exists_check() {
+        let f = filter("status", FilterOp::NotIn, FieldValue::Array(vec![]));
+        assert_eq!(generated_sql(&f).trim(), "fields->'status' IS NOT NULL");
+    }
+
+    /// AC-QFO-09/AC-QFO-10 (SQL-shape half): `NotIn` compares the WHOLE
+    /// `fields->'{field}'` value (never `->>'v'`), which is exactly the
+    /// property that lets a `Null`-valued field (a real JSONB value,
+    /// `{"t":"N"}`) be distinguished from an absent one (`fields->'{field}'`
+    /// itself SQL `NULL`) — see `push_value_equality`'s own doc comment for
+    /// the full reasoning. The real end-to-end proof (both cases actually
+    /// behaving differently against a live Postgres) is this feature's own
+    /// `qfo04_not_in.rs` acceptance test.
+    #[test]
+    fn not_in_compares_the_whole_field_value_never_the_unwrapped_v() {
+        let f = filter(
+            "status",
+            FilterOp::NotIn,
+            FieldValue::Array(vec![FieldValue::String("closed".to_string())]),
+        );
+        let sql = generated_sql(&f);
+        assert!(sql.contains("fields->'status' != "), "got: {sql}");
+        assert!(!sql.contains("->>'v'"), "must not extract the unwrapped value, got: {sql}");
+    }
+
+    /// Regression guard (AC-QFO-07): `Equal`'s own generated SQL is
+    /// unchanged after the `push_scalar_comparison` extraction.
+    #[test]
+    fn equal_still_generates_the_same_shape_as_before_the_refactor() {
+        let f = filter("category", FilterOp::Equal, FieldValue::String("B".to_string()));
+        let sql = generated_sql(&f);
+        assert_eq!(sql.trim(), "fields->'category'->>'v' = $1");
+    }
+
+    #[test]
+    #[should_panic(expected = "unsupported filter value type for In")]
+    fn in_with_a_non_array_value_panics_with_a_named_message() {
+        let f = filter("status", FilterOp::In, FieldValue::String("not-an-array".to_string()));
+        generated_sql(&f);
+    }
 }
