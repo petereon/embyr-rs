@@ -4497,7 +4497,11 @@ mod malformed_filter_shape_tests {
         let f = field_filter_proto("status", FieldOp::In, string_value("open"));
         let result = translate_filter(&f).expect("must produce Some");
         let err = result.expect_err("must be rejected");
-        assert!(err.contains("in"), "expected an 'in'-naming error, got: {err}");
+        // Exact match, not `.contains("in")` — "array-contains-any" itself
+        // contains the substring "in" (from "contains"), which would let a
+        // mutant that maps `In` to the WRONG op-name string slip through a
+        // looser assertion (confirmed via a real cargo-mutants miss).
+        assert_eq!(err, "in requires an array value");
     }
 
     /// AC-MFS-02 (NotIn)
@@ -4506,7 +4510,7 @@ mod malformed_filter_shape_tests {
         let f = field_filter_proto("status", FieldOp::NotIn, string_value("closed"));
         let result = translate_filter(&f).expect("must produce Some");
         let err = result.expect_err("must be rejected");
-        assert!(err.contains("not-in"), "expected a 'not-in'-naming error, got: {err}");
+        assert_eq!(err, "not-in requires an array value");
     }
 
     /// AC-MFS-02 (ArrayContainsAny)
@@ -4515,7 +4519,7 @@ mod malformed_filter_shape_tests {
         let f = field_filter_proto("tags", FieldOp::ArrayContainsAny, string_value("urgent"));
         let result = translate_filter(&f).expect("must produce Some");
         let err = result.expect_err("must be rejected");
-        assert!(err.contains("array-contains-any"), "expected an 'array-contains-any'-naming error, got: {err}");
+        assert_eq!(err, "array-contains-any requires an array value");
     }
 
     /// AC-MFS-03
@@ -4524,7 +4528,7 @@ mod malformed_filter_shape_tests {
         let f = field_filter_proto("score", FieldOp::LessThan, null_value());
         let result = translate_filter(&f).expect("must produce Some");
         let err = result.expect_err("must be rejected");
-        assert!(err.contains("null"), "expected a null-naming error, got: {err}");
+        assert_eq!(err, "range comparison operators do not support null values");
     }
 
     /// AC-MFS-04 (regression guard): `In` given a well-formed `Array` value
