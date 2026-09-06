@@ -1034,6 +1034,11 @@ path = "../../tests/firestore_range_operator_value_type_support/acceptance/rng01
 name = "firestore_range_operator_value_type_support_rng02_array_map_clean_rejection"
 path = "../../tests/firestore_range_operator_value_type_support/acceptance/rng02_array_map_clean_rejection.rs"
 
+# firestore-malformed-filter-shape-validation (Slice 01, US-01, Walking Skeleton, entire feature). AC-MFS-01 through AC-MFS-04.
+[[test]]
+name = "firestore_malformed_filter_shape_validation_mfs01_reject_malformed_shapes"
+path = "../../tests/firestore_malformed_filter_shape_validation/acceptance/mfs01_reject_malformed_shapes.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

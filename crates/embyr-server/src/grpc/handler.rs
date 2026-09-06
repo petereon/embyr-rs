@@ -3952,6 +3952,36 @@ pub(crate) fn translate_filter(
                 let kind = if matches!(value, FieldValue::Array(_)) { "array" } else { "map" };
                 return Some(Err(format!("range comparison operators are not supported on {kind} values")));
             }
+            // firestore-malformed-filter-shape-validation (Slice 01, US-01,
+            // AC-MFS-01/02): no real Firestore SDK's own query-builder API
+            // can produce a non-Array value for `in`/`not-in`/`array
+            // -contains-any` — only a caller who has already hand-crafted a
+            // malformed raw gRPC request could trigger this. Rejected here
+            // for operational clarity (a clean, named error in Sam's own
+            // logs/traces instead of a raw panic), NOT because this is a
+            // reachable real-client crash risk — the crash-elimination arc
+            // this follows is already fully closed.
+            if matches!(op, FilterOp::In | FilterOp::NotIn | FilterOp::ArrayContainsAny)
+                && !matches!(value, FieldValue::Array(_))
+            {
+                let op_name = match op {
+                    FilterOp::In => "in",
+                    FilterOp::NotIn => "not-in",
+                    _ => "array-contains-any",
+                };
+                return Some(Err(format!("{op_name} requires an array value")));
+            }
+            // firestore-malformed-filter-shape-validation (Slice 01, US-01,
+            // AC-MFS-03): no real Firestore SDK exposes a way to pass
+            // `null` to a range-comparison method — same reasoning as
+            // above.
+            if matches!(
+                op,
+                FilterOp::LessThan | FilterOp::LessThanOrEqual | FilterOp::GreaterThan | FilterOp::GreaterThanOrEqual
+            ) && matches!(value, FieldValue::Null)
+            {
+                return Some(Err("range comparison operators do not support null values".to_string()));
+            }
             Some(Ok(QueryFilter::Field(FieldFilter { field_path, op, value })))
         }
         FilterType::CompositeFilter(cf) => {
@@ -4421,5 +4451,101 @@ mod range_operator_value_type_tests {
         let f = field_filter_proto("tags", FieldOp::Equal, array_value(vec![string_value("a")]));
         let result = translate_filter(&f).expect("must produce Some");
         assert!(result.is_ok(), "Equal on Array must not be rejected by this feature's own check");
+    }
+}
+
+#[cfg(test)]
+mod malformed_filter_shape_tests {
+    //! firestore-malformed-filter-shape-validation (Slice 01, US-01) —
+    //! pure, IO-free unit coverage for `translate_filter`'s own 2 new
+    //! malformed-shape rejection checks.
+    use super::translate_filter;
+    use embyr_proto::firestore::{
+        structured_query::{
+            field_filter::Operator as FieldOp, filter::FilterType, FieldFilter, FieldReference,
+            Filter,
+        },
+        value::ValueType,
+        ArrayValue, Value,
+    };
+
+    fn field_filter_proto(field: &str, op: FieldOp, value: Value) -> Filter {
+        Filter {
+            filter_type: Some(FilterType::FieldFilter(FieldFilter {
+                field: Some(FieldReference { field_path: field.to_string() }),
+                op: op as i32,
+                value: Some(value),
+            })),
+        }
+    }
+
+    fn string_value(s: &str) -> Value {
+        Value { value_type: Some(ValueType::StringValue(s.to_string())) }
+    }
+
+    fn array_value(values: Vec<Value>) -> Value {
+        Value { value_type: Some(ValueType::ArrayValue(ArrayValue { values })) }
+    }
+
+    fn null_value() -> Value {
+        Value { value_type: Some(ValueType::NullValue(0)) }
+    }
+
+    /// AC-MFS-01
+    #[test]
+    fn in_given_a_non_array_value_is_rejected() {
+        let f = field_filter_proto("status", FieldOp::In, string_value("open"));
+        let result = translate_filter(&f).expect("must produce Some");
+        let err = result.expect_err("must be rejected");
+        assert!(err.contains("in"), "expected an 'in'-naming error, got: {err}");
+    }
+
+    /// AC-MFS-02 (NotIn)
+    #[test]
+    fn not_in_given_a_non_array_value_is_rejected() {
+        let f = field_filter_proto("status", FieldOp::NotIn, string_value("closed"));
+        let result = translate_filter(&f).expect("must produce Some");
+        let err = result.expect_err("must be rejected");
+        assert!(err.contains("not-in"), "expected a 'not-in'-naming error, got: {err}");
+    }
+
+    /// AC-MFS-02 (ArrayContainsAny)
+    #[test]
+    fn array_contains_any_given_a_non_array_value_is_rejected() {
+        let f = field_filter_proto("tags", FieldOp::ArrayContainsAny, string_value("urgent"));
+        let result = translate_filter(&f).expect("must produce Some");
+        let err = result.expect_err("must be rejected");
+        assert!(err.contains("array-contains-any"), "expected an 'array-contains-any'-naming error, got: {err}");
+    }
+
+    /// AC-MFS-03
+    #[test]
+    fn less_than_given_a_null_value_is_rejected() {
+        let f = field_filter_proto("score", FieldOp::LessThan, null_value());
+        let result = translate_filter(&f).expect("must produce Some");
+        let err = result.expect_err("must be rejected");
+        assert!(err.contains("null"), "expected a null-naming error, got: {err}");
+    }
+
+    /// AC-MFS-04 (regression guard): `In` given a well-formed `Array` value
+    /// is NOT rejected by this feature's own new check.
+    #[test]
+    fn in_given_a_well_formed_array_value_is_not_rejected() {
+        let f = field_filter_proto("status", FieldOp::In, array_value(vec![string_value("open")]));
+        let result = translate_filter(&f).expect("must produce Some");
+        assert!(result.is_ok(), "In with a well-formed Array value must not be rejected");
+    }
+
+    /// AC-MFS-04 (regression guard): `LessThan` given a well-formed
+    /// non-Null value is NOT rejected by this feature's own new check.
+    #[test]
+    fn less_than_given_a_well_formed_value_is_not_rejected() {
+        let f = field_filter_proto(
+            "score",
+            FieldOp::LessThan,
+            Value { value_type: Some(ValueType::IntegerValue(100)) },
+        );
+        let result = translate_filter(&f).expect("must produce Some");
+        assert!(result.is_ok(), "LessThan with a well-formed Integer value must not be rejected");
     }
 }
