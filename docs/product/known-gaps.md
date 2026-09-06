@@ -7,12 +7,14 @@ as each gap is picked up.
 
 | # | Gap | Location | Real-client reachable? | Severity | Status |
 |---|---|---|---|---|---|
-| 1 | Transactions ignore reads — no snapshot isolation, no OCC protection for read-then-write | `crates/embyr-server/src/grpc/handler.rs` (GetDocument/RunQuery/BatchGetDocuments ignore `consistency_selector.transaction`); `crates/embyr-pg-storage/.../backend_adapter.rs:916` (`commit_transaction` only checks preconditions on writes) | Yes — routine `runTransaction(fn)` usage | Blocks production (silent lost-update race) | IN PROGRESS |
+| 1 | Transactions ignore reads — no snapshot isolation, no OCC protection for read-then-write | `crates/embyr-server/src/grpc/handler.rs` (GetDocument/RunQuery/BatchGetDocuments ignore `consistency_selector.transaction`); `crates/embyr-pg-storage/.../backend_adapter.rs:916` (`commit_transaction` only checks preconditions on writes) | Yes — routine `runTransaction(fn)` usage | Blocks production (silent lost-update race) | **CLOSED** 2026-09-06 — see `docs/evolution/2026-09-06-firestore-transaction-read-consistency.md` |
 | 2 | `endAt`/`endBefore` cursor silently dropped — hardcoded `None`, never parsed | `crates/embyr-server/src/grpc/handler.rs:3048`; `crates/embyr-pg-storage` has zero `end_at` handling | Yes — routine backward pagination/windowing | Blocks production (silent wrong results, no error) | Not started |
 | 3 | `Filter.or()` composite OR rejected | `crates/embyr-server/src/grpc/handler.rs:4000` | Yes — real GA Firestore feature | Degrades feature (clean `INVALID_ARGUMENT`, not a crash/wrong-data) | Not started |
 | 4 | `IS_NULL`/`IS_NOT_NULL` unary filter rejected | `crates/embyr-server/src/grpc/handler.rs:4015-4019` | Likely — some SDKs lower `where(f,'==',null)` to this shape; unconfirmed, needs live-SDK verification | Degrades feature | Not started |
 | 5 | No TLS/mTLS on any of the 3 listeners (:8080 gRPC, :8081 REST/gRPC-Web, :9090 Admin) | grep across `embyr-server/src`: zero `rustls`/`TlsAcceptor` hits | Depends on deploy topology (fine if a TLS-terminating LB sits in front) | Blocks production unless mitigated at the LB | Not started |
 | 6 | No graceful shutdown — drops in-flight connections on deploy/restart | grep: zero `ctrl_c`/shutdown-signal hits in `embyr-server` | N/A — operational | Degrades feature (not data-corrupting) | Not started |
+| 7 | `secrets_management` sm01/sm02 tests fail consistently — server+LocalStack container doesn't exit within the test's own 10s wait | `tests/secrets_management/acceptance/sm01_admin_key_secrets_manager.rs:207`/`sm02_encryption_key_secrets_manager.rs` | Test-only — Docker/AWS-SDK timing, not a runtime code path a real client hits | Test flakiness/reliability, not a production data/crash risk | Not started — found as a byproduct of firestore-transaction-read-consistency's own regression testing, bisection-confirmed pre-existing (reproduces without that feature's diff) |
+| 8 | CEL rule-import "chaining" construct (a `get()` whose path is built from another `get()`'s own result) isn't detected as an offending import — only 1 of 3 expected offending blocks named | `tests/security_rules_cel_parity/acceptance/cp04_reject_out_of_scope_imports.rs:264`; underlying detection logic in `crates/embyr-server`'s rule-import validation | Yes — a real rule author could write a chaining `get()` and not be warned it's unsupported | Degrades feature (a real product gap in rule-import validation, not data-corrupting) | Not started — found as a byproduct of firestore-transaction-read-consistency's own regression testing, bisection-confirmed pre-existing |
 
 ## Notes
 
@@ -21,6 +23,10 @@ as each gap is picked up.
   fine, matching prior memory.
 - `SmtpEmailSender::new_scaffold()`'s panic is dead code (never called from any request
   path, `Noop` is the wired default) — cosmetic only, not tracked here.
-- #1 and #2 are the two gaps that matter most for "can this ship as a Firestore-compatible
+- #1 and #2 were the two gaps that mattered most for "can this ship as a Firestore-compatible
   service": both let a well-behaved client silently get wrong data, a worse failure class
-  than any of the panics closed by this session's 5 arcs.
+  than any of the panics closed by this session's 5 arcs. #1 is now closed
+  (`firestore-transaction-read-consistency`, 2026-09-06); #2 remains open.
+- #7 and #8 are pre-existing, unrelated issues discovered as a byproduct of
+  `firestore-transaction-read-consistency`'s own regression testing — both bisection-confirmed to
+  reproduce without that feature's diff, neither touches transactional reads.
