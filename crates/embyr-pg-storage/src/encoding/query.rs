@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use embyr_core::domain::{
     field_value::FieldValue,
     query::{FilterOp, FieldFilter, OrderBy, OrderDirection, QueryFilter},
@@ -188,6 +189,65 @@ fn push_scalar_comparison(qb: &mut QueryBuilder<Postgres>, field_path: &str, op:
             qb.push(format!("(fields->'{field_path}'->>'v')::boolean {op} "));
             qb.push_bind(*b);
         }
+        // firestore-range-operator-value-type-support (Slice 01, US-01,
+        // AC-RNG-01): `Timestamp` is stored as `{"t":"TS","s":..,"n":..}`
+        // — no single `"v"` key, so the `->>'v'`-extraction pattern above
+        // doesn't apply. Postgres `ROW(...)` comparison compares its own
+        // elements lexicographically (seconds first, nanos as tiebreaker),
+        // directly matching chronological ordering with zero arithmetic
+        // -overflow risk (vs. combining into one `seconds*1e9+nanos` value).
+        FieldValue::Timestamp(s, n) => {
+            qb.push(format!(
+                "ROW((fields->'{field_path}'->'s')::bigint, (fields->'{field_path}'->'n')::int) {op} ROW("
+            ));
+            qb.push_bind(*s);
+            qb.push(", ");
+            qb.push_bind(*n);
+            qb.push(")");
+        }
+        // firestore-range-operator-value-type-support (Slice 01, US-01,
+        // AC-RNG-02): live-verified real Firestore orders `Bytes` by raw
+        // byte value — standard base64's own alphabet (`A-Za-z0-9+/`) does
+        // NOT preserve byte-value ordering when compared as TEXT (e.g. `+`
+        // sorts after the entire alphanumeric range in base64's own
+        // alphabet, but its raw byte value 0x2B sorts BEFORE digits and
+        // letters). Decoding both sides to raw `bytea` in SQL and letting
+        // Postgres's own byte-wise `bytea` comparison operator do the work
+        // is what correctly matches real Firestore's own semantic — reuses
+        // `STANDARD` (the SAME base64 engine `field_value_to_json` already
+        // encodes with), never a second, divergent encoding.
+        FieldValue::Bytes(b) => {
+            qb.push(format!("decode(fields->'{field_path}'->>'v', 'base64') {op} decode("));
+            qb.push_bind(STANDARD.encode(b));
+            qb.push(", 'base64')");
+        }
+        // firestore-range-operator-value-type-support (Slice 01, US-01,
+        // AC-RNG-03): live-verified real Firestore orders `Reference`
+        // structurally (path-segment-by-segment), not as a flat string —
+        // but for SAME-DEPTH references (the evidenced, common case: a
+        // `Reference`-valued field virtually always points into one fixed
+        // target collection), flat lexicographic string comparison and
+        // true segment-wise comparison produce IDENTICAL results (a shared
+        // prefix compares character-for-character equal up to the first
+        // differing segment, where both mechanisms then compare that
+        // segment's own text identically). Cross-depth reference
+        // comparison is a named, zero-evidence, deferred divergence
+        // (feature-delta.md § Out of Scope) — not silently claimed correct
+        // in every case.
+        FieldValue::Reference(r) => {
+            qb.push(format!("fields->'{field_path}'->>'v' {op} "));
+            qb.push_bind(r.clone());
+        }
+        // firestore-range-operator-value-type-support (Slice 02, US-02):
+        // `Array`/`Map` should NEVER actually reach this function — a
+        // range-operator filter against either is rejected upstream, at
+        // proto-translation time, in `embyr-server`'s own
+        // `translate_filter` (reusing its own existing `Result<_, String>`
+        // -> `Status::invalid_argument` mechanism, matching real
+        // Firestore's own confirmed rejection of `Array` range queries,
+        // and a conservative default for `Map`'s own unconfirmed support).
+        // This remains a defensive panic for genuinely-unreachable
+        // post-validation code, not a live code path.
         _ => panic!("unsupported filter value type: {:?}", value),
     }
 }
@@ -510,5 +570,60 @@ mod tests {
             );
             assert!(sql.contains(cast), "expected cast '{cast}' in generated SQL, got: {sql}");
         }
+    }
+
+    /// AC-RNG-01: `Timestamp` uses a `ROW(...)` comparison over its own
+    /// `(seconds, nanos)` fields, never `->>'v'` extraction (Timestamp has
+    /// no `"v"` key).
+    #[test]
+    fn greater_than_on_timestamp_uses_row_comparison() {
+        let f = filter("createdAt", FilterOp::GreaterThan, FieldValue::Timestamp(1_700_000_000, 500));
+        let sql = generated_sql(&f);
+        assert!(sql.contains("ROW((fields->'createdAt'->'s')::bigint"), "got: {sql}");
+        assert!(sql.contains("(fields->'createdAt'->'n')::int)"), "got: {sql}");
+        assert!(sql.contains(" > ROW("), "got: {sql}");
+    }
+
+    /// AC-RNG-02: `Bytes` decodes to raw `bytea` for comparison, never
+    /// compares the base64 TEXT directly — proven with a byte pair whose
+    /// base64 text ordering DISAGREES with true byte-value ordering.
+    /// `\xFF` (255) has a HIGHER byte value than `\x00` (0), but base64
+    /// -encodes to `"/w=="` vs `"AA=="` — `'/'` (0x2F) sorts BEFORE `'A'`
+    /// (0x41) as TEXT, which would be backwards if compared as base64
+    /// strings directly.
+    #[test]
+    fn less_than_on_bytes_decodes_to_bytea_not_base64_text() {
+        let f = filter("payload", FilterOp::LessThan, FieldValue::Bytes(vec![0xFF]));
+        let sql = generated_sql(&f);
+        assert!(sql.contains("decode(fields->'payload'->>'v', 'base64')"), "got: {sql}");
+        assert!(sql.contains(" < decode("), "got: {sql}");
+        assert!(sql.contains(", 'base64')"), "got: {sql}");
+        assert!(!sql.contains("->>'v' <"), "must not compare the base64 TEXT directly, got: {sql}");
+    }
+
+    /// AC-RNG-03: `Reference` uses flat string comparison (same shape as
+    /// `String`), matching real Firestore's own segment-wise ordering for
+    /// the evidenced same-depth case.
+    #[test]
+    fn greater_than_or_equal_on_reference_uses_string_comparison() {
+        let f = filter(
+            "ownerRef",
+            FilterOp::GreaterThanOrEqual,
+            FieldValue::Reference("projects/p/databases/(default)/documents/users/alice".to_string()),
+        );
+        let sql = generated_sql(&f);
+        assert_eq!(sql.trim(), "fields->'ownerRef'->>'v' >= $1");
+    }
+
+    /// Regression guard: `Array`/`Map` still panic if they somehow reach
+    /// `push_scalar_comparison` directly (the real fix — rejecting them
+    /// upstream in `translate_filter` — is proven separately in
+    /// `embyr-server`'s own acceptance tests; this proves the defensive
+    /// fallback itself still exists and is exercised).
+    #[test]
+    #[should_panic(expected = "unsupported filter value type")]
+    fn array_still_panics_if_it_somehow_reaches_push_scalar_comparison_directly() {
+        let f = filter("tags", FilterOp::GreaterThan, FieldValue::Array(vec![]));
+        generated_sql(&f);
     }
 }

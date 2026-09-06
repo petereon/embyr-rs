@@ -3934,6 +3934,24 @@ pub(crate) fn translate_filter(
             let op = translate_field_op(FieldOp::try_from(ff.op).ok()?)?;
             let value =
                 crate::encoding::firestore_proto::proto_value_to_field_value(ff.value.as_ref()?)?;
+            // firestore-range-operator-value-type-support (Slice 02, US-02,
+            // AC-RNG-05/06): a range comparison against an Array or Map
+            // value has no real Firestore-accurate ordering to implement
+            // (live-verified: real Firestore itself does not support range
+            // queries on Array fields at all; Map's own support is
+            // unconfirmed, treated conservatively) — rejected here, at
+            // proto-translation time, via the SAME `Result<_, String>` ->
+            // `Status::invalid_argument` mechanism `CompositeOp::
+            // Unspecified` already uses below, rather than reaching
+            // `push_scalar_comparison`'s own defensive panic.
+            if matches!(
+                op,
+                FilterOp::LessThan | FilterOp::LessThanOrEqual | FilterOp::GreaterThan | FilterOp::GreaterThanOrEqual
+            ) && matches!(value, FieldValue::Array(_) | FieldValue::Map(_))
+            {
+                let kind = if matches!(value, FieldValue::Array(_)) { "array" } else { "map" };
+                return Some(Err(format!("range comparison operators are not supported on {kind} values")));
+            }
             Some(Ok(QueryFilter::Field(FieldFilter { field_path, op, value })))
         }
         FilterType::CompositeFilter(cf) => {
@@ -4329,5 +4347,79 @@ mod composite_index_requirement_tests {
             fields,
             vec![spec("category", IndexFieldOrder::Asc), spec("population", IndexFieldOrder::Asc)]
         );
+    }
+}
+
+#[cfg(test)]
+mod range_operator_value_type_tests {
+    //! firestore-range-operator-value-type-support (Slice 02, US-02) —
+    //! pure, IO-free unit coverage for `translate_filter`'s own new
+    //! Array/Map + range-operator rejection.
+    use super::translate_filter;
+    use embyr_proto::firestore::{
+        structured_query::{
+            field_filter::Operator as FieldOp, filter::FilterType, FieldFilter, FieldReference,
+            Filter,
+        },
+        value::ValueType,
+        ArrayValue, Value,
+    };
+
+    fn field_filter_proto(field: &str, op: FieldOp, value: Value) -> Filter {
+        Filter {
+            filter_type: Some(FilterType::FieldFilter(FieldFilter {
+                field: Some(FieldReference { field_path: field.to_string() }),
+                op: op as i32,
+                value: Some(value),
+            })),
+        }
+    }
+
+    fn array_value(values: Vec<Value>) -> Value {
+        Value { value_type: Some(ValueType::ArrayValue(ArrayValue { values })) }
+    }
+
+    fn map_value(fields: std::collections::HashMap<String, Value>) -> Value {
+        Value {
+            value_type: Some(ValueType::MapValue(embyr_proto::firestore::MapValue { fields })),
+        }
+    }
+
+    fn string_value(s: &str) -> Value {
+        Value { value_type: Some(ValueType::StringValue(s.to_string())) }
+    }
+
+    /// AC-RNG-05: a range operator against an Array value is rejected with
+    /// a named error (surfaces as `Status::invalid_argument` at both of
+    /// `translate_filter`'s own call sites), never reaching
+    /// `push_scalar_comparison`'s own defensive panic.
+    #[test]
+    fn greater_than_on_array_is_rejected_with_a_named_error() {
+        let f = field_filter_proto("tags", FieldOp::GreaterThan, array_value(vec![string_value("a")]));
+        let result = translate_filter(&f).expect("must produce Some");
+        let err = result.expect_err("must be rejected");
+        assert!(err.contains("array"), "expected an array-naming error, got: {err}");
+    }
+
+    /// AC-RNG-06: same rejection for Map values.
+    #[test]
+    fn less_than_on_map_is_rejected_with_a_named_error() {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert("k".to_string(), string_value("v"));
+        let f = field_filter_proto("metadata", FieldOp::LessThan, map_value(fields));
+        let result = translate_filter(&f).expect("must produce Some");
+        let err = result.expect_err("must be rejected");
+        assert!(err.contains("map"), "expected a map-naming error, got: {err}");
+    }
+
+    /// Regression guard: an Equal filter against an Array value is NOT
+    /// rejected by this feature's own new check — the check is scoped to
+    /// range operators only (`push_value_equality`, unaffected, already
+    /// handles Array equality correctly).
+    #[test]
+    fn equal_on_array_is_not_rejected_by_the_range_operator_check() {
+        let f = field_filter_proto("tags", FieldOp::Equal, array_value(vec![string_value("a")]));
+        let result = translate_filter(&f).expect("must produce Some");
+        assert!(result.is_ok(), "Equal on Array must not be rejected by this feature's own check");
     }
 }

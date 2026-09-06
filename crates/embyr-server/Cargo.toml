@@ -1024,6 +1024,16 @@ path = "../../tests/firestore_query_filter_operator_support/acceptance/qfo04_not
 name = "firestore_equal_notequal_value_type_support_env01_equal_notequal_every_value_type"
 path = "../../tests/firestore_equal_notequal_value_type_support/acceptance/env01_equal_notequal_every_value_type.rs"
 
+# firestore-range-operator-value-type-support (Slice 01, US-01, Walking Skeleton). AC-RNG-01 through AC-RNG-04.
+[[test]]
+name = "firestore_range_operator_value_type_support_rng01_timestamp_bytes_reference_ordering"
+path = "../../tests/firestore_range_operator_value_type_support/acceptance/rng01_timestamp_bytes_reference_ordering.rs"
+
+# firestore-range-operator-value-type-support (Slice 02, US-02, LAST slice). AC-RNG-05/06.
+[[test]]
+name = "firestore_range_operator_value_type_support_rng02_array_map_clean_rejection"
+path = "../../tests/firestore_range_operator_value_type_support/acceptance/rng02_array_map_clean_rejection.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
