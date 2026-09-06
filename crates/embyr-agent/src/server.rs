@@ -295,7 +295,7 @@ impl StorageAgent for StorageAgentService {
 
         let path = parse_document_name(&name, &self.project_id)?;
 
-        match self.storage.get_document(&path).await {
+        match self.storage.get_document(&path, None).await {
             Ok(Some(doc)) => {
                 let duration_ms = start.elapsed().as_millis();
                 tracing::info!(
@@ -361,7 +361,7 @@ impl StorageAgent for StorageAgentService {
             .map_err(core_error_to_status)?;
 
         // Fetch the created document to return with timestamps and generation
-        match self.storage.get_document(&path).await {
+        match self.storage.get_document(&path, None).await {
             Ok(Some(doc)) => Ok(Response::new(domain_doc_to_proto(doc))),
             Ok(None) => Err(Status::internal("document not found after creation")),
             Err(e) => Err(core_error_to_status(e)),
@@ -389,7 +389,7 @@ impl StorageAgent for StorageAgentService {
                 // Read-modify-write: fetch current doc, merge masked fields
                 let current_doc = self
                     .storage
-                    .get_document(&path)
+                    .get_document(&path, None)
                     .await
                     .map_err(core_error_to_status)?
                     .ok_or_else(|| {
@@ -423,7 +423,7 @@ impl StorageAgent for StorageAgentService {
             .map_err(core_error_to_status)?;
 
         // Fetch the updated document to return with timestamps and generation
-        match self.storage.get_document(&path).await {
+        match self.storage.get_document(&path, None).await {
             Ok(Some(updated_doc)) => Ok(Response::new(domain_doc_to_proto(updated_doc))),
             Ok(None) => Err(Status::internal("document not found after update")),
             Err(e) => Err(core_error_to_status(e)),

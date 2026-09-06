@@ -358,6 +358,13 @@ impl BackendAdapter for AgentBackendAdapter {
     async fn get_document(
         &self,
         path: &DocumentPath,
+        // firestore-transaction-read-consistency: backend_mode=agent is
+        // explicitly deferred (feature-delta.md § Out of Scope) — the
+        // internal `embyr.agent.v1.GetDocumentRequest` proto has no
+        // transaction-carrying field yet. Mirrors this adapter's own
+        // already-existing `run_query`/`run_aggregation_query`
+        // `_transaction_id`-ignored pattern.
+        _transaction_id: Option<&TransactionId>,
     ) -> Result<Option<FirestoreDocument>, CoreError> {
         let name = domain_path_to_agent_name(path);
         let req = GetDocumentRequest {

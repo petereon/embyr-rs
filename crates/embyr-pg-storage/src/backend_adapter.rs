@@ -232,6 +232,7 @@ impl BackendAdapter for PostgresBackendAdapter {
     async fn get_document(
         &self,
         path: &DocumentPath,
+        transaction_id: Option<&TransactionId>,
     ) -> Result<Option<FirestoreDocument>, CoreError> {
         use sqlx::Row;
 
@@ -250,39 +251,60 @@ impl BackendAdapter for PostgresBackendAdapter {
         .await
         .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
 
-        let Some(row) = row_opt else {
-            return Ok(None);
+        let result = match &row_opt {
+            None => Ok(None),
+            Some(row) => {
+                let fields_json: serde_json::Value = row
+                    .try_get("fields")
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                let version: i64 = row
+                    .try_get("version")
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                let create_time: chrono::DateTime<chrono::Utc> = row
+                    .try_get("create_time")
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+                let update_time: chrono::DateTime<chrono::Utc> = row
+                    .try_get("update_time")
+                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+                let fields = crate::encoding::field_value::json_to_fields(&fields_json)
+                    .ok_or_else(|| {
+                        CoreError::BackendUnavailable("failed to decode fields JSON".into())
+                    })?;
+
+                Ok(Some(FirestoreDocument {
+                    path: path.clone(),
+                    fields,
+                    create_time: (
+                        create_time.timestamp(),
+                        create_time.timestamp_subsec_nanos() as i32,
+                    ),
+                    update_time: (
+                        update_time.timestamp(),
+                        update_time.timestamp_subsec_nanos() as i32,
+                    ),
+                    version,
+                }))
+            }
         };
 
-        let fields_json: serde_json::Value = row
-            .try_get("fields")
-            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        let version: i64 = row
-            .try_get("version")
-            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        let create_time: chrono::DateTime<chrono::Utc> = row
-            .try_get("create_time")
-            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        let update_time: chrono::DateTime<chrono::Utc> = row
-            .try_get("update_time")
-            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        if let Some(txn_id) = transaction_id {
+            let version = match &result {
+                Ok(Some(doc)) => Some(doc.version),
+                Ok(None) => None,
+                Err(_) => return result,
+            };
+            crate::transactions::occ::record_read(
+                &self.pool,
+                path.project_id.as_str(),
+                txn_id,
+                path,
+                version,
+            )
+            .await?;
+        }
 
-        let fields = crate::encoding::field_value::json_to_fields(&fields_json)
-            .ok_or_else(|| CoreError::BackendUnavailable("failed to decode fields JSON".into()))?;
-
-        Ok(Some(FirestoreDocument {
-            path: path.clone(),
-            fields,
-            create_time: (
-                create_time.timestamp(),
-                create_time.timestamp_subsec_nanos() as i32,
-            ),
-            update_time: (
-                update_time.timestamp(),
-                update_time.timestamp_subsec_nanos() as i32,
-            ),
-            version,
-        }))
+        result
     }
 
     async fn create_document(
@@ -922,8 +944,8 @@ impl BackendAdapter for PostgresBackendAdapter {
         let txn_uuid = uuid_from_bytes(&transaction_id.0)?;
 
         // Check transaction status and expiry (60s window)
-        let row: Option<(String, DateTime<Utc>)> = sqlx::query_as(
-            "SELECT status, started_at FROM transactions \
+        let row: Option<(String, DateTime<Utc>, serde_json::Value)> = sqlx::query_as(
+            "SELECT status, started_at, reads FROM transactions \
              WHERE transaction_id = $1 AND project_id = $2",
         )
         .bind(txn_uuid)
@@ -932,7 +954,7 @@ impl BackendAdapter for PostgresBackendAdapter {
         .await
         .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
 
-        let (status, started_at) =
+        let (status, started_at, reads) =
             row.ok_or(CoreError::TransactionNotFound)?;
 
         if status != "active" {
@@ -1058,6 +1080,13 @@ impl BackendAdapter for PostgresBackendAdapter {
             &writes,
         )
         .await?;
+
+        // firestore-transaction-read-consistency: re-validate every document
+        // this transaction READ (not just what it writes) — a document read
+        // that has since changed (or, for a confirmed-absent read, been
+        // created) aborts the transaction, matching real Firestore's own
+        // OCC guarantee for `runTransaction(fn)`.
+        crate::transactions::occ::verify_reads(&mut pg_txn, project_id.as_str(), &reads).await?;
 
         // firestore-field-transforms (Slice 01, ADR-052 § Decision 5b/5c):
         // lock and read the PERSISTED `fields` for every write that carries
@@ -1268,7 +1297,7 @@ impl BackendAdapter for PostgresBackendAdapter {
 }
 
 /// Parse a 16-byte slice as a UUID.
-fn uuid_from_bytes(bytes: &[u8]) -> Result<uuid::Uuid, CoreError> {
+pub(crate) fn uuid_from_bytes(bytes: &[u8]) -> Result<uuid::Uuid, CoreError> {
     if bytes.len() != 16 {
         return Err(CoreError::InvalidArgument(
             "invalid transaction ID length".into(),

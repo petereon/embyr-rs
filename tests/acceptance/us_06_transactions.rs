@@ -744,3 +744,372 @@ async fn commit_write_with_must_exist_precondition_is_rejected_when_document_doe
         "the rejected write must NOT have created the document"
     );
 }
+
+// ---------------------------------------------------------------------------
+// firestore-transaction-read-consistency (Slice 01, US-01, AC-TRC-01/02/03/04/05)
+//
+// The tests above all simulate OCC by MANUALLY attaching an `UpdateTime`
+// precondition to the write, using a version the CLIENT read out-of-band.
+// A real Firestore SDK's own `runTransaction(tx => tx.get(ref))` does NOT
+// require the app to do this — the SDK sets `consistency_selector.transaction`
+// on the `GetDocument` call, and the SERVER automatically tracks that read
+// and aborts the commit if it's stale, with no explicit precondition needed
+// on the write at all. These tests exercise exactly that automatic path.
+// ---------------------------------------------------------------------------
+
+/// AC-TRC-01/AC-TRC-02: a transactional `GetDocument` read (via
+/// `consistency_selector.transaction`, NOT a manually-attached `UpdateTime`
+/// precondition) registers that document's version; `Commit` aborts if the
+/// SAME document changed in the meantime — the automatic lost-update guard
+/// a real `runTransaction(fn)` callback depends on.
+#[tokio::test]
+async fn transactional_get_document_aborts_commit_when_read_document_changes_before_commit() {
+    let env = setup("test-sk-trc-01", "trc-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let database = format!("projects/{}/databases/(default)", env.project_id);
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/counters/hits",
+        env.project_id
+    );
+
+    let mut seed_fields = HashMap::new();
+    seed_fields.insert("value".to_string(), integer_value(0));
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent,
+                collection_id: "counters".to_string(),
+                document_id: "hits".to_string(),
+                document: Some(Document { name: String::new(), fields: seed_fields, ..Default::default() }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("seed counters/hits");
+
+    let begin_resp = client
+        .begin_transaction(make_authed_request(
+            BeginTransactionRequest { database: database.clone(), options: None },
+            &env.api_key,
+        ))
+        .await
+        .expect("begin_transaction");
+    let txn_bytes = begin_resp.into_inner().transaction;
+
+    // Transactional read: sets consistency_selector.transaction, registering
+    // this document's current version in the transaction's own read set.
+    client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name.clone(),
+                mask: None,
+                consistency_selector: Some(
+                    embyr_proto::firestore::get_document_request::ConsistencySelector::Transaction(
+                        txn_bytes.clone(),
+                    ),
+                ),
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("transactional get_document");
+
+    // External, non-transactional write changes the SAME document.
+    let mut bumped = HashMap::new();
+    bumped.insert("value".to_string(), integer_value(99));
+    client
+        .update_document(make_authed_request(
+            UpdateDocumentRequest {
+                document: Some(Document { name: doc_name.clone(), fields: bumped, ..Default::default() }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("external update");
+
+    // Commit an UNRELATED write inside the transaction — no explicit
+    // precondition on this write at all. The registered READ is what must
+    // trigger the abort.
+    let mut other_fields = HashMap::new();
+    other_fields.insert("touched".to_string(), Value {
+        value_type: Some(ValueType::BooleanValue(true)),
+    });
+    let other_doc_name = format!(
+        "projects/{}/databases/(default)/documents/counters/other",
+        env.project_id
+    );
+    let write = ProtoWrite {
+        operation: Some(Operation::Update(Document {
+            name: other_doc_name,
+            fields: other_fields,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    let commit_result = client
+        .commit(make_authed_request(
+            CommitRequest { database, writes: vec![write], transaction: txn_bytes },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = commit_result.expect_err(
+        "commit must abort: the transactionally-read document changed before commit",
+    );
+    assert_eq!(status.code(), tonic::Code::Aborted, "got: {status}");
+}
+
+/// AC-TRC-03 (regression guard): when NOTHING changes the transactionally
+/// -read document, the commit succeeds exactly as it does without this
+/// feature — zero new restriction on the happy path.
+#[tokio::test]
+async fn transactional_get_document_commit_succeeds_when_read_document_is_unchanged() {
+    let env = setup("test-sk-trc-02", "trc-project-02").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let database = format!("projects/{}/databases/(default)", env.project_id);
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/counters/hits",
+        env.project_id
+    );
+
+    let mut seed_fields = HashMap::new();
+    seed_fields.insert("value".to_string(), integer_value(0));
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent,
+                collection_id: "counters".to_string(),
+                document_id: "hits".to_string(),
+                document: Some(Document { name: String::new(), fields: seed_fields, ..Default::default() }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("seed counters/hits");
+
+    let begin_resp = client
+        .begin_transaction(make_authed_request(
+            BeginTransactionRequest { database: database.clone(), options: None },
+            &env.api_key,
+        ))
+        .await
+        .expect("begin_transaction");
+    let txn_bytes = begin_resp.into_inner().transaction;
+
+    client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name.clone(),
+                mask: None,
+                consistency_selector: Some(
+                    embyr_proto::firestore::get_document_request::ConsistencySelector::Transaction(
+                        txn_bytes.clone(),
+                    ),
+                ),
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("transactional get_document");
+
+    let mut new_fields = HashMap::new();
+    new_fields.insert("value".to_string(), integer_value(1));
+    let write = ProtoWrite {
+        operation: Some(Operation::Update(Document {
+            name: doc_name,
+            fields: new_fields,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    client
+        .commit(make_authed_request(
+            CommitRequest { database, writes: vec![write], transaction: txn_bytes },
+            &env.api_key,
+        ))
+        .await
+        .expect("commit must succeed — the transactionally-read document never changed");
+}
+
+/// AC-TRC-04: reading a document that does NOT exist, then having another
+/// actor CREATE that exact document before commit, also aborts — the
+/// confirmed-absence read-set entry is validated too, not just the
+/// exists-with-a-version case.
+#[tokio::test]
+async fn transactional_get_document_aborts_commit_when_absent_document_is_created_before_commit() {
+    let env = setup("test-sk-trc-03", "trc-project-03").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let database = format!("projects/{}/databases/(default)", env.project_id);
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/reservations/seat-1",
+        env.project_id
+    );
+
+    let begin_resp = client
+        .begin_transaction(make_authed_request(
+            BeginTransactionRequest { database: database.clone(), options: None },
+            &env.api_key,
+        ))
+        .await
+        .expect("begin_transaction");
+    let txn_bytes = begin_resp.into_inner().transaction;
+
+    // Transactional read of a document that does not exist yet.
+    let read_result = client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name.clone(),
+                mask: None,
+                consistency_selector: Some(
+                    embyr_proto::firestore::get_document_request::ConsistencySelector::Transaction(
+                        txn_bytes.clone(),
+                    ),
+                ),
+            },
+            &env.api_key,
+        ))
+        .await;
+    assert!(read_result.is_err(), "the document must not exist yet");
+
+    // External actor creates the exact document the transaction read as absent.
+    let mut created_fields = HashMap::new();
+    created_fields.insert("occupant".to_string(), Value {
+        value_type: Some(ValueType::StringValue("someone-else".to_string())),
+    });
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent,
+                collection_id: "reservations".to_string(),
+                document_id: "seat-1".to_string(),
+                document: Some(Document {
+                    name: String::new(),
+                    fields: created_fields,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("external create of reservations/seat-1");
+
+    // Commit an unrelated write inside the transaction — the confirmed
+    // -absence read is what must trigger the abort.
+    let other_doc_name = format!(
+        "projects/{}/databases/(default)/documents/reservations/other",
+        env.project_id
+    );
+    let mut other_fields = HashMap::new();
+    other_fields.insert("touched".to_string(), Value {
+        value_type: Some(ValueType::BooleanValue(true)),
+    });
+    let write = ProtoWrite {
+        operation: Some(Operation::Update(Document {
+            name: other_doc_name,
+            fields: other_fields,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    let commit_result = client
+        .commit(make_authed_request(
+            CommitRequest { database, writes: vec![write], transaction: txn_bytes },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = commit_result.expect_err(
+        "commit must abort: a document read as absent was created before commit",
+    );
+    assert_eq!(status.code(), tonic::Code::Aborted, "got: {status}");
+}
+
+/// AC-TRC-05: a transactional `GetDocument` with an invalid/garbage
+/// transaction ID returns the SAME `NotFound` `Commit`/`Rollback` already
+/// return for this case today — no new error class introduced.
+#[tokio::test]
+async fn transactional_get_document_with_invalid_transaction_id_returns_not_found() {
+    let env = setup("test-sk-trc-04", "trc-project-04").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/counters/hits",
+        env.project_id
+    );
+
+    let bogus_txn_bytes = vec![1, 2, 3]; // not a valid 16-byte UUID
+
+    let result = client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name,
+                mask: None,
+                consistency_selector: Some(
+                    embyr_proto::firestore::get_document_request::ConsistencySelector::Transaction(
+                        bogus_txn_bytes,
+                    ),
+                ),
+            },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = result.expect_err("a malformed transaction ID must be rejected");
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "a non-16-byte transaction ID must fail length validation, got: {status:?}"
+    );
+}
+
+/// AC-TRC-05 (well-formed-but-unknown case): a transactional `GetDocument`
+/// with a syntactically valid (16-byte) but never-begun transaction ID
+/// returns the SAME `NotFound` `Commit`/`Rollback` already return today for
+/// an unknown transaction — no new error class.
+#[tokio::test]
+async fn transactional_get_document_with_unknown_transaction_id_returns_not_found() {
+    let env = setup("test-sk-trc-05", "trc-project-05").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/counters/hits",
+        env.project_id
+    );
+
+    let never_begun_txn_bytes = uuid::Uuid::new_v4().as_bytes().to_vec();
+
+    let result = client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name,
+                mask: None,
+                consistency_selector: Some(
+                    embyr_proto::firestore::get_document_request::ConsistencySelector::Transaction(
+                        never_begun_txn_bytes,
+                    ),
+                ),
+            },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = result.expect_err("an unknown transaction ID must be rejected");
+    assert_eq!(
+        status.code(),
+        tonic::Code::NotFound,
+        "an unknown (never-begun) transaction ID must return NotFound, got: {status:?}"
+    );
+}

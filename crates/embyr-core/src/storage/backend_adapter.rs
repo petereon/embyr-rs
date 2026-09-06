@@ -109,9 +109,15 @@ pub enum Write {
 /// Trait is object-safe: use `Box<dyn BackendAdapter>` in adapter registries.
 #[async_trait]
 pub trait BackendAdapter: Send + Sync {
+    /// `transaction_id`, when `Some`, registers this read in that
+    /// transaction's own read set (firestore-transaction-read-consistency):
+    /// `Commit` later re-validates the read document is unchanged, aborting
+    /// otherwise. `None` (the vast majority of calls) is a plain,
+    /// unregistered read — unchanged behavior.
     async fn get_document(
         &self,
         path: &DocumentPath,
+        transaction_id: Option<&TransactionId>,
     ) -> Result<Option<FirestoreDocument>, CoreError>;
 
     async fn create_document(

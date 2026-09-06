@@ -33,6 +33,7 @@ use embyr_proto::firestore::{
     ListDocumentsRequest, ListDocumentsResponse, ListenRequest,
     ListenResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
     RunQueryRequest, RunQueryResponse, UpdateDocumentRequest, WriteRequest, WriteResponse,
+    get_document_request::ConsistencySelector as GetDocConsistencySelector,
     run_aggregation_query_request::QueryType as AggregationQueryType,
     run_query_request::QueryType,
     structured_aggregation_query::{aggregation::Operator as AggregationOperator, QueryType as StructuredAggQueryType},
@@ -887,7 +888,7 @@ impl FirestoreService {
             claims: v.claims.clone(),
         });
 
-        let doc_opt = adapter.get_document(path).await.map_err(core_error_to_status)?;
+        let doc_opt = adapter.get_document(path, None).await.map_err(core_error_to_status)?;
         let empty_fields: std::collections::BTreeMap<String, FieldValue> =
             std::collections::BTreeMap::new();
         let resource_fields = doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
@@ -970,7 +971,7 @@ impl FirestoreService {
                 document_id,
             };
             let doc = adapter
-                .get_document(&doc_path)
+                .get_document(&doc_path, None)
                 .await
                 .map_err(core_error_to_status)?;
             results.insert(path.clone(), doc);
@@ -1286,6 +1287,17 @@ impl FirestoreService {
 
         let path = Self::parse_document_path(&name)?;
 
+        // firestore-transaction-read-consistency (US-01, AC-TRC-01/05): a
+        // `transaction` consistency-selector registers this read in that
+        // transaction's own read set, re-validated at `Commit`. `ReadTime`
+        // is out of scope (§ Out of Scope) — unset, unread, unaffected.
+        let txn_id = match request.get_ref().consistency_selector {
+            Some(GetDocConsistencySelector::Transaction(ref bytes)) => {
+                Some(embyr_core::domain::transaction::TransactionId(bytes.clone()))
+            }
+            _ => None,
+        };
+
         // security-rules (ADR-029 § Structural no-rule-defined guardrail,
         // AC-17-14/15/16): a single indexed lookup on the composite primary
         // key `(project_id, collection_path)`, called BEFORE the document
@@ -1301,7 +1313,7 @@ impl FirestoreService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let doc_opt = adapter
-            .get_document(&path)
+            .get_document(&path, txn_id.as_ref())
             .await
             .map_err(core_error_to_status)?;
 
@@ -1854,7 +1866,7 @@ impl FirestoreService {
                 // `PermissionDenied` response regardless of whether `doc_opt`
                 // was `Some` or `None`.
                 let doc_opt = adapter
-                    .get_document(&path)
+                    .get_document(&path, None)
                     .await
                     .map_err(core_error_to_status)?;
                 let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
@@ -1943,7 +1955,7 @@ impl FirestoreService {
                         });
 
                         let doc_opt = adapter
-                            .get_document(&path)
+                            .get_document(&path, None)
                             .await
                             .map_err(core_error_to_status)?;
                         let empty_resource_fields: std::collections::BTreeMap<String, FieldValue> =
@@ -2081,7 +2093,7 @@ impl FirestoreService {
                 // `PermissionDenied` response regardless of whether `doc_opt`
                 // was `Some` or `None`.
                 let doc_opt = adapter
-                    .get_document(&path)
+                    .get_document(&path, None)
                     .await
                     .map_err(core_error_to_status)?;
                 let empty_fields: std::collections::BTreeMap<String, FieldValue> =
@@ -2161,7 +2173,7 @@ impl FirestoreService {
                         });
 
                         let doc_opt = adapter
-                            .get_document(&path)
+                            .get_document(&path, None)
                             .await
                             .map_err(core_error_to_status)?;
                         let empty_fields: std::collections::BTreeMap<String, FieldValue> =
@@ -2577,7 +2589,7 @@ impl FirestoreService {
             // DDD-BGD-7: a genuine infra error aborts the whole call — never
             // conflated with a `Deny` (ADR-042 handles denial separately).
             let doc_opt = adapter
-                .get_document(&path)
+                .get_document(&path, None)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
 

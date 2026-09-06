@@ -413,9 +413,8 @@ EXACT insertion point for `verify_reads`'s own call (immediately after the exist
 
 ## Wave: DESIGN / [REF] Data Model
 
-`migrations/customer/0003_transaction_reads.sql` (new migration, since the 2 existing
-`transactions`-related migrations are already applied in production — an `ALTER TABLE`, not an
-edit to `0002_transactions.sql`):
+`migrations/customer/0005_transaction_reads.sql` (new migration — 0001-0004 already exist; an
+`ALTER TABLE`, not an edit to `0002_transactions.sql`):
 
 ```sql
 ALTER TABLE transactions ADD COLUMN reads JSONB NOT NULL DEFAULT '{}';
