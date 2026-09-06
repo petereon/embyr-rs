@@ -287,6 +287,24 @@ jobs:
     # `firestore-range-operator-value-type-support`). See
     # docs/feature/firestore-equal-notequal-value-type-support/
     # feature-delta.md § Resolution 2/3.
+    # NOTE (firestore-range-operator-value-type-support DISCUSS, 2026-09-06):
+    # JOB-01 now also covers range-operator (</<=/>/>=) support for
+    # `Timestamp`/`Bytes`/`Reference`-valued filter targets (previously
+    # panicking), plus a clean `INVALID_ARGUMENT` rejection (instead of a
+    # crash) for `Array`/`Map`-valued targets, matching real Firestore's own
+    # actual behavior (`Array` range queries are confirmed unsupported by
+    # real Firestore itself; `Map`'s own support is unconfirmed, treated
+    # conservatively) — same job, same persona, not a new job. Direct
+    # continuation of `firestore-equal-notequal-value-type-support`'s own
+    # flagged follow-up. `Timestamp` uses Postgres `ROW(...)` comparison
+    # over its own stored `(seconds, nanos)` fields; `Bytes` decodes
+    # standard-base64 to raw `bytea` for byte-wise comparison (base64 TEXT
+    # comparison would be WRONG — its own alphabet does not preserve
+    # byte-value ordering); `Reference` uses flat string comparison
+    # (real-Firestore-accurate for same-depth references, a named
+    # divergence for cross-depth ones). See
+    # docs/feature/firestore-range-operator-value-type-support/
+    # feature-delta.md § Resolution 2 through 5.
 
   - id: JOB-02
     name: tenant-provision
