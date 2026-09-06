@@ -305,6 +305,25 @@ jobs:
     # divergence for cross-depth ones). See
     # docs/feature/firestore-range-operator-value-type-support/
     # feature-delta.md § Resolution 2 through 5.
+    # NOTE (firestore-transaction-read-consistency DISCUSS, 2026-09-06): JOB-01
+    # now also covers transactional-read optimistic-concurrency control for
+    # `GetDocument`/`RunQuery`/`BatchGetDocuments` — a real `runTransaction(fn)`
+    # callback's own reads now participate in the same OCC guarantee real
+    # Firestore gives them (a document read inside a transaction that changes
+    # before commit aborts the transaction with `ABORTED`), closing a
+    # documented-but-unbuilt SPEC.md gap (§Transactions' own
+    # `GetDocumentForTransaction`/`CommitTransaction` contract existed in
+    # SPEC.md but was never implemented — the `transactions` table had no
+    # `reads` column at all). Same job, same persona, not a new job. Reuses
+    # `crates/embyr-pg-storage/src/transactions/occ.rs::verify_versions`'s own
+    # FOR-UPDATE-lock-and-compare mechanism as a direct sibling
+    # (`verify_reads`), zero new `CoreError` variant. Identified as the
+    # highest-real-world-impact finding in a 2026-09-06 production-readiness
+    # scan, ranked above the already-closed 3-feature crash-elimination arc
+    # because the failure mode is a SILENT lost update, not a visible panic.
+    # `backend_mode=agent` is explicitly deferred (separate candidate feature,
+    # mirroring the established agent-mode-deferral pattern). See
+    # docs/feature/firestore-transaction-read-consistency/feature-delta.md.
 
   - id: JOB-02
     name: tenant-provision
