@@ -554,6 +554,23 @@ jobs:
     # count; D-9 is about MONTHLY-CUMULATIVE usage vs. a paid-plan cap,
     # unrelated to horizontal scaling. Cross-referenced, not merged — see
     # docs/feature/card-payments-backend/feature-delta.md § Open Question.
+    # NOTE (firestore-malformed-filter-shape-validation DISCUSS, 2026-09-06):
+    # JOB-11 now also covers malformed raw gRPC filter shapes (non-`Array`
+    # value paired with `In`/`NotIn`/`ArrayContainsAny`; `Null` value paired
+    # with a range operator) producing a clean, named `INVALID_ARGUMENT`
+    # instead of a raw panic — same job, same persona (P2 Sam Chen), not a
+    # new job, and NOT a JOB-01 (P1 Alex) extension despite being a direct
+    # follow-up from `firestore-range-operator-value-type-support`'s own
+    # FINALIZE. Direct investigation during this feature's own DISCUSS
+    # confirmed the trigger requires a caller to have ALREADY constructed a
+    # raw gRPC request no real Firestore SDK could produce, and the panic's
+    # own blast radius is confirmed self-contained to that same caller's own
+    # request (Tokio's own default per-task panic isolation, no custom
+    # catch_unwind exists) — reframing this as an operational-clarity
+    # concern for Sam, not a crash-risk concern for Alex, and explicitly NOT
+    # part of the 3-feature crash-elimination arc that FINALIZE closed. See
+    # docs/feature/firestore-malformed-filter-shape-validation/
+    # feature-delta.md § Resolution 1/2.
 
   - id: JOB-12
     name: observability
