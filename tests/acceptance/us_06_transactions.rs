@@ -10,10 +10,13 @@
 use embyr_core::auth::{argon2, ecies};
 use embyr_proto::firestore::{
     firestore_client::FirestoreClient,
+    run_query_request::QueryType,
+    structured_query::CollectionSelector,
     value::ValueType,
     write::Operation,
-    BeginTransactionRequest, CommitRequest, CreateDocumentRequest, Document, GetDocumentRequest,
-    RollbackRequest, UpdateDocumentRequest, Value, Write as ProtoWrite,
+    BatchGetDocumentsRequest, BeginTransactionRequest, CommitRequest, CreateDocumentRequest,
+    Document, GetDocumentRequest, RollbackRequest, RunQueryRequest, StructuredQuery,
+    UpdateDocumentRequest, Value, Write as ProtoWrite,
 };
 use embyr_server::{adapters::system_db::SystemDb, start_test_server};
 use std::{collections::HashMap, sync::Arc};
@@ -1112,4 +1115,280 @@ async fn transactional_get_document_with_unknown_transaction_id_returns_not_foun
         tonic::Code::NotFound,
         "an unknown (never-begun) transaction ID must return NotFound, got: {status:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// firestore-transaction-read-consistency (Slice 02, US-02, AC-TRC-06/07/08)
+// ---------------------------------------------------------------------------
+
+/// AC-TRC-06/AC-TRC-07: a transactional `RunQuery` registers EVERY returned
+/// document's version; `Commit` aborts if any ONE of them changed before
+/// commit — the identical guarantee AC-TRC-01/02 give single-document reads,
+/// now for a query-based read.
+#[tokio::test]
+async fn transactional_run_query_aborts_commit_when_a_returned_document_changes_before_commit() {
+    let env = setup("test-sk-trc-06", "trc-project-06").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let database = format!("projects/{}/databases/(default)", env.project_id);
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/orders/o1",
+        env.project_id
+    );
+
+    let mut seed_fields = HashMap::new();
+    seed_fields.insert("status".to_string(), Value {
+        value_type: Some(ValueType::StringValue("pending".to_string())),
+    });
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent,
+                collection_id: "orders".to_string(),
+                document_id: "o1".to_string(),
+                document: Some(Document { name: String::new(), fields: seed_fields, ..Default::default() }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("seed orders/o1");
+
+    let begin_resp = client
+        .begin_transaction(make_authed_request(
+            BeginTransactionRequest { database: database.clone(), options: None },
+            &env.api_key,
+        ))
+        .await
+        .expect("begin_transaction");
+    let txn_bytes = begin_resp.into_inner().transaction;
+
+    // Transactional query: registers orders/o1's current version.
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "orders".to_string(), all_descendants: false }],
+        ..Default::default()
+    };
+    let query_req = make_authed_request(
+        RunQueryRequest {
+            parent: format!("projects/{}/databases/(default)/documents", env.project_id),
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            consistency_selector: Some(
+                embyr_proto::firestore::run_query_request::ConsistencySelector::Transaction(
+                    txn_bytes.clone(),
+                ),
+            ),
+        },
+        &env.api_key,
+    );
+    use tokio_stream::StreamExt;
+    let stream = client.run_query(query_req).await.expect("transactional run_query").into_inner();
+    let responses: Vec<_> = stream.collect().await;
+    let doc_count = responses.iter().filter(|r| r.as_ref().ok().and_then(|r| r.document.as_ref()).is_some()).count();
+    assert_eq!(doc_count, 1, "query must return exactly the 1 seeded document");
+
+    // External write changes the SAME document the query returned.
+    let mut bumped = HashMap::new();
+    bumped.insert("status".to_string(), Value {
+        value_type: Some(ValueType::StringValue("shipped".to_string())),
+    });
+    client
+        .update_document(make_authed_request(
+            UpdateDocumentRequest {
+                document: Some(Document { name: doc_name, fields: bumped, ..Default::default() }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("external update");
+
+    // Commit an unrelated write inside the transaction.
+    let other_doc_name = format!(
+        "projects/{}/databases/(default)/documents/orders/other",
+        env.project_id
+    );
+    let mut other_fields = HashMap::new();
+    other_fields.insert("touched".to_string(), Value { value_type: Some(ValueType::BooleanValue(true)) });
+    let write = ProtoWrite {
+        operation: Some(Operation::Update(Document {
+            name: other_doc_name,
+            fields: other_fields,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    let commit_result = client
+        .commit(make_authed_request(
+            CommitRequest { database, writes: vec![write], transaction: txn_bytes },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = commit_result.expect_err(
+        "commit must abort: a document the query returned changed before commit",
+    );
+    assert_eq!(status.code(), tonic::Code::Aborted, "got: {status}");
+}
+
+/// AC-TRC-08 (regression guard): a non-transactional `RunQuery`
+/// (`consistency_selector` unset) is completely unaffected — no read
+/// registration, no new behavior.
+#[tokio::test]
+async fn non_transactional_run_query_is_unaffected_by_read_consistency_tracking() {
+    let env = setup("test-sk-trc-07", "trc-project-07").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let mut seed_fields = HashMap::new();
+    seed_fields.insert("status".to_string(), Value {
+        value_type: Some(ValueType::StringValue("pending".to_string())),
+    });
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent: parent.clone(),
+                collection_id: "orders".to_string(),
+                document_id: "o1".to_string(),
+                document: Some(Document { name: String::new(), fields: seed_fields, ..Default::default() }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("seed orders/o1");
+
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "orders".to_string(), all_descendants: false }],
+        ..Default::default()
+    };
+    let query_req = make_authed_request(
+        RunQueryRequest {
+            parent,
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            consistency_selector: None,
+        },
+        &env.api_key,
+    );
+    use tokio_stream::StreamExt;
+    let stream = client.run_query(query_req).await.expect("non-transactional run_query").into_inner();
+    let responses: Vec<_> = stream.collect().await;
+    let doc_count = responses.iter().filter(|r| r.as_ref().ok().and_then(|r| r.document.as_ref()).is_some()).count();
+    assert_eq!(doc_count, 1, "non-transactional query must still return the seeded document");
+}
+
+// ---------------------------------------------------------------------------
+// firestore-transaction-read-consistency (Slice 03, US-03, AC-TRC-09/10)
+// ---------------------------------------------------------------------------
+
+/// AC-TRC-09/AC-TRC-10: a transactional `BatchGetDocuments` registers every
+/// requested document's version; `Commit` aborts if any ONE of them changed
+/// before commit — the identical guarantee AC-TRC-01/02/06/07 give
+/// single-document and query-based reads, now for a batch read.
+#[tokio::test]
+async fn transactional_batch_get_documents_aborts_commit_when_a_requested_document_changes_before_commit()
+{
+    let env = setup("test-sk-trc-08", "trc-project-08").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let database = format!("projects/{}/databases/(default)", env.project_id);
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let doc_a_name = format!(
+        "projects/{}/databases/(default)/documents/accounts/a",
+        env.project_id
+    );
+    let doc_b_name = format!(
+        "projects/{}/databases/(default)/documents/accounts/b",
+        env.project_id
+    );
+
+    for (id, balance) in [("a", 100), ("b", 200)] {
+        let mut fields = HashMap::new();
+        fields.insert("balance".to_string(), integer_value(balance));
+        client
+            .create_document(make_authed_request(
+                CreateDocumentRequest {
+                    parent: parent.clone(),
+                    collection_id: "accounts".to_string(),
+                    document_id: id.to_string(),
+                    document: Some(Document { name: String::new(), fields, ..Default::default() }),
+                    ..Default::default()
+                },
+                &env.api_key,
+            ))
+            .await
+            .expect("seed account");
+    }
+
+    let begin_resp = client
+        .begin_transaction(make_authed_request(
+            BeginTransactionRequest { database: database.clone(), options: None },
+            &env.api_key,
+        ))
+        .await
+        .expect("begin_transaction");
+    let txn_bytes = begin_resp.into_inner().transaction;
+
+    // Transactional batch read: registers both accounts' current versions.
+    let batch_req = make_authed_request(
+        BatchGetDocumentsRequest {
+            database: database.clone(),
+            documents: vec![doc_a_name.clone(), doc_b_name.clone()],
+            mask: None,
+            consistency_selector: Some(
+                embyr_proto::firestore::batch_get_documents_request::ConsistencySelector::Transaction(
+                    txn_bytes.clone(),
+                ),
+            ),
+        },
+        &env.api_key,
+    );
+    use tokio_stream::StreamExt;
+    let stream = client
+        .batch_get_documents(batch_req)
+        .await
+        .expect("transactional batch_get_documents")
+        .into_inner();
+    let responses: Vec<_> = stream.collect().await;
+    assert_eq!(responses.len(), 2, "batch must return both requested documents");
+
+    // External write changes ONE of the two batch-read documents.
+    let mut bumped = HashMap::new();
+    bumped.insert("balance".to_string(), integer_value(50));
+    client
+        .update_document(make_authed_request(
+            UpdateDocumentRequest {
+                document: Some(Document { name: doc_b_name, fields: bumped, ..Default::default() }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("external update of accounts/b");
+
+    // Commit a write to accounts/a (unrelated to the change on accounts/b) —
+    // the registered READ of accounts/b is what must trigger the abort.
+    let mut new_fields = HashMap::new();
+    new_fields.insert("balance".to_string(), integer_value(150));
+    let write = ProtoWrite {
+        operation: Some(Operation::Update(Document {
+            name: doc_a_name,
+            fields: new_fields,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    let commit_result = client
+        .commit(make_authed_request(
+            CommitRequest { database, writes: vec![write], transaction: txn_bytes },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = commit_result.expect_err(
+        "commit must abort: one of the two batch-read documents changed before commit",
+    );
+    assert_eq!(status.code(), tonic::Code::Aborted, "got: {status}");
 }

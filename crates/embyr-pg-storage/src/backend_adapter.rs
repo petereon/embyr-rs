@@ -558,7 +558,7 @@ impl BackendAdapter for PostgresBackendAdapter {
         &self,
         collection: &CollectionPath,
         query: &StructuredQuery,
-        _transaction_id: Option<&TransactionId>,
+        transaction_id: Option<&TransactionId>,
     ) -> Result<Vec<FirestoreDocument>, CoreError> {
         use sqlx::QueryBuilder;
         use crate::encoding::query::{append_filter, order_by_expr};
@@ -707,6 +707,25 @@ impl BackendAdapter for PostgresBackendAdapter {
                 version,
             });
         }
+
+        // firestore-transaction-read-consistency (Slice 02, AC-TRC-06):
+        // register EVERY document this transactional query returns, using
+        // the identical mechanism as `get_document`'s own Slice 01
+        // registration — a query-registered read is indistinguishable from
+        // a `GetDocument`-registered one once it's in the `reads` map.
+        if let Some(txn_id) = transaction_id {
+            for doc in &docs {
+                crate::transactions::occ::record_read(
+                    &self.pool,
+                    collection.project_id.as_str(),
+                    txn_id,
+                    &doc.path,
+                    Some(doc.version),
+                )
+                .await?;
+            }
+        }
+
         Ok(docs)
     }
 

@@ -33,9 +33,10 @@ use embyr_proto::firestore::{
     ListDocumentsRequest, ListDocumentsResponse, ListenRequest,
     ListenResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
     RunQueryRequest, RunQueryResponse, UpdateDocumentRequest, WriteRequest, WriteResponse,
+    batch_get_documents_request::ConsistencySelector as BatchGetConsistencySelector,
     get_document_request::ConsistencySelector as GetDocConsistencySelector,
     run_aggregation_query_request::QueryType as AggregationQueryType,
-    run_query_request::QueryType,
+    run_query_request::{ConsistencySelector as RunQueryConsistencySelector, QueryType},
     structured_aggregation_query::{aggregation::Operator as AggregationOperator, QueryType as StructuredAggQueryType},
     structured_query::{
         composite_filter::Operator as CompositeOp,
@@ -2498,6 +2499,19 @@ impl FirestoreService {
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        // firestore-transaction-read-consistency (Slice 03, AC-TRC-09/10): a
+        // `transaction` consistency-selector registers every requested
+        // document in that transaction's own read set, reusing
+        // `get_document`'s own per-document mechanism unchanged — mirrors
+        // `handle_get_document`/`handle_run_query`'s own wiring exactly.
+        // `NewTransaction`/`ReadTime` are out of scope (§ Out of Scope).
+        let txn_id = match req.consistency_selector {
+            Some(BatchGetConsistencySelector::Transaction(ref bytes)) => {
+                Some(embyr_core::domain::transaction::TransactionId(bytes.clone()))
+            }
+            _ => None,
+        };
+
         let rate_info = match self.rate_limiter.check(&project_id_str).await {
             Ok(info) => info,
             Err(info) => return Err(Self::rate_limit_rejection(&info)),
@@ -2588,10 +2602,18 @@ impl FirestoreService {
 
             // DDD-BGD-7: a genuine infra error aborts the whole call — never
             // conflated with a `Deny` (ADR-042 handles denial separately).
+            // firestore-transaction-read-consistency (Slice 03): switched
+            // from an ad-hoc `Status::internal`-only closure to the shared
+            // `core_error_to_status` mapping — a malformed/unknown
+            // transaction ID must surface as `NotFound`/`InvalidArgument`
+            // (matching `handle_get_document`'s own AC-TRC-05 behavior), not
+            // `internal`. Every other `CoreError` variant this call site
+            // could already produce still maps to `internal` via the same
+            // fallback arm, so DDD-BGD-7's own behavior is unchanged.
             let doc_opt = adapter
-                .get_document(&path, None)
+                .get_document(&path, txn_id.as_ref())
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(core_error_to_status)?;
 
             let response_item = match rule_row {
                 // No rule defined — unrestricted, mirrors GetDocument's own
@@ -2960,6 +2982,19 @@ impl FirestoreService {
         let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
+        // firestore-transaction-read-consistency (Slice 02, AC-TRC-06/08): a
+        // `transaction` consistency-selector registers every document THIS
+        // query returns in that transaction's own read set, re-validated at
+        // `Commit`. `ReadTime` is out of scope (§ Out of Scope) — unset,
+        // unread, unaffected. Mirrors `handle_get_document`'s own Slice 01
+        // wiring exactly.
+        let txn_id = match req.consistency_selector {
+            Some(RunQueryConsistencySelector::Transaction(ref bytes)) => {
+                Some(embyr_core::domain::transaction::TransactionId(bytes.clone()))
+            }
+            _ => None,
+        };
+
         let rate_info = match self.rate_limiter.check(&project_id_str).await {
             Ok(info) => info,
             Err(info) => return Err(Self::rate_limit_rejection(&info)),
@@ -3189,7 +3224,7 @@ impl FirestoreService {
         }
 
         let docs = adapter
-            .run_query(&collection, &domain_query, None)
+            .run_query(&collection, &domain_query, txn_id.as_ref())
             .await
             .map_err(core_error_to_status)?;
 
