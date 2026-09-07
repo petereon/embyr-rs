@@ -114,6 +114,10 @@ fn integer_value(i: i64) -> Value {
     Value { value_type: Some(ValueType::IntegerValue(i)) }
 }
 
+fn double_value(d: f64) -> Value {
+    Value { value_type: Some(ValueType::DoubleValue(d)) }
+}
+
 fn string_value(s: &str) -> Value {
     Value { value_type: Some(ValueType::StringValue(s.to_string())) }
 }
@@ -561,6 +565,145 @@ async fn start_at_cursor_flips_operator_for_descending_order() {
         vec!["C", "B", "A"],
         "startAt(C) on a DESC-ordered query must include C and everything below it, got {names:?}"
     );
+}
+
+/// AC-EC-01/02 regression, non-`String` cursor value types: `endAt`/`endBefore`
+/// on Integer- and Double-valued fields bound results identically to the
+/// already-proven String case above — every value-type match arm the SQL
+/// -generation block handles gets its own real proof, not just the type used
+/// by every other cursor test in this file.
+#[tokio::test]
+async fn end_cursor_bounds_results_for_integer_and_double_field_types() {
+    let env = setup("test-sk-ecs-04", "ecs-project-04").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Integer-valued cursor: seed scores 10, 20, 30, 40; endAt(30) must
+    // include 30 and exclude 40.
+    for score in [10i64, 20, 30, 40] {
+        let mut fields = HashMap::new();
+        fields.insert("score".to_string(), integer_value(score));
+        seed_document(
+            &mut client,
+            &env.project_id,
+            &env.api_key,
+            "int_scores",
+            &format!("score-{score}"),
+            fields,
+        )
+        .await;
+    }
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "int_scores".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("score")), direction: Direction::Ascending as i32 }],
+        end_at: Some(Cursor { values: vec![integer_value(30)], before: false }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+    let scores: Vec<i64> = docs
+        .iter()
+        .map(|d| match &d.fields.get("score").expect("score field missing").value_type {
+            Some(ValueType::IntegerValue(i)) => *i,
+            other => panic!("expected IntegerValue for score, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(scores, vec![10, 20, 30], "endAt(30) on an Integer field must include 30, got {scores:?}");
+
+    // Double-valued cursor: seed prices 1.5, 2.5, 3.5; endAt(2.5) must
+    // include 2.5 and exclude 3.5.
+    for price in [1.5f64, 2.5, 3.5] {
+        let mut fields = HashMap::new();
+        fields.insert("price".to_string(), double_value(price));
+        seed_document(
+            &mut client,
+            &env.project_id,
+            &env.api_key,
+            "prices",
+            &format!("price-{price}"),
+            fields,
+        )
+        .await;
+    }
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "prices".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("price")), direction: Direction::Ascending as i32 }],
+        end_at: Some(Cursor { values: vec![double_value(2.5)], before: false }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+    let prices: Vec<f64> = docs
+        .iter()
+        .map(|d| match &d.fields.get("price").expect("price field missing").value_type {
+            Some(ValueType::DoubleValue(v)) => *v,
+            other => panic!("expected DoubleValue for price, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(prices, vec![1.5, 2.5], "endAt(2.5) on a Double field must include 2.5, got {prices:?}");
+
+    // AC-EC-04 regression, non-String startAt: reuses the SAME seeded
+    // int_scores/prices collections above — startAt(20) on the Integer
+    // field must exclude 10 and include 20/30/40; startAt(2.5) on the
+    // Double field must exclude 1.5 and include 2.5/3.5. Closes the
+    // startAt block's own Integer/Double match arms, which (unlike
+    // String, already exercised by start_after_cursor_skips_cursor_document
+    // and start_at_cursor_flips_operator_for_descending_order) had zero
+    // prior coverage despite startAt itself already being shipped.
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "int_scores".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("score")), direction: Direction::Ascending as i32 }],
+        start_at: Some(Cursor { values: vec![integer_value(20)], before: true }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+    let scores: Vec<i64> = docs
+        .iter()
+        .map(|d| match &d.fields.get("score").expect("score field missing").value_type {
+            Some(ValueType::IntegerValue(i)) => *i,
+            other => panic!("expected IntegerValue for score, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(scores, vec![20, 30, 40], "startAt(20) on an Integer field must exclude 10, got {scores:?}");
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "prices".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("price")), direction: Direction::Ascending as i32 }],
+        start_at: Some(Cursor { values: vec![double_value(2.5)], before: true }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+    let prices: Vec<f64> = docs
+        .iter()
+        .map(|d| match &d.fields.get("price").expect("price field missing").value_type {
+            Some(ValueType::DoubleValue(v)) => *v,
+            other => panic!("expected DoubleValue for price, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(prices, vec![2.5, 3.5], "startAt(2.5) on a Double field must exclude 1.5, got {prices:?}");
 }
 
 /// AC-04e: IS_NAN filter behaves identically to where("score", "==", NaN)
