@@ -9,7 +9,11 @@ use crate::encoding::field_value::field_value_to_json;
 
 /// Append a `QueryFilter` to the builder as a SQL predicate.
 ///
-/// Composite (AND) filters are expanded recursively.
+/// Composite (AND) filters are expanded recursively, unparenthesized (always
+/// correct — AND-of-AND is associative). `CompositeOr` (firestore-or-filter
+/// -support) filters are OR-joined and the WHOLE expression is parenthesized
+/// — required for correct precedence now that OR can appear nested inside
+/// AND context (or vice versa).
 pub fn append_filter(qb: &mut QueryBuilder<Postgres>, filter: &QueryFilter) {
     match filter {
         QueryFilter::Field(f) => append_field_filter(qb, f),
@@ -20,6 +24,16 @@ pub fn append_filter(qb: &mut QueryBuilder<Postgres>, filter: &QueryFilter) {
                 }
                 append_filter(qb, f);
             }
+        }
+        QueryFilter::CompositeOr(filters) => {
+            qb.push("(");
+            for (i, f) in filters.iter().enumerate() {
+                if i > 0 {
+                    qb.push(" OR ");
+                }
+                append_filter(qb, f);
+            }
+            qb.push(")");
         }
     }
 }

@@ -12,9 +12,10 @@ use embyr_proto::firestore::{
     firestore_client::FirestoreClient,
     run_query_request::QueryType,
     structured_query::{
+        composite_filter::Operator as CompositeOp,
         field_filter::Operator as FieldOp,
         unary_filter::Operator as UnaryOp,
-        CollectionSelector, Direction, FieldFilter, FieldReference,
+        CollectionSelector, CompositeFilter, Direction, FieldFilter, FieldReference,
         Filter, Order, UnaryFilter,
         filter::FilterType,
     },
@@ -1035,4 +1036,133 @@ async fn collection_group_query_returns_documents_from_all_matching_subcollectio
     let doc_ids: Vec<String> = docs.iter().map(|d| d.name.split('/').last().unwrap_or("").to_string()).collect();
     assert!(doc_ids.contains(&"e1".to_string()), "e1 missing from results: {doc_ids:?}");
     assert!(doc_ids.contains(&"e2".to_string()), "e2 missing from results: {doc_ids:?}");
+}
+
+// ---------------------------------------------------------------------------
+// firestore-or-filter-support (Slice 01, US-01, AC-OR-01/02/03)
+// ---------------------------------------------------------------------------
+
+fn equality_filter(field_path: &str, value: Value) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::FieldFilter(FieldFilter {
+            field: Some(field_ref(field_path)),
+            op: FieldOp::Equal as i32,
+            value: Some(value),
+        })),
+    }
+}
+
+fn or_filter(branches: Vec<Filter>) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+            op: CompositeOp::Or as i32,
+            filters: branches,
+        })),
+    }
+}
+
+fn and_filter(branches: Vec<Filter>) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+            op: CompositeOp::And as i32,
+            filters: branches,
+        })),
+    }
+}
+
+/// AC-OR-01: `Filter.or(a, b)` returns the union of documents matching
+/// either branch — previously rejected outright with "unsupported composite
+/// operator".
+#[tokio::test]
+async fn or_filter_returns_union_of_matching_documents() {
+    let env = setup("test-sk-or-01", "or-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    for (id, status) in [("o1", "pending"), ("o2", "processing"), ("o3", "shipped")] {
+        let mut fields = HashMap::new();
+        fields.insert("status".to_string(), string_value(status));
+        seed_document(&mut client, &env.project_id, &env.api_key, "orders", id, fields).await;
+    }
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "orders".to_string(), all_descendants: false }],
+        r#where: Some(or_filter(vec![
+            equality_filter("status", string_value("pending")),
+            equality_filter("status", string_value("processing")),
+        ])),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    let mut statuses: Vec<String> = docs
+        .iter()
+        .map(|d| match &d.fields.get("status").expect("status field missing").value_type {
+            Some(ValueType::StringValue(s)) => s.clone(),
+            other => panic!("expected StringValue for status, got {other:?}"),
+        })
+        .collect();
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        vec!["pending".to_string(), "processing".to_string()],
+        "OR filter must return the union of both branches, excluding 'shipped', got {statuses:?}"
+    );
+}
+
+/// AC-OR-02: an OR filter nested inside an AND filter is correctly
+/// parenthesized — `AND(x==1, OR(y==2, y==3))` must NOT be misinterpreted as
+/// `x==1 AND y==2 OR y==3` (which would wrongly match y==3 regardless of x).
+#[tokio::test]
+async fn or_filter_nested_inside_and_filter_is_correctly_parenthesized() {
+    let env = setup("test-sk-or-02", "or-project-02").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    // Seed: (x=1,y=2) matches both branches; (x=1,y=3) matches both branches;
+    // (x=0,y=3) matches y==3 but NOT x==1 — must be EXCLUDED by correct
+    // precedence, but would be wrongly INCLUDED under the unparenthesized
+    // misinterpretation.
+    for (id, x, y) in [("d1", 1i64, 2i64), ("d2", 1, 3), ("d3", 0, 3)] {
+        let mut fields = HashMap::new();
+        fields.insert("x".to_string(), integer_value(x));
+        fields.insert("y".to_string(), integer_value(y));
+        seed_document(&mut client, &env.project_id, &env.api_key, "precedence_docs", id, fields).await;
+    }
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "precedence_docs".to_string(), all_descendants: false }],
+        r#where: Some(and_filter(vec![
+            equality_filter("x", integer_value(1)),
+            or_filter(vec![
+                equality_filter("y", integer_value(2)),
+                equality_filter("y", integer_value(3)),
+            ]),
+        ])),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    let mut ids: Vec<String> = docs
+        .iter()
+        .map(|d| d.name.split('/').last().unwrap_or("").to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["d1".to_string(), "d2".to_string()],
+        "AND(x==1, OR(y==2, y==3)) must match only d1/d2 (x==1 AND (y==2 OR y==3)), \
+         excluding d3 (x==0) — got {ids:?}. A wrong, unparenthesized precedence would \
+         wrongly include d3 via the y==3 branch alone."
+    );
 }

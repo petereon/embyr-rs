@@ -114,6 +114,11 @@ pub enum QueryFilter {
     Field(FieldFilter),
     /// Composite AND filter.
     Composite(Vec<QueryFilter>),
+    /// Composite OR filter (firestore-or-filter-support). A document
+    /// matches iff it matches AT LEAST ONE child filter — the union, not
+    /// the intersection `Composite` represents. Strictly additive: every
+    /// existing `Composite` call site is unaffected by this variant.
+    CompositeOr(Vec<QueryFilter>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

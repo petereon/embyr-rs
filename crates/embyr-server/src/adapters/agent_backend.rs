@@ -346,6 +346,17 @@ fn domain_filter_to_agent_filter(filter: &QueryFilter) -> Result<AgentFilter, Co
                 })),
             })
         }
+        // firestore-or-filter-support: the agent's own internal
+        // `embyr.agent.v1.CompositeFilterOp` proto has no `Or` variant —
+        // backend_mode=agent is explicitly deferred (feature-delta.md §
+        // Out of Scope). A clean rejection here, not a silent
+        // mistranslation to AND (which would return the intersection
+        // instead of the union — this SAME function's own doc comment
+        // above already documents a prior cross-user-leak incident from a
+        // different silent-mistranslation bug).
+        QueryFilter::CompositeOr(_) => Err(CoreError::FailedPrecondition(
+            "OR filters are not supported when backend_mode=agent".into(),
+        )),
     }
 }
 
@@ -742,5 +753,44 @@ impl BackendAdapter for AgentBackendAdapter {
             Err(s) if s.code() == tonic::Code::Unimplemented => Ok(()),
             Err(s) => Err(CoreError::BackendUnavailable(format!("agent probe failed: {s}"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! firestore-or-filter-support (Slice 01, US-01, AC-OR-07): a direct
+    //! unit test of `domain_filter_to_agent_filter`'s own pure translation
+    //! logic — a full end-to-end agent-binary harness would be
+    //! disproportionate for testing one function's own `Err` arm.
+    use super::*;
+    use embyr_core::domain::query::FieldFilter;
+
+    fn field_filter(field_path: &str) -> QueryFilter {
+        QueryFilter::Field(FieldFilter {
+            field_path: field_path.to_string(),
+            op: FilterOp::Equal,
+            value: FieldValue::String("x".to_string()),
+        })
+    }
+
+    #[test]
+    fn composite_or_is_cleanly_rejected_not_silently_mistranslated_to_and() {
+        let filter = QueryFilter::CompositeOr(vec![field_filter("a"), field_filter("b")]);
+        let result = domain_filter_to_agent_filter(&filter);
+        assert!(
+            result.is_err(),
+            "OR filters must be cleanly rejected for backend_mode=agent, not silently \
+             translated to AND (which would return the intersection instead of the union)"
+        );
+    }
+
+    #[test]
+    fn composite_and_still_translates_successfully() {
+        let filter = QueryFilter::Composite(vec![field_filter("a"), field_filter("b")]);
+        let result = domain_filter_to_agent_filter(&filter);
+        assert!(
+            result.is_ok(),
+            "AND filters must continue to translate successfully — regression guard"
+        );
     }
 }

@@ -35,7 +35,11 @@ fn string_value(s: &str) -> Value {
     Value { value_type: Some(ValueType::StringValue(s.to_string())) }
 }
 
-fn equality_filter(field_path: &str, value: &str) -> Filter {
+/// firestore-or-filter-support: widened to `pub` (previously private) so
+/// `or_composed_query_compliance.rs` can build OR-composed filters directly
+/// via `run_query_raw` — mirrors how `not_equal_filter` was already widened
+/// for the SAME reason (AC-17-55).
+pub fn equality_filter(field_path: &str, value: &str) -> Filter {
     Filter {
         filter_type: Some(FilterType::FieldFilter(FieldFilter {
             field: Some(FieldReference { field_path: field_path.to_string() }),

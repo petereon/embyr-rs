@@ -2159,6 +2159,19 @@ fn filter_binds_field_to_uid(
         Some(QueryFilter::Composite(filters)) => filters
             .iter()
             .any(|f| filter_binds_field_to_uid(Some(f), field_path, caller_uid)),
+        // firestore-or-filter-support (Slice 02, US-02): SECURITY-CRITICAL —
+        // `.all()`, NOT `.any()`. A document matching an OR filter need only
+        // satisfy ONE branch, so the ownership binding is guaranteed for
+        // EVERY possible match only if EVERY branch independently enforces
+        // it. Using `.any()` here (matching Composite's own AND semantics)
+        // would be a real access-control bypass: `WHERE ownerId == uid OR
+        // true` would be wrongly treated as ownership-compliant, while its
+        // actual result set includes every other tenant's own documents
+        // matching the permissive `true` branch. See feature-delta.md §
+        // Reading Confirmation.
+        Some(QueryFilter::CompositeOr(filters)) => filters
+            .iter()
+            .all(|f| filter_binds_field_to_uid(Some(f), field_path, caller_uid)),
     }
 }
 

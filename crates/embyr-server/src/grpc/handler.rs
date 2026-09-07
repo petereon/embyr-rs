@@ -643,6 +643,13 @@ impl FirestoreService {
             QueryFilter::Composite(sub) => {
                 sub.iter().flat_map(Self::collect_filter_fields).collect()
             }
+            // firestore-or-filter-support: reuses the SAME field-collection
+            // walk as Composite — no new index-requirement heuristic.
+            // OR-specific composite-index nuances are an explicit, deferred
+            // follow-up (feature-delta.md § Out of Scope).
+            QueryFilter::CompositeOr(sub) => {
+                sub.iter().flat_map(Self::collect_filter_fields).collect()
+            }
         }
     }
 
@@ -4053,7 +4060,23 @@ pub(crate) fn translate_filter(
                     }
                     Some(Ok(QueryFilter::Composite(filters)))
                 }
-                _ => Some(Err("unsupported composite operator".into())),
+                // firestore-or-filter-support (Slice 01, US-01): mirrors the
+                // And arm exactly, producing the additive CompositeOr
+                // variant instead. See feature-delta.md § Reading
+                // Confirmation for why this is NOT simply merged into the
+                // And arm above — CompositeOr carries different SQL-join
+                // and security-compliance semantics downstream.
+                CompositeOp::Or => {
+                    let mut filters = Vec::new();
+                    for sub in &cf.filters {
+                        match translate_filter(sub) {
+                            Some(Ok(qf)) => filters.push(qf),
+                            Some(Err(e)) => return Some(Err(e)),
+                            None => {}
+                        }
+                    }
+                    Some(Ok(QueryFilter::CompositeOr(filters)))
+                }
             }
         }
         FilterType::UnaryFilter(uf) => {
