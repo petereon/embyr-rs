@@ -337,6 +337,24 @@ jobs:
     # (firestore-transaction-read-consistency): a well-behaved client
     # silently gets wrong (too many) rows, not an error. See
     # docs/feature/firestore-end-cursor-support/feature-delta.md.
+    # NOTE (firestore-or-filter-support DISCUSS, 2026-09-07): JOB-01 now also
+    # covers `Filter.or()` composite queries executing correctly (union
+    # semantics, correct precedence when nested inside AND) — previously
+    # rejected outright. This feature's own DISCUSS wave found and avoided a
+    # real access-control-bypass risk in the naive fix:
+    # `QueryFilter::Composite`'s AND-only assumption is load-bearing for
+    # ADR-031's own `filter_binds_field_to_uid` security check (`.any()`
+    # semantics, correct ONLY because every composite meant AND). Added a
+    # strictly ADDITIVE `CompositeOr` domain variant (zero change to the 15
+    # existing AND-only call sites) with its own `.all()` compliance-check
+    # semantics — every branch of an OR must independently prove an
+    # ownership-equality constraint for the query to be admitted, matching
+    # real Firestore's own documented query-validation model.
+    # `backend_mode=agent` cleanly rejects OR filters (its own internal
+    # proto has no `Or` operator) rather than silently mistranslating them.
+    # Same job, same persona, not a new job. See
+    # docs/feature/firestore-or-filter-support/feature-delta.md § Reading
+    # Confirmation, § System Constraints.
 
   - id: JOB-02
     name: tenant-provision
