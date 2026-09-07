@@ -307,9 +307,10 @@ fn domain_filter_op_to_agent(op: &FilterOp) -> Result<AgentFieldFilterOp, CoreEr
         FilterOp::In => AgentFieldFilterOp::In,
         FilterOp::NotIn => AgentFieldFilterOp::NotIn,
         FilterOp::ArrayContainsAny => AgentFieldFilterOp::ArrayContainsAny,
-        FilterOp::IsNan | FilterOp::IsNotNan => {
+        FilterOp::IsNan | FilterOp::IsNotNan | FilterOp::IsNull | FilterOp::IsNotNull => {
             return Err(CoreError::InvalidArgument(
-                "IS_NAN/IS_NOT_NAN filters are not supported in backend_mode=agent".into(),
+                "IS_NAN/IS_NOT_NAN/IS_NULL/IS_NOT_NULL filters are not supported in backend_mode=agent"
+                    .into(),
             ));
         }
     })
@@ -792,5 +793,25 @@ mod tests {
             result.is_ok(),
             "AND filters must continue to translate successfully — regression guard"
         );
+    }
+
+    fn unary_filter(op: FilterOp) -> QueryFilter {
+        QueryFilter::Field(FieldFilter {
+            field_path: "status".to_string(),
+            op,
+            value: FieldValue::Null,
+        })
+    }
+
+    #[test]
+    fn is_null_is_cleanly_rejected_for_backend_mode_agent() {
+        let result = domain_filter_to_agent_filter(&unary_filter(FilterOp::IsNull));
+        assert!(result.is_err(), "IS_NULL must be cleanly rejected for backend_mode=agent");
+    }
+
+    #[test]
+    fn is_not_null_is_cleanly_rejected_for_backend_mode_agent() {
+        let result = domain_filter_to_agent_filter(&unary_filter(FilterOp::IsNotNull));
+        assert!(result.is_err(), "IS_NOT_NULL must be cleanly rejected for backend_mode=agent");
     }
 }

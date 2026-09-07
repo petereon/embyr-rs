@@ -4094,9 +4094,16 @@ pub(crate) fn translate_filter(
             let op = match UnaryOp::try_from(uf.op).ok()? {
                 UnaryOp::IsNan => FilterOp::IsNan,
                 UnaryOp::IsNotNan => FilterOp::IsNotNan,
+                // firestore-is-null-filter-support (US-01): the proto's own
+                // `UnaryFilter.Operator` sibling ops to IS_NAN/IS_NOT_NAN —
+                // every official SDK lowers `where(f,'==',null)`/
+                // `where(f,'!=',null)` to these, for the same reason NaN
+                // comparisons are unary ops rather than FieldFilter.EQUAL.
+                UnaryOp::IsNull => FilterOp::IsNull,
+                UnaryOp::IsNotNull => FilterOp::IsNotNull,
                 _ => return Some(Err(format!("unsupported unary filter op: {}", uf.op))),
             };
-            // IS_NAN and IS_NOT_NAN use no value; provide a sentinel Null value.
+            // IS_NAN, IS_NOT_NAN, IS_NULL, and IS_NOT_NULL all use no value; provide a sentinel Null value.
             Some(Ok(QueryFilter::Field(FieldFilter {
                 field_path,
                 op,

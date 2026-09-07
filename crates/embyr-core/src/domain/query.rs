@@ -100,6 +100,8 @@ pub enum FilterOp {
     ArrayContainsAny,
     IsNan,
     IsNotNan,
+    IsNull,
+    IsNotNull,
 }
 
 #[derive(Debug, Clone)]

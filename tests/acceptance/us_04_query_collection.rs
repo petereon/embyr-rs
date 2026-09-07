@@ -1166,3 +1166,114 @@ async fn or_filter_nested_inside_and_filter_is_correctly_parenthesized() {
          wrongly include d3 via the y==3 branch alone."
     );
 }
+
+fn null_value() -> Value {
+    Value { value_type: Some(ValueType::NullValue(0)) }
+}
+
+fn unary_filter(field_path: &str, op: UnaryOp) -> Filter {
+    Filter {
+        filter_type: Some(FilterType::UnaryFilter(UnaryFilter {
+            op: op as i32,
+            operand_type: Some(
+                embyr_proto::firestore::structured_query::unary_filter::OperandType::Field(
+                    field_ref(field_path),
+                ),
+            ),
+        })),
+    }
+}
+
+/// AC-IN-01/02: IS_NULL matches only documents where the field is present
+/// AND explicitly null — a document missing the field entirely must not
+/// match.
+///
+/// Given:  d1 has status=null, d2 has status="active", d3 has no status field
+/// When:   a RunQuery with IS_NULL on "status" is executed
+/// Then:   only d1 is returned
+#[tokio::test]
+async fn is_null_filter_matches_only_documents_with_field_explicitly_null() {
+    let env = setup("test-sk-us04-isnull-01", "us04-isnull-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    seed_document(
+        &mut client, &env.project_id, &env.api_key, "accounts", "d1",
+        HashMap::from([("status".to_string(), null_value())]),
+    ).await;
+    seed_document(
+        &mut client, &env.project_id, &env.api_key, "accounts", "d2",
+        HashMap::from([("status".to_string(), string_value("active"))]),
+    ).await;
+    seed_document(
+        &mut client, &env.project_id, &env.api_key, "accounts", "d3",
+        HashMap::from([("other_field".to_string(), string_value("x"))]),
+    ).await;
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "accounts".to_string(), all_descendants: false }],
+        r#where: Some(unary_filter("status", UnaryOp::IsNull)),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    let ids: Vec<String> = docs.iter().map(|d| d.name.split('/').last().unwrap_or("").to_string()).collect();
+    assert_eq!(
+        ids,
+        vec!["d1".to_string()],
+        "IS_NULL must match only d1 (status explicitly null) — d2 (non-null) and d3 \
+         (field missing entirely) must both be excluded, got {ids:?}"
+    );
+}
+
+/// AC-IN-03/04: IS_NOT_NULL matches only documents where the field is
+/// present AND not null — a document missing the field entirely must not
+/// match either.
+///
+/// Given:  d1 has status=null, d2 has status="active", d3 has no status field
+/// When:   a RunQuery with IS_NOT_NULL on "status" is executed
+/// Then:   only d2 is returned
+#[tokio::test]
+async fn is_not_null_filter_matches_only_documents_with_field_present_and_non_null() {
+    let env = setup("test-sk-us04-isnotnull-01", "us04-isnotnull-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    seed_document(
+        &mut client, &env.project_id, &env.api_key, "accounts", "d1",
+        HashMap::from([("status".to_string(), null_value())]),
+    ).await;
+    seed_document(
+        &mut client, &env.project_id, &env.api_key, "accounts", "d2",
+        HashMap::from([("status".to_string(), string_value("active"))]),
+    ).await;
+    seed_document(
+        &mut client, &env.project_id, &env.api_key, "accounts", "d3",
+        HashMap::from([("other_field".to_string(), string_value("x"))]),
+    ).await;
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "accounts".to_string(), all_descendants: false }],
+        r#where: Some(unary_filter("status", UnaryOp::IsNotNull)),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    let ids: Vec<String> = docs.iter().map(|d| d.name.split('/').last().unwrap_or("").to_string()).collect();
+    assert_eq!(
+        ids,
+        vec!["d2".to_string()],
+        "IS_NOT_NULL must match only d2 (status present and non-null) — d1 (explicitly \
+         null) and d3 (field missing entirely) must both be excluded, got {ids:?}"
+    );
+}

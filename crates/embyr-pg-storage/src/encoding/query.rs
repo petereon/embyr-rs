@@ -56,6 +56,21 @@ pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
             ));
             return;
         }
+        // firestore-is-null-filter-support: FieldValue::Null encodes as
+        // `{"t": "N"}` (no `v` key). Unlike IS_NOT_NAN above, a MISSING
+        // field matches neither IS_NULL nor IS_NOT_NULL — real Firestore's
+        // own documented semantics require the field to be present.
+        FilterOp::IsNull => {
+            qb.push(format!("fields->'{}'->>'t' = 'N'", f.field_path));
+            return;
+        }
+        FilterOp::IsNotNull => {
+            qb.push(format!(
+                "(fields->'{fp}' IS NOT NULL AND fields->'{fp}'->>'t' != 'N')",
+                fp = f.field_path
+            ));
+            return;
+        }
         _ => {}
     }
 

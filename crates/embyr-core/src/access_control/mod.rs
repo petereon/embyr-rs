@@ -3892,6 +3892,34 @@ mod tests {
     }
 
     #[test]
+    fn is_null_filter_on_the_ownership_field_never_satisfies_an_equality_rule_ac_in_06() {
+        // firestore-is-null-filter-support (AC-IN-06): an IS_NULL filter on
+        // the SAME field name the rule requires ownership-equality on can
+        // never prove `field == callerUid` — IS_NULL only proves the field
+        // is null, never that it equals a specific caller's own uid.
+        let condition = Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField("owner_id".to_string()),
+        );
+        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let filter = QueryFilter::Field(FieldFilter {
+            field_path: "owner_id".to_string(),
+            op: FilterOp::IsNull,
+            value: FieldValue::Null,
+        });
+
+        assert_eq!(
+            check_query_compliance(&condition, Some(&filter), Some(&auth)),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::OwnershipFilterMissing {
+                    field_path: "owner_id".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
     fn no_signed_in_caller_can_never_satisfy_an_ownership_equality_rule() {
         // `auth` is `None` (no signed-in caller) — there is no uid to bind
         // to, so no filter, however shaped, can ever satisfy the rule.
