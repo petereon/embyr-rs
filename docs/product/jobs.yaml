@@ -324,6 +324,19 @@ jobs:
     # `backend_mode=agent` is explicitly deferred (separate candidate feature,
     # mirroring the established agent-mode-deferral pattern). See
     # docs/feature/firestore-transaction-read-consistency/feature-delta.md.
+    # NOTE (firestore-end-cursor-support DISCUSS, 2026-09-07): JOB-01 now also
+    # covers `RunQuery`'s `endAt`/`endBefore` cursors correctly bounding
+    # results (previously silently ignored — `sq_proto.end_at` was parsed
+    # nowhere, hardcoded `None`), plus a closely-coupled fix to `startAt`/
+    # `startAfter`'s own operator selection for `DESC`-ordered queries
+    # (previously always used the `ASC` operator regardless of sort
+    # direction — a pre-existing bug discovered while implementing this
+    # feature, not originally named in its own candidate framing). Same job,
+    # same persona, not a new job. Identified as gap #2 in the 2026-09-06
+    # production-readiness scan, same severity class as gap #1
+    # (firestore-transaction-read-consistency): a well-behaved client
+    # silently gets wrong (too many) rows, not an error. See
+    # docs/feature/firestore-end-cursor-support/feature-delta.md.
 
   - id: JOB-02
     name: tenant-provision
