@@ -355,6 +355,14 @@ jobs:
     # Same job, same persona, not a new job. See
     # docs/feature/firestore-or-filter-support/feature-delta.md § Reading
     # Confirmation, § System Constraints.
+    # NOTE (firestore-is-null-filter-support DISCUSS, 2026-09-07): JOB-01 now
+    # also covers `.where(field, '=='|'!=', null)` — lowered by every
+    # official SDK to the proto's own `IS_NULL`/`IS_NOT_NULL` unary filter
+    # ops, previously rejected outright alongside the already-supported
+    # `IS_NAN`/`IS_NOT_NAN` siblings. Same job, same persona, not a new job;
+    # no security dimension (confirmed: neither op can ever establish an
+    # ownership-equality binding, so `filter_binds_field_to_uid` needs no
+    # change). See docs/feature/firestore-is-null-filter-support/feature-delta.md.
 
   - id: JOB-02
     name: tenant-provision
