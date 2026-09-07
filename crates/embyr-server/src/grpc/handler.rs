@@ -3075,6 +3075,15 @@ impl FirestoreService {
                 .collect();
             values.map(|vals| Cursor { values: vals, before: c.before })
         });
+        // firestore-end-cursor-support: mirrors start_at's own translation exactly.
+        let end_at = sq_proto.end_at.as_ref().and_then(|c| {
+            let values: Option<Vec<FieldValue>> = c
+                .values
+                .iter()
+                .map(crate::encoding::firestore_proto::proto_value_to_field_value)
+                .collect();
+            values.map(|vals| Cursor { values: vals, before: c.before })
+        });
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -3092,7 +3101,7 @@ impl FirestoreService {
             limit,
             offset: if sq_proto.offset > 0 { Some(sq_proto.offset) } else { None },
             start_at,
-            end_at: None,
+            end_at,
             since_update_time: None,
         };
 

@@ -12,7 +12,7 @@ use embyr_core::{
         field_transform::apply_field_transform,
         field_value::FieldValue,
         project::ProjectId,
-        query::{AggregateValue, AggregationKind, AggregationQuery, StructuredQuery},
+        query::{AggregateValue, AggregationKind, AggregationQuery, OrderDirection, StructuredQuery},
         schema_readiness::SchemaReadiness,
         transaction::{TransactionId, TransactionOptions},
     },
@@ -595,11 +595,45 @@ impl BackendAdapter for PostgresBackendAdapter {
             qb.push_bind(since_ts);
         }
 
-        // startAfter cursor — single-field orderBy only (step 04-01)
+        // startAt/startAfter cursor — single-field orderBy only (step 04-01)
         if let (Some(cursor), false) = (&query.start_at, query.order_by.is_empty()) {
             if !cursor.values.is_empty() {
                 let ob = &query.order_by[0];
-                let op = if cursor.before { ">=" } else { ">" };
+                let op = cursor_operator(false, cursor.before, &ob.direction);
+                match &cursor.values[0] {
+                    embyr_core::domain::field_value::FieldValue::Integer(v) => {
+                        qb.push(format!(
+                            " AND (fields->'{}'->>'v')::bigint {} ",
+                            ob.field_path, op
+                        ));
+                        qb.push_bind(*v);
+                    }
+                    embyr_core::domain::field_value::FieldValue::String(s) => {
+                        qb.push(format!(
+                            " AND fields->'{}'->>'v' {} ",
+                            ob.field_path, op
+                        ));
+                        qb.push_bind(s.clone());
+                    }
+                    embyr_core::domain::field_value::FieldValue::Double(d) => {
+                        qb.push(format!(
+                            " AND (fields->'{}'->>'v')::float8 {} ",
+                            ob.field_path, op
+                        ));
+                        qb.push_bind(*d);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // endAt/endBefore cursor (firestore-end-cursor-support) — mirrors the
+        // startAt/startAfter block immediately above exactly, single-field
+        // orderBy only, same value-type scope.
+        if let (Some(cursor), false) = (&query.end_at, query.order_by.is_empty()) {
+            if !cursor.values.is_empty() {
+                let ob = &query.order_by[0];
+                let op = cursor_operator(true, cursor.before, &ob.direction);
                 match &cursor.values[0] {
                     embyr_core::domain::field_value::FieldValue::Integer(v) => {
                         qb.push(format!(
@@ -1312,6 +1346,34 @@ impl BackendAdapter for PostgresBackendAdapter {
             return Err(CoreError::TransactionNotFound);
         }
         Ok(())
+    }
+}
+
+/// Resolve the SQL comparison operator for a cursor bound
+/// (firestore-end-cursor-support).
+///
+/// `is_end`: `false` for `start_at` (`startAt`/`startAfter`), `true` for
+/// `end_at` (`endAt`/`endBefore`).
+/// `before`: the cursor's own `before` flag (SPEC.md §Cursors: `startAt`/
+/// `endBefore` = true, `startAfter`/`endAt` = false).
+/// `direction`: the first `orderBy` field's own sort direction — cursors are
+/// single-field-only, so only `order_by[0]`'s direction matters.
+fn cursor_operator(is_end: bool, before: bool, direction: &OrderDirection) -> &'static str {
+    // ASC table (SPEC.md §Cursors): startAt=">=", startAfter=">", endAt="<=", endBefore="<".
+    let asc_op = match (is_end, before) {
+        (false, true) => ">=",  // startAt
+        (false, false) => ">", // startAfter
+        (true, false) => "<=", // endAt
+        (true, true) => "<",   // endBefore
+    };
+    // DESC flips every operator (SPEC.md §Cursors' own DESC column).
+    match (direction, asc_op) {
+        (OrderDirection::Ascending, op) => op,
+        (OrderDirection::Descending, ">=") => "<=",
+        (OrderDirection::Descending, ">") => "<",
+        (OrderDirection::Descending, "<=") => ">=",
+        (OrderDirection::Descending, "<") => ">",
+        (OrderDirection::Descending, _) => unreachable!("asc_op is always one of the 4 above"),
     }
 }
 

@@ -402,6 +402,167 @@ async fn start_after_cursor_skips_cursor_document() {
     assert_eq!(names, vec!["C", "D"], "expected [C, D] after cursor B, got {names:?}");
 }
 
+// ---------------------------------------------------------------------------
+// firestore-end-cursor-support (Slice 01, US-01, AC-EC-01/02/03/04/05)
+// ---------------------------------------------------------------------------
+
+/// AC-EC-01: endAt(v) on an ASC-ordered field bounds results to field <= v
+/// (inclusive) — previously silently ignored, returning every document.
+#[tokio::test]
+async fn end_at_cursor_bounds_results_inclusive() {
+    let env = setup("test-sk-ecs-01", "ecs-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    for name in ["A", "B", "C", "D", "E"] {
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), string_value(name));
+        seed_document(
+            &mut client,
+            &env.project_id,
+            &env.api_key,
+            "letters",
+            &format!("letter-{name}"),
+            fields,
+        )
+        .await;
+    }
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "letters".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("name")), direction: Direction::Ascending as i32 }],
+        end_at: Some(Cursor {
+            values: vec![string_value("C")],
+            before: false, // endAt: inclusive
+        }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    let names: Vec<String> = docs
+        .iter()
+        .map(|d| match &d.fields.get("name").expect("name field missing").value_type {
+            Some(ValueType::StringValue(s)) => s.clone(),
+            other => panic!("expected StringValue for name, got {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(names, vec!["A", "B", "C"], "endAt(C) must include C, got {names:?}");
+}
+
+/// AC-EC-02: endBefore(v) on an ASC-ordered field bounds results to
+/// field < v (exclusive).
+#[tokio::test]
+async fn end_before_cursor_bounds_results_exclusive() {
+    let env = setup("test-sk-ecs-02", "ecs-project-02").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    for name in ["A", "B", "C", "D", "E"] {
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), string_value(name));
+        seed_document(
+            &mut client,
+            &env.project_id,
+            &env.api_key,
+            "letters",
+            &format!("letter-{name}"),
+            fields,
+        )
+        .await;
+    }
+
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "letters".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("name")), direction: Direction::Ascending as i32 }],
+        end_at: Some(Cursor {
+            values: vec![string_value("C")],
+            before: true, // endBefore: exclusive
+        }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    let names: Vec<String> = docs
+        .iter()
+        .map(|d| match &d.fields.get("name").expect("name field missing").value_type {
+            Some(ValueType::StringValue(s)) => s.clone(),
+            other => panic!("expected StringValue for name, got {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(names, vec!["A", "B"], "endBefore(C) must exclude C, got {names:?}");
+}
+
+/// AC-EC-03: startAt(v) on a DESC-ordered field correctly flips its own
+/// operator (field <= v, not the ASC field >= v) — a pre-existing bug fixed
+/// alongside end_at support.
+#[tokio::test]
+async fn start_at_cursor_flips_operator_for_descending_order() {
+    let env = setup("test-sk-ecs-03", "ecs-project-03").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    for name in ["A", "B", "C", "D", "E"] {
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), string_value(name));
+        seed_document(
+            &mut client,
+            &env.project_id,
+            &env.api_key,
+            "letters",
+            &format!("letter-{name}"),
+            fields,
+        )
+        .await;
+    }
+
+    // orderBy name DESC, startAt(C) inclusive — in DESC order this must mean
+    // "start from C and go DOWN": field <= C, i.e. C, B, A.
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "letters".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("name")), direction: Direction::Descending as i32 }],
+        start_at: Some(Cursor {
+            values: vec![string_value("C")],
+            before: true, // startAt: inclusive
+        }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+
+    let names: Vec<String> = docs
+        .iter()
+        .map(|d| match &d.fields.get("name").expect("name field missing").value_type {
+            Some(ValueType::StringValue(s)) => s.clone(),
+            other => panic!("expected StringValue for name, got {other:?}"),
+        })
+        .collect();
+
+    assert_eq!(
+        names,
+        vec!["C", "B", "A"],
+        "startAt(C) on a DESC-ordered query must include C and everything below it, got {names:?}"
+    );
+}
+
 /// AC-04e: IS_NAN filter behaves identically to where("score", "==", NaN)
 ///
 /// Given:  documents with score values: 1.0, NaN, 2.0
