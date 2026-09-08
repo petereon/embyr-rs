@@ -468,3 +468,504 @@ Applied in this same DISCUSS pass.
 **Deliverables**: this feature-delta.md, the working hypothesis in § Job Discovery Framing
 Resolution (explicitly unconfirmed — DESIGN must verify against real implementation before designing
 a fix), 1-story/5-scenario walking-skeleton plan.
+
+## Wave: DESIGN / [REF] Prior Wave Consultation — Reading Confirmation
+
+✓ This feature-delta.md's own DISCUSS section, read in full — the working hypothesis (§ Job
+Discovery Framing Resolution) explicitly deferred root-cause diagnosis to DESIGN.
+✓ `crates/embyr-core/src/access_control/rules_file.rs` — read in full (1842 lines: `parse_rules_file`,
+`parse_match_blocks`, `parse_nested_match_blocks`, `parse_block_body`, `parse_allow_clauses`,
+`expand_function_calls`, `decompose`, `decompose_block`, `validate_segment_shape`, and the entire
+`#[cfg(test)] mod tests` block).
+✓ `crates/embyr-core/src/access_control/mod.rs` — read the relevant sections: `parse_condition`,
+`detect_unsupported_construct` (the pre-tokenize `CUSTOM_FUNCTION`/`NESTED_PATH` scan),
+`find_matching_paren`, the tokenizer's `get(`/`exists(` branches, `parse_path_template` (the
+`get()`/`exists()` PATH-ARGUMENT parser — this is the actual chaining detector), and the existing
+unit tests `a_substitution_beyond_auth_uid_or_path_variable_is_a_named_rejection` (line ~2999) and
+`discover_finds_two_distinct_paths_separately` (line ~3297).
+✓ `crates/embyr-server/src/admin/handlers/access_rules.rs` — read `import_rules_file` (line 1927) in
+full, plus the surrounding `rules_file_rejection_response`/`condition_parse_error_response` helpers.
+✓ `tests/security_rules_cel_parity/acceptance/cp04_reject_out_of_scope_imports.rs` — read in full
+(already read at DISCUSS; re-confirmed against real code this time).
+✓ `tests/security_rules_cel_functions/acceptance/cf01_named_helper_function_walking_skeleton.rs` —
+read the `a_call_to_an_undefined_function_is_rejected_at_import_time` test (AC-CF-04) — this is the
+proof that an undeclared call-shaped identifier inside a `.rules` file import is classified
+`UNDEFINED_FUNCTION`, not `CUSTOM_FUNCTION` (see § Root Cause Analysis, Finding 2).
+✓ **Ran the actual failing test** (`multiple_offending_blocks_are_all_named_in_a_single_rejection_response`)
+against real Postgres via testcontainers, to get ground truth rather than hand-tracing the parser.
+Actual panic: `assertion 'left == right' failed: AC-17-191: every offending block must be named, not
+just the first — left: 1, right: 3`. This is the single most important fact this DESIGN rests on: the
+CURRENT behavior is not "2 of 3 named" (the paraphrase this feature was scoped from) — it is **1 of
+3 named**, matching `known-gaps.md` gap #8's own original wording exactly.
+
+## Wave: DESIGN / [REF] Root Cause Analysis
+
+### The two-stage pipeline
+
+`import_rules_file` (`access_rules.rs:1941`) runs the `.rules` file through TWO sequential, separately
+-reasoned-about passes:
+
+- **Stage 1 — `rules_file::parse_rules_file`** (`parse_match_blocks` → `parse_nested_match_blocks` →
+  `parse_block_body` → `parse_allow_clauses` → `expand_function_calls`): a hand-rolled scanner that
+  turns the file's TEXT into `Vec<MatchBlock>`. Its own doc comment (rules_file.rs:184-190) states it
+  "fails fast on the FIRST structural problem it finds" and that "multi-block error aggregation is
+  exercised starting Slice 04" (i.e. Stage 2) — a deliberate design choice at the time it was written,
+  because in Slice 01 the ONLY things that could go wrong here were genuinely-structural (unbalanced
+  braces, wrong shell keyword) with no well-defined resume point.
+- **Stage 2 — `rules_file::decompose`**: loops over EVERY successfully-parsed `MatchBlock`, calls
+  `decompose_block` on each, and — critically — does NOT fail fast: `decompose()`'s own loop
+  (rules_file.rs:781-791) always visits every block and *accumulates* every offending one into a
+  single `Vec<OffendingBlock>`. This is where `NESTED_PATH` (`validate_segment_shape`) and
+  `UNSUPPORTED_EXPRESSION_GRAMMAR`/`CUSTOM_FUNCTION`/`CONFLICTING_VERB_CONDITIONS` (`parse_condition`
+  on the block's own rewritten condition) are detected.
+
+`import_rules_file` wires the two stages with an early return on ANY Stage 1 error
+(`Err(e) => return Ok(rules_file_rejection_response(e))`, access_rules.rs:1943) — **`decompose` is
+never called at all if Stage 1 returns `Err`.**
+
+### Why this specific test loses 2 of 3 blocks, not just the chaining one
+
+The 3 blocks in `multiple_offending_blocks_are_all_named_in_a_single_rejection_response` are:
+
+1. `/{expeditionId}/journal_entries` — a wildcard at a collection-name position. This parses FINE at
+   Stage 1 (`{expeditionId}` is a syntactically legal `PathSegment::Wildcard`) — `NESTED_PATH` is only
+   detected later, by `validate_segment_shape` in Stage 2.
+2. `/trail_guides/{guideId}` with `allow write: if isEditor();` — **no `function isEditor() {...}` is
+   declared anywhere in this rules file.** `expand_function_calls` (rules_file.rs:380-483, added by the
+   already-FINALIZED `security-rules-cel-functions` feature) scans every call-shaped identifier in a
+   condition; `isEditor` is call-shaped, not in the (empty) `functions` map, and not one of the 3
+   exempted names (`get`/`exists`/`duration.value`) — so it returns
+   `Err(RulesFileError::single(path_pattern, "UNDEFINED_FUNCTION", ...))` **at Stage 1**, confirmed
+   directly by `cf01`'s own already-passing `a_call_to_an_undefined_function_is_rejected_at_import_time`
+   test and by this codebase's own unit test `a_call_to_an_undefined_function_is_a_named_rejection`
+   (rules_file.rs:1613) using this EXACT rules-file shape.
+3. `/journal_entries` with the chaining `get()`/`exists()` block — parses FINE at Stage 1
+   (`expand_function_calls` explicitly exempts `get`/`exists` from its own call-shaped-identifier scan,
+   rules_file.rs:469, so the whole condition passes through unchanged); the chaining shape is only
+   caught later, in Stage 2, by `parse_condition` → `parse_path_template`.
+
+`parse_nested_match_blocks`'s loop (rules_file.rs:549-595) processes these 3 blocks IN ORDER, using
+`?` on `parse_block_body`'s result (line 589: `let mut nested = parse_block_body(...)?;`). When it hits
+block 2's `UNDEFINED_FUNCTION` error, `?` propagates it IMMEDIATELY, abandoning the loop — **block 3 is
+never even scanned**, and the `Vec<MatchBlock>` accumulated so far (block 1's own successfully-parsed
+`MatchBlock`) is DISCARDED (a `Result::Err` carries no partial `Ok` data). `import_rules_file` receives
+`Err(RulesFileError { offending_blocks: [UNDEFINED_FUNCTION for block 2] })` and returns immediately —
+`decompose()` (the only place that would have found block 1's `NESTED_PATH` and block 3's
+`UNSUPPORTED_EXPRESSION_GRAMMAR`) is never invoked. Result: exactly 1 offending block reported. This
+matches the test-run evidence (`left: 1, right: 3`) exactly.
+
+### DISCUSS hypothesis — confirmed, with a more specific mechanism
+
+DISCUSS's own working hypothesis (§ Job Discovery Framing Resolution) was: *"something in the
+per-block iteration/aggregation that collects `offending_blocks` across MULTIPLE `match` blocks in one
+file either short-circuits, drops, or misclassifies the third block ... an aggregation/orchestration
+gap, not necessarily a total absence of single-condition detection."* **Confirmed.** The mechanism is
+more specific than "aggregation across match blocks" in the abstract: it is a **two-stage pipeline
+where only the SECOND stage aggregates**, and the FIRST stage's `?`-propagation both (a) short-circuits
+scanning of every block after the first Stage-1 failure, AND (b) discards the successfully-parsed
+`Vec<MatchBlock>` for blocks BEFORE that failure, so those blocks never even reach the aggregating
+stage. The chaining `get()` block (#3) is not special — it is simply whichever block happens to sit
+AFTER the first Stage-1-only failure in file order. Reordering the test's 3 blocks would surface a
+DIFFERENT missing construct, not always the chaining one.
+
+DISCUSS's own alternative, narrower hypothesis in this task's own briefing — "the chaining detector
+only checks whether a block contains a `get()` call, never whether that `get()`'s OWN path argument
+contains a further nested `get()`" — is **refuted**. `parse_path_template` (mod.rs:779-836) already
+splits a `get()`/`exists()` path on `/` and, for each `$(...)`-substitution segment, accepts only
+`$(request.auth.uid)` and `$(request.path.<var>)` (mod.rs:796-817); anything else — including a nested
+`get(` — fails to `strip_suffix(')')` cleanly and falls through to the `raw_segment.contains('$')`
+fallback (mod.rs:818-828), which rejects it as `UnsupportedExpressionGrammar` with a "not a well-formed
+`$(...)` substitution" detail. This is PROVEN directly and in isolation by the existing, ALREADY-PASSING
+unit test `a_substitution_beyond_auth_uid_or_path_variable_is_a_named_rejection` (mod.rs:2999), which
+uses the EXACT SAME condition text as this feature's own AC-CCD-01/02 chaining example. **The chaining
+detector itself needs zero changes.** Its own doc comment (mod.rs:770-778) already explains and
+anticipates exactly this fallback mechanism.
+
+### Finding 2 (unanticipated by DISCUSS): the test's own `CUSTOM_FUNCTION` assertion is stale
+
+`multiple_offending_blocks_are_all_named_in_a_single_rejection_response` asserts
+`constructs.contains(&"CUSTOM_FUNCTION")` for the `isEditor()` block. This assertion predates
+`security-rules-cel-functions` (which introduced `expand_function_calls` and its own
+`UNDEFINED_FUNCTION` classification for exactly this shape — an undeclared, call-shaped identifier
+inside a `.rules` FILE IMPORT). Per § Root Cause Analysis above, an undeclared `isEditor()` call inside
+an IMPORTED rules file is now **structurally unreachable** as `CUSTOM_FUNCTION` — `expand_function_calls`
+always runs first (during Stage 1, inside `parse_allow_clauses`) and unconditionally intercepts any
+call-shaped identifier not in `{get, exists, duration.value}` ∪ declared functions, before
+`decompose_block`'s own `parse_condition` (where `detect_unsupported_construct`'s `CUSTOM_FUNCTION`
+path lives) ever sees the condition text. `CUSTOM_FUNCTION` remains fully live and correct for the OTHER
+4 routes that call `parse_condition` directly on a raw HTTP body (`define_access_rule`,
+`define_write_access_rule`, `simulate_access_rule`, `define_group_access_rule`) — none of those go
+through `expand_function_calls` (that preprocessing step is import-only). This is a genuine, if
+narrow, pre-existing test-staleness bug — the SAME "supersede a construct name, but the test wasn't
+updated" pattern this exact test file has already handled twice (`RECURSIVE_WILDCARD` →
+`RECURSIVE_WILDCARD_NOT_TERMINAL`/`RECURSIVE_WILDCARD_ODD_PREFIX`; `CROSS_DOCUMENT_READ` → the
+narrowly-scoped `get()`/`exists()` idiom), just never noticed for this ONE assertion because the test
+has never gotten far enough (`assert_eq!(offending.len(), 3)` panics first) to reach it. **This is a
+DISTILL-wave test-fixture correction (change the expected construct string from `"CUSTOM_FUNCTION"` to
+`"UNDEFINED_FUNCTION"` for the `isEditor()` block, mirroring this file's own established
+"superseded, not silently deleted" convention), not a production-code change** — flagged here so
+DISTILL/DELIVER are not surprised when the multi-block fix below still doesn't turn the test green
+until this one-line assertion is also corrected. AC-CCD-02's own underlying INTENT ("every offending
+block is named, not just the first") is fully served either way; only the SPECIFIC construct string
+literally written into DISCUSS's AC text needs this correction.
+
+## Wave: DESIGN / [REF] Architecture Design
+
+### Overview
+
+Minimal, root-cause fix confined to `rules_file.rs`'s own Stage 1 scanner plus one small merge-logic
+addition in the ONE handler that wires Stage 1 to Stage 2. Nothing in `access_control/mod.rs`
+(tokenizer, `parse_condition`, `parse_path_template` — the actual chaining detector) changes at all —
+per § Root Cause Analysis, that logic is already correct.
+
+Two changes, same shape as `decompose()`'s own already-proven "loop, don't fail fast, accumulate"
+pattern, applied one layer earlier:
+
+1. **`parse_nested_match_blocks`'s loop stops using `?` for per-block CONTENT errors** (a block's own
+   `parse_path_segments`/`parse_block_body` failure) while KEEPING `?` for genuinely-structural,
+   no-resume-point errors (can't find where a block's own text starts/ends). The insight that makes
+   this safe: `find_matching_close` (a pure `{`/`}` depth-count over already-known text) determines the
+   NEXT block's own resume offset BEFORE `parse_block_body` is ever called — so a content-level failure
+   inside ONE block never prevents the loop from correctly locating and scanning its SIBLINGS.
+2. **`RulesFileError` gains one field, `partial_blocks: Vec<MatchBlock>`** — the blocks that DID parse
+   successfully at Stage 1, carried alongside the ones that didn't, so the caller can still hand them to
+   `decompose()` (Stage 2) instead of discarding them. Zero new IO, zero new types beyond this one field
+   — pure computation over already-parsed values, `embyr-core`'s zero-IO boundary (`deny.toml`) is
+   untouched (confirmed: no new `use` of `tokio`/`sqlx`/`tonic`/`axum`/any IO crate anywhere in this
+   diff).
+
+### Component-level flow (before → after)
+
+```mermaid
+flowchart TB
+    subgraph before["BEFORE — Stage 1 discards everything on first error"]
+        A1["parse_rules_file()"] -->|"block 2 fails\n(UNDEFINED_FUNCTION)"| A2["? propagates\nimmediately"]
+        A2 --> A3["Err — 1 offending block\nblock 1 + block 3 LOST"]
+        A3 --> A4["import_rules_file:\nreturns immediately"]
+        A5["decompose() — NEVER CALLED"]
+    end
+    subgraph after["AFTER — Stage 1 accumulates, hands survivors to Stage 2"]
+        B1["parse_rules_file()"] -->|"block 1 ok, block 2 fails,\nblock 3 ok — loop CONTINUES"| B2["Err with BOTH:\noffending_blocks=[UNDEFINED_FUNCTION]\npartial_blocks=[block1, block3]"]
+        B2 --> B3["import_rules_file:\nblocks = partial_blocks\nparse_offending = offending_blocks"]
+        B3 --> B4["decompose(blocks)\nfinds NESTED_PATH (block1)\n+ UNSUPPORTED_EXPRESSION_GRAMMAR (block3)"]
+        B4 --> B5["merge: 3 offending blocks total\n400 IMPORT_REJECTED, all 3 named"]
+    end
+```
+
+### 1. `MatchBlock` gains `Eq` (`crates/embyr-core/src/access_control/rules_file.rs:81`)
+
+Needed so `RulesFileError` (which derives `Eq`) can still derive `Eq` once it holds a
+`Vec<MatchBlock>`. Every field of `MatchBlock` is already `Eq`-capable (`PathSegment` derives `Eq`
+at line 51, `Verb` derives `Eq` at line 66, `String`/`Vec` are `Eq` when their elements are) — purely
+additive, zero behavior change:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]   // was: #[derive(Debug, Clone, PartialEq)]
+pub struct MatchBlock {
+    pub path_pattern: String,
+    pub segments: Vec<PathSegment>,
+    pub allow_clauses: Vec<(Vec<Verb>, String)>,
+}
+```
+
+### 2. `RulesFileError` gains `partial_blocks` (`rules_file.rs:191-206`)
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulesFileError {
+    pub offending_blocks: Vec<OffendingBlock>,
+    /// NEW (security-rules-cel-chaining-detection): the `MatchBlock`s that
+    /// DID parse successfully at Stage 1, alongside the ones that didn't —
+    /// carried so the caller can still hand them to `decompose()` (Stage 2)
+    /// instead of losing the opportunity to find THEIR own offending
+    /// constructs (`NESTED_PATH`, `UNSUPPORTED_EXPRESSION_GRAMMAR`, etc.).
+    /// Empty for a genuinely-structural failure (unbalanced brace, wrong
+    /// shell keyword) — there is no well-defined partial block list in that
+    /// case, matching today's unchanged fail-fast behavior for those.
+    pub partial_blocks: Vec<MatchBlock>,
+}
+
+impl RulesFileError {
+    fn single(path_pattern: impl Into<String>, construct: &'static str, detail: impl Into<String>) -> Self {
+        RulesFileError {
+            offending_blocks: vec![OffendingBlock {
+                path_pattern: path_pattern.into(),
+                construct,
+                detail: detail.into(),
+            }],
+            partial_blocks: Vec::new(),
+        }
+    }
+}
+```
+
+`decompose()`'s own error return (rules_file.rs:789) gets the same trivial addition:
+`RulesFileError { offending_blocks: offending, partial_blocks: Vec::new() }` (Stage 2 has no
+"partial blocks" of its own kind — it operates on an already-fully-parsed `Vec<MatchBlock>`).
+
+### 3. `parse_nested_match_blocks` — accumulate content errors, keep structural fail-fast (`rules_file.rs:549-595`)
+
+```rust
+fn parse_nested_match_blocks(
+    mut body: &str,
+    parent_path_text: &str,
+    parent_segments: &[PathSegment],
+    functions: &BTreeMap<String, String>,
+) -> Result<Vec<MatchBlock>, RulesFileError> {
+    let mut blocks = Vec::new();
+    let mut offending: Vec<OffendingBlock> = Vec::new();
+    loop {
+        body = body.trim_start();
+        if body.is_empty() {
+            break;
+        }
+        // ── Structural delineation — TRUE fail-fast, no well-defined resume
+        //    point if any of these fail (unchanged from today). ──
+        let after_match = body
+            .strip_prefix("match")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .ok_or_else(|| shell_syntax_error(
+                "expected a 'match /<path> { ... }' block — a match block body may not mix \
+                 'allow' clauses with nested 'match' blocks",
+            ))?
+            .trim_start();
+        let pattern_end = find_path_pattern_end(after_match)
+            .ok_or_else(|| shell_syntax_error("expected a '/'-prefixed match block path pattern"))?;
+        let local_path_pattern = after_match[..pattern_end].trim().to_string();
+        let after_pattern = after_match[pattern_end..].trim_start();
+        if !after_pattern.starts_with('{') {
+            return Err(shell_syntax_error("expected '{' after a match block's path pattern"));
+        }
+        let rest = after_pattern;
+        let close_idx = find_matching_close(rest, 0).ok_or_else(|| {
+            shell_syntax_error(&format!("unbalanced '{{' in match block '{local_path_pattern}'"))
+        })?;
+        let block_body = &rest[1..close_idx];
+
+        // ── Content parsing — this block's own byte range is now fully
+        //    known (`&rest[close_idx + 1..]` is always a safe resume point,
+        //    computed purely from brace-depth counting above, independent
+        //    of whether THIS block's own content is valid). A problem here
+        //    is this ONE block's own concern, never a reason to abandon its
+        //    siblings — mirrors decompose()'s own accumulate-and-continue
+        //    loop, one syntactic layer earlier. ──
+        match parse_path_segments(&local_path_pattern) {
+            Ok(local_segments) => {
+                let full_path_pattern = format!("{parent_path_text}{local_path_pattern}");
+                let mut full_segments = parent_segments.to_vec();
+                full_segments.extend(local_segments);
+
+                match parse_block_body(block_body, &full_path_pattern, &full_segments, functions) {
+                    Ok(mut nested) => blocks.append(&mut nested),
+                    Err(mut err) => offending.append(&mut err.offending_blocks),
+                }
+            }
+            Err(mut err) => offending.append(&mut err.offending_blocks),
+        }
+
+        body = &rest[close_idx + 1..];
+    }
+    if !offending.is_empty() {
+        return Err(RulesFileError { offending_blocks: offending, partial_blocks: blocks });
+    }
+    Ok(blocks)
+}
+```
+
+Note `parse_block_body`'s own nested-shell recursion (rules_file.rs:612-613,
+`return parse_nested_match_blocks(block_body, full_path_pattern, full_segments, functions);`) calls
+THIS SAME function — a nested `match { match { ... } } }` shell inherits the identical
+accumulate-and-continue behavior automatically, no separate fix needed for nesting.
+
+`parse_match_blocks` (rules_file.rs:535-541) is unchanged — it still propagates `parse_nested_match_blocks`'s
+`Err` via `?` (now carrying `partial_blocks` transparently) and still rejects a genuinely-empty file the
+same way.
+
+### 4. `import_rules_file` — merge Stage 1 and Stage 2 offending blocks (`crates/embyr-server/src/admin/handlers/access_rules.rs:1941-1948`)
+
+```rust
+let (blocks, mut offending) = match rules_file::parse_rules_file(&body.rules_file) {
+    Ok(b) => (b, Vec::new()),
+    // Some blocks parsed fine at Stage 1 (worth feeding to decompose for
+    // their OWN possible Stage-2 problems) alongside ones that didn't.
+    Err(e) if !e.partial_blocks.is_empty() => (e.partial_blocks, e.offending_blocks),
+    // A genuinely-structural failure — nothing to salvage, unchanged
+    // behavior from today.
+    Err(e) => return Ok(rules_file_rejection_response(e)),
+};
+
+let decomposed = match rules_file::decompose(blocks) {
+    Ok(d) => {
+        if !offending.is_empty() {
+            return Ok(rules_file_rejection_response(rules_file::RulesFileError {
+                offending_blocks: offending,
+                partial_blocks: Vec::new(),
+            }));
+        }
+        d
+    }
+    Err(mut decompose_err) => {
+        offending.append(&mut decompose_err.offending_blocks);
+        return Ok(rules_file_rejection_response(rules_file::RulesFileError {
+            offending_blocks: offending,
+            partial_blocks: Vec::new(),
+        }));
+    }
+};
+// ...unchanged from here: check_pattern_overlap, the upsert loop, etc.
+```
+
+### Why this is strictly additive (the regression argument)
+
+For ANY input file: if the file parses with zero problems at both stages, behavior is byte-for-byte
+identical to today (`offending` stays empty the whole way through, `Ok(blocks)`/`Ok(decomposed)` paths
+are unchanged). If the file was ALREADY going to be rejected before this fix (Stage 1 or Stage 2 found
+ANY problem), it is STILL rejected after this fix — the fix only changes HOW MANY / WHICH offending
+blocks are named in that same rejection, never whether a file is accepted or rejected. This is why
+AC-CCD-03 (the already-supported single-level idiom) and AC-CCD-05 (the 6-suite regression guard) hold
+by construction, not merely by testing: no code path this fix touches can turn a previously-`Ok` file
+into an `Err` one, or vice versa.
+
+**AC-CCD-03's own "2 independent, non-nested `get()` calls" regression risk** (e.g.
+`get(pathA).data.x && get(pathB).data.y`, as opposed to one `get()` nested inside another's own path
+argument) is unaffected because this fix touches ZERO code in `access_control/mod.rs` — the tokenizer's
+`get(`/`exists(` scan (mod.rs:659-683) and `parse_path_template` (mod.rs:779-836) are exactly what
+already correctly distinguishes "two sibling `get()` calls" (each with its own well-formed,
+non-nested path — accepted, per `discover_finds_two_distinct_paths_separately`, mod.rs:3297,
+which proves 2 independent paths are discovered as 2, never conflated) from "one `get()` whose OWN path
+argument contains another" (rejected, per `a_substitution_beyond_auth_uid_or_path_variable_is_a_named_rejection`,
+mod.rs:2999). This fix's diff never enters that file.
+
+## Wave: DESIGN / [REF] Wave Decisions Summary
+
+### Key Decisions
+- [D1] Root cause is a two-stage pipeline where only Stage 2 (`decompose`) aggregates across blocks;
+  Stage 1 (`parse_rules_file`) fails fast via `?` and discards already-successfully-parsed blocks the
+  moment ANY block hits a Stage-1-only content error — confirmed by an actual test run
+  (`left: 1, right: 3`), not by hand-tracing alone.
+- [D2] The chaining `get()` detector itself (`parse_path_template`, `access_control/mod.rs`) needs ZERO
+  changes — it already correctly rejects a nested `get()` inside another's own path argument, proven by
+  an existing, already-passing isolated unit test using the identical condition shape. DISCUSS's
+  narrower alternative hypothesis (a per-block classifier only checking "does this block contain a
+  `get()` call") is refuted.
+- [D3] Fix shape: `parse_nested_match_blocks` stops fail-fasting on per-block CONTENT errors (keeps
+  fail-fast for genuinely-structural, no-resume-point errors only) and accumulates them exactly like
+  `decompose()` already does, one syntactic layer earlier. `RulesFileError` gains one field
+  (`partial_blocks: Vec<MatchBlock>`) so Stage-1-successful blocks are still handed to Stage 2 instead
+  of being discarded. `import_rules_file` merges both stages' offending lists before responding.
+- [D4] `MatchBlock` gains `derive(Eq)` — a required, purely mechanical consequence of `RulesFileError`
+  (which already derives `Eq`) now holding a `Vec<MatchBlock>`.
+- [D5] The test's own `constructs.contains(&"CUSTOM_FUNCTION")` assertion for the `isEditor()` block is
+  stale (superseded by `security-rules-cel-functions`'s own `UNDEFINED_FUNCTION`, unnoticed only
+  because the test never got past its first failing assertion) — a DISTILL-wave test-fixture
+  correction, not a production-code change, flagged explicitly so it isn't mistaken for a sign the
+  production fix is wrong.
+- [D6] No new ADR — mirrors this project's own established precedent (`firestore-tls-support`'s DESIGN
+  section) of recording an architecturally-small, single-file-scoped decision directly in this
+  feature's own narrative `feature-delta.md` rather than a separate `adr-*.md`.
+- [D7] No Earned Trust probe design needed (principle 12) — this fix introduces zero new dependency on
+  anything external (filesystem, network, subprocess, vendor SDK, clock): it is pure computation over
+  already-in-memory, already-parsed text, entirely within `embyr-core`'s zero-IO boundary.
+
+### Constraints Established
+- `embyr-core`'s zero-IO boundary (`deny.toml`) holds — confirmed no new `use` of any IO crate anywhere
+  in this diff; `rules_file.rs` and its `#[cfg(test)]` module are the only `embyr-core` files touched.
+- No new external dependency, no new crate, no new bounded context.
+- No change to any RPC/HTTP route shape, request/response type, or public API contract —
+  `ImportRulesFileBody`/`RulesFileRejectionResponse`/`OffendingBlockResponse` are all unchanged; only
+  the CONTENTS of `offending_blocks` (how many entries, which constructs) change for files that were
+  already being rejected.
+- Zero regression to `NESTED_PATH`, `CUSTOM_FUNCTION` (for the 4 non-import routes), `SYNTAX_ERROR`,
+  `CONFLICTING_VERB_CONDITIONS`, `UNDEFINED_FUNCTION`, `DUPLICATE_FUNCTION`,
+  `FUNCTION_PARAMETERS_UNSUPPORTED`, recursive wildcards, fixed-depth multi-segment patterns, the
+  single-level `get()`/`exists()` idiom, numeric/whitelist/duration grammar, or named helper functions —
+  argued by construction in § Architecture Design ("strictly additive"), not merely by test count.
+
+### External Integration Note
+None. Zero external API/vendor SDK surface — no contract-testing annotation applies.
+
+## Wave: DESIGN / Handoff Package
+
+**Every file requiring a code change** (confirmed exhaustive by direct grep — `RulesFileError \{`
+across the whole repo returns exactly this set, no other construction or destructuring site exists):
+
+1. `crates/embyr-core/src/access_control/rules_file.rs`:
+   - Line 81: `MatchBlock`'s derive list gains `Eq`.
+   - Lines 191-206: `RulesFileError` gains `partial_blocks: Vec<MatchBlock>`; `RulesFileError::single`
+     populates it as `Vec::new()`.
+   - Line 549-595 (`parse_nested_match_blocks`): restructured per § Architecture Design item 3 —
+     accumulate-and-continue for content errors, keep `?` for structural ones.
+   - Line 789 (`decompose`'s own `Err` construction): add `partial_blocks: Vec::new()`.
+   - **14 existing test call sites** matching `Err(RulesFileError { offending_blocks })` (lines 1172,
+     1348, 1378, 1484, 1507, 1578, 1625, 1647, 1667, 1687, 1707, 1733, 1753, 1773) need `..` added
+     (`Err(RulesFileError { offending_blocks, .. })`) — purely mechanical, the Rust compiler will point
+     at each one (exhaustive struct-pattern requirement); the ~20 success-path call sites
+     (`parse_rules_file(...).expect("must parse")`) are UNCHANGED — `parse_rules_file`'s `Ok` type
+     stays `Vec<MatchBlock>`, this fix never touches the success return shape.
+2. `crates/embyr-server/src/admin/handlers/access_rules.rs`:
+   - Lines 1941-1948 (`import_rules_file`): replaced per § Architecture Design item 4 — merges Stage 1
+     `partial_blocks`/`offending_blocks` with Stage 2's own `decompose` result before responding.
+   - Lines 1170, 1294, 1690 (3 other direct `rules_file::RulesFileError { ... }` construction sites —
+     `simulate_routed_access_rule`'s shape guard and `overlap_rejection`): add
+     `partial_blocks: Vec::new()` — none of these three has any "partial blocks" concept of its own
+     (they construct a rejection directly, never from a partially-consumed parse), purely mechanical.
+
+**Blast-radius confirmation**: grep for `parse_rules_file|parse_match_blocks\(|parse_nested_match_blocks\(`
+across the whole repo (`*.rs`) returns matches ONLY inside `rules_file.rs` itself (internal helpers +
+its own 30 unit-test call sites) and exactly ONE external caller,
+`access_rules.rs:1941` (`import_rules_file`). Grep for `RulesFileError \{`/`RulesFileError\{` returns
+the exhaustive set listed above — 2 files, no others. No test file outside
+`crates/embyr-core/src/access_control/rules_file.rs`'s own inline `#[cfg(test)]` module calls
+`parse_rules_file`/`parse_match_blocks`/`parse_nested_match_blocks` directly (acceptance tests only ever
+go through the HTTP import route).
+
+**Tests DISTILL/DELIVER should run to prove the fix:**
+- `tests/security_rules_cel_parity/acceptance/cp04_reject_out_of_scope_imports.rs` — ALL 6 tests
+  (the target failing test `multiple_offending_blocks_are_all_named_in_a_single_rejection_response`,
+  PLUS the other 5 in this exact file as the immediate regression guard for `NESTED_PATH`,
+  `SYNTAX_ERROR`, `CONFLICTING_VERB_CONDITIONS`, and the atomicity guarantee AC-17-192 — the same
+  file this feature's own bug lives in). Per § Root Cause Analysis Finding 2, the target test's own
+  `"CUSTOM_FUNCTION"` assertion needs updating to `"UNDEFINED_FUNCTION"` before it can go green — this
+  is expected, not a sign of a broken fix.
+- `crates/embyr-core/src/access_control/rules_file.rs`'s own `#[cfg(test)] mod tests` (`cargo test -p
+  embyr-core --lib access_control::rules_file`) — the fastest feedback loop for the restructured
+  `parse_nested_match_blocks` loop; add a NEW unit test here proving multi-block aggregation across a
+  Stage-1-only error (`isEditor()`) and a Stage-2-only error (a wildcard-at-collection-position block)
+  in the SAME file, which no existing unit test in this module currently covers (every existing
+  multi-block test in this file has zero-error or single-error shapes only).
+- `tests/security_rules_cel_functions/acceptance/*` (all files) — `expand_function_calls`'s own
+  `UNDEFINED_FUNCTION`/`FUNCTION_PARAMETERS_UNSUPPORTED`/`DUPLICATE_FUNCTION` call sites are read but
+  not modified by this fix; this suite is the regression guard for that call path.
+- `tests/security_rules_cel_cross_document_reads/acceptance/*` (all files) — the regression guard for
+  AC-CCD-03 (single-level `get()`/`exists()` idiom must keep working) and for the "2 independent,
+  non-nested `get()` calls" shape (`cdr03_same_path_fetched_once.rs` and siblings).
+- `tests/security_rules_cel_path_matching/acceptance/*`, `tests/security_rules_cel_recursive_wildcards/acceptance/*`
+  — regression guards for `NESTED_PATH`'s sibling constructs (`RECURSIVE_WILDCARD_NOT_TERMINAL`/
+  `RECURSIVE_WILDCARD_ODD_PREFIX`, multi-segment patterns) which share `validate_segment_shape` and the
+  same `decompose`/`decompose_block` call path this fix's `partial_blocks` plumbing feeds into.
+- `tests/security_rules_cel_expression_grammar/acceptance/*` — regression guard for the OTHER
+  `UnsupportedExpressionGrammar`-producing shapes (map literals, unsupported arithmetic operators,
+  duration units) that share `parse_condition`'s own error path, unchanged by this fix but worth
+  confirming.
+- Full workspace `cargo test` is NOT required as an inner-loop check (per this repo's root `CLAUDE.md`
+  test-run token discipline) — scope to the 6 named suites above plus the `embyr-core` unit tests;
+  reserve the full-workspace run for the DELIVER-wave pre-commit gate.
+
+**External integrations**: none — no contract-testing annotation required for this handoff.
+
+**Development paradigm** (for DISTILL/DELIVER): functional-where-practical Rust, per this repo's own
+root `CLAUDE.md`. `parse_nested_match_blocks`'s restructured loop stays a pure, `Result`-returning
+function with explicit accumulation (no shared mutable state beyond the two local `Vec`s already
+idiomatic to this file's own style, e.g. `decompose`'s existing loop) — no new traits, no new
+abstraction, the smallest diff that makes Stage 1 behave like Stage 2 already does.
+
+## Wave: DESIGN / [REF] Next Wave
+
+**Handoff To**: nw-acceptance-designer (DISTILL wave)
+**Deliverables**: this feature-delta.md's DESIGN sections above — confirmed root cause (two-stage
+pipeline, Stage 1 fail-fast discarding Stage-1-successful blocks), the refuted narrower hypothesis (the
+chaining detector itself is already correct), the concrete fix (§ Architecture Design items 1-4), the
+exhaustive Handoff Package file/test list, and the flagged pre-existing test-staleness correction
+(§ Root Cause Analysis Finding 2 / Decision D5: `"CUSTOM_FUNCTION"` → `"UNDEFINED_FUNCTION"` in
+`multiple_offending_blocks_are_all_named_in_a_single_rejection_response`) for DISTILL to apply as part
+of making AC-CCD-02 executable.
