@@ -435,6 +435,43 @@ async fn exits_nonzero_when_only_cert_path_is_set() {
     );
 }
 
+/// AC-TLS-05 (symmetric case): the reverse partial-config direction — only
+/// EMBYR_TLS_KEY_PATH set. Mutation testing (firestore-tls-support
+/// QUALITY_GATE) found this direction was untested: the sibling test above
+/// only covers cert-path-only, leaving the `(None, Some(_))` match arm in
+/// `ServerConfig::from_env` unexercised.
+#[tokio::test]
+#[ignore]
+async fn exits_nonzero_when_only_key_path_is_set() {
+    let mut server = ServerProcess::start_env_only(&[
+        (
+            "DATABASE_URL",
+            "postgres://postgres:postgres@127.0.0.1:65535/embyr",
+        ),
+        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
+        ("EMBYR_TLS_KEY_PATH", "/tmp/embyr-tls-support-test-key.pem"),
+        // EMBYR_TLS_CERT_PATH intentionally absent
+    ]);
+
+    let exit_code = server.wait_for_exit(Duration::from_secs(3)).await;
+    let stderr = server.drain_stderr();
+
+    assert_ne!(
+        exit_code,
+        Some(0),
+        "server must not exit 0 with a partial TLS config; got {exit_code:?}"
+    );
+    assert!(
+        stderr.contains("EMBYR_TLS_CERT_PATH"),
+        "stderr must name EMBYR_TLS_CERT_PATH as the missing half of the pair; got: {stderr}"
+    );
+    assert!(
+        !ServerProcess::port_is_bound(server.grpc_port),
+        "no port may bind when TLS config is invalid"
+    );
+}
+
 // ─── AC-TLS-06: missing file → exit non-zero, name the path ─────────────────
 
 /// Startup fails fast when the configured key file does not exist on disk —
