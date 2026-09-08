@@ -203,6 +203,19 @@ async fn a_recursive_wildcard_path_is_now_accepted_superseding_the_original_reje
 /// trigger — so this test still proves 3 independently-offending blocks are
 /// ALL named in one response, not just 2.
 ///
+/// SUPERSEDED SCENARIO NOTE (found during `security-rules-cel-chaining-
+/// detection` DESIGN Root Cause Analysis, Finding 2): the `isEditor()`
+/// block's own expected construct was originally `CUSTOM_FUNCTION`. That
+/// assertion is stale — `security-rules-cel-functions` (ADR-067) introduced
+/// `expand_function_calls`, which always runs first during a rules-file
+/// IMPORT and unconditionally intercepts any undeclared call-shaped
+/// identifier as `UNDEFINED_FUNCTION` before `decompose_block`'s own
+/// `CUSTOM_FUNCTION` path can ever see it. `CUSTOM_FUNCTION` remains live
+/// and correct for the OTHER direct-condition routes (`define_access_rule`
+/// and siblings), just structurally unreachable via THIS import path. Same
+/// "superseded, not silently deleted" precedent this file already applies
+/// twice above.
+///
 /// AC-17-190, AC-17-191
 ///
 /// @error @driving_port @real-io @US-04 @AC-17-190 @AC-17-191
@@ -265,7 +278,13 @@ async fn multiple_offending_blocks_are_all_named_in_a_single_rejection_response(
 
     let constructs: Vec<&str> = offending.iter().map(|b| b["construct"].as_str().unwrap()).collect();
     assert!(constructs.contains(&"NESTED_PATH"), "AC-17-188 (within multi-block): {constructs:?}");
-    assert!(constructs.contains(&"CUSTOM_FUNCTION"), "AC-17-190: custom function call: {constructs:?}");
+    assert!(
+        constructs.contains(&"UNDEFINED_FUNCTION"),
+        "AC-17-190 (superseded by `security-rules-cel-functions`, ADR-067: an undeclared \
+         call-shaped identifier inside a rules-file IMPORT is UNDEFINED_FUNCTION, not \
+         CUSTOM_FUNCTION — see cf01's own a_call_to_an_undefined_function_is_rejected_at_import_time): \
+         undefined function call: {constructs:?}"
+    );
     assert!(
         constructs.contains(&"UNSUPPORTED_EXPRESSION_GRAMMAR"),
         "AC-17-190 (superseded; see note above): a chained get() call: {constructs:?}"

@@ -78,7 +78,7 @@ pub enum Verb {
 /// unit. `path_pattern` is the raw, as-written text — retained for
 /// error-message fidelity even for shapes `segments` cannot classify
 /// meaningfully.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchBlock {
     pub path_pattern: String,
     pub segments: Vec<PathSegment>,
@@ -191,6 +191,15 @@ pub struct OffendingBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RulesFileError {
     pub offending_blocks: Vec<OffendingBlock>,
+    /// `security-rules-cel-chaining-detection`: the `MatchBlock`s that DID
+    /// parse successfully at Stage 1, alongside the ones that didn't —
+    /// carried so the caller can still hand them to `decompose()` (Stage 2)
+    /// instead of losing the opportunity to find THEIR own offending
+    /// constructs (`NESTED_PATH`, `UNSUPPORTED_EXPRESSION_GRAMMAR`, etc.).
+    /// Empty for a genuinely-structural failure (unbalanced brace, wrong
+    /// shell keyword) — there is no well-defined partial block list in that
+    /// case, matching today's unchanged fail-fast behavior for those.
+    pub partial_blocks: Vec<MatchBlock>,
 }
 
 impl RulesFileError {
@@ -201,6 +210,7 @@ impl RulesFileError {
                 construct,
                 detail: detail.into(),
             }],
+            partial_blocks: Vec::new(),
         }
     }
 }
@@ -553,11 +563,14 @@ fn parse_nested_match_blocks(
     functions: &BTreeMap<String, String>,
 ) -> Result<Vec<MatchBlock>, RulesFileError> {
     let mut blocks = Vec::new();
+    let mut offending: Vec<OffendingBlock> = Vec::new();
     loop {
         body = body.trim_start();
         if body.is_empty() {
             break;
         }
+        // ── Structural delineation — TRUE fail-fast, no well-defined resume
+        //    point if any of these fail (unchanged from today). ──
         let after_match = body
             .strip_prefix("match")
             .filter(|rest| rest.starts_with(char::is_whitespace))
@@ -581,15 +594,31 @@ fn parse_nested_match_blocks(
         })?;
         let block_body = &rest[1..close_idx];
 
-        let local_segments = parse_path_segments(&local_path_pattern)?;
-        let full_path_pattern = format!("{parent_path_text}{local_path_pattern}");
-        let mut full_segments = parent_segments.to_vec();
-        full_segments.extend(local_segments);
+        // ── Content parsing — this block's own byte range is now fully
+        //    known (`&rest[close_idx + 1..]` is always a safe resume point,
+        //    computed purely from brace-depth counting above, independent
+        //    of whether THIS block's own content is valid). A problem here
+        //    is this ONE block's own concern, never a reason to abandon its
+        //    siblings — mirrors decompose()'s own accumulate-and-continue
+        //    loop, one syntactic layer earlier. ──
+        match parse_path_segments(&local_path_pattern) {
+            Ok(local_segments) => {
+                let full_path_pattern = format!("{parent_path_text}{local_path_pattern}");
+                let mut full_segments = parent_segments.to_vec();
+                full_segments.extend(local_segments);
 
-        let mut nested = parse_block_body(block_body, &full_path_pattern, &full_segments, functions)?;
-        blocks.append(&mut nested);
+                match parse_block_body(block_body, &full_path_pattern, &full_segments, functions) {
+                    Ok(mut nested) => blocks.append(&mut nested),
+                    Err(mut err) => offending.append(&mut err.offending_blocks),
+                }
+            }
+            Err(mut err) => offending.append(&mut err.offending_blocks),
+        }
 
         body = &rest[close_idx + 1..];
+    }
+    if !offending.is_empty() {
+        return Err(RulesFileError { offending_blocks: offending, partial_blocks: blocks });
     }
     Ok(blocks)
 }
@@ -786,7 +815,7 @@ pub fn decompose(blocks: Vec<MatchBlock>) -> Result<Vec<DecomposedTarget>, Rules
     }
 
     if !offending.is_empty() {
-        return Err(RulesFileError { offending_blocks: offending });
+        return Err(RulesFileError { offending_blocks: offending, partial_blocks: Vec::new() });
     }
     Ok(targets)
 }
@@ -1169,7 +1198,7 @@ mod tests {
         ] {
             let result = parse_rules_file(bad_source);
             match result {
-                Err(RulesFileError { offending_blocks }) => {
+                Err(RulesFileError { offending_blocks, .. }) => {
                     assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
                 }
                 Ok(_) => panic!("expected a SYNTAX_ERROR for malformed shell '{bad_source}'"),
@@ -1345,7 +1374,7 @@ mod tests {
         .expect("must parse");
 
         match decompose(blocks) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "NESTED_PATH");
             }
             Ok(_) => panic!("expected NESTED_PATH rejection for a wildcard at a collection-name position"),
@@ -1375,7 +1404,7 @@ mod tests {
         .expect("must parse");
 
         match decompose(blocks) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "RECURSIVE_WILDCARD_ODD_PREFIX");
             }
             Ok(_) => panic!("expected RECURSIVE_WILDCARD_ODD_PREFIX rejection"),
@@ -1481,7 +1510,7 @@ mod tests {
         .expect("must parse");
 
         match decompose(blocks) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "CONFLICTING_VERB_CONDITIONS");
             }
             Ok(_) => panic!("expected CONFLICTING_VERB_CONDITIONS rejection"),
@@ -1504,7 +1533,7 @@ mod tests {
         .expect("must parse");
 
         match decompose(blocks) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "RECURSIVE_WILDCARD_NOT_TERMINAL");
             }
             Ok(_) => panic!("expected RECURSIVE_WILDCARD_NOT_TERMINAL rejection"),
@@ -1575,7 +1604,7 @@ mod tests {
         "#;
 
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
             }
             Ok(_) => panic!("expected SYNTAX_ERROR: a match block body may not mix 'allow' with nested 'match'"),
@@ -1622,7 +1651,7 @@ mod tests {
             }
         "#;
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "UNDEFINED_FUNCTION");
                 assert!(offending_blocks[0].detail.contains("isEditor"));
             }
@@ -1644,7 +1673,7 @@ mod tests {
             }
         "#;
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "DUPLICATE_FUNCTION");
             }
             Ok(_) => panic!("expected DUPLICATE_FUNCTION"),
@@ -1664,7 +1693,7 @@ mod tests {
             }
         "#;
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "FUNCTION_PARAMETERS_UNSUPPORTED");
             }
             Ok(_) => panic!("expected FUNCTION_PARAMETERS_UNSUPPORTED"),
@@ -1684,7 +1713,7 @@ mod tests {
             }
         "#;
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "FUNCTION_PARAMETERS_UNSUPPORTED");
             }
             Ok(_) => panic!("expected FUNCTION_PARAMETERS_UNSUPPORTED"),
@@ -1704,7 +1733,7 @@ mod tests {
             }
         "#;
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
             }
             Ok(_) => panic!("expected SYNTAX_ERROR: 'let' bindings are not supported in v1"),
@@ -1730,7 +1759,7 @@ mod tests {
             }
         "#;
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "CUSTOM_FUNCTION");
             }
             Ok(_) => panic!("expected CUSTOM_FUNCTION: function bodies may not call other functions in v1"),
@@ -1750,7 +1779,7 @@ mod tests {
             }
         "#;
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
             }
             Ok(_) => panic!("expected SYNTAX_ERROR: 'exists' collides with a reserved construct"),
@@ -1770,7 +1799,7 @@ mod tests {
             }
         "#;
         match parse_rules_file(source) {
-            Err(RulesFileError { offending_blocks }) => {
+            Err(RulesFileError { offending_blocks, .. }) => {
                 assert_eq!(offending_blocks[0].construct, "SYNTAX_ERROR");
             }
             Ok(_) => panic!("expected SYNTAX_ERROR: '1abc' does not start with a letter or underscore"),
@@ -1837,5 +1866,63 @@ mod tests {
         functions.insert("isEditor".to_string(), "request.auth.uid == resource.data.editor_id".to_string());
         let expanded = expand_function_calls("!isEditor()", &functions, "").expect("must not error");
         assert_eq!(expanded, "!(request.auth.uid == resource.data.editor_id)");
+    }
+
+    // ── security-rules-cel-chaining-detection (US-01, DESIGN § Root Cause
+    // Analysis / § Architecture Design — root-cause fix regression guard) ──
+
+    /// Proves the DESIGN-identified gap directly, at the fastest feedback
+    /// loop (`embyr-core`'s own unit tests, no HTTP/DB round-trip). Two
+    /// blocks in ONE file: block 1 has a Stage-1-only content error
+    /// (`isEditor()`, an undeclared call-shaped identifier —
+    /// `UNDEFINED_FUNCTION`, caught by `expand_function_calls` inside
+    /// `parse_block_body`); block 2 has a Stage-2-only error (a wildcard at
+    /// a collection-name position — `NESTED_PATH`, only detectable once
+    /// `decompose` runs). Today, `parse_nested_match_blocks`'s loop still
+    /// uses `?` on a per-block CONTENT error, so it fails fast on block 1
+    /// and abandons the loop — block 2 is never even scanned, and
+    /// `decompose` (the only place `NESTED_PATH` is found) is never
+    /// reached. This mirrors `import_rules_file`'s own intended Stage 1 ->
+    /// Stage 2 wiring (DESIGN § Architecture Design item 4, not yet
+    /// implemented): both stages' offending blocks should end up in ONE
+    /// final list. Correct RED today: only `UNDEFINED_FUNCTION` is found,
+    /// `NESTED_PATH` never gets the chance to be.
+    #[test]
+    fn a_stage_1_only_error_and_a_stage_2_only_error_in_the_same_file_are_both_named() {
+        let source = r#"
+            service cloud.firestore {
+              match /databases/{database}/documents {
+                match /trail_guides/{guideId} {
+                  allow write: if isEditor();
+                }
+                match /{expeditionId}/journal_entries {
+                  allow read: if true;
+                }
+              }
+            }
+        "#;
+
+        // Mirrors import_rules_file's own intended Stage 1 -> Stage 2
+        // wiring: whatever Stage 1 hands back gets fed to Stage 2, and both
+        // stages' offending blocks are merged into one final list.
+        let offending = match parse_rules_file(source) {
+            Ok(blocks) => decompose(blocks).expect_err("expected at least one Stage 2 rejection").offending_blocks,
+            Err(RulesFileError { mut offending_blocks, partial_blocks }) => {
+                if let Err(mut stage2_err) = decompose(partial_blocks) {
+                    offending_blocks.append(&mut stage2_err.offending_blocks);
+                }
+                offending_blocks
+            }
+        };
+
+        let constructs: Vec<&str> = offending.iter().map(|b| b.construct).collect();
+        assert!(
+            constructs.contains(&"UNDEFINED_FUNCTION"),
+            "the Stage-1-only error (undeclared isEditor() call) must survive to the final offending list: {constructs:?}"
+        );
+        assert!(
+            constructs.contains(&"NESTED_PATH"),
+            "the Stage-2-only error (wildcard at a collection-name position) must survive to the final offending list: {constructs:?}"
+        );
     }
 }

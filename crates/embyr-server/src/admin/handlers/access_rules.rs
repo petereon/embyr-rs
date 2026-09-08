@@ -1174,6 +1174,7 @@ pub async fn simulate_routed_access_rule(
                 detail: "a routed pattern requires at least an ancestor segment and a leaf segment"
                     .to_string(),
             }],
+            partial_blocks: Vec::new(),
         }));
     }
 
@@ -1299,6 +1300,7 @@ async fn simulate_recursive_wildcard_candidate(
                           segment"
                     .to_string(),
             }],
+            partial_blocks: Vec::new(),
         }));
     }
 
@@ -1689,6 +1691,7 @@ fn overlap_offending_block(path_pattern: &str, other: &str) -> rules_file::Offen
 fn overlap_rejection(a: &str, b: &str) -> rules_file::RulesFileError {
     rules_file::RulesFileError {
         offending_blocks: vec![overlap_offending_block(a, b), overlap_offending_block(b, a)],
+        partial_blocks: Vec::new(),
     }
 }
 
@@ -1938,13 +1941,33 @@ pub async fn import_rules_file(
     let pool = state.system_db.pool();
     verify_project_ownership(pool, &project_id, session.account_id).await?;
 
-    let blocks = match rules_file::parse_rules_file(&body.rules_file) {
-        Ok(b) => b,
+    let (blocks, mut offending) = match rules_file::parse_rules_file(&body.rules_file) {
+        Ok(b) => (b, Vec::new()),
+        // Some blocks parsed fine at Stage 1 (worth feeding to decompose for
+        // their OWN possible Stage-2 problems) alongside ones that didn't.
+        Err(e) if !e.partial_blocks.is_empty() => (e.partial_blocks, e.offending_blocks),
+        // A genuinely-structural failure — nothing to salvage, unchanged
+        // behavior from today.
         Err(e) => return Ok(rules_file_rejection_response(e)),
     };
+
     let decomposed = match rules_file::decompose(blocks) {
-        Ok(d) => d,
-        Err(e) => return Ok(rules_file_rejection_response(e)),
+        Ok(d) => {
+            if !offending.is_empty() {
+                return Ok(rules_file_rejection_response(rules_file::RulesFileError {
+                    offending_blocks: offending,
+                    partial_blocks: Vec::new(),
+                }));
+            }
+            d
+        }
+        Err(mut decompose_err) => {
+            offending.append(&mut decompose_err.offending_blocks);
+            return Ok(rules_file_rejection_response(rules_file::RulesFileError {
+                offending_blocks: offending,
+                partial_blocks: Vec::new(),
+            }));
+        }
     };
 
     if let Some(rejection) = check_pattern_overlap(&state, &project_id, &decomposed).await? {
