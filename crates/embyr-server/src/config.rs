@@ -116,6 +116,32 @@ pub struct ServerConfig {
     /// retention window (ADR-054 § D2/D7, Slice 02); default 30 days,
     /// mirroring `SessionCleaner`'s own documented 30-day precedent.
     pub transaction_retention_days: i64,
+    /// `EMBYR_TLS_CERT_PATH`/`EMBYR_TLS_KEY_PATH` — optional, both-or-neither.
+    /// `None` = today's plaintext behavior on all 3 listeners, unchanged
+    /// (AC-TLS-01, hard regression guard).
+    pub tls: Option<TlsMaterial>,
+}
+
+/// Validated TLS material for firestore-tls-support: one cert/key pair
+/// shared by all 3 listeners, read once at startup. `cert_pem`/`key_pem`
+/// are the raw PEM bytes (tonic's own `Identity::from_pem` wants raw PEM);
+/// `rustls_config` is pre-built once so both axum-based listeners share the
+/// IDENTICAL `Arc<rustls::ServerConfig>` instance rather than each
+/// re-parsing PEM independently.
+#[derive(Clone)]
+pub struct TlsMaterial {
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+    pub rustls_config: std::sync::Arc<rustls::ServerConfig>,
+}
+
+impl fmt::Debug for TlsMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlsMaterial")
+            .field("cert_pem_len", &self.cert_pem.len())
+            .field("key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Configuration parse error.
@@ -146,6 +172,13 @@ pub enum ConfigError {
     /// resolved `EMBYR_ENCRYPTION_KEY` bytes (ADR-018 §6) — checked after both
     /// values are resolved, comparing resolved bytes, never raw env text.
     DuplicateRotationKey { var: String, base_var: String },
+    /// EMBYR_TLS_CERT_PATH or EMBYR_TLS_KEY_PATH names a path that does not
+    /// exist or cannot be read. `var` names which of the two (AC-TLS-06).
+    TlsFileNotFound { var: String, path: String },
+    /// The file at `var`'s configured path was read, but its content is not
+    /// valid PEM, or the private key does not match the certificate
+    /// (AC-TLS-07).
+    TlsInvalidPem { var: String, reason: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -189,6 +222,12 @@ impl fmt::Display for ConfigError {
             ConfigError::DuplicateRotationKey { var, base_var } => {
                 write!(f, "{var} must differ from {base_var}")
             }
+            ConfigError::TlsFileNotFound { var, path } => {
+                write!(f, "{var} names a file that could not be read: {path}")
+            }
+            ConfigError::TlsInvalidPem { var, reason } => {
+                write!(f, "invalid PEM content for {var}: {reason}")
+            }
         }
     }
 }
@@ -212,9 +251,23 @@ impl ServerConfig {
         let enc_hex_opt = resolve_encryption_key_hex(&mut missing).await?;
         let enc_prev_hex_opt = resolve_encryption_key_previous_hex().await?;
 
+        // ── TLS (firestore-tls-support, D1/D5) ─────────────────────────────
+        let cert_path = std::env::var("EMBYR_TLS_CERT_PATH").ok().filter(|v| !v.is_empty());
+        let key_path = std::env::var("EMBYR_TLS_KEY_PATH").ok().filter(|v| !v.is_empty());
+        match (&cert_path, &key_path) {
+            (Some(_), None) => missing.push("EMBYR_TLS_KEY_PATH".to_string()),
+            (None, Some(_)) => missing.push("EMBYR_TLS_CERT_PATH".to_string()),
+            _ => {} // both set, or both unset — no missing-var error either way
+        }
+
         if !missing.is_empty() {
             return Err(ConfigError::MissingVars(missing));
         }
+
+        let tls = match (cert_path, key_path) {
+            (Some(cert_path), Some(key_path)) => Some(load_tls_material(&cert_path, &key_path)?),
+            _ => None, // AC-TLS-01
+        };
 
         let admin_key = admin_key_opt.unwrap();
         if let Some(prev) = &admin_key_previous {
@@ -286,8 +339,69 @@ impl ServerConfig {
             cap_check_interval_secs,
             transaction_sweep_interval_secs,
             transaction_retention_days,
+            tls,
         })
     }
+}
+
+/// Read and parse the cert/key PEM pair. Installs the process-wide rustls
+/// crypto provider (idempotent — mirrors `StripeGateway`'s own already-
+/// established `rustls::crypto::ring::default_provider().install_default()`
+/// call in `adapters/stripe_gateway.rs`). This feature's own call cannot
+/// rely on StripeGateway's call happening first — StripeGateway is
+/// constructed in `main.rs` Step 10, well AFTER this function runs in Step
+/// 1 (`from_env()`) — so TLS material construction installs the provider
+/// itself.
+fn load_tls_material(cert_path: &str, key_path: &str) -> Result<TlsMaterial, ConfigError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let cert_pem = std::fs::read(cert_path).map_err(|_| ConfigError::TlsFileNotFound {
+        var: "EMBYR_TLS_CERT_PATH".to_string(),
+        path: cert_path.to_string(),
+    })?;
+    let key_pem = std::fs::read(key_path).map_err(|_| ConfigError::TlsFileNotFound {
+        var: "EMBYR_TLS_KEY_PATH".to_string(),
+        path: key_path.to_string(),
+    })?;
+
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_pem.as_slice())
+            .collect::<Result<_, _>>()
+            .map_err(|e| ConfigError::TlsInvalidPem {
+                var: "EMBYR_TLS_CERT_PATH".to_string(),
+                reason: e.to_string(),
+            })?;
+    if certs.is_empty() {
+        return Err(ConfigError::TlsInvalidPem {
+            var: "EMBYR_TLS_CERT_PATH".to_string(),
+            reason: "no certificate found in PEM file".to_string(),
+        });
+    }
+
+    let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+        .map_err(|e| ConfigError::TlsInvalidPem {
+            var: "EMBYR_TLS_KEY_PATH".to_string(),
+            reason: e.to_string(),
+        })?
+        .ok_or_else(|| ConfigError::TlsInvalidPem {
+            var: "EMBYR_TLS_KEY_PATH".to_string(),
+            reason: "no private key found in PEM file".to_string(),
+        })?;
+
+    // D4: with_no_client_auth() — no mTLS in this feature's scope.
+    let rustls_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| ConfigError::TlsInvalidPem {
+            var: "EMBYR_TLS_KEY_PATH".to_string(),
+            reason: format!("certificate/key mismatch or invalid: {e}"),
+        })?;
+
+    Ok(TlsMaterial {
+        cert_pem,
+        key_pem,
+        rustls_config: std::sync::Arc::new(rustls_config),
+    })
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────

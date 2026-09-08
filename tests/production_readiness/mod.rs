@@ -16,6 +16,8 @@
 //!   2. pr02 — US-PR-02: Dockerfile multi-stage build (D-PR-3)
 //!   3. pr03 — US-PR-03: CI pipeline (.github/workflows/ci.yml) (D-PR-4)
 //!   4. pr04 — US-PR-01: graceful shutdown on SIGTERM (D-PR-5)
+//!   5. pr05 — firestore-tls-support US-01: in-process TLS on all 3
+//!      listeners via EMBYR_TLS_CERT_PATH/EMBYR_TLS_KEY_PATH (AC-TLS-01..07)
 //!
 //! Pre-requisites before running any test:
 //!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
@@ -29,4 +31,5 @@ mod acceptance {
     mod pr02_dockerfile;
     mod pr03_ci;
     mod pr04_graceful_shutdown;
+    mod pr05_tls_support;
 }

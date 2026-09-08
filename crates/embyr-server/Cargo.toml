@@ -69,6 +69,10 @@ async-stripe-webhook.workspace = true
 # key), not just test fixtures (mirrors custom-claims' serde_json
 # promotion in embyr-core/Cargo.toml).
 ed25519-dalek = { workspace = true }
+# firestore-tls-support: promoted from dev-dependencies -- load_tls_material
+# parses REAL operator-provided PEM cert/key files in PRODUCTION code, not
+# just test fixtures (mirrors ed25519-dalek's own documented promotion above).
+rustls-pemfile.workspace = true
 
 [[test]]
 name = "us_13_browser_transport"

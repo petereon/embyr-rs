@@ -339,6 +339,8 @@ pub fn spawn_all_servers(
     encryption_key: [u8; 32],
     encryption_key_previous: Option<[u8; 32]>,
     google_jwks_cache: Arc<adapters::google_jwks_cache::GoogleJwksCache>,
+    tonic_tls_config: Option<tonic::transport::ServerTlsConfig>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) -> tokio::task::JoinHandle<()> {
     let service_for_rest = service.clone();
 
@@ -416,7 +418,12 @@ pub fn spawn_all_servers(
         .with_state(accounts_bridge_state);
     let axum_app = axum_app.merge(accounts_bridge_app);
 
-    let rest_task = rest::grpc_web::spawn_hybrid_server(rest_listener, service_for_rest, axum_app);
+    let rest_task = rest::grpc_web::spawn_hybrid_server(
+        rest_listener,
+        service_for_rest,
+        axum_app,
+        tls_acceptor.clone(),
+    );
 
     tokio::spawn(async move {
         let grpc_incoming = tokio_stream::wrappers::TcpListenerStream::new(grpc_listener);
@@ -427,7 +434,17 @@ pub fn spawn_all_servers(
         // of aborting them the instant the outer signal below resolves.
         let (grpc_shutdown_tx, grpc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let grpc_fut = tonic::transport::Server::builder()
+        let mut grpc_builder = tonic::transport::Server::builder();
+        if let Some(tls) = tonic_tls_config {
+            // Safe to .expect(): the SAME PEM bytes already passed
+            // rustls::ServerConfig::builder()...with_single_cert(...) inside
+            // load_tls_material() during from_env() — this cannot fail on
+            // content that already-succeeded parse/validate produced.
+            grpc_builder = grpc_builder
+                .tls_config(tls)
+                .expect("tls config already validated in ServerConfig::from_env()");
+        }
+        let grpc_fut = grpc_builder
             .add_service(FirestoreServer::new(service))
             .serve_with_incoming_shutdown(grpc_incoming, async {
                 let _ = grpc_shutdown_rx.await;
@@ -438,7 +455,7 @@ pub fn spawn_all_servers(
         // it can keep draining after this task moves on to the join below.
         let grpc_handle = tokio::spawn(grpc_fut);
 
-        let admin_fut = axum::serve(admin_listener, admin_app);
+        let admin_fut = spawn_admin_server(admin_listener, admin_app, tls_acceptor);
 
         tokio::select! {
             _ = rest_task => {},
@@ -450,6 +467,63 @@ pub fn spawn_all_servers(
         // on already-open connections to finish naturally before returning.
         let _ = grpc_shutdown_tx.send(());
         let _ = grpc_handle.await;
+    })
+}
+
+/// Serve `admin_app` on `listener`, optionally TLS-wrapped. Mirrors
+/// `rest::grpc_web::spawn_hybrid_server`'s own accept-loop shape and
+/// reuses its EXACT `accept_maybe_tls` handshake step — the Admin listener
+/// previously used `axum::serve`, which owns its own accept loop
+/// internally and has no TLS hook.
+fn spawn_admin_server(
+    listener: tokio::net::TcpListener,
+    admin_app: axum::Router,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let (stream, _peer) = match listener.accept().await {
+                Ok(pair) => pair,
+                Err(_) => break,
+            };
+            let app = admin_app.clone();
+            let tls_acceptor = tls_acceptor.clone();
+            tokio::spawn(async move {
+                let io = match adapters::tls::accept_maybe_tls(stream, tls_acceptor.as_ref()).await
+                {
+                    Ok(io) => hyper_util::rt::TokioIo::new(io),
+                    Err(_) => return,
+                };
+                // Reuses grpc_web's own incoming_to_axum_body (now pub(crate))
+                // — identical Incoming→axum::body::Body conversion HybridService's
+                // non-grpc-web branch already performs.
+                let svc = tower::service_fn(move |req: http::Request<hyper::body::Incoming>| {
+                    let app = app.clone();
+                    async move {
+                        Ok::<_, std::convert::Infallible>(
+                            tower::ServiceExt::oneshot(
+                                app,
+                                req.map(rest::grpc_web::incoming_to_axum_body),
+                            )
+                            .await
+                            .unwrap_or_else(|_: std::convert::Infallible| {
+                                http::Response::builder()
+                                    .status(500)
+                                    .body(axum::body::Body::empty())
+                                    .unwrap()
+                            }),
+                        )
+                    }
+                });
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection_with_upgrades(
+                        io,
+                        hyper_util::service::TowerToHyperService::new(svc),
+                    )
+                    .await
+                    .ok();
+            });
+        }
     })
 }
 
@@ -497,6 +571,7 @@ pub async fn start_test_server_with_keepalive(
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+        None, None,
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -560,6 +635,7 @@ pub async fn start_test_server_with_email_sender(
         service, admin_app, c.shutdown_rx, email_sender,
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+        None, None,
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -617,6 +693,7 @@ pub async fn start_test_server_with_oauth(
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
         encryption_key, None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::new(google_jwks_base_url)),
+        None, None,
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -669,6 +746,7 @@ pub async fn start_test_server_with_aws_fetcher(
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+        None, None,
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -721,6 +799,7 @@ pub async fn start_test_server_with_gcp_fetcher(
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+        None, None,
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -778,6 +857,7 @@ pub async fn start_test_server_with_distributed_rate_limit(
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+        None, None,
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -838,6 +918,68 @@ pub async fn start_test_server_with_rate_limit(
         service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+        None, None,
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    TestServer {
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
+    }
+}
+
+/// Start an in-process server with all 3 listeners TLS-wrapped using the
+/// given `TlsMaterial` (firestore-tls-support AC-TLS-02/03/04). Mirrors
+/// `start_test_server_with_keepalive`'s own shape, threading
+/// `Some(tonic_tls_config)`/`Some(tls_acceptor)` built from `tls` the same
+/// way `main.rs` does from `cfg.tls`.
+pub async fn start_test_server_with_tls(
+    system_db: Arc<SystemDb>,
+    tls: config::TlsMaterial,
+) -> TestServer {
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
+
+    let rate_limit_rps = default_rate_limit_capacity();
+    let rate_limiter = RateLimiter::new(rate_limit_rps, rate_limit_rps);
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
+    let service = FirestoreService {
+        system_db: Arc::clone(&system_db),
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
+        keepalive_interval: std::time::Duration::from_secs(30),
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
+        aws_secret_fetcher: None,
+        gcp_secret_fetcher: None,
+        rate_limiter,
+    };
+
+    let admin_app = admin::router::build_with_aws(
+        system_db,
+        "test-admin-key-secret".to_string(),
+        c.cache_for_admin,
+        None,
+    )
+    .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler));
+
+    let tonic_tls_config = tonic::transport::ServerTlsConfig::new()
+        .identity(tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem));
+    let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::clone(&tls.rustls_config));
+
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
+        [0u8; 32], None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+        Some(tonic_tls_config), Some(tls_acceptor),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

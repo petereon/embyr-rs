@@ -16,3 +16,5 @@ pub mod project_auth;
 pub mod query_log;
 pub mod stripe_gateway;
 pub mod system_db;
+// firestore-tls-support: shared accept_maybe_tls() handshake helper.
+pub mod tls;

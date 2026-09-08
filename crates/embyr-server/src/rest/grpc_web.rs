@@ -37,7 +37,7 @@ use crate::grpc::handler::FirestoreService;
 
 // ── Body adapters ──────────────────────────────────────────────────────────
 
-fn incoming_to_axum_body(incoming: Incoming) -> Body {
+pub(crate) fn incoming_to_axum_body(incoming: Incoming) -> Body {
     Body::new(incoming.map_err(axum::Error::new))
 }
 
@@ -126,6 +126,7 @@ pub fn spawn_hybrid_server(
     listener: tokio::net::TcpListener,
     grpc_service: FirestoreService,
     axum_app: axum::Router,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) -> tokio::task::JoinHandle<()> {
     let hybrid = HybridService::new(grpc_service, axum_app);
     tokio::spawn(async move {
@@ -134,12 +135,15 @@ pub fn spawn_hybrid_server(
                 Ok(pair) => pair,
                 Err(_) => break,
             };
-            let io = TokioIo::new(stream);
-            let svc = TowerToHyperService::new(hybrid.clone());
-            let builder =
-                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+            let svc = hybrid.clone();
+            let tls_acceptor = tls_acceptor.clone();
             tokio::spawn(async move {
-                builder
+                let io = match crate::adapters::tls::accept_maybe_tls(stream, tls_acceptor.as_ref()).await {
+                    Ok(io) => TokioIo::new(io),
+                    Err(_) => return, // handshake failed — drop connection, never fall back plaintext
+                };
+                let svc = TowerToHyperService::new(svc);
+                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
                     .serve_connection_with_upgrades(io, svc)
                     .await
                     .ok();

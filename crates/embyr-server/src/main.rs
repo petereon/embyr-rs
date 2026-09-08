@@ -255,6 +255,16 @@ async fn main() {
     );
 
     // ── Step 11: spawn gRPC + REST + admin servers ────────────────────────
+    // firestore-tls-support: derive the 2 listener-facing TLS types from
+    // `cfg.tls` (both `None` when TLS is not configured — AC-TLS-01).
+    let tonic_tls_config = cfg.tls.as_ref().map(|tls| {
+        tonic::transport::ServerTlsConfig::new()
+            .identity(tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem))
+    });
+    let tls_acceptor = cfg.tls.as_ref().map(|tls| {
+        tokio_rustls::TlsAcceptor::from(Arc::clone(&tls.rustls_config))
+    });
+
     let server_task = spawn_all_servers(
         grpc_listener,
         rest_listener,
@@ -266,6 +276,8 @@ async fn main() {
         cfg.encryption_key,
         cfg.encryption_key_previous,
         Arc::new(GoogleJwksCache::production()),
+        tonic_tls_config,
+        tls_acceptor,
     );
 
     // ── Step 12: log ready ────────────────────────────────────────────────
