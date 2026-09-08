@@ -295,6 +295,13 @@ async fn startup_refuses_ambiguous_encryption_key_sourcing() {
 async fn exits_1_when_encryption_key_secret_fetch_fails() {
     let (_localstack, endpoint_url) = start_localstack().await;
 
+    // Warm up LocalStack's lazily-initialized Secrets Manager backend before
+    // the timed wait starts (see DESIGN § Root Cause Investigation, Finding 3:
+    // the first-ever Secrets Manager call in a LocalStack container's lifetime
+    // pays a one-time init cost that can exceed a 10s wait_for_exit bound).
+    let sm_client = make_sm_client(&endpoint_url).await;
+    let _ = create_raw_secret(&sm_client, "sm02-warmup-secret", "warmup-value").await;
+
     let mut env: Vec<(&str, String)> = localstack_aws_env(&endpoint_url);
     env.push((
         "EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN",
@@ -309,7 +316,7 @@ async fn exits_1_when_encryption_key_secret_fetch_fails() {
     let borrowed: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
     let mut server = ServerProcess::start_env_only(&borrowed);
 
-    let exit_code = server.wait_for_exit(Duration::from_secs(10)).await;
+    let exit_code = server.wait_for_exit(Duration::from_secs(15)).await;
     let stderr = server.drain_stderr();
 
     assert_eq!(
