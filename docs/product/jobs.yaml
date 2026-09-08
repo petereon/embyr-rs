@@ -1366,6 +1366,19 @@ jobs:
     # per-event I/O cost multiplier). See
     # docs/feature/security-rules-cel-cross-document-reads/feature-delta.md
     # § Job Discovery Framing Resolution.
+    # NOTE (security-rules-cel-chaining-detection DISCUSS, 2026-09-08):
+    # JOB-17 now also covers reliably NAMING a "chaining" get() (a get()
+    # whose own path is built from ANOTHER get()'s own result) as an
+    # offending construct at rule-import time -- same job, same persona,
+    # not a new job. Chaining itself remains a deliberate non-goal
+    # (ADR-066 Resolution 2, not re-litigated here) -- this feature is
+    # scoped strictly to detection/naming reliability at import time, so
+    # a real rule author gets a clear, actionable rejection instead of an
+    # import that silently succeeds and could fail unpredictably later at
+    # evaluation time. Found as the last remaining item in the
+    # 2026-09-06 production-readiness/parity known-gaps scan. See
+    # docs/feature/security-rules-cel-chaining-detection/feature-delta.md
+    # § Job Discovery Framing Resolution.
 
   - id: JOB-18
     name: embyr-hosted-identity
