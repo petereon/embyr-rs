@@ -176,6 +176,16 @@ impl ServerProcess {
             .env("REST_PORT", rest_port.to_string())
             .env("ADMIN_PORT", admin_port.to_string())
             .env("RUST_LOG", "info")
+            // stripe-webhook-secret-required (Decision 3): this harness does
+            // not clear the environment (unlike its sibling `start_env_only`),
+            // so it would otherwise silently inherit CI's job-level
+            // `STRIPE_SECRET_KEY` (set at job level in ci.yml for
+            // card-payments-backend's own real-Stripe tests) — making every
+            // one of this helper's call sites fail-fast in CI for no real
+            // misconfiguration reason. Remove both; `extra_env` below can
+            // still re-add either explicitly for tests that want them.
+            .env_remove("STRIPE_SECRET_KEY")
+            .env_remove("STRIPE_WEBHOOK_SIGNING_SECRET")
             .stderr(Stdio::piped())
             .stdout(Stdio::piped());
 

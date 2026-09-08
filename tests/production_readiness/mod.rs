@@ -18,6 +18,10 @@
 //!   4. pr04 — US-PR-01: graceful shutdown on SIGTERM (D-PR-5)
 //!   5. pr05 — firestore-tls-support US-01: in-process TLS on all 3
 //!      listeners via EMBYR_TLS_CERT_PATH/EMBYR_TLS_KEY_PATH (AC-TLS-01..07)
+//!   6. pr06 — stripe-webhook-secret-required US-01: fail-fast when
+//!      STRIPE_SECRET_KEY is set without STRIPE_WEBHOOK_SIGNING_SECRET, and
+//!      the webhook route is unmounted when Stripe is fully unconfigured
+//!      (AC-WHS-01, AC-WHS-02)
 //!
 //! Pre-requisites before running any test:
 //!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
@@ -32,4 +36,5 @@ mod acceptance {
     mod pr03_ci;
     mod pr04_graceful_shutdown;
     mod pr05_tls_support;
+    mod pr06_stripe_webhook_secret_required;
 }

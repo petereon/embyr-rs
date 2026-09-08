@@ -200,6 +200,31 @@ async fn main() {
     let email_sender: Arc<dyn embyr_core::admin::email::IEmailSender + Send + Sync> =
         Arc::new(NoopEmailSender);
 
+    // stripe-webhook-secret-required (D1/D2): mount the webhook sub-router
+    // only when Stripe billing is genuinely enabled (non-empty
+    // STRIPE_SECRET_KEY). `ServerConfig::from_env()` (Step 1, already run)
+    // already refused to start the process if STRIPE_SECRET_KEY was set
+    // without STRIPE_WEBHOOK_SIGNING_SECRET — the `.expect()` below documents
+    // that invariant, it never fires in a process that reached this line.
+    let stripe_billing_enabled = cfg
+        .stripe_secret_key
+        .as_deref()
+        .is_some_and(|v| !v.is_empty());
+    let webhook_signing_secret: Option<String> = if stripe_billing_enabled {
+        Some(
+            cfg.stripe_webhook_signing_secret
+                .clone()
+                .filter(|v| !v.is_empty())
+                .expect(
+                    "invariant violated: STRIPE_SECRET_KEY is set but \
+                     STRIPE_WEBHOOK_SIGNING_SECRET is absent/empty — \
+                     ServerConfig::from_env() must already have refused startup",
+                ),
+        )
+    } else {
+        None
+    };
+
     let admin_app = build_admin_router(
         Arc::clone(&system_db),
         cfg.admin_key.clone(),
@@ -213,7 +238,7 @@ async fn main() {
         cfg.rate_limit_rps,
         prom_handle,
         Arc::clone(&stripe_gateway),
-        cfg.stripe_webhook_signing_secret.clone().unwrap_or_default(),
+        webhook_signing_secret,
         Arc::clone(&cap_status_cache),
     )
     .route("/healthz", axum::routing::get(healthz_handler));

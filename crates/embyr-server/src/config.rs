@@ -260,6 +260,30 @@ impl ServerConfig {
             _ => {} // both set, or both unset — no missing-var error either way
         }
 
+        // ── Stripe webhook secret (stripe-webhook-secret-required, D1) ─────
+        // Independent, throwaway reads — deliberately NOT reusing the
+        // `stripe_secret_key`/`stripe_webhook_signing_secret` fields populated
+        // later in this function: those use plain `.ok()` with no empty-string
+        // filter, because GitHub Actions sets a configured-but-absent repo
+        // secret to `""`, not "unset" — an empty string must NOT count as
+        // "billing enabled" here, or every fork/PR without the secret would
+        // fail-fast startup. `.filter(|v| !v.is_empty())` mirrors the TLS
+        // pattern above.
+        let stripe_secret_key_present = std::env::var("STRIPE_SECRET_KEY")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some();
+        let stripe_webhook_signing_secret_present = std::env::var("STRIPE_WEBHOOK_SIGNING_SECRET")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some();
+        if stripe_secret_key_present && !stripe_webhook_signing_secret_present {
+            missing.push(
+                "STRIPE_WEBHOOK_SIGNING_SECRET (required because STRIPE_SECRET_KEY is set)"
+                    .to_string(),
+            );
+        }
+
         if !missing.is_empty() {
             return Err(ConfigError::MissingVars(missing));
         }

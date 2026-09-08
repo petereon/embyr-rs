@@ -249,7 +249,7 @@ impl CpbTestContext {
             1000.0,
             prometheus_handle,
             stripe_gateway,
-            webhook_signing_secret.to_string(),
+            Some(webhook_signing_secret.to_string()),
             cap_status_cache.clone(),
         );
 
@@ -341,7 +341,7 @@ impl CpbTestContext {
             1000.0,
             prometheus_handle,
             stripe_gateway,
-            webhook_signing_secret.to_string(),
+            Some(webhook_signing_secret.to_string()),
             cap_status_cache.clone(),
         );
 

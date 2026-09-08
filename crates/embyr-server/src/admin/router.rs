@@ -109,7 +109,11 @@ pub fn build_admin_router(
     // card-payments-backend (US-203): the 5th sub-router's own signing
     // secret, checked by `stripe_signature_middleware` — no session/operator
     // auth guards this sub-router.
-    webhook_signing_secret: String,
+    // stripe-webhook-secret-required (D1/D2): `None` = Stripe billing not
+    // enabled for this deployment — the webhook sub-router is not mounted at
+    // all (AC-WHS-01). `Some(secret)` = mount it, gated by
+    // `stripe_signature_middleware` exactly as today.
+    webhook_signing_secret: Option<String>,
     // card-payments-backend (ADR-020, step 03-01): shared with the
     // composition root's `CapUsageRefresher::spawn` call so the background
     // task writes into the SAME cache instance `get_subscription` reads from
@@ -129,12 +133,29 @@ pub fn build_admin_router(
         prometheus_handle,
         stripe_gateway: stripe_gateway.clone(),
     };
-    let webhook_state = WebhookState {
-        system_db: system_db.clone(),
-        stripe_gateway: stripe_gateway.clone(),
-        webhook_signing_secret,
-        credential_cache: credential_cache.clone(),
-    };
+
+    // Webhook sub-router: no session/operator auth (AC-203-01) — gated by its
+    // own `stripe_signature_middleware` instead (US-203). Built only when
+    // Stripe billing is enabled (stripe-webhook-secret-required, D1/D2) —
+    // `None` means the route must not exist at all (AC-WHS-01). Built here,
+    // before `system_db`/`credential_cache`/`stripe_gateway` are moved into
+    // `user_state` below.
+    let webhook_router: Option<Router> = webhook_signing_secret.map(|secret| {
+        let webhook_state = WebhookState {
+            system_db: system_db.clone(),
+            stripe_gateway: stripe_gateway.clone(),
+            webhook_signing_secret: secret,
+            credential_cache: credential_cache.clone(),
+        };
+        Router::<WebhookState>::new()
+            .route("/admin/v1/webhooks/stripe", post(stripe_webhook_handler))
+            .route_layer(axum::middleware::from_fn_with_state(
+                webhook_state.clone(),
+                stripe_signature_middleware,
+            ))
+            .with_state(webhook_state)
+    });
+
     let user_state = UserAdminState {
         system_db,
         encryption_key,
@@ -395,22 +416,15 @@ pub fn build_admin_router(
         ))
         .with_state(user_state);
 
-    // Webhook sub-router: no session/operator auth (AC-203-01) — gated by
-    // its own `stripe_signature_middleware` instead (US-203).
-    let webhook_router = Router::<WebhookState>::new()
-        .route("/admin/v1/webhooks/stripe", post(stripe_webhook_handler))
-        .route_layer(axum::middleware::from_fn_with_state(
-            webhook_state.clone(),
-            stripe_signature_middleware,
-        ))
-        .with_state(webhook_state);
-
-    Router::new()
+    let mut router = Router::new()
         .merge(operator_router)
         .merge(dual_auth_router)
         .merge(public_router)
-        .merge(webhook_router)
-        .merge(session_router)
+        .merge(session_router);
+    if let Some(webhook_router) = webhook_router {
+        router = router.merge(webhook_router);
+    }
+    router
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +500,7 @@ pub fn build_with_secret_fetchers(
         1000.0,
         prometheus_handle,
         stripe_gateway,
-        String::new(),
+        None,
         Arc::new(CapStatusCache::new()),
     )
 }
