@@ -764,16 +764,6 @@ jobs:
         no hardcoded defaults for security-critical values, clean exit codes
     opportunity_score: 15
     priority: critical
-    # NOTE (firestore-tls-support DISCUSS, 2026-09-08): JOB-13 now also
-    # covers TLS termination as an opt-in deployment capability --
-    # EMBYR_TLS_CERT_PATH/EMBYR_TLS_KEY_PATH, both-or-neither (fail-fast,
-    # same D-PR-6 "all or none" pattern already used for the 3 port
-    # binds). Absent (default) preserves today's plaintext behavior
-    # exactly -- correct for LB-terminated deployments, per known-gaps.md
-    # #5's own severity note ("fine if a TLS-terminating LB sits in
-    # front"). Same job, same persona, not a new job. mTLS explicitly
-    # deferred (feature-delta.md Out of Scope) -- no evidenced need, and
-    # the gap's own severity reasoning is entirely about plain TLS.
 
   - id: JOB-14
     name: manage-subscription
