@@ -151,6 +151,15 @@ on-demand and are not instrumented in V1 — unbounded cardinality; V2 concern).
 
 ### HIGH CARDINALITY: `project_id` label on `embyr_rate_limit_requests_total`
 
+**Amended by ADR-069 (2026-09-09):** D-OBS-7's acceptance below assumed cardinality is bounded by the
+count of *real, registered* projects. That assumption was not enforced in code — the label used
+whatever raw `project_id` string an unauthenticated caller supplied, before any validation
+(production-readiness-audit-2026-09-08.md finding #2, Blocker). ADR-069 makes this assumption true in
+code by gating the label on the rate limiter's own pre-existing `rate_buckets` row-existence check,
+with a constant `"unconfirmed"` sentinel for anything not already provisioned. The ≤10,000-projects
+ceiling below is otherwise unchanged and remains the operative scaling assumption for legitimate
+traffic.
+
 Per D-OBS-7, the `project_id` label is retained in V1 despite the cardinality risk. This
 delivers the auditor-visible evidence that JOB-11 fair-multitenancy is enforced.
 
