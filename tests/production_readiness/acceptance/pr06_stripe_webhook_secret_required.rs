@@ -160,3 +160,108 @@ async fn exits_nonzero_when_stripe_secret_key_set_without_webhook_signing_secret
         "no port may bind when Stripe billing is half-configured"
     );
 }
+
+// ─── QUALITY_GATE addendum: an empty-string secret must fail exactly like an
+// absent one — this IS the GitHub-Actions-repo-secret scenario the whole
+// feature exists to close (a configured-but-absent repo secret is set to
+// "", not omitted) — and separately, that the webhook route genuinely DOES
+// mount through the REAL binary once correctly configured (mutation testing
+// found neither case was covered: AC-WHS-01 short-circuits before ever
+// evaluating `stripe_billing_enabled`'s own closure since STRIPE_SECRET_KEY
+// is None there, and AC-WHS-02 exits before main.rs's own mount logic runs
+// at all — so main.rs:205-221's "should mount" branch, and config.rs:278's
+// own empty-string direction specifically, had zero real coverage). ────────
+
+/// An empty-string STRIPE_WEBHOOK_SIGNING_SECRET must fail fast exactly like
+/// an absent one — GitHub Actions sets a configured-but-absent repo secret
+/// to `""`, not "unset"; if this test were missing, `.filter(|v| !v.is_empty())`
+/// silently inverted to `.filter(|v| v.is_empty())` would go undetected while
+/// still satisfying AC-WHS-02 (which only tests the fully-absent case).
+///
+/// @error @US-01 @AC-WHS-02
+#[tokio::test]
+#[ignore]
+async fn exits_nonzero_when_stripe_webhook_signing_secret_is_empty_string() {
+    let mut server = ServerProcess::start_env_only(&[
+        (
+            "DATABASE_URL",
+            "postgres://postgres:postgres@127.0.0.1:65535/embyr",
+        ),
+        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
+        ("STRIPE_SECRET_KEY", "sk_live_stripe_webhook_secret_required_test"),
+        ("STRIPE_WEBHOOK_SIGNING_SECRET", ""),
+    ]);
+
+    let exit_code = server.wait_for_exit(Duration::from_secs(3)).await;
+    let stderr = server.drain_stderr();
+
+    assert_eq!(
+        exit_code,
+        Some(1),
+        "server must exit 1 when STRIPE_WEBHOOK_SIGNING_SECRET is an empty \
+         string, exactly like the fully-absent case; got {exit_code:?}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("STRIPE_WEBHOOK_SIGNING_SECRET"),
+        "stderr must name STRIPE_WEBHOOK_SIGNING_SECRET; got: {stderr}"
+    );
+    assert!(
+        !ServerProcess::port_is_bound(server.grpc_port),
+        "no port may bind when Stripe billing is half-configured"
+    );
+}
+
+/// With both Stripe vars correctly (non-empty) configured, the real binary's
+/// own `main.rs` startup path must actually mount the webhook route — proving
+/// `stripe_billing_enabled`/`webhook_signing_secret` (main.rs:209-221) reach
+/// their `true`/`Some` arms, not just that the fully-unconfigured and
+/// fully-absent cases behave correctly. A 401 (rejected by
+/// `stripe_signature_middleware` for lacking a `Stripe-Signature` header)
+/// proves the route EXISTS; a 404 would mean it was never mounted at all.
+///
+/// @error @boundary @US-01 @AC-WHS-03
+#[tokio::test]
+#[ignore]
+async fn webhook_route_is_reachable_when_stripe_correctly_configured() {
+    let (_pg, db_url) = start_postgres_container().await;
+
+    let mut server = ServerProcess::start(
+        &db_url,
+        &[
+            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
+            ("STRIPE_SECRET_KEY", "sk_live_stripe_webhook_secret_required_test"),
+            ("STRIPE_WEBHOOK_SIGNING_SECRET", "whsec_stripe_webhook_secret_required_test"),
+        ],
+    );
+
+    let healthy = server.wait_for_healthy(Duration::from_secs(30)).await;
+    assert!(
+        healthy,
+        "server with correctly-configured Stripe billing must start normally"
+    );
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "http://127.0.0.1:{}/admin/v1/webhooks/stripe",
+        server.admin_port
+    );
+    let resp = client
+        .post(&url)
+        .body("{}")
+        .send()
+        .await
+        .expect("POST to webhook route must complete");
+
+    assert_ne!(
+        resp.status().as_u16(),
+        404,
+        "webhook route must be mounted when Stripe billing is correctly \
+         configured — a 404 means main.rs never reached the Some(...) arm; got {}",
+        resp.status()
+    );
+
+    server.sigterm();
+    let _ = server.wait_for_exit(Duration::from_secs(10)).await;
+}
