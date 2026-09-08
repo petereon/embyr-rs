@@ -764,6 +764,25 @@ jobs:
         no hardcoded defaults for security-critical values, clean exit codes
     opportunity_score: 15
     priority: critical
+    # NOTE (firestore-tls-support DISCUSS, 2026-09-08): JOB-13 now also covers
+    # TLS termination as an opt-in deployment capability — two new optional env
+    # vars (EMBYR_TLS_CERT_PATH/EMBYR_TLS_KEY_PATH) let an operator without a
+    # TLS-terminating load balancer in front (a common self-hosted/bare-metal
+    # deployment shape) encrypt all 3 listeners (:8080 gRPC, :8081 REST/
+    # gRPC-Web, :9090 Admin) in-process, using the same fail-fast/named-error
+    # startup discipline this job's own production-readiness feature already
+    # established for DATABASE_URL/EMBYR_ADMIN_KEY/EMBYR_ENCRYPTION_KEY — same
+    # job, same persona, not a new job. Leaving both vars unset preserves
+    # today's plaintext behavior byte-for-byte (hard regression guard) — the
+    # LB-fronted deployment shape this job's own walking skeleton already
+    # validated is completely unaffected. One cert/key pair serves all 3
+    # listeners; cert/key are read once at startup (no rotation/hot-reload,
+    # matching EMBYR_ADMIN_KEY/EMBYR_ENCRYPTION_KEY's own read-once pattern).
+    # mTLS (client certificate verification) is explicitly DEFERRED — the
+    # source gap's own severity argument was entirely about plain server-side
+    # TLS; mTLS was named only in the gap's title, with no evidenced customer
+    # need. See docs/feature/firestore-tls-support/feature-delta.md § Reading
+    # Confirmation, § Out of Scope.
 
   - id: JOB-14
     name: manage-subscription
