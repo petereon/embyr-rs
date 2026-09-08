@@ -110,7 +110,7 @@ impl OAuthProviderAdminContext {
             1000.0,
             prometheus_handle,
             stripe_gateway,
-            String::new(),
+            None,
             Arc::new(CapStatusCache::new()),
         );
 

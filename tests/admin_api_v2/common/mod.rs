@@ -375,7 +375,7 @@ impl AdminTestContext {
             1000.0,
             prometheus_handle,
             stripe_gateway,
-            String::new(),
+            None,
             // admin_api_v2 never exercises billing/cap_status routes —
             // fresh, unshared cache is sufficient (card-payments-backend
             // ADR-020, step 03-01 signature addition).

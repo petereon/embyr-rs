@@ -105,7 +105,7 @@ impl HostedIdentityAdminContext {
             1000.0,
             prometheus_handle,
             stripe_gateway,
-            String::new(),
+            None,
             Arc::new(CapStatusCache::new()),
         );
 
@@ -289,7 +289,10 @@ impl HostedIdentityFullContext {
         let cust_url = format!("postgres://postgres:postgres@127.0.0.1:{cust_port}/postgres");
 
         let system_db = Arc::new(SystemDb::new(&sys_url).await.expect("SystemDb::new failed"));
-        system_db.migrate().await.expect("system DB migrations failed");
+        system_db
+            .migrate()
+            .await
+            .expect("system DB migrations failed");
         let sys_pool = system_db.pool().clone();
 
         let cust_pool = sqlx::PgPool::connect(&cust_url)
@@ -310,7 +313,8 @@ impl HostedIdentityFullContext {
         let api_key = format!("test-sk-hosted-identity-{project_id}");
         let api_key_hash = argon2::hash_api_key(api_key.as_bytes()).expect("hash api key");
         let pub_key = ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_dsn = ecies::encrypt(&pub_key, cust_url.as_bytes()).expect("ecies encrypt dsn");
+        let encrypted_dsn =
+            ecies::encrypt(&pub_key, cust_url.as_bytes()).expect("ecies encrypt dsn");
 
         sqlx::query(
             "INSERT INTO projects \
@@ -337,11 +341,9 @@ impl HostedIdentityFullContext {
         .expect("insert seed document");
 
         let captured_emails = Arc::new(FakeEmailSender::default());
-        let server = embyr_server::start_test_server_with_email_sender(
-            system_db,
-            captured_emails.clone(),
-        )
-        .await;
+        let server =
+            embyr_server::start_test_server_with_email_sender(system_db, captured_emails.clone())
+                .await;
 
         HostedIdentityFullContext {
             _sys_container: sys_container,
@@ -431,14 +433,15 @@ impl HostedIdentityFullContext {
 
     /// Reconnect to the customer DB for direct assertions (test-only — the
     /// production path always goes through `resolve_customer_db_adapter`).
-    async fn customer_pool(&self) -> embyr_server::adapters::postgres_backend::PostgresBackendAdapter {
-        let encrypted_dsn: Vec<u8> = sqlx::query_scalar(
-            "SELECT ecies_encrypted_dsn FROM projects WHERE id = $1",
-        )
-        .bind(&self.project_id)
-        .fetch_one(&self.sys_pool)
-        .await
-        .expect("read ecies_encrypted_dsn");
+    async fn customer_pool(
+        &self,
+    ) -> embyr_server::adapters::postgres_backend::PostgresBackendAdapter {
+        let encrypted_dsn: Vec<u8> =
+            sqlx::query_scalar("SELECT ecies_encrypted_dsn FROM projects WHERE id = $1")
+                .bind(&self.project_id)
+                .fetch_one(&self.sys_pool)
+                .await
+                .expect("read ecies_encrypted_dsn");
         let dsn_bytes =
             ecies::decrypt(self.api_key.as_bytes(), &encrypted_dsn).expect("decrypt dsn");
         let dsn = String::from_utf8(dsn_bytes).expect("dsn utf8");

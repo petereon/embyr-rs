@@ -80,9 +80,15 @@ pub mod universe {
 /// the role of Trailmark's own backend — an external actor embyr never
 /// calls — so real Ed25519 signing here is correct test design, not a mock
 /// of any embyr-owned port.
-pub fn mint_client_identity_token(signing_key: &SigningKey, sub: &str, aud: &str, exp_unix: i64) -> String {
+pub fn mint_client_identity_token(
+    signing_key: &SigningKey,
+    sub: &str,
+    aud: &str,
+    exp_unix: i64,
+) -> String {
     let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#);
-    let payload = URL_SAFE_NO_PAD.encode(serde_json::json!({"sub": sub, "aud": aud, "exp": exp_unix}).to_string());
+    let payload = URL_SAFE_NO_PAD
+        .encode(serde_json::json!({"sub": sub, "aud": aud, "exp": exp_unix}).to_string());
     let signing_input = format!("{header}.{payload}");
     let signature = signing_key.sign(signing_input.as_bytes());
     let sig_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
@@ -91,14 +97,21 @@ pub fn mint_client_identity_token(signing_key: &SigningKey, sub: &str, aud: &str
 
 /// Algorithm-confusion attack token (ADR-024 Enforcement regression, ca05):
 /// `alg: HS256` using the registered PUBLIC key bytes as the HMAC secret.
-pub fn mint_hs256_confusion_token(public_key_bytes: &[u8; 32], sub: &str, aud: &str, exp_unix: i64) -> String {
+pub fn mint_hs256_confusion_token(
+    public_key_bytes: &[u8; 32],
+    sub: &str,
+    aud: &str,
+    exp_unix: i64,
+) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
     let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-    let payload = URL_SAFE_NO_PAD.encode(serde_json::json!({"sub": sub, "aud": aud, "exp": exp_unix}).to_string());
+    let payload = URL_SAFE_NO_PAD
+        .encode(serde_json::json!({"sub": sub, "aud": aud, "exp": exp_unix}).to_string());
     let signing_input = format!("{header}.{payload}");
-    let mut mac = Hmac::<Sha256>::new_from_slice(public_key_bytes).expect("HMAC accepts any key length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(public_key_bytes).expect("HMAC accepts any key length");
     mac.update(signing_input.as_bytes());
     let sig_b64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
     format!("{signing_input}.{sig_b64}")
@@ -170,7 +183,7 @@ impl ClientAuthAdminContext {
             1000.0,
             prometheus_handle,
             stripe_gateway,
-            String::new(),
+            None,
             Arc::new(CapStatusCache::new()),
         );
 
@@ -346,7 +359,10 @@ impl ClientAuthFullContext {
         let cust_url = format!("postgres://postgres:postgres@127.0.0.1:{cust_port}/postgres");
 
         let system_db = Arc::new(SystemDb::new(&sys_url).await.expect("SystemDb::new failed"));
-        system_db.migrate().await.expect("system DB migrations failed");
+        system_db
+            .migrate()
+            .await
+            .expect("system DB migrations failed");
         let sys_pool = system_db.pool().clone();
 
         let cust_pool = sqlx::PgPool::connect(&cust_url)
@@ -367,7 +383,8 @@ impl ClientAuthFullContext {
         let api_key = format!("test-sk-client-auth-{project_id}");
         let api_key_hash = argon2::hash_api_key(api_key.as_bytes()).expect("hash api key");
         let pub_key = ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_dsn = ecies::encrypt(&pub_key, cust_url.as_bytes()).expect("ecies encrypt dsn");
+        let encrypted_dsn =
+            ecies::encrypt(&pub_key, cust_url.as_bytes()).expect("ecies encrypt dsn");
 
         sqlx::query(
             "INSERT INTO projects \

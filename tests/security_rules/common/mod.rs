@@ -126,7 +126,7 @@ impl SecurityRulesAdminContext {
             1000.0,
             prometheus_handle,
             stripe_gateway,
-            String::new(),
+            None,
             Arc::new(CapStatusCache::new()),
         );
 
@@ -225,7 +225,12 @@ impl SecurityRulesAdminContext {
     /// used by AC-17-02's redefine-precondition setup, mirroring
     /// `ClientAuthAdminContext::seed_credential`'s identical
     /// bypass-the-endpoint allowance).
-    pub async fn seed_access_rule(&self, project_id: &str, collection_path: &str, condition_source: &str) {
+    pub async fn seed_access_rule(
+        &self,
+        project_id: &str,
+        collection_path: &str,
+        condition_source: &str,
+    ) {
         sqlx::query(
             "INSERT INTO access_rules (project_id, collection_path, condition_source) \
              VALUES ($1, $2, $3)",
@@ -311,7 +316,10 @@ impl SecurityRulesFullContext {
         let cust_url = format!("postgres://postgres:postgres@127.0.0.1:{cust_port}/postgres");
 
         let system_db = Arc::new(SystemDb::new(&sys_url).await.expect("SystemDb::new failed"));
-        system_db.migrate().await.expect("system DB migrations failed");
+        system_db
+            .migrate()
+            .await
+            .expect("system DB migrations failed");
         let sys_pool = system_db.pool().clone();
 
         let cust_pool = sqlx::PgPool::connect(&cust_url)
@@ -330,9 +338,11 @@ impl SecurityRulesFullContext {
         .expect("insert account");
 
         let api_key = format!("test-sk-security-rules-{project_id}");
-        let api_key_hash = embyr_core::auth::argon2::hash_api_key(api_key.as_bytes()).expect("hash api key");
+        let api_key_hash =
+            embyr_core::auth::argon2::hash_api_key(api_key.as_bytes()).expect("hash api key");
         let pub_key = embyr_core::auth::ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_dsn = embyr_core::auth::ecies::encrypt(&pub_key, cust_url.as_bytes()).expect("ecies encrypt dsn");
+        let encrypted_dsn = embyr_core::auth::ecies::encrypt(&pub_key, cust_url.as_bytes())
+            .expect("ecies encrypt dsn");
 
         sqlx::query(
             "INSERT INTO projects \
@@ -490,7 +500,12 @@ impl SecurityRulesFullContext {
     /// security-rules-cel-parity (Slice 02): lets CP02 seed
     /// `profiles/<uid>`-shaped documents this fixture's fixed seed set
     /// doesn't cover.
-    pub async fn seed_document(&self, collection: &str, document_id: &str, fields: serde_json::Value) {
+    pub async fn seed_document(
+        &self,
+        collection: &str,
+        document_id: &str,
+        fields: serde_json::Value,
+    ) {
         sqlx::query(
             "INSERT INTO documents (project_id, collection_path, document_id, fields, create_time, update_time, version) \
              VALUES ($1, $2, $3, $4, now(), now(), 1)",
@@ -527,10 +542,7 @@ impl SecurityRulesFullContext {
         &self,
         resource_name: &str,
         client_identity_token: Option<&str>,
-    ) -> Result<
-        tonic::Response<embyr_proto::firestore::Document>,
-        tonic::Status,
-    > {
+    ) -> Result<tonic::Response<embyr_proto::firestore::Document>, tonic::Status> {
         use embyr_proto::firestore::firestore_client::FirestoreClient;
 
         let channel = tonic::transport::Endpoint::new(format!("http://{}", self.server.grpc_addr))
