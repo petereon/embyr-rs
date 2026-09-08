@@ -57,9 +57,9 @@ use testcontainers_modules::{
     testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt},
 };
 
-use embyr_server::adapters::system_db::SystemDb;
 use embyr_proto::firestore::firestore_client::FirestoreClient;
 use embyr_proto::firestore::GetDocumentRequest;
+use embyr_server::adapters::system_db::SystemDb;
 
 // ─── DrlTestContext ───────────────────────────────────────────────────────────
 
@@ -111,13 +111,14 @@ impl DrlTestContext {
                 .await
                 .expect("SystemDb::new failed for DRL test context"),
         );
-        system_db.migrate().await.expect("Migrations failed for DRL test context");
+        system_db
+            .migrate()
+            .await
+            .expect("Migrations failed for DRL test context");
 
         let pool = system_db.pool().clone();
 
-        let admin_client = reqwest::Client::builder()
-            .build()
-            .expect("reqwest client");
+        let admin_client = reqwest::Client::builder().build().expect("reqwest client");
 
         DrlTestContext {
             _container: container,
@@ -144,7 +145,10 @@ impl DrlTestContext {
 
     /// Returns the full URL for the given admin API path.
     pub fn admin_url(&self, path: &str) -> String {
-        let base = self.admin_base_url.as_deref().expect("admin_base_url not set");
+        let base = self
+            .admin_base_url
+            .as_deref()
+            .expect("admin_base_url not set");
         format!("{}{}", base, path)
     }
 
@@ -189,24 +193,20 @@ impl DrlTestContext {
     /// Count rows in rate_buckets for a given project.
     /// Returns 0 if the table does not exist yet (DRL-01 pending) or the project has no row.
     pub async fn rate_bucket_row_count(&self, project_id: &str) -> i64 {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM rate_buckets WHERE project_id = $1",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(0)
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM rate_buckets WHERE project_id = $1")
+            .bind(project_id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0)
     }
 
     /// Count rows in the projects table for a given project_id.
     pub async fn project_row_count(&self, project_id: &str) -> i64 {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM projects WHERE id = $1",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(0)
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = $1")
+            .bind(project_id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0)
     }
 
     // ── Project seeding helpers ───────────────────────────────────────────────
@@ -215,12 +215,11 @@ impl DrlTestContext {
     /// Used to test the provisioning path that is supposed to create the rate_buckets row.
     pub async fn insert_project_without_bucket(&self, project_id: &str, api_key: &str) {
         use embyr_core::auth::{argon2, ecies};
-        let api_key_hash = argon2::hash_api_key(api_key.as_bytes())
-            .expect("argon2::hash_api_key failed");
+        let api_key_hash =
+            argon2::hash_api_key(api_key.as_bytes()).expect("argon2::hash_api_key failed");
         let pub_key = ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_dsn =
-            ecies::encrypt(&pub_key, b"postgres://placeholder:5432/test")
-                .expect("ecies::encrypt failed");
+        let encrypted_dsn = ecies::encrypt(&pub_key, b"postgres://placeholder:5432/test")
+            .expect("ecies::encrypt failed");
 
         sqlx::query(
             "INSERT INTO projects \
@@ -245,12 +244,11 @@ impl DrlTestContext {
         initial_tokens: f64,
     ) {
         use embyr_core::auth::{argon2, ecies};
-        let api_key_hash = argon2::hash_api_key(api_key.as_bytes())
-            .expect("argon2::hash_api_key failed");
+        let api_key_hash =
+            argon2::hash_api_key(api_key.as_bytes()).expect("argon2::hash_api_key failed");
         let pub_key = ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_dsn =
-            ecies::encrypt(&pub_key, b"postgres://placeholder:5432/test")
-                .expect("ecies::encrypt failed");
+        let encrypted_dsn = ecies::encrypt(&pub_key, b"postgres://placeholder:5432/test")
+            .expect("ecies::encrypt failed");
 
         sqlx::query(
             "INSERT INTO projects \
@@ -280,13 +278,8 @@ impl DrlTestContext {
 
 /// Build a GetDocument request for a given project and API key.
 /// Uses the canonical Firestore resource name format.
-pub fn get_document_request(
-    project_id: &str,
-    api_key: &str,
-) -> tonic::Request<GetDocumentRequest> {
-    let name = format!(
-        "projects/{project_id}/databases/(default)/documents/test/doc1"
-    );
+pub fn get_document_request(project_id: &str, api_key: &str) -> tonic::Request<GetDocumentRequest> {
+    let name = format!("projects/{project_id}/databases/(default)/documents/test/doc1");
     let mut req = tonic::Request::new(GetDocumentRequest {
         name,
         ..Default::default()
@@ -302,9 +295,7 @@ pub fn get_document_request(
 
 /// Classify a tonic gRPC call result as a status code string.
 /// Returns "ok", "not_found", "resource_exhausted", "permission_denied", or "other:{code}".
-pub fn classify_grpc_status<T>(
-    result: &Result<tonic::Response<T>, tonic::Status>,
-) -> String {
+pub fn classify_grpc_status<T>(result: &Result<tonic::Response<T>, tonic::Status>) -> String {
     match result {
         Ok(_) => "ok".to_string(),
         Err(s) => match s.code() {
@@ -314,6 +305,54 @@ pub fn classify_grpc_status<T>(
             code => format!("other:{code:?}"),
         },
     }
+}
+
+// ─── Metrics scrape helpers (rate-limiter-project-id-validation, AC-RLV-01) ───
+
+/// Fixed operator Bearer key `start_test_server_with_distributed_rate_limit`
+/// always configures the admin router with (see `embyr_server::lib.rs`).
+pub const ADMIN_KEY: &str = "test-admin-key-secret";
+
+/// GET /metrics on the given admin server with the fixed test operator key.
+/// Returns the raw Prometheus text-format body.
+pub async fn get_metrics(
+    admin_client: &reqwest::Client,
+    admin_addr: std::net::SocketAddr,
+) -> String {
+    admin_client
+        .get(format!("http://{admin_addr}/metrics"))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .send()
+        .await
+        .expect("GET /metrics request failed")
+        .text()
+        .await
+        .expect("GET /metrics body read failed")
+}
+
+/// Extract the distinct `project_id` label VALUES present on the
+/// `embyr_rate_limit_requests_total` metric family in a scraped Prometheus body.
+///
+/// Used to prove/disprove unbounded cardinality (ADR-069): before the fix, one
+/// distinct label appears per distinct `project_id` string ever sent, regardless
+/// of whether it corresponds to a real, provisioned project.
+pub fn rate_limit_metric_project_id_labels(body: &str) -> std::collections::HashSet<String> {
+    let mut labels = std::collections::HashSet::new();
+    for line in body.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with("embyr_rate_limit_requests_total{") {
+            continue;
+        }
+        if let Some(start) = line.find("project_id=\"") {
+            let rest = &line[start + "project_id=\"".len()..];
+            if let Some(end) = rest.find('"') {
+                labels.insert(rest[..end].to_string());
+            }
+        }
+    }
+    labels
 }
 
 // ─── Distributed gRPC server starter (scaffold) ───────────────────────────────

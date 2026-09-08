@@ -28,6 +28,13 @@ use embyr_core::rate_limit::RateLimitInfo;
 /// Hard cap on Postgres round-trip for distributed rate-limit enforcement.
 const RATE_LIMIT_PG_TIMEOUT_MS: u64 = 20;
 
+/// Sentinel label for `project_id` values not confirmed to belong to a
+/// provisioned project at the time of this rate-limit check (ADR-069).
+/// Bounds `embyr_rate_limit_requests_total` cardinality: an unauthenticated
+/// attacker sending N distinct, never-provisioned project_id strings
+/// contributes at most this ONE new label value, never N.
+const UNCONFIRMED_PROJECT_LABEL: &str = "unconfirmed";
+
 // ---------------------------------------------------------------------------
 // Token bucket (in-process, per project)
 // ---------------------------------------------------------------------------
@@ -137,12 +144,24 @@ impl RateLimiter {
     /// Increments `embyr_rate_limit_requests_total{project_id, outcome}` on
     /// every return (OBS-04).  The pg-timeout counter is incremented alongside
     /// the existing `tracing::warn!` inside `check_inner`.
+    ///
+    /// The `project_id` label is only the real value when `check_inner` reports
+    /// the project as `known_existing` (a `rate_buckets` row or in-process map
+    /// entry already existed); otherwise the label is the bounded sentinel
+    /// `UNCONFIRMED_PROJECT_LABEL` (ADR-069). This bounds Prometheus label
+    /// cardinality against unauthenticated, unvalidated `project_id` input —
+    /// the rate-limit bucket key itself is unaffected.
     pub async fn check(&self, project_id: &str) -> Result<RateLimitInfo, RateLimitInfo> {
-        let result = self.check_inner(project_id).await;
+        let (result, known_existing) = self.check_inner(project_id).await;
         let outcome = if result.is_ok() { "allowed" } else { "rejected" };
+        let label = if known_existing {
+            project_id.to_owned()
+        } else {
+            UNCONFIRMED_PROJECT_LABEL.to_owned()
+        };
         metrics::counter!(
             "embyr_rate_limit_requests_total",
-            "project_id" => project_id.to_owned(),
+            "project_id" => label,
             "outcome" => outcome
         )
         .increment(1);
@@ -151,13 +170,23 @@ impl RateLimiter {
 
     /// Inner implementation of `check` — extracted so the metric wrapper has a
     /// single call site.
-    async fn check_inner(&self, project_id: &str) -> Result<RateLimitInfo, RateLimitInfo> {
+    ///
+    /// Returns the rate-limit decision AND whether `project_id` was already
+    /// known to this rate limiter's backing store *before* this call (ADR-069)
+    /// — used only to bound the Prometheus label, never the bucket key.
+    async fn check_inner(
+        &self,
+        project_id: &str,
+    ) -> (Result<RateLimitInfo, RateLimitInfo>, bool) {
         if !self.enabled {
-            return Ok(RateLimitInfo {
-                remaining: self.capacity,
-                limit: self.capacity,
-                reset_ms: 0,
-            });
+            return (
+                Ok(RateLimitInfo {
+                    remaining: self.capacity,
+                    limit: self.capacity,
+                    reset_ms: 0,
+                }),
+                false,
+            );
         }
 
         if let Some(pool) = &self.pg_pool {
@@ -167,7 +196,7 @@ impl RateLimiter {
             )
             .await
             {
-                Ok(result) => return result,
+                Ok(result_and_existed) => return result_and_existed,
                 Err(_timeout) => {
                     tracing::warn!(
                         project_id = project_id,
@@ -194,7 +223,7 @@ impl RateLimiter {
         &self,
         project_id: &str,
         pool: &sqlx::PgPool,
-    ) -> Result<RateLimitInfo, RateLimitInfo> {
+    ) -> (Result<RateLimitInfo, RateLimitInfo>, bool) {
         let capacity = self.capacity;
         let refill_rate = self.refill_rate;
 
@@ -224,7 +253,7 @@ impl RateLimiter {
                 } else {
                     0
                 };
-                Ok(RateLimitInfo { remaining, limit: capacity, reset_ms })
+                (Ok(RateLimitInfo { remaining, limit: capacity, reset_ms }), true)
             }
             None => {
                 // No row updated: either rate-limited or project row absent.
@@ -247,11 +276,14 @@ impl RateLimiter {
                     .bind(capacity - 1.0)
                     .execute(pool)
                     .await;
-                    return Ok(RateLimitInfo {
-                        remaining: capacity - 1.0,
-                        limit: capacity,
-                        reset_ms: 0,
-                    });
+                    return (
+                        Ok(RateLimitInfo {
+                            remaining: capacity - 1.0,
+                            limit: capacity,
+                            reset_ms: 0,
+                        }),
+                        false,
+                    );
                 }
 
                 // Genuinely rate-limited — query current token level for headers.
@@ -274,7 +306,7 @@ impl RateLimiter {
                 } else {
                     0
                 };
-                Err(RateLimitInfo { remaining: current, limit: capacity, reset_ms })
+                (Err(RateLimitInfo { remaining: current, limit: capacity, reset_ms }), true)
             }
         }
     }
@@ -284,10 +316,11 @@ impl RateLimiter {
     /// Used when Postgres is unavailable or not configured.
     /// Caps the in-process bucket at 1× capacity to prevent token accumulation
     /// during long idle periods.
-    fn check_in_process(&self, project_id: &str) -> Result<RateLimitInfo, RateLimitInfo> {
+    fn check_in_process(&self, project_id: &str) -> (Result<RateLimitInfo, RateLimitInfo>, bool) {
         let capacity = self.capacity;
         let refill_rate = self.refill_rate;
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let known_existing = buckets.contains_key(project_id);
         let bucket = buckets
             .entry(project_id.to_string())
             .or_insert_with(|| TokenBucket::new(capacity, refill_rate));
@@ -295,7 +328,7 @@ impl RateLimiter {
         if bucket.tokens > capacity {
             bucket.tokens = capacity;
         }
-        if bucket.try_consume() {
+        let result = if bucket.try_consume() {
             let remaining = bucket.tokens;
             let reset_ms = if remaining < 1.0 {
                 ((1.0 - remaining) / refill_rate * 1000.0) as u64
@@ -307,7 +340,8 @@ impl RateLimiter {
             let reset_ms =
                 ((1.0 - bucket.tokens.min(1.0)) / refill_rate * 1000.0) as u64;
             Err(RateLimitInfo { remaining: bucket.tokens, limit: capacity, reset_ms })
-        }
+        };
+        (result, known_existing)
     }
 }
 

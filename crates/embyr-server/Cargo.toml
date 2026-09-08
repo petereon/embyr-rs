@@ -213,6 +213,14 @@ path = "../../tests/distributed_rate_limiting/acceptance/b13_fallback_on_pg_fail
 name = "drl_b14_ratelimit_headers"
 path = "../../tests/distributed_rate_limiting/acceptance/b14_ratelimit_headers.rs"
 
+[[test]]
+name = "drl_b15_project_id_metric_label_cardinality"
+path = "../../tests/distributed_rate_limiting/acceptance/b15_project_id_metric_label_cardinality.rs"
+
+[[test]]
+name = "drl_b16_malformed_project_id_no_panic"
+path = "../../tests/distributed_rate_limiting/acceptance/b16_malformed_project_id_no_panic.rs"
+
 # production-readiness acceptance tests
 [[test]]
 name = "production_readiness"
