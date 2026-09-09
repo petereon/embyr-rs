@@ -115,7 +115,7 @@ async fn insert_project(
          (id, account_id, backend_mode, api_key_hash_current, status, name, \
           deleted_at, ecies_encrypted_dsn, backend_pg_dsn_enc, agent_tls_bundle_enc) \
          VALUES ($1, $2, $3, 'unused-hash', $4, $1, \
-          CASE WHEN $5::float8 IS NULL THEN NULL ELSE now() - make_interval(days => $5) END, \
+          CASE WHEN $5::float8 IS NULL THEN NULL ELSE now() - make_interval(days => $5::int) END, \
           $6, $7, $8)",
     )
     .bind(project_id)

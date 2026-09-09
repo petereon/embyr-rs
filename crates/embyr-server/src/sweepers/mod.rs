@@ -2,11 +2,14 @@
 //! task must not run redundantly across instances).
 //!
 //! `CapUsageRefresher` (ADR-020) was the first module here. `TransactionSweeper`
-//! (customer-db-transaction-sweeper, ADR-054) is the second — both share the
-//! identical interval-loop + `pg_try_advisory_lock`/`pg_advisory_unlock` shape,
-//! so [`advisory_lock_key`] is extracted here rather than duplicated per module.
+//! (customer-db-transaction-sweeper, ADR-054) is the second, and
+//! `SoftDeletePurgeSweeper` (soft-delete-purge-sweeper, ADR-073) is the
+//! third — all three share the identical interval-loop +
+//! `pg_try_advisory_lock`/`pg_advisory_unlock` shape, so
+//! [`advisory_lock_key`] is extracted here rather than duplicated per module.
 
 pub mod cap_usage_refresher;
+pub mod soft_delete_purge_sweeper;
 pub mod transaction_sweeper;
 
 /// FNV-1a hash of `s`, used as the `pg_try_advisory_lock` key by every

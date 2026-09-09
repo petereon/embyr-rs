@@ -279,6 +279,18 @@ async fn main() {
         cfg.transaction_retention_days,
     );
 
+    // soft-delete-purge-sweeper (Blocker finding #6, production-readiness-audit-2026-09-08.md):
+    // background purge of the 3 sensitive encrypted-credential columns on a
+    // `'deleted'` project's own row, once the configured grace window (default
+    // 168h/7 days, matching the admin-UI's own unchanged promise) has elapsed.
+    // SystemDb-only — no customer-database connection, no DSN resolution
+    // (target columns live on the projects row itself, unlike TransactionSweeper).
+    let _soft_delete_purge_sweeper = embyr_server::sweepers::soft_delete_purge_sweeper::spawn(
+        Arc::clone(&system_db),
+        std::time::Duration::from_secs(cfg.soft_delete_sweep_interval_secs),
+        cfg.soft_delete_grace_days,
+    );
+
     // ── Step 11: spawn gRPC + REST + admin servers ────────────────────────
     // firestore-tls-support: derive the 2 listener-facing TLS types from
     // `cfg.tls` (both `None` when TLS is not configured — AC-TLS-01).

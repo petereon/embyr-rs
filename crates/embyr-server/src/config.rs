@@ -116,6 +116,13 @@ pub struct ServerConfig {
     /// retention window (ADR-054 § D2/D7, Slice 02); default 30 days,
     /// mirroring `SessionCleaner`'s own documented 30-day precedent.
     pub transaction_retention_days: i64,
+    /// `EMBYR_SOFT_DELETE_SWEEP_INTERVAL_SECS` — `SoftDeletePurgeSweeper`
+    /// background task interval (ADR-073 § D3); default 3600s (1 hour).
+    pub soft_delete_sweep_interval_secs: u64,
+    /// `EMBYR_SOFT_DELETE_GRACE_DAYS` — `SoftDeletePurgeSweeper` grace
+    /// window (ADR-073 § D3); default 7 days (168h), matching the admin-UI's
+    /// own unchanged promise text.
+    pub soft_delete_grace_days: i64,
     /// `EMBYR_TLS_CERT_PATH`/`EMBYR_TLS_KEY_PATH` — optional, both-or-neither.
     /// `None` = today's plaintext behavior on all 3 listeners, unchanged
     /// (AC-TLS-01, hard regression guard).
@@ -345,6 +352,14 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(30);
+        let soft_delete_sweep_interval_secs = std::env::var("EMBYR_SOFT_DELETE_SWEEP_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(3600);
+        let soft_delete_grace_days = std::env::var("EMBYR_SOFT_DELETE_GRACE_DAYS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(7);
 
         Ok(ServerConfig {
             db_url: db_url_opt.unwrap(),
@@ -363,6 +378,8 @@ impl ServerConfig {
             cap_check_interval_secs,
             transaction_sweep_interval_secs,
             transaction_retention_days,
+            soft_delete_sweep_interval_secs,
+            soft_delete_grace_days,
             tls,
         })
     }
