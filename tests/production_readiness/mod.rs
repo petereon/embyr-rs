@@ -33,6 +33,12 @@
 //!      accumulation, operator-visible signal after sustained failure,
 //!      dedicated per-project isolation unaffected) (AC-RLR-01 through
 //!      AC-RLR-05; AC-RLR-06/07 are regression guards, not new tests here)
+//!   9. pr09 — wire-secret-fetchers US-01: main.rs constructs real
+//!      AwsSecretFetcher/GcpSecretFetcher instances and threads them into
+//!      all 3 existing composition-root call sites (FirestoreService,
+//!      build_admin_router, transaction_sweeper::spawn) instead of
+//!      hardcoding None, None (production-readiness-audit-2026-09-08.md
+//!      finding #7) (AC-WSF-01 through AC-WSF-06)
 //!
 //! Pre-requisites before running any test:
 //!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
@@ -50,4 +56,5 @@ mod acceptance {
     mod pr06_stripe_webhook_secret_required;
     mod pr07_stripe_webhook_body_limit;
     mod pr08_realtime_listener_reconnect;
+    mod pr09_wire_secret_fetchers;
 }
