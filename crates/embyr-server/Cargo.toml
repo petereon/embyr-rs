@@ -1016,6 +1016,21 @@ path = "../../tests/composite_index_requirement_rules/acceptance/cir02_in_plus_r
 name = "composite_index_requirement_rules_cir03_name_the_missing_index"
 path = "../../tests/composite_index_requirement_rules/acceptance/cir03_name_the_missing_index.rs"
 
+# composite-index-real-creation (Slice 01, US-01, Release 1, Walking Skeleton). AC-CXR-01/02/03/04/05.
+[[test]]
+name = "composite_index_real_creation_cxr01_real_index_creation_and_usage"
+path = "../../tests/composite_index_real_creation/acceptance/cxr01_real_index_creation_and_usage.rs"
+
+# composite-index-real-creation (Slice 02, US-02, Release 1). AC-CXR-06/07/08/09.
+[[test]]
+name = "composite_index_real_creation_cxr02_non_blocking_build"
+path = "../../tests/composite_index_real_creation/acceptance/cxr02_non_blocking_build.rs"
+
+# composite-index-real-creation (Slice 03, US-03, Release 2, LAST slice). AC-CXR-10/11/12.
+[[test]]
+name = "composite_index_real_creation_cxr03_delete_removes_real_index"
+path = "../../tests/composite_index_real_creation/acceptance/cxr03_delete_removes_real_index.rs"
+
 # firestore-query-filter-operator-support (Slice 01, US-01, Release 1, Walking Skeleton). AC-QFO-01/02/03.
 [[test]]
 name = "firestore_query_filter_operator_support_qfo01_array_contains"
