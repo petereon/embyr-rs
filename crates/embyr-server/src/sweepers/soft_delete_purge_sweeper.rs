@@ -28,6 +28,14 @@ use super::advisory_lock_key;
 /// actual lock key, mirroring `TransactionSweeper::LOCK_KEY_NAME`.
 pub const LOCK_KEY_NAME: &str = "embyr_soft_delete_purge";
 
+/// Whether this instance should run the purge cycle: only when
+/// `pg_try_advisory_lock` genuinely returned `true` — `Some(false)` (lock
+/// held by another instance) and `None` (the probe query itself failed) both
+/// mean "skip, retry next tick".
+fn should_run_cycle(locked: Option<bool>) -> bool {
+    locked == Some(true)
+}
+
 /// Spawn the `SoftDeletePurgeSweeper` background task. Returns a `JoinHandle`
 /// the composition root should hold for the process lifetime (mirrors
 /// `cap_usage_refresher::spawn`'s exact fire-and-forget shape).
@@ -54,7 +62,7 @@ pub fn spawn(
                 .await
                 .ok();
 
-            if locked != Some(true) {
+            if !should_run_cycle(locked) {
                 // Lock held by another instance (or the probe query itself
                 // failed) — skip this cycle, retry next tick.
                 continue;
@@ -116,5 +124,17 @@ pub async fn run_cycle(system_db: &Arc<SystemDb>, grace_days: i64) {
         Err(e) => {
             tracing::warn!(error = %e, "SoftDeletePurgeSweeper: purge query failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_run_cycle;
+
+    #[test]
+    fn only_a_genuinely_acquired_lock_runs_the_cycle() {
+        assert!(should_run_cycle(Some(true)));
+        assert!(!should_run_cycle(Some(false)));
+        assert!(!should_run_cycle(None));
     }
 }
