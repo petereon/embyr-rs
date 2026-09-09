@@ -27,6 +27,12 @@
 //!      fully buffered (bounded RSS growth), while legitimate normally-sized
 //!      and large-but-legitimate correctly-signed webhooks still succeed
 //!      (AC-WBL-01 through AC-WBL-04)
+//!   8. pr08 — realtime-listener-reconnect US-01: a transient Postgres
+//!      connection failure against a project's real-time listener recovers
+//!      automatically (bounded backoff, no dangling task/connection
+//!      accumulation, operator-visible signal after sustained failure,
+//!      dedicated per-project isolation unaffected) (AC-RLR-01 through
+//!      AC-RLR-05; AC-RLR-06/07 are regression guards, not new tests here)
 //!
 //! Pre-requisites before running any test:
 //!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
@@ -43,4 +49,5 @@ mod acceptance {
     mod pr05_tls_support;
     mod pr06_stripe_webhook_secret_required;
     mod pr07_stripe_webhook_body_limit;
+    mod pr08_realtime_listener_reconnect;
 }
