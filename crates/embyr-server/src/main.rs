@@ -9,6 +9,7 @@
 //!   6.  `SystemDb::probe()`                      — verify schema (hard gate)
 //!   7.  Allocate production components            — cache, rate limiter, registry
 //!   8.  `TcpListener::bind` × 3                  — all three ports or none (D-PR-6)
+//!       8b. Construct cloud secret fetchers          — AWS unconditional, GCP gated on EMBYR_GCP_ACCESS_TOKEN
 //!   9.  Build [`grpc::handler::FirestoreService`]
 //!  10.  Build admin router (+ `/healthz` route)
 //!  11.  [`spawn_all_servers()`]                  — start accepting connections
@@ -23,8 +24,10 @@ use tracing_subscriber::EnvFilter;
 
 use embyr_server::{
     adapters::{
+        aws_secret_fetcher::AwsSecretFetcher,
         credential_cache::CredentialCache,
         email::NoopEmailSender,
+        gcp_secret_fetcher::GcpSecretFetcher,
         google_jwks_cache::GoogleJwksCache,
         index_manager::IndexManager,
         metrics_adapter::MetricsAdapter,
@@ -32,7 +35,7 @@ use embyr_server::{
         system_db::SystemDb,
     },
     admin::router::build_admin_router,
-    config::ServerConfig,
+    config::{ServerConfig, CLOUD_SECRET_FETCHER_TTL_SECS, GCP_SECRET_MANAGER_BASE_URL},
     grpc::{handler::FirestoreService, healthz::healthz_handler},
     middleware::rate_limit::RateLimiter,
     observability::get_or_install_prometheus_handle,
@@ -152,6 +155,37 @@ async fn main() {
     let rest_listener = bind_or_exit(cfg.rest_port, "REST").await;
     let admin_listener = bind_or_exit(cfg.admin_port, "admin").await;
 
+    // ── Step 8b: construct cloud secret fetchers (wire-secret-fetchers,
+    // closes production-readiness-audit finding #7) ───────────────────────
+    // AWS: unconditional construction. `aws_config::load_defaults` is
+    // infallible/lazy — zero I/O, zero risk of blocking or failing startup,
+    // regardless of whether real credentials exist. A deployment with no
+    // AWS credentials still starts normally; the first aws_secret-mode
+    // request or provisioning call fails closed later via the
+    // already-implemented `AwsSecretError` path (handler.rs / provision.rs)
+    // — no new error-handling code needed.
+    let aws_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let aws_secret_fetcher = Some(Arc::new(
+        AwsSecretFetcher::new(&aws_config, CLOUD_SECRET_FETCHER_TTL_SECS).await,
+    ));
+
+    // GCP: gated construction. `GcpSecretFetcher::new` takes the bearer
+    // token synchronously — it cannot be constructed without one. `None`
+    // here is a deliberate deferral, not an oversight: this feature's own
+    // System Constraints lock "no global startup fail-fast for missing
+    // AWS/GCP credentials" — a gcp_secret-mode request/provision call fails
+    // closed later, exactly as today (handler.rs / provision.rs).
+    let gcp_secret_fetcher = std::env::var("EMBYR_GCP_ACCESS_TOKEN")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|token| {
+            Arc::new(GcpSecretFetcher::new(
+                GCP_SECRET_MANAGER_BASE_URL,
+                &token,
+                CLOUD_SECRET_FETCHER_TTL_SECS,
+            ))
+        });
+
     // ── Step 9: build FirestoreService ────────────────────────────────────
     let service = FirestoreService {
         system_db: Arc::clone(&system_db),
@@ -161,8 +195,8 @@ async fn main() {
         keepalive_interval: std::time::Duration::from_secs(30),
         listen_registry,
         active_listeners,
-        aws_secret_fetcher: None,
-        gcp_secret_fetcher: None,
+        aws_secret_fetcher: aws_secret_fetcher.clone(),
+        gcp_secret_fetcher: gcp_secret_fetcher.clone(),
         rate_limiter,
     };
 
@@ -233,8 +267,8 @@ async fn main() {
         cfg.encryption_key,
         cfg.encryption_key_previous,
         Arc::clone(&email_sender),
-        None,
-        None,
+        aws_secret_fetcher.clone(),
+        gcp_secret_fetcher.clone(),
         cfg.rate_limit_rps,
         prom_handle,
         Arc::clone(&stripe_gateway),
@@ -261,18 +295,16 @@ async fn main() {
     // customer-db-transaction-sweeper (ADR-054): background reclaim +
     // purge of abandoned/terminal transactions rows across every
     // PG-reachable customer database (Slice 01 reclaim, Slice 02 purge).
-    // `aws_secret_fetcher`/`gcp_secret_fetcher` are `None` here, mirroring
-    // the pre-existing gap ADR-054 § D7 names explicitly: `FirestoreService`'s
-    // own live gRPC request-serving path (above) already hardcodes the same
-    // `None, None` for aws_secret/gcp_secret DSN resolution today — this
-    // sweeper's wiring is independent and does not worsen that gap. Any
-    // deployment with these fetchers unconfigured sees the sweeper silently
-    // skip every aws_secret/gcp_secret project via its own continue-on-error
-    // path.
+    // `aws_secret_fetcher`/`gcp_secret_fetcher` (wire-secret-fetchers): the
+    // same instances constructed at Step 8b reach this third call site too
+    // — a deployment with a cloud's credentials configured now has its
+    // aws_secret/gcp_secret projects actually reclaimed here, rather than
+    // silently skipped (ADR-054 § D7). Final use in program order, so this
+    // moves rather than clones.
     let _transaction_sweeper = embyr_server::sweepers::transaction_sweeper::spawn(
         Arc::clone(&system_db),
-        None,
-        None,
+        aws_secret_fetcher,
+        gcp_secret_fetcher,
         cfg.encryption_key,
         cfg.encryption_key_previous,
         std::time::Duration::from_secs(cfg.transaction_sweep_interval_secs),

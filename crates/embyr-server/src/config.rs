@@ -50,8 +50,10 @@ use crate::adapters::gcp_secret_fetcher::GcpSecretFetcher;
 
 /// GCP Secret Manager REST API base URL used by every GCP-sourced secret
 /// fetch in `from_env()`. No env-var override exists yet (OQ-SM-4 / ADR-018
-/// Alternatives A6) — out of scope for this feature.
-const GCP_SECRET_MANAGER_BASE_URL: &str = "https://secretmanager.googleapis.com";
+/// Alternatives A6) — out of scope for this feature. `pub` so `main.rs` (a
+/// separate crate) can reuse it directly for its own long-lived
+/// `gcp_secret_fetcher` construction (wire-secret-fetchers D-WSF-3).
+pub const GCP_SECRET_MANAGER_BASE_URL: &str = "https://secretmanager.googleapis.com";
 
 /// Cache TTL passed to `GcpSecretFetcher::new` / `AwsSecretFetcher::new` for
 /// every secret resolved in `from_env()` (admin_key, encryption_key, and
@@ -60,6 +62,16 @@ const GCP_SECRET_MANAGER_BASE_URL: &str = "https://secretmanager.googleapis.com"
 /// sourcing, no TTL benefit) — but each fetcher's constructor requires a
 /// value, so one shared constant serves all resolvers.
 const SECRET_FETCHER_TTL_SECS_UNUSED: u64 = 300;
+
+/// Cache TTL for the long-lived `aws_secret_fetcher`/`gcp_secret_fetcher`
+/// instances `main.rs` constructs once at startup and reuses across every
+/// live gRPC request/provisioning call (wire-secret-fetchers D-WSF-2) —
+/// unlike `SECRET_FETCHER_TTL_SECS_UNUSED` above, the cache here IS
+/// consulted repeatedly. 300s bounds `GetSecretValue`/GCP REST call volume
+/// to at most 1 per project per 5 minutes and keeps rotated-DSN staleness
+/// within an operationally acceptable window (both adapters' own doc
+/// comments independently document "default 300s").
+pub const CLOUD_SECRET_FETCHER_TTL_SECS: u64 = 300;
 
 /// Full configuration for embyr-server loaded from environment variables.
 #[derive(Debug)]
