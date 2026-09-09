@@ -160,3 +160,72 @@ jobs:
           docker build . -t embyr-server:ci
           --cache-from type=gha
           --cache-to type=gha,mode=max
+
+  # ─── agent: build + verify + package the embyr-agent static binary ───────────
+  # Produces the artifact ADR-001 requires: a separately compiled,
+  # statically-linked embyr-agent binary. Deliberately has no `needs:` —
+  # see ADR-074 for why mirroring the `docker` job's `needs: [test]` shape
+  # would break AC-EARP-05's failure-visibility requirement.
+  agent:
+    name: Agent build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc + musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler musl-tools
+
+      # toolchain: pinned to match rust-toolchain.toml exactly (1.95.0) — see
+      # the equivalent comment in the `test` job for why drift here has
+      # broken CI before. `targets:` installs the musl target on THIS
+      # pinned toolchain install, not via a later `rustup target add` (which
+      # would silently land on the wrong, stable-tracking toolchain once
+      # rust-toolchain.toml's own override takes effect).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Compiles the release embyr-agent binary for the musl target AND runs
+      # the three acceptance tests already written for exactly this purpose
+      # (tests/acceptance/embyr_agent/us_a06_lifecycle.rs) against the real
+      # compiled artifact — the happy-path startup-ordering and credential-
+      # logging proofs, AND the fail-closed-on-unreachable-storage proof
+      # (AC-EARP-02 covers both the artifact working AND failing correctly).
+      # RUSTFLAGS makes static linking explicit on top of musl's own default
+      # (matches main.rs's own top comment and
+      # docs/architecture/embyr-rs/architecture-decisions.md:147).
+      - name: Build + verify release musl binary
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: >
+          cargo test --release --target x86_64-unknown-linux-musl
+          -p embyr-agent --test embyr_agent --
+          agent_logs_storage_readiness_before_accepting_connections
+          storage_credential_never_appears_in_agent_logs
+          agent_exits_without_binding_port_when_storage_unreachable
+
+      - name: Upload embyr-agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: embyr-agent-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/embyr-agent
+          if-no-files-found: error
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Validates crates/embyr-agent/Dockerfile builds — build-and-tag-only,
+      # no registry push, same pattern the existing `docker` job already
+      # uses for embyr-server (registry publishing is finding #19's scope).
+      # scope=agent keeps this job's GHA cache isolated from the existing
+      # `docker` job's own cache (AC-EARP-04: no shared state).
+      - name: Build embyr-agent container image
+        run: >
+          docker build . -f crates/embyr-agent/Dockerfile -t embyr-agent:ci
+          --cache-from type=gha,scope=agent
+          --cache-to type=gha,mode=max,scope=agent

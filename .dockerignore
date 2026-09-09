@@ -1,5 +1,10 @@
 # Build artifacts — excluded to minimise Docker build context and avoid stale binaries
 target/
+# ...except the pre-built embyr-agent musl release binary the agent CI job's
+# Dockerfile COPYs in (see ADR-074) — un-exclude just that path.
+!target/x86_64-unknown-linux-musl/
+!target/x86_64-unknown-linux-musl/release/
+!target/x86_64-unknown-linux-musl/release/embyr-agent
 
 # Version control history
 .git/

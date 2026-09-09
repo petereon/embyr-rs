@@ -55,7 +55,6 @@ fn write_test_certs(dir: &std::path::Path) -> (String, String, String) {
 ///   Then  "connected to Postgres" appears in the log before "listening on :9191"
 ///   And   a document retrieval call succeeds immediately after both lines appear
 #[tokio::test]
-#[ignore = "requires Docker + embyr-agent binary — unskip in S06A delivery"]
 async fn agent_logs_storage_readiness_before_accepting_connections() {
     let (_pg, db_url) = start_test_postgres().await;
 
@@ -260,7 +259,6 @@ async fn agent_completes_in_flight_work_before_exiting_on_shutdown_signal() {
 ///   Then  no log line at any level contains "DO-NOT-LOG"
 ///   And   all log output is structured and machine-readable
 #[tokio::test]
-#[ignore = "requires Docker + embyr-agent binary — unskip in S06A delivery"]
 async fn storage_credential_never_appears_in_agent_logs() {
     let sentinel = "DO-NOT-LOG";
 
@@ -355,7 +353,6 @@ async fn storage_credential_never_appears_in_agent_logs() {
 ///   Then  the log contains a connection-failure message
 ///   And   the process exits with a non-zero exit code; no port is bound
 #[tokio::test]
-#[ignore = "requires embyr-agent binary — unskip in S06A delivery"]
 async fn agent_exits_without_binding_port_when_storage_unreachable() {
     let unreachable_dsn = "postgres://agent:pw@127.0.0.1:1/db"; // port 1 always fails
 
