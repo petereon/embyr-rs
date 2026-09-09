@@ -82,6 +82,28 @@ async fn seed_document(
     client.create_document(req).await.expect("seed document should succeed");
 }
 
+/// composite-index-real-creation (ADR-072) superseded synchronous
+/// `status='ready'` with a genuine async build — poll `ListIndexes` until
+/// the row reaches 'ready' before relying on it.
+async fn wait_until_ready(ctx: &SecurityRulesFullContext, cookie: &str, project_id: &str, index_id: &str) {
+    for _ in 0..100 {
+        let resp = reqwest::Client::new()
+            .get(ctx.admin_url(&format!("/admin/v1/projects/{project_id}/indexes")))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .expect("list_composite_indexes request failed");
+        let body: Vec<serde_json::Value> = resp.json().await.expect("JSON array");
+        if let Some(row) = body.iter().find(|r| r["id"] == index_id) {
+            if row["status"] == "ready" {
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("index {index_id} did not become ready in time");
+}
+
 async fn run_query(
     client: &mut FirestoreClient<tonic::transport::Channel>,
     project_id: &str,
@@ -210,12 +232,10 @@ async fn single_order_by_field_different_from_an_equality_filter_is_still_gated(
     let err = before.expect_err("AC-CIR-03: unchanged — still gated without a ready index");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition, "got {:?}: {}", err.code(), err.message());
 
+    let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     let create_resp = reqwest::Client::new()
         .post(ctx.admin_url(&format!("/admin/v1/projects/{}/indexes", ctx.project_id)))
-        .header(
-            "Cookie",
-            &ctx.seed_session("alex@trailmark.example", "Owner").await,
-        )
+        .header("Cookie", &cookie)
         .json(&serde_json::json!({
             "collection_path": "products",
             "fields": [{"field": "category", "order": "ASC"}, {"field": "score", "order": "DESC"}],
@@ -224,6 +244,9 @@ async fn single_order_by_field_different_from_an_equality_filter_is_still_gated(
         .await
         .expect("create_composite_index request failed");
     assert_eq!(create_resp.status().as_u16(), 200);
+    let create_body: serde_json::Value = create_resp.json().await.expect("JSON body");
+    let index_id = create_body["id"].as_str().expect("response must carry an id");
+    wait_until_ready(&ctx, &cookie, &ctx.project_id, index_id).await;
 
     let after = run_query(&mut client, &ctx.project_id, &ctx.api_key, sq).await;
     assert!(

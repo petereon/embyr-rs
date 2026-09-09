@@ -488,6 +488,65 @@ impl SystemDb {
         }))
     }
 
+    /// Fold ownership verification + the DSN-resolution-relevant columns
+    /// into one query (composite-index-real-creation, ADR-072 Decision C —
+    /// mirrors `get_project_backend_mode`'s own identical "fold ownership +
+    /// field into one query" pattern, ADR-036 Decision 5). `Ok(None)` means
+    /// the project does not exist, is deleted, or belongs to a different
+    /// account.
+    pub async fn get_project_pg_connect_info(
+        &self,
+        project_id: &str,
+        account_id: Uuid,
+    ) -> Result<Option<crate::adapters::customer_db_connect::PgConnectInfo>, CoreError> {
+        let row_opt = sqlx::query(
+            "SELECT backend_mode, backend_secret_arn, backend_secret_gcp, backend_pg_dsn_enc \
+             FROM projects WHERE id = $1 AND account_id = $2 AND status != 'deleted'",
+        )
+        .bind(project_id)
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        let Some(r) = row_opt else {
+            return Ok(None);
+        };
+
+        Ok(Some(crate::adapters::customer_db_connect::PgConnectInfo {
+            backend_mode: r
+                .try_get("backend_mode")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            backend_secret_arn: r
+                .try_get::<Option<String>, _>("backend_secret_arn")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            backend_secret_gcp: r
+                .try_get::<Option<String>, _>("backend_secret_gcp")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            backend_pg_dsn_enc: r
+                .try_get::<Option<Vec<u8>>, _>("backend_pg_dsn_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+        }))
+    }
+
+    /// Write the terminal (or transitional) `status` for a composite index
+    /// row (composite-index-real-creation, ADR-072 Decision C) — used by
+    /// `composite_index_builder`'s one-shot build task via the system DB
+    /// pool the admin handler already holds.
+    pub async fn update_composite_index_status(
+        &self,
+        id: Uuid,
+        status: &str,
+    ) -> Result<(), CoreError> {
+        sqlx::query("UPDATE composite_indexes SET status = $1 WHERE id = $2")
+            .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        Ok(())
+    }
+
     /// Enable hosted identity for a project (US-01): stores the
     /// server-generated, ECIES-encrypted signing key. Idempotent UPSERT
     /// (AC-18-02) — `INSERT ... ON CONFLICT (project_id) DO NOTHING

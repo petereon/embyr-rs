@@ -58,6 +58,31 @@ pub use state_delta::{appended_with, assert_state_delta, containing, set_to, unc
 pub mod client_auth_common;
 pub use client_auth_common::{mint_client_identity_token, now_unix, public_key_b64};
 
+/// composite-index-real-creation (ADR-072 Decision C): AES-256-GCM-encrypt
+/// `dsn` under `key` (12-byte random nonce prefix + ciphertext), the exact
+/// shape `adapters::customer_db_connect::resolve_dsn_without_api_key`
+/// decrypts via `decrypt_with_rotation` — mirrors
+/// `tests/customer_db_transaction_sweeper`'s own identical `encrypt_dsn`
+/// helper. `[0u8; 32]` matches `embyr_server::start_test_server`'s own
+/// hardcoded test `encryption_key` (`lib.rs::start_test_server_with_keepalive`).
+fn encrypt_dsn_for_test_server(dsn: &str) -> Vec<u8> {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
+    use rand_core::{OsRng, RngCore};
+
+    const TEST_SERVER_ENCRYPTION_KEY: [u8; 32] = [0u8; 32];
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let cipher = Aes256Gcm::new_from_slice(&TEST_SERVER_ENCRYPTION_KEY).expect("valid key");
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ct = cipher.encrypt(nonce, dsn.as_bytes()).expect("encrypt dsn");
+    let mut enc = nonce_bytes.to_vec();
+    enc.extend_from_slice(&ct);
+    enc
+}
+
 // ─── Universe — port-exposed observable names ─────────────────────────────────
 
 /// Port-exposed observable names for security-rules acceptance assertions.
@@ -343,16 +368,25 @@ impl SecurityRulesFullContext {
         let pub_key = embyr_core::auth::ecies::derive_public_key(api_key.as_bytes());
         let encrypted_dsn = embyr_core::auth::ecies::encrypt(&pub_key, cust_url.as_bytes())
             .expect("ecies encrypt dsn");
+        // composite-index-real-creation (ADR-072 Decision C): also populate
+        // backend_pg_dsn_enc — the api_key-free DSN resolution path
+        // (`resolve_dsn_without_api_key`) reads THIS column, never
+        // `ecies_encrypted_dsn` (which requires a live api_key to derive
+        // its ECIES private key — not available in CreateIndex's own
+        // admin-session auth context).
+        let backend_pg_dsn_enc = encrypt_dsn_for_test_server(&cust_url);
 
         sqlx::query(
             "INSERT INTO projects \
-             (id, account_id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
-             VALUES ($1, $2, 'active', 'direct_pg', $3, $4)",
+             (id, account_id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn, \
+              backend_pg_dsn_enc) \
+             VALUES ($1, $2, 'active', 'direct_pg', $3, $4, $5)",
         )
         .bind(project_id)
         .bind(account_id)
         .bind(&api_key_hash)
         .bind(&encrypted_dsn)
+        .bind(&backend_pg_dsn_enc)
         .execute(&sys_pool)
         .await
         .expect("insert project");

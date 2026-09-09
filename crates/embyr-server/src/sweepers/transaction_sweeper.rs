@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::adapters::aws_secret_fetcher::AwsSecretFetcher;
-use crate::adapters::encryption::decrypt_with_rotation;
+use crate::adapters::customer_db_connect::{resolve_dsn_without_api_key, PgConnectInfo};
 use crate::adapters::gcp_secret_fetcher::GcpSecretFetcher;
 use crate::adapters::postgres_backend::PostgresBackendAdapter;
 use crate::adapters::system_db::{SweeperProjectRow, SystemDb};
@@ -166,8 +166,15 @@ async fn sweep_one_project(
     encryption_key_previous: Option<&[u8; 32]>,
     retention_days: i64,
 ) {
+    let connect_info = PgConnectInfo {
+        backend_mode: project.backend_mode.clone(),
+        backend_secret_arn: project.backend_secret_arn.clone(),
+        backend_secret_gcp: project.backend_secret_gcp.clone(),
+        backend_pg_dsn_enc: project.backend_pg_dsn_enc.clone(),
+    };
     let Some(dsn) = resolve_dsn_without_api_key(
-        project,
+        &project.id,
+        &connect_info,
         aws_secret_fetcher,
         gcp_secret_fetcher,
         encryption_key,
@@ -246,98 +253,6 @@ async fn sweep_one_project(
     }
 }
 
-/// Resolve `project`'s customer-DB DSN without ever holding a live api_key
-/// (ADR-054 § D3, DISCUSS § System Constraints). `None` on any failure
-/// (missing arn/resource-name, fetcher not configured, fetch error,
-/// `backend_pg_dsn_enc IS NULL`, decrypt/AEAD failure, malformed UTF-8) —
-/// every `None` path has already logged a `tracing::warn!` naming the
-/// reason, so the caller can skip silently.
-async fn resolve_dsn_without_api_key(
-    project: &SweeperProjectRow,
-    aws_secret_fetcher: Option<&AwsSecretFetcher>,
-    gcp_secret_fetcher: Option<&GcpSecretFetcher>,
-    encryption_key: &[u8; 32],
-    encryption_key_previous: Option<&[u8; 32]>,
-) -> Option<String> {
-    match project.backend_mode.as_str() {
-        "aws_secret" => resolve_aws_secret_dsn(project, aws_secret_fetcher).await,
-        "gcp_secret" => resolve_gcp_secret_dsn(project, gcp_secret_fetcher).await,
-        "direct_pg" => resolve_direct_pg_dsn(project, encryption_key, encryption_key_previous),
-        other => {
-            tracing::warn!(
-                project_id = %project.id,
-                backend_mode = %other,
-                "TransactionSweeper: unreachable backend_mode in enumeration result"
-            );
-            None
-        }
-    }
-}
-
-async fn resolve_aws_secret_dsn(
-    project: &SweeperProjectRow,
-    aws_secret_fetcher: Option<&AwsSecretFetcher>,
-) -> Option<String> {
-    let Some(arn) = project.backend_secret_arn.as_deref() else {
-        tracing::warn!(project_id = %project.id, "TransactionSweeper: aws_secret project missing backend_secret_arn, skipping");
-        return None;
-    };
-    let Some(fetcher) = aws_secret_fetcher else {
-        tracing::warn!(project_id = %project.id, "TransactionSweeper: aws_secret_fetcher not configured, skipping");
-        return None;
-    };
-    match fetcher.get_dsn(arn).await {
-        Ok(dsn) => Some(dsn),
-        Err(e) => {
-            tracing::warn!(project_id = %project.id, error = %e, "TransactionSweeper: aws secret fetch failed, skipping");
-            None
-        }
-    }
-}
-
-async fn resolve_gcp_secret_dsn(
-    project: &SweeperProjectRow,
-    gcp_secret_fetcher: Option<&GcpSecretFetcher>,
-) -> Option<String> {
-    let Some(resource_name) = project.backend_secret_gcp.as_deref() else {
-        tracing::warn!(project_id = %project.id, "TransactionSweeper: gcp_secret project missing backend_secret_gcp, skipping");
-        return None;
-    };
-    let Some(fetcher) = gcp_secret_fetcher else {
-        tracing::warn!(project_id = %project.id, "TransactionSweeper: gcp_secret_fetcher not configured, skipping");
-        return None;
-    };
-    match fetcher.get_dsn(resource_name).await {
-        Ok(dsn) => Some(dsn),
-        Err(e) => {
-            tracing::warn!(project_id = %project.id, error = %e, "TransactionSweeper: gcp secret fetch failed, skipping");
-            None
-        }
-    }
-}
-
-fn resolve_direct_pg_dsn(
-    project: &SweeperProjectRow,
-    encryption_key: &[u8; 32],
-    encryption_key_previous: Option<&[u8; 32]>,
-) -> Option<String> {
-    let Some(enc) = project.backend_pg_dsn_enc.as_deref() else {
-        // ADR-055: accepted, documented coverage gap — silent skip, not an error.
-        tracing::warn!(project_id = %project.id, "TransactionSweeper: direct_pg project has backend_pg_dsn_enc IS NULL, skipping (ADR-055)");
-        return None;
-    };
-    let plaintext = match decrypt_with_rotation(encryption_key, encryption_key_previous, enc) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::warn!(project_id = %project.id, error = %e, "TransactionSweeper: backend_pg_dsn_enc decrypt failed, skipping");
-            return None;
-        }
-    };
-    match String::from_utf8(plaintext) {
-        Ok(dsn) => Some(dsn),
-        Err(_) => {
-            tracing::warn!(project_id = %project.id, "TransactionSweeper: decrypted DSN is not valid UTF-8, skipping");
-            None
-        }
-    }
-}
+// DSN resolution (resolve_dsn_without_api_key + per-backend_mode helpers)
+// extracted to `adapters::customer_db_connect` (ADR-072 Decision C) —
+// behavior-preserving move, second consumer is composite_index_builder.rs.

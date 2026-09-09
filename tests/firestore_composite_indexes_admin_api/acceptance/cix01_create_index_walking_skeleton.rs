@@ -99,6 +99,29 @@ fn filter_and_order_by_query(collection: &str) -> StructuredQuery {
     }
 }
 
+/// composite-index-real-creation (ADR-072) superseded synchronous
+/// `status='ready'` with a genuine async build — poll `ListIndexes` until
+/// the row reaches a terminal state, mirroring
+/// `composite_index_real_creation`'s own `wait_until_status_is_one_of`.
+async fn wait_until_ready(ctx: &SecurityRulesFullContext, cookie: &str, project_id: &str, index_id: &str) {
+    for _ in 0..100 {
+        let resp = reqwest::Client::new()
+            .get(ctx.admin_url(&format!("/admin/v1/projects/{project_id}/indexes")))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .expect("list_composite_indexes request failed");
+        let body: Vec<serde_json::Value> = resp.json().await.expect("JSON array");
+        if let Some(row) = body.iter().find(|r| r["id"] == index_id) {
+            if row["status"] == "ready" {
+                return;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("index {index_id} did not become ready in time");
+}
+
 async fn run_query(
     client: &mut FirestoreClient<tonic::transport::Channel>,
     project_id: &str,
@@ -166,7 +189,14 @@ async fn creating_an_index_unblocks_a_previously_stuck_query() {
         .expect("create_composite_index request failed");
     assert_eq!(create_resp.status().as_u16(), 200, "AC-CIX-01: create must succeed");
     let create_body: serde_json::Value = create_resp.json().await.expect("response body must be JSON");
-    assert_eq!(create_body["status"], "ready", "AC-CIX-01: index must be immediately ready");
+    // composite-index-real-creation (ADR-072) reverses this feature's own
+    // original metadata-only stub, by design (feature-delta.md [D2]):
+    // status now starts 'building', never synchronously 'ready' — the
+    // underlying AC-CIX-01/02 intent (create succeeds, query then works)
+    // is unchanged, proven below once the build genuinely completes.
+    assert_eq!(create_body["status"], "building", "AC-CIX-01: status starts 'building', not synchronously 'ready'");
+    let index_id = create_body["id"].as_str().expect("response must carry an id");
+    wait_until_ready(&ctx, &cookie, &ctx.project_id, index_id).await;
 
     let after = run_query(&mut client, &ctx.project_id, &ctx.api_key, sq).await;
     let docs = after.expect("AC-CIX-02: the identical query must succeed once a matching index exists");

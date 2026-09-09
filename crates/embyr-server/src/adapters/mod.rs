@@ -1,7 +1,15 @@
 pub mod agent_backend;
 pub mod aws_secret_fetcher;
 pub mod cap_status_cache;
+// composite-index-real-creation (ADR-072): pure DDL-string builders +
+// one-shot build-task orchestration for real composite-index provisioning.
+pub mod composite_index_builder;
+pub mod composite_index_ddl;
 pub mod credential_cache;
+// composite-index-real-creation (ADR-072 Decision C): shared DSN-resolution
+// for reaching a customer DB without a live api_key, extracted from
+// sweepers/transaction_sweeper.rs.
+pub mod customer_db_connect;
 pub mod email;
 pub mod encryption;
 pub mod gcp_secret_fetcher;

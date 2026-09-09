@@ -74,6 +74,14 @@ pub struct UserAdminState {
     /// `CapStatus` per account (ADR-020) — read (fail-open on a miss,
     /// AC-206-04) by `billing_subscription::get_subscription`.
     pub cap_status_cache: Arc<CapStatusCache>,
+    /// composite-index-real-creation (ADR-072): needed for `aws_secret`/
+    /// `gcp_secret` customer-DB DSN resolution when building a real
+    /// composite index. `OperatorState` already carries these; wired
+    /// `None, None` at the composition root today (ADR-054 § D7's own
+    /// already-documented, inherited gap — this feature neither fixes nor
+    /// worsens it).
+    pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
+    pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
 }
 
 /// State for the Stripe webhook sub-router (US-203). No session/operator

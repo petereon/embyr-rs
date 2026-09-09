@@ -42,8 +42,8 @@ mod common;
 use common::{
     cix_prefixed_index_names, category_equal_score_desc_structured_query,
     explain_category_equal_electronics_order_by_score_desc, field_ref, index_is_valid,
-    integer_value, make_channel, run_grpc_query, seed_document_via_grpc, string_value,
-    wait_until_status_is_one_of, SecurityRulesFullContext,
+    integer_value, make_channel, run_grpc_query, seed_bulk_products, seed_document_via_grpc,
+    string_value, wait_until_status_is_one_of, SecurityRulesFullContext,
 };
 
 use embyr_proto::firestore::{
@@ -61,7 +61,11 @@ async fn creating_an_index_builds_a_real_postgres_index_that_the_planner_uses() 
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     let mut client = FirestoreClient::new(make_channel(ctx.server.grpc_addr));
 
-    // Given: Trailmark's "products" collection has real documents.
+    // Given: Trailmark's "products" collection has a few thousand documents
+    // (US-01 Domain Example 1) — enough that the real cost-based planner
+    // genuinely prefers the new index over a Seq Scan (AC-CXR-03 proves
+    // real planner selection, not merely index existence).
+    seed_bulk_products(&ctx.cust_pool, &ctx.project_id, 3000).await;
     for (doc_id, category, score) in
         [("prod-1", "electronics", 200i64), ("prod-2", "electronics", 50), ("prod-3", "garden", 900)]
     {

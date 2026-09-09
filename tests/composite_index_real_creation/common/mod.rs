@@ -225,6 +225,19 @@ pub async fn explain_category_equal_electronics_order_by_score_desc(
     use embyr_pg_storage::encoding::query::{append_filter, order_by_expr};
     use sqlx::{Postgres, QueryBuilder};
 
+    // A fresh testcontainers Postgres has no autovacuum-driven ANALYZE run
+    // yet within this test's short window (unlike a real production DB,
+    // where autovacuum runs continuously) — without it, the planner has no
+    // real row-count/selectivity statistics and defaults to a Seq Scan
+    // regardless of which indexes exist. Explicit ANALYZE here gives the
+    // planner the SAME informational basis a real deployment already has,
+    // so this EXPLAIN reflects genuine cost-based index usage, not a
+    // testing-environment artifact.
+    sqlx::query("ANALYZE documents")
+        .execute(cust_pool)
+        .await
+        .expect("ANALYZE documents failed");
+
     let filter = QueryFilter::Field(FieldFilter {
         field_path: "category".to_string(),
         op: FilterOp::Equal,

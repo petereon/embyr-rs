@@ -127,8 +127,8 @@ pub fn build_admin_router(
         admin_key: admin_key.clone(),
         admin_key_previous: admin_key_previous.clone(),
         credential_cache: credential_cache.clone(),
-        aws_secret_fetcher,
-        gcp_secret_fetcher,
+        aws_secret_fetcher: aws_secret_fetcher.clone(),
+        gcp_secret_fetcher: gcp_secret_fetcher.clone(),
         rate_limit_capacity,
         prometheus_handle,
         stripe_gateway: stripe_gateway.clone(),
@@ -166,6 +166,8 @@ pub fn build_admin_router(
         admin_key_previous_env: admin_key_previous,
         stripe_gateway,
         cap_status_cache,
+        aws_secret_fetcher,
+        gcp_secret_fetcher,
     };
 
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by

@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
+use crate::adapters::composite_index_builder::spawn_build;
+use crate::adapters::composite_index_ddl::{build_drop_index_sql, validate_fields};
+use crate::adapters::customer_db_connect::{resolve_dsn_without_api_key, PgConnectInfo};
+use crate::adapters::postgres_backend::PostgresBackendAdapter;
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::handlers::shared::verify_project_ownership;
 use crate::admin::state::UserAdminState;
@@ -112,14 +116,22 @@ pub async fn create_composite_index(
     let pool = state.system_db.pool();
     verify_project_ownership(pool, &project_id, session.account_id).await?;
 
+    // AC-CXR-04: reject a field path outside the safe charset BEFORE any DB
+    // write or DDL text is ever constructed (ADR-072 Decision A).
+    validate_fields(&body.fields).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+
     let fields_json =
         serde_json::to_value(&body.fields).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
 
+    // ADR-072 Decision C: status starts 'building', never synchronously
+    // 'ready'. Re-POSTing a 'failed' index resets it to 'building' (retry);
+    // re-POSTing a 'building'/'ready' index is a true no-op.
     let row: CompositeIndexRow = sqlx::query_as(
         "INSERT INTO composite_indexes (project_id, collection_path, fields, status) \
-         VALUES ($1, $2, $3::jsonb, 'ready') \
+         VALUES ($1, $2, $3::jsonb, 'building') \
          ON CONFLICT (project_id, collection_path, fields) \
-         DO UPDATE SET collection_path = EXCLUDED.collection_path \
+         DO UPDATE SET status = CASE WHEN composite_indexes.status = 'failed' THEN 'building' \
+                                      ELSE composite_indexes.status END \
          RETURNING id::text AS id, project_id, collection_path, fields, status, created_at",
     )
     .bind(&project_id)
@@ -131,6 +143,38 @@ pub async fn create_composite_index(
         tracing::error!("create_composite_index: DB error: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Only a fresh INSERT or a failed->building retry ever needs a build —
+    // an already-'ready' conflict is a true no-op (never rebuilds a working
+    // index, ADR-072 Decision C).
+    if row.status == "building" {
+        let index_id = Uuid::parse_str(&row.id).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        match state.system_db.get_project_pg_connect_info(&project_id, session.account_id).await {
+            Ok(Some(connect_info)) => {
+                spawn_build(
+                    state.system_db.clone(),
+                    connect_info,
+                    state.aws_secret_fetcher.clone(),
+                    state.gcp_secret_fetcher.clone(),
+                    state.encryption_key,
+                    state.encryption_key_previous,
+                    index_id,
+                    project_id.clone(),
+                    serde_json::from_value(row.fields.clone())
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                );
+            }
+            Ok(None) => {
+                // Project vanished between ownership check and now (race) —
+                // never leave the row ambiguously 'building' forever.
+                let _ = state.system_db.update_composite_index_status(index_id, "failed").await;
+            }
+            Err(e) => {
+                tracing::error!("create_composite_index: connect-info lookup failed: {e}");
+                let _ = state.system_db.update_composite_index_status(index_id, "failed").await;
+            }
+        }
+    }
 
     Ok((StatusCode::OK, Json(row.into_response()?)))
 }
@@ -165,6 +209,16 @@ pub async fn list_composite_indexes(
 /// only). No dependency-safety check (ADR-068 § Resolution 4) — the next
 /// query that newly requires the deleted index simply fails
 /// `FAILED_PRECONDITION` again, same as if it had never been created.
+///
+/// composite-index-real-creation (US-03, ADR-072): also drops the real
+/// underlying Postgres index (when one exists), BEFORE the metadata-row
+/// DELETE below (AC-CXR-10/11). For a `building`/`failed` row the drop is
+/// best-effort — its outcome never blocks the delete (AC-CXR-11: "does not
+/// error, regardless of whether a real (possibly partial) index object
+/// exists yet"). For a `ready` row (a real index is KNOWN to exist), a drop
+/// failure aborts the delete instead — the metadata row is left in place,
+/// visible and retryable, rather than silently orphaning a real index with
+/// no record of it at all (ADR-072 § Component Boundaries).
 pub async fn delete_composite_index(
     Path((project_id, index_id)): Path<(String, String)>,
     State(state): State<UserAdminState>,
@@ -178,6 +232,35 @@ pub async fn delete_composite_index(
 
     let pool = state.system_db.pool();
     verify_project_ownership(pool, &project_id, session.account_id).await?;
+
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM composite_indexes WHERE id = $1 AND project_id = $2")
+            .bind(index_uuid)
+            .bind(&project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("delete_composite_index: DB error: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    let Some(status) = status else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    if let Some(connect_info) = state
+        .system_db
+        .get_project_pg_connect_info(&project_id, session.account_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("delete_composite_index: connect-info lookup failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    {
+        let dropped = drop_real_index(&state, &connect_info, &project_id, index_uuid).await;
+        if status == "ready" && !dropped {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
 
     let result = sqlx::query("DELETE FROM composite_indexes WHERE id = $1 AND project_id = $2")
         .bind(index_uuid)
@@ -193,6 +276,45 @@ pub async fn delete_composite_index(
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Best-effort `DROP INDEX CONCURRENTLY IF EXISTS` against the customer
+/// database. `false` on any failure to connect or drop (logged); the caller
+/// decides how strictly to treat that based on the row's own `status`.
+async fn drop_real_index(
+    state: &UserAdminState,
+    connect_info: &PgConnectInfo,
+    project_id: &str,
+    index_id: Uuid,
+) -> bool {
+    let Some(dsn) = resolve_dsn_without_api_key(
+        project_id,
+        connect_info,
+        state.aws_secret_fetcher.as_deref(),
+        state.gcp_secret_fetcher.as_deref(),
+        &state.encryption_key,
+        state.encryption_key_previous.as_ref(),
+    )
+    .await
+    else {
+        return false;
+    };
+
+    let adapter = match PostgresBackendAdapter::new(&dsn).await {
+        Ok(adapter) => adapter,
+        Err(e) => {
+            tracing::warn!(project_id = %project_id, index_id = %index_id, error = %e, "delete_composite_index: failed to connect to customer database");
+            return false;
+        }
+    };
+
+    match sqlx::query(&build_drop_index_sql(index_id)).execute(adapter.pool()).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(project_id = %project_id, index_id = %index_id, error = %e, "delete_composite_index: DROP INDEX CONCURRENTLY failed");
+            false
+        }
+    }
 }
 
 #[cfg(test)]

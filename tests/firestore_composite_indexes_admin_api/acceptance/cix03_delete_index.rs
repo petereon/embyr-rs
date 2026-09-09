@@ -50,6 +50,10 @@ fn field_ref(path: &str) -> FieldReference {
     FieldReference { field_path: path.to_string() }
 }
 
+/// composite-index-real-creation (ADR-072) superseded synchronous
+/// `status='ready'` with a genuine async build — `create_index` waits for
+/// the row to reach 'ready' before returning, so every caller here keeps
+/// its own original "the index is usable" precondition true, unchanged.
 async fn create_index(ctx: &SecurityRulesFullContext, cookie: &str) -> String {
     let resp = reqwest::Client::new()
         .post(ctx.admin_url(&format!("/admin/v1/projects/{}/indexes", ctx.project_id)))
@@ -63,7 +67,24 @@ async fn create_index(ctx: &SecurityRulesFullContext, cookie: &str) -> String {
         .expect("create_composite_index request failed");
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.expect("JSON body");
-    body["id"].as_str().unwrap().to_string()
+    let index_id = body["id"].as_str().unwrap().to_string();
+
+    for _ in 0..100 {
+        let list_resp = reqwest::Client::new()
+            .get(ctx.admin_url(&format!("/admin/v1/projects/{}/indexes", ctx.project_id)))
+            .header("Cookie", cookie)
+            .send()
+            .await
+            .expect("list_composite_indexes request failed");
+        let rows: Vec<serde_json::Value> = list_resp.json().await.expect("JSON array");
+        if let Some(row) = rows.iter().find(|r| r["id"] == index_id) {
+            if row["status"] == "ready" {
+                return index_id;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("index {index_id} did not become ready in time");
 }
 
 /// AC-CIX-07
