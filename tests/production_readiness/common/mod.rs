@@ -321,6 +321,57 @@ impl ServerProcess {
     }
 }
 
+// ─── Resident memory (RSS) measurement — stripe-webhook-body-limit AC-WBL-01 ──
+
+/// Read `VmRSS` (resident memory, KB) for `pid` from `/proc/<pid>/status`.
+///
+/// Linux-only: this repo's CI and local dev flow both require a Docker
+/// daemon (testcontainers Postgres), which in practice means Linux or Docker
+/// Desktop's Linux VM — `/proc` is always present on the box actually running
+/// `embyr-server`. No cross-platform fallback added (ponytail: native OS
+/// accounting file, zero new dependency, matches this project's existing
+/// `#[cfg(unix)]` precedent in `ServerProcess::sigterm`).
+///
+/// Returns `None` if the file can't be read (process exited) or the
+/// `VmRSS:` line is missing/malformed — callers should treat `None` as "skip
+/// this measurement," not as zero.
+pub fn read_rss_kb(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("VmRSS:")
+            .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+    })
+}
+
+// ─── Stripe webhook signature (real HMAC, no mock) ────────────────────────────
+
+/// Compute a valid `Stripe-Signature` header value for `payload` under
+/// `webhook_secret`, matching Stripe's documented scheme exactly:
+/// `t=<unix_timestamp>,v1=<hex(HMAC-SHA256(secret, "{timestamp}.{payload}"))>`.
+///
+/// Deterministic crypto, no network call — same shape as
+/// `tests/card_payments_backend/common/mod.rs::sign_stripe_payload` (not
+/// imported cross-test-target since Rust integration test binaries don't
+/// share code across `[[test]]` targets without a dedicated support crate;
+/// duplicating this ~15-line pure function is the smaller diff).
+pub fn sign_stripe_payload(payload: &str, webhook_secret: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs();
+    let signed_payload = format!("{timestamp}.{payload}");
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(webhook_secret.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(signed_payload.as_bytes());
+    let signature_hex = hex::encode(mac.finalize().into_bytes());
+
+    format!("t={timestamp},v1={signature_hex}")
+}
+
 impl Drop for ServerProcess {
     fn drop(&mut self) {
         // Best-effort SIGKILL to avoid zombie processes. Errors ignored.

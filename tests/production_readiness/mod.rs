@@ -22,6 +22,11 @@
 //!      STRIPE_SECRET_KEY is set without STRIPE_WEBHOOK_SIGNING_SECRET, and
 //!      the webhook route is unmounted when Stripe is fully unconfigured
 //!      (AC-WHS-01, AC-WHS-02)
+//!   7. pr07 — stripe-webhook-body-limit US-01: an oversized, unauthenticated
+//!      body to the Stripe webhook route is rejected with 413 before being
+//!      fully buffered (bounded RSS growth), while legitimate normally-sized
+//!      and large-but-legitimate correctly-signed webhooks still succeed
+//!      (AC-WBL-01 through AC-WBL-04)
 //!
 //! Pre-requisites before running any test:
 //!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
@@ -37,4 +42,5 @@ mod acceptance {
     mod pr04_graceful_shutdown;
     mod pr05_tls_support;
     mod pr06_stripe_webhook_secret_required;
+    mod pr07_stripe_webhook_body_limit;
 }
