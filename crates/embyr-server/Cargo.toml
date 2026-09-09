@@ -732,6 +732,13 @@ path = "../../tests/customer_db_transaction_sweeper/acceptance/us01_reclaim_orph
 name = "customer_db_transaction_sweeper_us02_purge_terminal_transactions"
 path = "../../tests/customer_db_transaction_sweeper/acceptance/us02_purge_terminal_transactions.rs"
 
+# soft-delete-purge-sweeper acceptance tests (Walking Skeleton, US-01,
+# ADR-073) — SystemDb-only purge of a soft-deleted project's sensitive
+# encrypted-credential columns once the grace window elapses.
+[[test]]
+name = "soft_delete_purge_sweeper_us01_purge_credentials_after_grace_window"
+path = "../../tests/soft_delete_purge_sweeper/acceptance/us01_purge_credentials_after_grace_window.rs"
+
 # agent-mode-write-streaming acceptance tests (Slice 01, Walking Skeleton,
 # US-01, ADR-060) — Write bidi-streaming against backend_mode=agent, reusing
 # write_stream.rs unchanged.
