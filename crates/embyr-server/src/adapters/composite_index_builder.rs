@@ -141,7 +141,7 @@ async fn run_build(
     .await
     .unwrap_or(false);
 
-    if create_result.is_ok() && valid {
+    if build_succeeded(create_result.is_ok(), valid) {
         return "ready";
     }
 
@@ -157,4 +157,27 @@ async fn run_build(
         );
     }
     "failed"
+}
+
+/// ADR-072 Decision B: an index build only counts as `ready` when BOTH the
+/// `CREATE INDEX CONCURRENTLY` statement itself returned `Ok` AND the
+/// authoritative `pg_index.indisvalid` re-check confirms it — either signal
+/// alone can lie (a mid-build connection drop can leave `create_ok=true`
+/// with an invalid index; a stale leftover index under the same
+/// deterministic name could read `indisvalid=true` after a failed create).
+fn build_succeeded(create_ok: bool, indisvalid: bool) -> bool {
+    create_ok && indisvalid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_succeeded;
+
+    #[test]
+    fn ready_requires_both_create_ok_and_indisvalid() {
+        assert!(build_succeeded(true, true));
+        assert!(!build_succeeded(true, false));
+        assert!(!build_succeeded(false, true));
+        assert!(!build_succeeded(false, false));
+    }
 }
