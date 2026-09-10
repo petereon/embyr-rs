@@ -1078,6 +1078,26 @@ path = "../../tests/firestore_range_operator_value_type_support/acceptance/rng02
 name = "firestore_malformed_filter_shape_validation_mfs01_reject_malformed_shapes"
 path = "../../tests/firestore_malformed_filter_shape_validation/acceptance/mfs01_reject_malformed_shapes.rs"
 
+# sanitize-backend-error-messages (DISTILL wave). Walking Skeleton + regression (US-01/US-02, AC-SBM-01/03/06/11).
+[[test]]
+name = "sanitize_backend_error_messages_sbm01_walking_skeleton_authenticate_unreachable_backend"
+path = "../../tests/sanitize_backend_error_messages/acceptance/sbm01_walking_skeleton_authenticate_unreachable_backend.rs"
+
+# sanitize-backend-error-messages — AC-SBM-10 completeness-gate spot check (access-rule-lookup family).
+[[test]]
+name = "sanitize_backend_error_messages_sbm02_completeness_gate_access_rule_family"
+path = "../../tests/sanitize_backend_error_messages/acceptance/sbm02_completeness_gate_access_rule_family.rs"
+
+# sanitize-backend-error-messages — regression guards (AC-SBM-04/05/11).
+[[test]]
+name = "sanitize_backend_error_messages_sbm03_regression_guards"
+path = "../../tests/sanitize_backend_error_messages/acceptance/sbm03_regression_guards.rs"
+
+# sanitize-backend-error-messages — Listen / bare-sqlx::Error site (AC-SBM-07).
+[[test]]
+name = "sanitize_backend_error_messages_sbm04_listen_unreachable_backend"
+path = "../../tests/sanitize_backend_error_messages/acceptance/sbm04_listen_unreachable_backend.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
@@ -1119,3 +1139,7 @@ hex = { workspace = true }
 # client-auth (DISTILL): mints real Ed25519-signed test tokens simulating a
 # customer's own backend (Trailmark) — see tests/client_auth/common/mod.rs.
 ed25519-dalek = { workspace = true }
+# sanitize-backend-error-messages (DISTILL): server-side tracing capture
+# (AC-SBM-03 proof) — see tests/sanitize_backend_error_messages/common/mod.rs.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

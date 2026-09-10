@@ -37,3 +37,7 @@ mod us_a06_lifecycle;
 
 #[path = "embyr_agent/us_a07_field_transforms.rs"]
 mod us_a07_field_transforms;
+
+// sanitize-backend-error-messages (AC-SBM-02, AC-SBM-08) — DISTILL wave.
+#[path = "embyr_agent/us_a08_error_sanitization.rs"]
+mod us_a08_error_sanitization;
