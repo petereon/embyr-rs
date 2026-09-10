@@ -83,6 +83,16 @@ impl StorageAgentService {
     }
 }
 
+/// ADR-075: the ONE conversion point between a raw backend/driver error and a
+/// client-facing Status anywhere in this binary. `context` names WHICH
+/// operation failed (a static string chosen by the call site, never derived
+/// from `e`) so the server-side log stays useful without ever echoing `e`'s
+/// own text into anything client-visible.
+fn sanitize_backend_error(e: impl std::fmt::Display, context: &'static str) -> Status {
+    tracing::error!(error = %e, "{context}");
+    Status::internal("internal server error")
+}
+
 /// Map a `CoreError` to a gRPC `Status`.
 fn core_error_to_status(e: CoreError) -> Status {
     match e {
@@ -91,7 +101,9 @@ fn core_error_to_status(e: CoreError) -> Status {
         CoreError::OccConflict => Status::failed_precondition("optimistic concurrency conflict"),
         CoreError::FailedPrecondition(msg) => Status::failed_precondition(msg),
         CoreError::InvalidArgument(msg) => Status::invalid_argument(msg),
-        CoreError::BackendUnavailable(msg) => Status::internal(msg),
+        CoreError::BackendUnavailable(msg) => {
+            sanitize_backend_error(msg, "core_error_to_status: BackendUnavailable")
+        }
         CoreError::TransactionNotFound => Status::not_found("transaction not found or expired"),
         CoreError::TransactionAborted => Status::aborted("transaction aborted"),
         CoreError::ProjectNotFound(msg) => Status::not_found(msg),
@@ -307,7 +319,7 @@ impl StorageAgent for StorageAgentService {
                 Ok(Response::new(domain_doc_to_proto(doc)))
             }
             Ok(None) => Err(Status::not_found(format!("document not found: {name}"))),
-            Err(e) => Err(Status::internal(format!("{e}"))),
+            Err(e) => Err(core_error_to_status(e)),
         }
     }
 
@@ -795,7 +807,7 @@ impl StorageAgent for StorageAgentService {
             .notify_bridge
             .subscribe()
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| sanitize_backend_error(e, "subscribe: AgentNotifyBridge::subscribe"))?;
 
         // Filter bridge events: pass RESET always; pass others only when the
         // document_name contains the subscribed collection_path.

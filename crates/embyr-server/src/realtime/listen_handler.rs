@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use crate::{
     adapters::{credential_cache::SharedBackendAdapter, system_db::SystemDb},
     encoding::firestore_proto::document_to_proto,
-    grpc::handler::query_compliance_rejection,
+    grpc::handler::{query_compliance_rejection, sanitize_backend_error},
     realtime::{
         listen_registry::{ListenEvent, ListenRegistry},
         resume_token as rt,
@@ -113,7 +113,7 @@ pub async fn handle_add_target(
     let rule_row = system_db
         .get_access_rule(&project_id, &collection.collection_path)
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(|e| sanitize_backend_error(e, "handle_listen: get_access_rule"))?;
 
     // `condition`/`ancestor_bindings` are retained for the REST OF THIS
     // FUNCTION's lifetime — see ADR-033 § Decision — Per-Event Composition
@@ -242,7 +242,7 @@ pub async fn handle_add_target(
     let docs = adapter
         .run_query(&collection, &domain_query, None)
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(|e| sanitize_backend_error(e, "handle_listen: initial snapshot run_query"))?;
 
     // Send one DocumentChange per doc.
     for doc in docs {

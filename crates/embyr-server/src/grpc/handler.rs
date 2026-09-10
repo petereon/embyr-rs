@@ -225,7 +225,7 @@ impl FirestoreService {
             .system_db
             .get_project_for_auth(project_id_str)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(|e| sanitize_backend_error(e, "authenticate: load project row"))?
             .ok_or_else(|| Status::unauthenticated("project not found"))?;
 
         // Fast-path status checks before the expensive Argon2id verification.
@@ -275,7 +275,7 @@ impl FirestoreService {
                 .map_err(|e| Status::internal(format!("aws secret fetch failed: {e}")))?;
             let adapter = PostgresBackendAdapter::new(&dsn)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| sanitize_backend_error(e, "authenticate: aws_secret backend connect"))?;
             let shared: SharedBackendAdapter = Arc::new(adapter);
             (shared, dsn)
         } else if row.backend_mode == "gcp_secret" {
@@ -293,7 +293,7 @@ impl FirestoreService {
                 .map_err(|e| Status::internal(format!("gcp secret fetch failed: {e}")))?;
             let adapter = PostgresBackendAdapter::new(&dsn)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| sanitize_backend_error(e, "authenticate: gcp_secret backend connect"))?;
             let shared: SharedBackendAdapter = Arc::new(adapter);
             (shared, dsn)
         } else if row.backend_mode == "agent" {
@@ -329,7 +329,7 @@ impl FirestoreService {
             let adapter =
                 AgentBackendAdapter::new(&endpoint, &ca_pem, &client_cert_pem, &client_key_pem)
                     .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
+                    .map_err(|e| sanitize_backend_error(e, "authenticate: agent backend connect"))?;
             let shared: SharedBackendAdapter = Arc::new(adapter);
             (shared, String::new())
         } else {
@@ -344,7 +344,7 @@ impl FirestoreService {
 
             let adapter = PostgresBackendAdapter::new(&dsn)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| sanitize_backend_error(e, "authenticate: direct_pg backend connect"))?;
             let shared: SharedBackendAdapter = Arc::new(adapter);
             (shared, dsn)
         };
@@ -765,7 +765,7 @@ impl FirestoreService {
         let candidates = system_db
             .list_access_rule_patterns_by_skeleton(project_id, ancestor_segment_count, &literal_skeleton)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| sanitize_backend_error(e, "resolve_access_rule_pattern: list_access_rule_patterns_by_skeleton"))?;
 
         let mut matched = None;
         for candidate in candidates {
@@ -809,7 +809,7 @@ impl FirestoreService {
         let recursive_candidates = system_db
             .list_recursive_access_rule_patterns_up_to(project_id, concrete_full_path.len() as i16)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| sanitize_backend_error(e, "resolve_access_rule_pattern: list_recursive_access_rule_patterns_up_to"))?;
 
         let mut best: Option<(
             crate::adapters::system_db::AccessRulePatternRow,
@@ -883,7 +883,7 @@ impl FirestoreService {
         let write_rule_row = system_db
             .get_write_access_rule(project_id_str, &path.collection_path)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| sanitize_backend_error(e, "evaluate_write_rule: get_write_access_rule"))?;
 
         let Some(write_rule_row) = write_rule_row else {
             return Ok(());
@@ -1318,7 +1318,7 @@ impl FirestoreService {
             .system_db
             .get_access_rule(&project_id, &path.collection_path)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| sanitize_backend_error(e, "get_document: get_access_rule"))?;
 
         let doc_opt = adapter
             .get_document(&path, txn_id.as_ref())
@@ -1621,7 +1621,7 @@ impl FirestoreService {
             .system_db
             .get_write_access_rule(&project_id_str, &req.collection_id)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| sanitize_backend_error(e, "evaluate_write_rule_for_commit: get_write_access_rule"))?;
 
         match write_rule_row {
             Some(write_rule_row) => {
@@ -1841,7 +1841,7 @@ impl FirestoreService {
             .system_db
             .get_write_access_rule(&project_id_str, &path.collection_path)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| sanitize_backend_error(e, "create_document: get_write_access_rule"))?;
 
         match write_rule_row {
             Some(write_rule_row) => {
@@ -2068,7 +2068,7 @@ impl FirestoreService {
             .system_db
             .get_write_access_rule(&project_id_str, &path.collection_path)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| sanitize_backend_error(e, "delete_document: get_write_access_rule"))?;
 
         match write_rule_row {
             Some(write_rule_row) => {
@@ -2351,7 +2351,7 @@ impl FirestoreService {
                         .system_db
                         .get_access_rule(&project_id_str, collection_path)
                         .await
-                        .map_err(|e| Status::internal(e.to_string()))?;
+                        .map_err(|e| sanitize_backend_error(e, "run_query: get_access_rule"))?;
                     rule_cache.insert(collection_path.clone(), fetched.clone());
                     fetched
                 }
@@ -2601,7 +2601,7 @@ impl FirestoreService {
                         .system_db
                         .get_access_rule(&project_id_str, &path.collection_path)
                         .await
-                        .map_err(|e| Status::internal(e.to_string()))?;
+                        .map_err(|e| sanitize_backend_error(e, "batch_get_documents: get_access_rule"))?;
                     rule_cache.insert(path.collection_path.clone(), fetched.clone());
                     fetched
                 }
@@ -3126,7 +3126,7 @@ impl FirestoreService {
                 .system_db
                 .get_group_access_rule(&project_id_str, &collection.collection_path)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| sanitize_backend_error(e, "run_query: get_group_access_rule (collection group)"))?;
 
             let Some(group_rule_row) = group_rule_row else {
                 // US-04, Resolution 2 (universal fail-closed default): no
@@ -3177,7 +3177,7 @@ impl FirestoreService {
                 .system_db
                 .get_access_rule(&project_id_str, &collection.collection_path)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| sanitize_backend_error(e, "run_query: get_access_rule (collection group)"))?;
 
             if let Some(rule_row) = rule_row {
                 let condition =
@@ -3409,7 +3409,7 @@ impl FirestoreService {
                 .system_db
                 .get_group_access_rule(&project_id_str, &collection.collection_path)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| sanitize_backend_error(e, "run_aggregation_query: get_group_access_rule (collection group)"))?;
 
             let Some(group_rule_row) = group_rule_row else {
                 return Err(group_rule_not_defined_rejection());
@@ -3442,7 +3442,7 @@ impl FirestoreService {
                 .system_db
                 .get_access_rule(&project_id_str, &collection.collection_path)
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| sanitize_backend_error(e, "run_aggregation_query: get_access_rule (collection group)"))?;
 
             if let Some(rule_row) = rule_row {
                 let condition =
@@ -3553,7 +3553,7 @@ impl FirestoreService {
                     .max_connections(2)
                     .connect(&dsn)
                     .await
-                    .map_err(|e| Status::internal(format!("notify listener pool: {e}")))?;
+                    .map_err(|e| sanitize_backend_error(e, "handle_listen: provision notify-listener pool"))?;
                 let listener = PostgresNotifyListener::start(
                     &dsn,
                     &project_id,
@@ -3561,7 +3561,7 @@ impl FirestoreService {
                     pool,
                 )
                 .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                .map_err(|e| sanitize_backend_error(e, "handle_listen: start PostgresNotifyListener"))?;
                 listeners.insert(project_id.clone(), listener);
             }
         }
@@ -4145,6 +4145,16 @@ fn aggregation_error_to_status(e: CoreError) -> Status {
     }
 }
 
+/// ADR-075: the ONE conversion point between a raw backend/driver error and a
+/// client-facing Status anywhere in this binary. `context` names WHICH
+/// operation failed (a static string chosen by the call site, never derived
+/// from `e`) so the server-side log stays useful without ever echoing `e`'s
+/// own text into anything client-visible.
+pub(crate) fn sanitize_backend_error(e: impl std::fmt::Display, context: &'static str) -> Status {
+    tracing::error!(error = %e, "{context}");
+    Status::internal("internal server error")
+}
+
 pub(crate) fn core_error_to_status(e: CoreError) -> Status {
     match e {
         CoreError::DocumentNotFound(_) => Status::not_found(e.to_string()),
@@ -4157,7 +4167,7 @@ pub(crate) fn core_error_to_status(e: CoreError) -> Status {
         CoreError::TransactionNotFound => Status::not_found(e.to_string()),
         CoreError::ResourceExhausted(_) => Status::resource_exhausted(e.to_string()),
         CoreError::FailedPrecondition(_) => Status::failed_precondition(e.to_string()),
-        _ => Status::internal(e.to_string()),
+        _ => sanitize_backend_error(e, "core_error_to_status: unmapped CoreError variant"),
     }
 }
 
