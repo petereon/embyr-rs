@@ -1396,3 +1396,32 @@ pub(crate) fn uuid_from_bytes(bytes: &[u8]) -> Result<uuid::Uuid, CoreError> {
     let arr: [u8; 16] = bytes.try_into().unwrap();
     Ok(uuid::Uuid::from_bytes(arr))
 }
+
+#[cfg(test)]
+mod to_datetime_tests {
+    use super::to_datetime;
+
+    #[test]
+    fn valid_seconds_and_nanos_succeed() {
+        assert!(to_datetime(1_700_000_000, 0).is_ok());
+        assert!(to_datetime(0, 999_999_999).is_ok());
+    }
+
+    #[test]
+    fn negative_nanos_is_rejected_before_the_seconds_check() {
+        let err = to_datetime(1_700_000_000, -1).unwrap_err();
+        assert!(err.to_string().contains("nanos"), "got: {err}");
+    }
+
+    #[test]
+    fn nanos_at_or_above_one_billion_is_rejected() {
+        let err = to_datetime(1_700_000_000, 1_000_000_000).unwrap_err();
+        assert!(err.to_string().contains("nanos"), "got: {err}");
+    }
+
+    #[test]
+    fn out_of_range_seconds_is_rejected() {
+        let err = to_datetime(i64::MAX, 0).unwrap_err();
+        assert!(err.to_string().contains("seconds"), "got: {err}");
+    }
+}
