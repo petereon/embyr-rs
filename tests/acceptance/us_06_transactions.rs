@@ -749,6 +749,124 @@ async fn commit_write_with_must_exist_precondition_is_rejected_when_document_doe
 }
 
 // ---------------------------------------------------------------------------
+// occ-precondition-validation (AC-OCC-03): a malformed `update_time`
+// precondition inside commit_transaction's OWN OCC-verification loop
+// (backend_adapter.rs:1051's `to_datetime` call site — a distinct call site
+// from update_document's :398, per DESIGN's own call-site list) is cleanly
+// rejected, not a panic, and the transaction is not partially applied.
+// ---------------------------------------------------------------------------
+
+/// AC-OCC-03: a malformed `nanos` value on a Write's precondition inside a
+/// transactional Commit is cleanly rejected instead of panicking the
+/// request-handling task while a Postgres transaction guard is on the stack.
+///
+/// Given:  a transaction has begun and a document exists
+/// When:   Commit is called with a Write whose Precondition.update_time.nanos
+///         is -1 (negative — the exact edge case DESIGN's own nanos-before-
+///         seconds cast ordering exists to attribute correctly)
+/// Then:   the RPC returns INVALID_ARGUMENT naming the "nanos" field
+/// And:    the transaction is not partially applied — the document is unchanged
+#[tokio::test]
+async fn commit_transaction_with_malformed_nanos_precondition_returns_invalid_argument() {
+    let env = setup("test-sk-occ-txn-nanos", "occ-txn-nanos-project").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let database = format!("projects/{}/databases/(default)", env.project_id);
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/orders/occ-malformed-txn",
+        env.project_id
+    );
+
+    let mut seed_fields = HashMap::new();
+    seed_fields.insert(
+        "status".to_string(),
+        Value { value_type: Some(ValueType::StringValue("original".to_string())) },
+    );
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent,
+                collection_id: "orders".to_string(),
+                document_id: "occ-malformed-txn".to_string(),
+                document: Some(Document { name: String::new(), fields: seed_fields, ..Default::default() }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("seed orders/occ-malformed-txn");
+
+    let begin_resp = client
+        .begin_transaction(make_authed_request(
+            BeginTransactionRequest { database: database.clone(), options: None },
+            &env.api_key,
+        ))
+        .await
+        .expect("begin_transaction");
+    let txn_bytes = begin_resp.into_inner().transaction;
+
+    let mut overwrite_fields = HashMap::new();
+    overwrite_fields.insert(
+        "status".to_string(),
+        Value { value_type: Some(ValueType::StringValue("should-never-land".to_string())) },
+    );
+    let write = ProtoWrite {
+        operation: Some(Operation::Update(Document {
+            name: doc_name.clone(),
+            fields: overwrite_fields,
+            ..Default::default()
+        })),
+        current_document: Some(embyr_proto::firestore::Precondition {
+            condition_type: Some(embyr_proto::firestore::precondition::ConditionType::UpdateTime(
+                prost_types::Timestamp { seconds: 1_799_942_400, nanos: -1 },
+            )),
+        }),
+        ..Default::default()
+    };
+
+    let commit_result = client
+        .commit(make_authed_request(
+            CommitRequest { database, writes: vec![write], transaction: txn_bytes },
+            &env.api_key,
+        ))
+        .await;
+
+    let status = commit_result.expect_err(
+        "a malformed nanos precondition inside commit_transaction's OCC loop must be cleanly \
+         rejected, not panic the connection",
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "expected INVALID_ARGUMENT for out-of-range nanos in transactional commit, got {:?}: {}",
+        status.code(),
+        status.message()
+    );
+    assert!(
+        status.message().contains("nanos"),
+        "error message must name the offending 'nanos' field, got: {}",
+        status.message()
+    );
+
+    // Regression: the transaction must not be partially applied.
+    let read_resp = client
+        .get_document(make_authed_request(
+            GetDocumentRequest { name: doc_name, mask: None, consistency_selector: None },
+            &env.api_key,
+        ))
+        .await
+        .expect("get orders/occ-malformed-txn")
+        .into_inner();
+    let status_field = read_resp.fields.get("status").and_then(|v| v.value_type.clone());
+    assert_eq!(
+        status_field,
+        Some(ValueType::StringValue("original".to_string())),
+        "the rejected transactional write must NOT have modified the document"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // firestore-transaction-read-consistency (Slice 01, US-01, AC-TRC-01/02/03/04/05)
 //
 // The tests above all simulate OCC by MANUALLY attaching an `UpdateTime`

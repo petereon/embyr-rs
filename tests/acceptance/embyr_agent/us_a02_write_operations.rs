@@ -463,6 +463,79 @@ async fn creating_document_that_already_exists_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// occ-precondition-validation (AC-OCC-07 — uniformity guard)
+// ---------------------------------------------------------------------------
+
+/// @driving_port @us_a02 @real_io @error
+///
+/// occ-precondition-validation AC-OCC-07: the identical malformed
+/// `update_time` precondition rejection embyr-server's own UpdateDocument
+/// RPC gives (AC-OCC-01) also holds on the agent's own StorageAgent surface
+/// — proving the shared `embyr-pg-storage::to_datetime` fix closes BOTH
+/// independent precondition-parsing paths (`embyr-server`'s
+/// `convert_precondition` AND `embyr-agent`'s own `parse_precondition`), not
+/// just embyr-server's.
+///
+/// Feature: A malformed update_time precondition on the agent's own surface is cleanly rejected
+///   Given "orders/occ-malformed" exists on the agent's own storage
+///   When  a caller updates it with Precondition.update_time.nanos = 2147483647 (i32::MAX)
+///   Then  the agent returns INVALID_ARGUMENT naming the "nanos" field, not a panic
+///   And   the document is unchanged
+#[tokio::test]
+#[ignore = "requires Docker — unskip in S02A delivery"]
+async fn updating_with_malformed_nanos_precondition_returns_invalid_argument() {
+    let (_handle, mut client) = start_test_agent("finops-prod").await;
+
+    let mut fields = HashMap::new();
+    fields.insert("status".to_string(), str_val("original"));
+    let created = create_doc(&mut client, "orders", "occ-malformed", fields).await;
+    let doc_name = created.name.clone();
+
+    let mut update_fields = HashMap::new();
+    update_fields.insert("status".to_string(), str_val("should-not-land"));
+    let req = UpdateDocumentRequest {
+        document: Some(Document {
+            name: doc_name.clone(),
+            fields: update_fields,
+            ..Default::default()
+        }),
+        current_document: Some(Precondition {
+            condition_type: Some(ConditionType::UpdateTime(prost_types::Timestamp {
+                seconds: 1_799_942_400,
+                nanos: i32::MAX,
+            })),
+        }),
+        ..Default::default()
+    };
+
+    let result = client.update_document(req).await;
+
+    let status = result.expect_err(
+        "a malformed nanos precondition on the agent's own surface must be cleanly rejected, \
+         not panic the connection",
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "expected INVALID_ARGUMENT, got {:?}: {}",
+        status.code(),
+        status.message()
+    );
+    assert!(
+        status.message().contains("nanos"),
+        "error message must name the offending 'nanos' field, got: {}",
+        status.message()
+    );
+
+    let fetched = get_doc(&mut client, &doc_name).await;
+    assert_eq!(
+        fetched.fields.get("status").and_then(|v| v.value_type.as_ref()),
+        Some(&ValueType::StringValue("original".to_string())),
+        "the rejected write must NOT have modified the document"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Property scenario
 // ---------------------------------------------------------------------------
 

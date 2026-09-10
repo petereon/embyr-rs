@@ -494,3 +494,212 @@ async fn write_with_invalid_api_key_returns_unauthenticated() {
         status.message()
     );
 }
+
+// ---------------------------------------------------------------------------
+// occ-precondition-validation (AC-OCC-01, AC-OCC-02): a malformed
+// `Precondition.update_time` on the single-document UpdateDocument path
+// (backend_adapter.rs:398's `to_datetime` call site) is cleanly rejected —
+// no real Firestore SDK can construct these values, but a raw gRPC caller
+// can. Today this panics the request-handling task; after the fix, a clean
+// INVALID_ARGUMENT naming the offending field is returned instead.
+// ---------------------------------------------------------------------------
+
+/// AC-OCC-01: a malformed `nanos` value in an UpdateDocument precondition is
+/// cleanly rejected instead of panicking the request-handling task.
+///
+/// Given:  a document exists with a valid update_time
+/// When:   UpdateDocument is called with Precondition.update_time.nanos =
+///         2147483647 (i32::MAX, far outside the valid [0, 999999999] range)
+/// Then:   the RPC returns INVALID_ARGUMENT naming the "nanos" field
+/// And:    the document's fields are unchanged
+#[tokio::test]
+async fn update_document_with_malformed_nanos_precondition_returns_invalid_argument() {
+    let env = setup().await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let mut fields = HashMap::new();
+    fields.insert("status".to_string(), make_string_value("original"));
+    let parent = format!(
+        "projects/{}/databases/(default)/documents",
+        env.project_id
+    );
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent,
+                collection_id: "occ-malformed".to_string(),
+                document_id: "doc-nanos".to_string(),
+                document: Some(Document {
+                    name: String::new(),
+                    fields,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("seed document");
+
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/occ-malformed/doc-nanos",
+        env.project_id
+    );
+
+    let mut update_fields = HashMap::new();
+    update_fields.insert("status".to_string(), make_string_value("should-not-land"));
+    let req = make_authed_request(
+        UpdateDocumentRequest {
+            document: Some(Document {
+                name: doc_name.clone(),
+                fields: update_fields,
+                ..Default::default()
+            }),
+            current_document: Some(Precondition {
+                condition_type: Some(ConditionType::UpdateTime(Timestamp {
+                    seconds: 1_799_942_400,
+                    nanos: i32::MAX,
+                })),
+            }),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+
+    let result = client.update_document(req).await;
+
+    let status = result.expect_err(
+        "a malformed nanos precondition must be cleanly rejected, not panic the connection",
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "expected INVALID_ARGUMENT for out-of-range nanos, got {:?}: {}",
+        status.code(),
+        status.message()
+    );
+    assert!(
+        status.message().contains("nanos"),
+        "error message must name the offending 'nanos' field, got: {}",
+        status.message()
+    );
+
+    // Regression: the rejected write must not have modified the document.
+    let fetched = client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name,
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("get_document after rejected update")
+        .into_inner();
+    let status_field = fetched.fields.get("status").and_then(|v| v.value_type.clone());
+    assert_eq!(
+        status_field,
+        Some(ValueType::StringValue("original".to_string())),
+        "the rejected write must NOT have modified the document"
+    );
+}
+
+/// AC-OCC-02: a malformed `seconds` value in an UpdateDocument precondition
+/// is cleanly rejected instead of panicking the request-handling task.
+///
+/// Given:  a document exists with a valid update_time
+/// When:   UpdateDocument is called with Precondition.update_time.seconds =
+///         i64::MIN (far outside chrono's representable range)
+/// Then:   the RPC returns INVALID_ARGUMENT naming the "seconds" field
+/// And:    the document's fields are unchanged
+#[tokio::test]
+async fn update_document_with_malformed_seconds_precondition_returns_invalid_argument() {
+    let env = setup().await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let mut fields = HashMap::new();
+    fields.insert("status".to_string(), make_string_value("original"));
+    let parent = format!(
+        "projects/{}/databases/(default)/documents",
+        env.project_id
+    );
+    client
+        .create_document(make_authed_request(
+            CreateDocumentRequest {
+                parent,
+                collection_id: "occ-malformed".to_string(),
+                document_id: "doc-seconds".to_string(),
+                document: Some(Document {
+                    name: String::new(),
+                    fields,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("seed document");
+
+    let doc_name = format!(
+        "projects/{}/databases/(default)/documents/occ-malformed/doc-seconds",
+        env.project_id
+    );
+
+    let mut update_fields = HashMap::new();
+    update_fields.insert("status".to_string(), make_string_value("should-not-land"));
+    let req = make_authed_request(
+        UpdateDocumentRequest {
+            document: Some(Document {
+                name: doc_name.clone(),
+                fields: update_fields,
+                ..Default::default()
+            }),
+            current_document: Some(Precondition {
+                condition_type: Some(ConditionType::UpdateTime(Timestamp {
+                    seconds: i64::MIN,
+                    nanos: 0,
+                })),
+            }),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+
+    let result = client.update_document(req).await;
+
+    let status = result.expect_err(
+        "a malformed seconds precondition must be cleanly rejected, not panic the connection",
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::InvalidArgument,
+        "expected INVALID_ARGUMENT for out-of-range seconds, got {:?}: {}",
+        status.code(),
+        status.message()
+    );
+    assert!(
+        status.message().contains("seconds"),
+        "error message must name the offending 'seconds' field, got: {}",
+        status.message()
+    );
+
+    // Regression: the rejected write must not have modified the document.
+    let fetched = client
+        .get_document(make_authed_request(
+            GetDocumentRequest {
+                name: doc_name,
+                ..Default::default()
+            },
+            &env.api_key,
+        ))
+        .await
+        .expect("get_document after rejected update")
+        .into_inner();
+    let status_field = fetched.fields.get("status").and_then(|v| v.value_type.clone());
+    assert_eq!(
+        status_field,
+        Some(ValueType::StringValue("original".to_string())),
+        "the rejected write must NOT have modified the document"
+    );
+}
