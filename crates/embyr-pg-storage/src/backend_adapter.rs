@@ -206,10 +206,19 @@ impl PostgresBackendAdapter {
 }
 
 /// Convert (seconds, nanos) to `chrono::DateTime<Utc>`.
-fn to_datetime(seconds: i64, nanos: i32) -> DateTime<Utc> {
+fn to_datetime(seconds: i64, nanos: i32) -> Result<DateTime<Utc>, CoreError> {
+    if !(0..=999_999_999).contains(&nanos) {
+        return Err(CoreError::InvalidArgument(format!(
+            "Precondition.update_time.nanos must be within [0, 999999999], got: {nanos}"
+        )));
+    }
     Utc.timestamp_opt(seconds, nanos as u32)
         .single()
-        .expect("valid timestamp")
+        .ok_or_else(|| {
+            CoreError::InvalidArgument(format!(
+                "Precondition.update_time.seconds is out of range for a valid timestamp, got: {seconds}"
+            ))
+        })
 }
 
 /// Convert `chrono::DateTime<Utc>` to (seconds, nanos).
@@ -395,7 +404,7 @@ impl BackendAdapter for PostgresBackendAdapter {
 
             Some(WritePrecondition::UpdateTime(s, n)) => {
                 // OCC: update only if update_time matches.
-                let precondition_dt = to_datetime(s, n);
+                let precondition_dt = to_datetime(s, n)?;
                 let row_opt = sqlx::query(
                     "UPDATE documents \
                      SET fields = $4::jsonb, version = version + 1, \
@@ -1048,7 +1057,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                 _ => continue,
             };
 
-            let expected_dt = to_datetime(expected_secs, expected_nanos);
+            let expected_dt = to_datetime(expected_secs, expected_nanos)?;
             // Use FOR UPDATE to serialize concurrent OCC checks on the same document row.
             let row: Option<(DateTime<Utc>,)> = sqlx::query_as(
                 "SELECT update_time FROM documents \
