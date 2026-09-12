@@ -542,9 +542,31 @@ async fn query_over_empty_collection_returns_no_documents_and_completion_signal(
 ///
 /// Feature: Query with a malformed field path is rejected before any data is read
 ///   Given the "orders" collection contains documents
-///   When  a caller queries with field path "order..amount" (double dot)
+///   When  a caller queries with field path "order amount" (space, outside the spec charset)
 ///   Then  the caller receives an invalid-request response
 ///   And   no documents are scanned from storage
+///
+/// Payload note (agent-field-path-validation, 2026-09-12): this test used to
+/// use "order..amount" (double dot) as its malformed example. Consecutive
+/// dots are a DELIBERATE exception widened by that feature (see
+/// `docs/feature/agent-field-path-validation/feature-delta.md` § Finding 3
+/// and `us_a09_field_path_validation.rs`'s
+/// `consecutive_dot_field_path_is_now_accepted_and_matches_zero_documents`)
+/// — a consecutive-dot path is no longer malformed under the spec-mandated
+/// charset `^[a-zA-Z_][a-zA-Z0-9_.]*$`. The payload here was swapped to a
+/// space character, which stays genuinely outside that charset, so this
+/// test keeps testing its own original, unrelated intent (a generically
+/// malformed field path is rejected) without silently breaking.
+///
+/// Red classification (pre-fix, confirmed empirically): the old weak
+/// validator only checks for `".."`, so "order amount" (space) sails
+/// through unrejected today. Because the space stays inside the
+/// single-quoted SQL string literal (`fields->'order amount' = $1`), it
+/// does not break SQL syntax either — the observed pre-fix behavior is a
+/// normal, silent, zero-result response
+/// (`RunQueryResponse { document: None, continuation_selector: Done(true) }`),
+/// never `INVALID_ARGUMENT`. This assertion fails today for that reason —
+/// a genuine RED, not a setup error.
 #[tokio::test]
 async fn query_with_malformed_field_path_rejected_before_data_read() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
@@ -557,7 +579,7 @@ async fn query_with_malformed_field_path_rejected_before_data_read() {
             }],
             filter: Some(Filter {
                 filter_type: Some(FilterType::FieldFilter(FieldFilterProto {
-                    field_path: "order..amount".to_string(),
+                    field_path: "order amount".to_string(),
                     op: FieldFilterOp::Equal as i32,
                     value: Some(Value {
                         value_type: Some(ValueType::IntegerValue(100)),

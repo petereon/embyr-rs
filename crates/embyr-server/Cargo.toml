@@ -1098,6 +1098,11 @@ path = "../../tests/sanitize_backend_error_messages/acceptance/sbm03_regression_
 name = "sanitize_backend_error_messages_sbm04_listen_unreachable_backend"
 path = "../../tests/sanitize_backend_error_messages/acceptance/sbm04_listen_unreachable_backend.rs"
 
+# agent-field-path-validation — AC-AFP-06 cross-binary parity (direct_pg vs agent).
+[[test]]
+name = "agent_field_path_validation_afp06_cross_binary_parity"
+path = "../../tests/agent_field_path_validation/acceptance/afp06_cross_binary_parity.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

@@ -41,3 +41,7 @@ mod us_a07_field_transforms;
 // sanitize-backend-error-messages (AC-SBM-02, AC-SBM-08) — DISTILL wave.
 #[path = "embyr_agent/us_a08_error_sanitization.rs"]
 mod us_a08_error_sanitization;
+
+// agent-field-path-validation (AC-AFP-02 through AC-AFP-05) — DISTILL wave.
+#[path = "embyr_agent/us_a09_field_path_validation.rs"]
+mod us_a09_field_path_validation;
