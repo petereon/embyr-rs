@@ -20,7 +20,7 @@ use embyr_core::storage::backend_adapter::{
     BackendAdapter, FieldTransform as CoreFieldTransform, Write as DomainWrite, WritePrecondition,
 };
 use embyr_pg_storage::backend_adapter::PostgresBackendAdapter;
-use embyr_core::domain::{document::CollectionPath, query::{FieldFilter, FilterOp, QueryFilter, StructuredQuery as DomainStructuredQuery}};
+use embyr_core::domain::{document::CollectionPath, query::{FieldFilter, FilterOp, QueryFilter, StructuredQuery as DomainStructuredQuery, validate_field_path}};
 use embyr_proto::agent::{
     filter::FilterType as ProtoFilterType,
     precondition::ConditionType,
@@ -125,18 +125,6 @@ fn parse_precondition(p: Option<Precondition>) -> Option<WritePrecondition> {
     }
 }
 
-/// Validate that a field path does not contain consecutive dots.
-fn validate_field_path(path: &str) -> Result<(), Status> {
-    if path.contains("..") {
-        Err(Status::invalid_argument(format!(
-            "invalid field path '{}': consecutive dots not allowed",
-            path
-        )))
-    } else {
-        Ok(())
-    }
-}
-
 /// Convert a proto FieldFilterOp i32 to a domain FilterOp.
 fn proto_filter_op_to_domain(op_i32: i32) -> Result<FilterOp, Status> {
     match FieldFilterOp::try_from(op_i32).unwrap_or(FieldFilterOp::Unspecified) {
@@ -158,7 +146,7 @@ fn proto_filter_op_to_domain(op_i32: i32) -> Result<FilterOp, Status> {
 fn proto_filter_to_domain(filter: ProtoFilter) -> Result<QueryFilter, Status> {
     match filter.filter_type {
         Some(ProtoFilterType::FieldFilter(ff)) => {
-            validate_field_path(&ff.field_path)?;
+            validate_field_path(&ff.field_path).map_err(core_error_to_status)?;
             let op = proto_filter_op_to_domain(ff.op)?;
             let value = ff
                 .value
