@@ -16,6 +16,17 @@
 //!   "db.sessions.token_hash_stored"           — BLAKE3 hash in DB (not plaintext)
 //!   "db.sessions.row_expired"                 — expires_at updated on signout
 //!   "auth.account_locked"                     — lockout flag observable via 429
+//!
+//! admin-signin-hardening extension (ADR-076, docs/feature/admin-signin-hardening/
+//! feature-delta.md, AC-ASH-01 through AC-ASH-08) — appended below the original
+//! B-01 scenarios rather than a parallel file: same driving port
+//! (POST /admin/v1/auth/signin), same AdminTestContext composition root.
+//! Additional observables exercised (black-box, via HTTP only — no new Rust
+//! module imports, since this DISTILL pass does not create signin_rate_limit.rs,
+//! the sweeper, or touch auth.rs/router.rs/lib.rs; that is DELIVER's job):
+//!   "response.status_code"            — 429 once the per-source-IP bucket is exhausted
+//!   "response.retry_after_ms_present" — retry-after-ms header on a 429
+//!   "reactor.batch_wall_time_ms"      — proves Argon2id runs off the async reactor thread
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -654,6 +665,359 @@ async fn pre_expired_session_row_returns_401() {
         resp.status().as_u16(),
         401,
         "earned-trust: pre-expired session must return 401"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// admin-signin-hardening (ADR-076) — AC-ASH-01 through AC-ASH-08
+//
+// AC-ASH-04 (regression guard: sign_in_with_valid_credentials_returns_session_cookie,
+// wrong_totp_code_returns_401_and_does_not_set_session,
+// three_consecutive_totp_failures_lock_account_for_fifteen_minutes,
+// valid_recovery_code_grants_session_and_invalidates_code) and AC-ASH-07
+// (regression guard: wrong_password_returns_401_without_revealing_email_existence)
+// are already satisfied VERBATIM by the five existing tests above — zero new
+// test code required for those two ACs (nw-tdd-methodology "No Code Without a
+// Requiring Test": if an AC is already covered by a passing test, adding a
+// duplicate is waste, not rigor).
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// US-01 Scenario 2 (walking skeleton) + AC-ASH-01/AC-ASH-02: while a burst of
+/// wrong-password requests targets a DIFFERENT teammate's account (Dana Kim,
+/// here `ctx.viewer_email`), Chris Okafor's own correct-credential signin
+/// completes quickly instead of being serialized behind the flood — proof
+/// that Argon2id verification runs off the async reactor's own worker thread
+/// (`tokio::task::spawn_blocking`, AC-ASH-01), not a code-inspection claim.
+///
+/// This test deliberately runs on tokio's DEFAULT `#[tokio::test]`
+/// SINGLE-THREADED runtime (matches every other test in this file — no
+/// `flavor = "multi_thread"` override). That choice is load-bearing, not
+/// incidental: on a single OS thread, a synchronous (non-`.await`-yielding)
+/// Argon2id verify running INLINE on the reactor thread cannot be preempted —
+/// it monopolizes the one thread for its full ~50-100ms, and every other
+/// task (other in-flight connections on the same admin server, the other
+/// concurrent client requests below) stalls until it returns.
+/// `tokio::task::spawn_blocking` moves that same computation onto tokio's
+/// separate blocking-thread pool, which exists independently of runtime
+/// flavor — so the reactor thread stays free even under this
+/// single-threaded harness. A multi-thread runtime would partly mask an
+/// inline-blocking bug behind OS-level parallelism across reactor threads;
+/// single-threaded is the SHARPER proof, not a weaker one.
+///
+/// RED (today, unfixed — confirmed empirically, not assumed): `auth.rs` runs
+/// Argon2id inline, so this whole batch of FLOOD_SIZE+1 requests serializes
+/// on the one reactor thread. The observed failure mode is WORSE than mere
+/// slowness: `SystemDb`'s pool has a 5-second `acquire_timeout`
+/// (`adapters/system_db.rs`), and once ~7 requests' worth of serialized
+/// Argon2id verifies (~50-100ms each) have consumed that budget, every
+/// subsequent request's connection-pool acquire also times out, cascading
+/// into `500` for effectively the rest of the batch (empirically: 7×`401`
+/// then ~94×`500`, ~10s total wall time for FLOOD_SIZE=100) — including the
+/// legitimate signin. This is finding #12's own "reactor starvation" claim
+/// reproduced directly: the reactor stalls so completely that even
+/// unrelated DB connection acquisition fails.
+/// GREEN (post-fix): `spawn_blocking` moves each verify onto tokio's
+/// blocking-thread pool (independent of the async reactor and unaffected by
+/// its single-threadedness); all FLOOD_SIZE+1 verifies run genuinely
+/// concurrently, DB connection acquisition is never starved, and the legit
+/// request returns `200` well within `MAX_TOTAL_WALL_MS`.
+///
+/// AC-ASH-01, AC-ASH-02
+// @US-ASH-01 @AC-ASH-01 @AC-ASH-02 @walking_skeleton @driving_port @real-io
+#[tokio::test]
+async fn argon2_verification_does_not_block_the_reactor_under_concurrent_signin_load() {
+    // "~100 concurrent" per AC-ASH-02's own wording; safely under the
+    // 150-token rate-limit capacity (ADR-076) so this test observes 200/401,
+    // never 429 (that is AC-ASH-03/06's own concern, tested separately below).
+    const FLOOD_SIZE: usize = 100;
+    // One Argon2id verify (~50-100ms) plus DB-pool-of-5 queueing slack for
+    // FLOOD_SIZE+1 requests — far below the fully-serialized RED baseline
+    // (FLOOD_SIZE * ~50-100ms ≈ 5-10s).
+    const MAX_TOTAL_WALL_MS: u128 = 2_000;
+
+    let ctx = AdminTestContext::new().await;
+
+    let mut handles = Vec::with_capacity(FLOOD_SIZE + 1);
+
+    // Flood: wrong-password attempts against Dana Kim's (viewer) account.
+    for _ in 0..FLOOD_SIZE {
+        let client = ctx.client.clone();
+        let url = ctx.url("/admin/v1/auth/signin");
+        let email = ctx.viewer_email.clone();
+        handles.push(tokio::spawn(async move {
+            client
+                .post(url)
+                .json(&serde_json::json!({
+                    "email": email,
+                    "password": "wrong-password-flood",
+                    "totp_code": "000000",
+                }))
+                .send()
+                .await
+                .map(|r| r.status().as_u16())
+        }));
+    }
+
+    // Chris Okafor's own legitimate, concurrent signin — must still succeed.
+    let legit_client = ctx.client.clone();
+    let legit_url = ctx.url("/admin/v1/auth/signin");
+    let legit_body = serde_json::json!({
+        "email": ctx.user_email,
+        "password": ctx.user_password,
+        "totp_code": ctx.totp_code_now(),
+    });
+    handles.push(tokio::spawn(async move {
+        legit_client
+            .post(legit_url)
+            .json(&legit_body)
+            .send()
+            .await
+            .map(|r| r.status().as_u16())
+    }));
+
+    let start = std::time::Instant::now();
+    let mut statuses = Vec::with_capacity(handles.len());
+    for h in handles {
+        statuses.push(h.await.expect("task panicked").expect("request failed"));
+    }
+    let elapsed_ms = start.elapsed().as_millis();
+
+    // Legit request (last handle pushed) still succeeds — functionality intact.
+    let legit_status = *statuses.last().unwrap();
+    assert_eq!(
+        legit_status, 200,
+        "AC-ASH-02: legitimate concurrent signin must still succeed (got {legit_status}; \
+         a 500 here means the reactor stalled badly enough that even DB connection \
+         acquisition timed out — see this test's own doc comment); full batch: {statuses:?}"
+    );
+
+    assert!(
+        elapsed_ms < MAX_TOTAL_WALL_MS,
+        "AC-ASH-01/AC-ASH-02: {} concurrent wrong-password attempts (+1 legitimate) \
+         took {}ms — expected under {}ms if Argon2id verification runs off the \
+         reactor thread via spawn_blocking. A wall time near FLOOD_SIZE * 50-100ms \
+         indicates Argon2id is still running INLINE and serializing every request \
+         on the single-threaded test runtime (ADR-003 violation).",
+        FLOOD_SIZE, elapsed_ms, MAX_TOTAL_WALL_MS
+    );
+}
+
+/// Secondary, WEAKER regression guard (source-inspection level) for AC-ASH-01.
+/// The load-style test above is the primary, decisive proof; this only
+/// guards against an accidental future revert (e.g. someone "simplifying"
+/// `signin` back to an inline Argon2 call) even if CI load ever made a
+/// timing-based assertion flaky. Per DESIGN's own ADR-076 § Enforcement, a
+/// broader workspace-wide CI grep gate (no direct `argon2::Argon2::new(`
+/// call site anywhere under `crates/embyr-server/src/`, forcing every caller
+/// through `embyr_core::auth::argon2`) is a separate, explicitly-recommended
+/// FOLLOW-UP, not one of this feature's 8 locked ACs — this narrow,
+/// signin-only check is this feature's own in-scope secondary guard.
+///
+/// RED today (confirmed empirically): `auth.rs` contains zero occurrences of
+/// `spawn_blocking` — fails instantly (~0ms, no server/container needed).
+#[test]
+fn signin_source_wraps_password_verification_in_spawn_blocking() {
+    let src = include_str!("../../../crates/embyr-server/src/admin/handlers/auth.rs");
+    assert!(
+        src.contains("spawn_blocking"),
+        "AC-ASH-01 (secondary/weak check): auth.rs must call \
+         tokio::task::spawn_blocking somewhere for the Argon2id verification — \
+         the primary proof is the concurrent-load test above; this only \
+         guards against an accidental revert."
+    );
+}
+
+/// US-01 Scenario 3: a sustained flood of wrong-password attempts against one
+/// account, all from the same source (the test's own loopback client), is
+/// throttled once the configured threshold is exceeded. ADR-076 sizes the
+/// bucket at capacity=150 tokens (source-IP keyed) — sending more than that
+/// from one source must produce at least one `429` with a `retry-after-ms`
+/// header, per D-ASH-3's "gated before any Argon2id/DB work" position.
+///
+/// RED (today, unfixed): zero rate-limit gate exists on this route — every
+/// one of the OVER_CAPACITY requests below returns 401, never 429.
+///
+/// AC-ASH-03
+// @US-ASH-01 @AC-ASH-03 @error @driving_port @real-io
+#[tokio::test]
+async fn wrong_password_flood_from_one_source_is_throttled_once_capacity_is_exceeded() {
+    const OVER_CAPACITY: usize = 160; // capacity=150 tokens (ADR-076) + safety margin
+
+    let ctx = AdminTestContext::new().await;
+
+    let mut handles = Vec::with_capacity(OVER_CAPACITY);
+    for _ in 0..OVER_CAPACITY {
+        let client = ctx.client.clone();
+        let url = ctx.url("/admin/v1/auth/signin");
+        let email = ctx.user_email.clone();
+        handles.push(tokio::spawn(async move {
+            let resp = client
+                .post(url)
+                .json(&serde_json::json!({
+                    "email": email,
+                    "password": "wrong-password-sustained-flood",
+                    "totp_code": "000000",
+                }))
+                .send()
+                .await
+                .expect("request failed");
+            let status = resp.status().as_u16();
+            let retry_after_ms = resp
+                .headers()
+                .get("retry-after-ms")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            (status, retry_after_ms)
+        }));
+    }
+
+    let mut throttled_count = 0usize;
+    let mut saw_retry_after_header = false;
+    for h in handles {
+        let (status, retry_after_ms) = h.await.expect("task panicked");
+        if status == 429 {
+            throttled_count += 1;
+            if retry_after_ms.is_some() {
+                saw_retry_after_header = true;
+            }
+        }
+    }
+
+    assert!(
+        throttled_count > 0,
+        "AC-ASH-03: sending {} wrong-password attempts from one source \
+         (capacity=150 per ADR-076) must throttle at least the excess with 429; \
+         got 0 throttled responses out of {}",
+        OVER_CAPACITY, OVER_CAPACITY
+    );
+    assert!(
+        saw_retry_after_header,
+        "AC-ASH-03: at least one 429 response must carry a retry-after-ms header"
+    );
+}
+
+/// US-02 Scenario 2: an automated script probes many distinct candidate
+/// emails from one source, most of which do not exist. Because the rate
+/// limiter is keyed by SOURCE IP ONLY (ADR-076 D-ASH-2/OQ-ASH-01 — not
+/// email, not a compound key), the throttle fires after the same 150-token
+/// capacity is exhausted, regardless of how many distinct emails were
+/// targeted. This is the test that distinguishes an IP-keyed limiter from an
+/// email-keyed one (explicitly rejected by DESIGN — an email-keyed bucket
+/// would hand this exact attacker a fresh 150-token budget per candidate
+/// email, defeating the throttle outright).
+///
+/// RED (today, unfixed): zero rate limiting exists — every one of the
+/// OVER_CAPACITY distinct-email probes below returns 401, never 429.
+///
+/// AC-ASH-06
+// @US-ASH-02 @AC-ASH-06 @error @driving_port @real-io
+#[tokio::test]
+async fn enumeration_across_many_distinct_candidate_emails_from_one_source_is_throttled() {
+    const OVER_CAPACITY: usize = 160; // capacity=150 tokens (ADR-076) + safety margin
+
+    let ctx = AdminTestContext::new().await;
+
+    let mut handles = Vec::with_capacity(OVER_CAPACITY);
+    for i in 0..OVER_CAPACITY {
+        let client = ctx.client.clone();
+        let url = ctx.url("/admin/v1/auth/signin");
+        // Distinct, mostly-nonexistent candidate emails — same source IP for every request.
+        let candidate_email = format!("candidate{i}@fernbankanalytics.example");
+        handles.push(tokio::spawn(async move {
+            client
+                .post(url)
+                .json(&serde_json::json!({
+                    "email": candidate_email,
+                    "password": "any-password",
+                    "totp_code": "000000",
+                }))
+                .send()
+                .await
+                .map(|r| r.status().as_u16())
+        }));
+    }
+
+    let mut status_counts: HashMap<u16, usize> = HashMap::new();
+    for h in handles {
+        let status = h.await.expect("task panicked").expect("request failed");
+        *status_counts.entry(status).or_insert(0) += 1;
+    }
+
+    let throttled = *status_counts.get(&429).unwrap_or(&0);
+    let rejected = *status_counts.get(&401).unwrap_or(&0);
+
+    assert!(
+        throttled > 0,
+        "AC-ASH-06: probing {} DISTINCT candidate emails from one source must be \
+         throttled by the SAME per-source mechanism once capacity is exceeded — \
+         an email-keyed (or unkeyed) limiter would let every distinct email \
+         through; got status counts: {:?}",
+        OVER_CAPACITY, status_counts
+    );
+    assert!(
+        rejected <= 150,
+        "AC-ASH-06: no more than the 150-token capacity worth of distinct-email \
+         probes should reach a full 401 rejection; got {} 401s (status counts: {:?})",
+        rejected, status_counts
+    );
+}
+
+/// DESIGN resolved OQ-ASH-03 as "accept the residual timing difference; do
+/// not add a dummy Argon2id verify" (D-ASH-7). This test makes that a
+/// testable outcome instead of an unenforced prose decision: the
+/// unknown-email path must remain measurably FASTER than the
+/// known-email-wrong-password path (which pays a full Argon2id verify), not
+/// converge to the same latency a dummy-verify fix would produce.
+///
+/// Sent as isolated, unthrottled single requests (well under the 150-token
+/// capacity), so any difference is attributable ONLY to whether Argon2id
+/// runs on the unknown-email path — not to rate-limiting.
+///
+/// NOTE: unlike the other new tests in this section, this one is expected to
+/// ALREADY PASS against today's unfixed code — D-ASH-7 explicitly changes
+/// zero lines of the unknown-email fast path. It exists to lock the accepted
+/// design decision as a regression guard, not to prove new behavior.
+///
+/// AC-ASH-08
+// @US-ASH-02 @AC-ASH-08 @driving_port @real-io
+#[tokio::test]
+async fn unknown_email_path_remains_faster_than_known_email_wrong_password_path() {
+    let ctx = AdminTestContext::new().await;
+
+    async fn timed_signin_401(client: &reqwest::Client, url: &str, email: &str) -> std::time::Duration {
+        let start = std::time::Instant::now();
+        let resp = client
+            .post(url)
+            .json(&serde_json::json!({
+                "email": email,
+                "password": "irrelevant-wrong-password",
+                "totp_code": "000000",
+            }))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status().as_u16(), 401, "sanity: both paths must return 401");
+        start.elapsed()
+    }
+
+    let url = ctx.url("/admin/v1/auth/signin");
+
+    // Warm up the connection/DB pool so the first timed sample isn't skewed
+    // by one-time setup cost (TCP handshake, pool connection acquisition).
+    let _ = timed_signin_401(&ctx.client, &url, "warmup-unused@example.com").await;
+
+    let unknown_email_elapsed =
+        timed_signin_401(&ctx.client, &url, "nobody-at-all@fernbankanalytics.example").await;
+    let known_wrong_password_elapsed = timed_signin_401(&ctx.client, &url, &ctx.user_email).await;
+
+    assert!(
+        unknown_email_elapsed < known_wrong_password_elapsed,
+        "AC-ASH-08: the unknown-email path ({:?}) must remain faster than the \
+         known-email-wrong-password path ({:?}) — a dummy Argon2id verify on the \
+         unknown-email path (the rejected OQ-ASH-03 alternative) would make these \
+         converge",
+        unknown_email_elapsed,
+        known_wrong_password_elapsed
     );
 }
 
