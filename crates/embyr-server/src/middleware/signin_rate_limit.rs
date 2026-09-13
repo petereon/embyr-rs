@@ -153,3 +153,107 @@ impl SigninRateLimiter {
         }
     }
 }
+
+// admin-signin-hardening QUALITY_GATE: `check_pg` (the Postgres-backed path,
+// production-only — every acceptance-test wrapper in this workspace
+// constructs `SigninRateLimiter::new(...)`, in-process only) is never
+// exercised by the integration suite. cargo-mutants confirmed two missed
+// mutants here (whole-function stub -> `Ok(Ok(()))`; `<` -> `==` in the
+// retry_after_ms boundary at line 130). These direct unit tests close that
+// gap, mirroring the testcontainers-Postgres idiom already established in
+// `crate::adapters::system_db`'s own `#[cfg(test)]` module.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::system_db::SystemDb;
+    use testcontainers_modules::postgres::Postgres;
+    use testcontainers_modules::testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+
+    async fn start_pg() -> (ContainerAsync<Postgres>, PgPool) {
+        let container = Postgres::default()
+            .with_tag("15-alpine")
+            .start()
+            .await
+            .expect("Failed to start Postgres container");
+        let host_port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("Failed to get port");
+        let url = format!("postgres://postgres:postgres@127.0.0.1:{host_port}/postgres");
+        let db = SystemDb::new(&url).await.expect("connect");
+        db.migrate().await.expect("migrate"); // applies 0037_signin_rate_limits.sql
+        (container, db.pool().clone())
+    }
+
+    #[tokio::test]
+    async fn check_pg_allows_when_under_capacity() {
+        let (_container, pool) = start_pg().await;
+        let limiter = SigninRateLimiter::with_pg(5.0, 1.0, pool.clone());
+        let result = limiter
+            .check_pg("198.51.100.1", &pool)
+            .await
+            .expect("no sqlx error");
+        assert!(
+            result.is_ok(),
+            "first request under capacity must be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_pg_throttles_once_capacity_exhausted() {
+        let (_container, pool) = start_pg().await;
+        // capacity=1, near-zero refill: the 2nd immediate request must throttle.
+        let limiter = SigninRateLimiter::with_pg(1.0, 1.0 / 3600.0, pool.clone());
+        let first = limiter
+            .check_pg("198.51.100.2", &pool)
+            .await
+            .expect("no sqlx error");
+        assert!(first.is_ok(), "first request consumes the only token");
+
+        let second = limiter
+            .check_pg("198.51.100.2", &pool)
+            .await
+            .expect("no sqlx error");
+        match second {
+            Err(retry_after_ms) => assert!(
+                retry_after_ms > 0,
+                "retry_after_ms must be > 0 once throttled"
+            ),
+            Ok(()) => panic!("second request must be throttled once capacity is exhausted"),
+        }
+    }
+
+    /// Pins the exact `retry_after_ms` VALUE (not just its sign) with a
+    /// non-degenerate `current` (~0.5, not ~0.0) so `1.0 - current` and
+    /// `1.0 + current`/`1.0 / current` diverge, and `/ refill_rate * 1000.0`
+    /// vs `+`/`/` variants land far outside the expected range. Closes 4
+    /// arithmetic mutants (`*`->`+`, `*`->`/`, `-`->`+`, `-`->`/` on the
+    /// `retry_after_ms` formula) that `check_pg_throttles_once_capacity_
+    /// exhausted`'s `> 0` assertion alone did not catch.
+    #[tokio::test]
+    async fn check_pg_retry_after_ms_matches_expected_formula() {
+        let (_container, pool) = start_pg().await;
+        // capacity=1.5, refill=1/hour: first call leaves current ~= 0.5 tokens.
+        let limiter = SigninRateLimiter::with_pg(1.5, 1.0 / 3600.0, pool.clone());
+        let first = limiter
+            .check_pg("198.51.100.3", &pool)
+            .await
+            .expect("no sqlx error");
+        assert!(first.is_ok(), "first request leaves ~0.5 tokens, still allowed");
+
+        let second = limiter
+            .check_pg("198.51.100.3", &pool)
+            .await
+            .expect("no sqlx error");
+        // Expected: (1.0 - 0.5) / (1/3600) * 1000.0 = 1_800_000ms, with slack
+        // for the negligible refill + real query latency between the 2 calls.
+        match second {
+            Err(retry_after_ms) => assert!(
+                (1_700_000..=1_900_000).contains(&retry_after_ms),
+                "retry_after_ms = {retry_after_ms}, expected ~1_800_000 \
+                 ((1.0 - 0.5) / (1/3600) * 1000.0)"
+            ),
+            Ok(()) => panic!("second request must be throttled (only ~0.5 tokens remained)"),
+        }
+    }
+}
