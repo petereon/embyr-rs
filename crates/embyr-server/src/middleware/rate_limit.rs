@@ -386,6 +386,32 @@ pub async fn rest_rate_limit_middleware(
         return next.run(request).await;
     };
 
+    // preauth-db-amplification (finding #14): reject a charset-invalid
+    // project_id here, before rate_limiter.check()'s 3-round-trip path.
+    // Reuses the SAME response the dispatched handler would itself have
+    // produced for this exact case, per action, so the observable response
+    // is unchanged, only earlier (AC-PDA-03):
+    //   - signInWithCustomToken: rest/sign_in.rs's own malformed_response()
+    //     (400 MALFORMED_TOKEN) — that handler never calls
+    //     resolve_customer_db_adapter, so it does NOT share the other
+    //     3 actions' shape.
+    //   - every other action (signInWithPassword, signUp, sendOobCode,
+    //     resetPassword, and any future action): resolve_customer_db_adapter's
+    //     own ProjectId::new guard (adapters/project_auth.rs:76) maps to
+    //     crate::rest::sign_up::invalid_api_key() (401 INVALID_API_KEY) —
+    //     confirmed identical across all 3 of today's other dispatched actions.
+    if embyr_core::domain::project::ProjectId::new(project_id.as_str()).is_err() {
+        let action = params
+            .get("action")
+            .map(|s| s.trim_start_matches(':'))
+            .unwrap_or_default();
+        return if action == "signInWithCustomToken" {
+            crate::rest::sign_in::malformed_response().into_response()
+        } else {
+            crate::rest::sign_up::invalid_api_key()
+        };
+    }
+
     match rate_limiter.check(project_id).await {
         Ok(_info) => next.run(request).await,
         Err(info) => rest_rate_limit_rejection(project_id, &info),

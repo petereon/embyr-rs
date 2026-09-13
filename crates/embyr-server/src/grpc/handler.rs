@@ -99,7 +99,19 @@ impl FirestoreService {
     fn extract_project_id(name: &str) -> Result<&str, Status> {
         let mut parts = name.splitn(5, '/');
         match (parts.next(), parts.next()) {
-            (Some("projects"), Some(pid)) if !pid.is_empty() => Ok(pid),
+            (Some("projects"), Some(pid)) if !pid.is_empty() => {
+                // preauth-db-amplification (finding #14): reject a charset-invalid
+                // project_id here, BEFORE rate_limiter.check()'s 3-round-trip
+                // check_pg() path — not just before authenticate(). Verbatim reuse
+                // of authenticate()'s own existing check (handler.rs:205-206) so
+                // the observable Status/message is byte-identical to today's,
+                // only earlier (AC-PDA-03). authenticate()'s own check is left in
+                // place (defense-in-depth for any future caller of authenticate()
+                // that skips this guard) — not removed by this fix.
+                embyr_core::domain::project::ProjectId::new(pid)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                Ok(pid)
+            }
             _ => Err(Status::invalid_argument(format!(
                 "invalid resource name: {name}"
             ))),
@@ -3901,7 +3913,13 @@ fn extract_project_id_from_listen_request(msg: &ListenRequest) -> Result<String,
     let db = &msg.database;
     let mut parts = db.splitn(5, '/');
     match (parts.next(), parts.next()) {
-        (Some("projects"), Some(pid)) if !pid.is_empty() => Ok(pid.to_string()),
+        (Some("projects"), Some(pid)) if !pid.is_empty() => {
+            // preauth-db-amplification (finding #14): same guard as
+            // extract_project_id — see that function's comment.
+            embyr_core::domain::project::ProjectId::new(pid)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            Ok(pid.to_string())
+        }
         _ => Err(Status::invalid_argument(format!(
             "invalid database path in ListenRequest: {db}"
         ))),

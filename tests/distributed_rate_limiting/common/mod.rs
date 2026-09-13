@@ -49,6 +49,20 @@ pub mod universe {
     pub const PG_TIMEOUT_COUNTER: &str = "metrics.rate_limit_pg_timeout_total";
 }
 
+/// Charset-invalid `project_id` values — none can ever match
+/// `^[a-z][a-z0-9-]{0,62}$` (docs/SPEC.md:73), so none can ever correspond to a
+/// real, provisioned project (preauth-db-amplification, finding #14, DISCUSS §
+/// Domain Examples / Example 2).
+pub fn garbage_project_ids() -> Vec<String> {
+    vec![
+        "DROP_TABLE_123".to_string(),
+        "' OR 1=1--".to_string(),
+        "Not_Lowercase".to_string(),
+        "-leading-dash".to_string(),
+        "a".repeat(500),
+    ]
+}
+
 // ─── Imports ──────────────────────────────────────────────────────────────────
 use std::sync::Arc;
 
@@ -209,6 +223,16 @@ impl DrlTestContext {
             .unwrap_or(0)
     }
 
+    // NOTE (preauth-db-amplification, finding #14): a `pg_stat_user_tables`
+    // scan/insert-counter snapshot was tried first as the DB-round-trip
+    // observability mechanism and REJECTED — empirically measured to lag
+    // commits by Postgres's own internal `PGSTAT_MIN_INTERVAL` (~1s) stats
+    // flush, producing false-zero deltas for single, fast sequential
+    // requests. `rate_bucket_row_count`/`query_rate_bucket` (below) read the
+    // real table directly (MVCC-consistent, no flush lag) and are used
+    // instead — see the acceptance tests in `acceptance/b17_*`/`b18_*` for
+    // the row-existence-based proof this feature relies on.
+
     // ── Project seeding helpers ───────────────────────────────────────────────
 
     /// Insert a project directly into the projects table WITHOUT a rate_buckets row.
@@ -328,6 +352,44 @@ pub async fn get_metrics(
         .text()
         .await
         .expect("GET /metrics body read failed")
+}
+
+/// Parse the numeric value of a Prometheus counter/gauge line matching a
+/// metric name AND all given label pairs, from a scraped text body. Returns
+/// `0.0` if no matching line is found (metric not yet emitted — a fresh
+/// counter defaults to 0 either way).
+///
+/// Used (preauth-db-amplification, finding #14) as the DB-round-trip
+/// observability mechanism: `embyr_rate_limit_requests_total{project_id=
+/// "unconfirmed",outcome="allowed"}` (OBS-04/ADR-069, already-existing
+/// instrumentation) increments exactly once per `RateLimiter::check()`
+/// INVOCATION for any never-before-seen project_id — regardless of whether
+/// `check_pg`'s own `INSERT ... ON CONFLICT DO NOTHING` actually persists a
+/// row (it silently fails via the `rate_buckets.project_id` FK to
+/// `projects(id)` — confirmed by migration 0018 — for a project_id with no
+/// `projects` row at all, e.g. pure garbage or a truly never-provisioned
+/// id). Row-existence (`rate_bucket_row_count`) is therefore NOT a reliable
+/// zero-vs-nonzero signal for those cases; this counter is call-site-scoped
+/// (increments in `check()` itself, after `check_inner()` returns) and is
+/// unaffected by what happens to the INSERT inside `check_pg`.
+pub fn metric_value(body: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+    let prefix = format!("{metric}{{");
+    for line in body.lines() {
+        if line.starts_with('#') || !line.starts_with(&prefix) {
+            continue;
+        }
+        if labels
+            .iter()
+            .all(|(k, v)| line.contains(&format!("{k}=\"{v}\"")))
+        {
+            if let Some(value_str) = line.rsplit(' ').next() {
+                if let Ok(value) = value_str.parse::<f64>() {
+                    return value;
+                }
+            }
+        }
+    }
+    0.0
 }
 
 /// Extract the distinct `project_id` label VALUES present on the

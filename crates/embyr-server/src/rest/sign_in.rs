@@ -60,7 +60,7 @@ pub struct SignInFailureResponse {
     pub reason: &'static str,
 }
 
-fn malformed_response() -> (StatusCode, Json<SignInFailureResponse>) {
+pub(crate) fn malformed_response() -> (StatusCode, Json<SignInFailureResponse>) {
     (
         StatusCode::BAD_REQUEST,
         Json(SignInFailureResponse {
