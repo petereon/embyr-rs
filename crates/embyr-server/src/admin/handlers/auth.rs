@@ -11,9 +11,8 @@
 //! GET /admin/v1/auth/oidc/callback
 //!   (RED scaffold — implemented in a later step)
 
-use argon2::{Algorithm as Argon2Algorithm, Argon2, Params, PasswordHash, PasswordVerifier, Version};
 use axum::{
-    extract::{Json, Query, State},
+    extract::{ConnectInfo, Json, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -21,6 +20,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::net::SocketAddr;
 use totp_rs::{Algorithm as TotpAlgorithm, TOTP};
 use uuid::Uuid;
 
@@ -72,6 +72,22 @@ fn invalid_code() -> Response {
         }),
     )
         .into_response()
+}
+
+/// admin-signin-hardening (AC-ASH-03/06, ADR-076): per-source-IP rate limit
+/// exceeded. `retry-after-ms` header lets a well-behaved client back off.
+fn signin_throttled(retry_after_ms: u64) -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(ErrorBody {
+            message: "Too many signin attempts — try again later".to_string(),
+        }),
+    )
+        .into_response();
+    if let Ok(v) = HeaderValue::from_str(&retry_after_ms.to_string()) {
+        response.headers_mut().insert("retry-after-ms", v);
+    }
+    response
 }
 
 fn internal_err(context: &str, e: impl std::fmt::Display) -> Response {
@@ -133,9 +149,20 @@ macro_rules! try_get_or_err {
 ///   9. Return 200 + Set-Cookie: embyr_session=<token>; HttpOnly; Secure; SameSite=Strict; Path=/admin; Max-Age=86400
 pub async fn signin(
     State(state): State<UserAdminState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(body): Json<SigninRequest>,
 ) -> Response {
     let pool = state.system_db.pool();
+
+    // ── 0. Per-source-IP rate limit (AC-ASH-03/06, ADR-076) ──────────────────
+    // First statement — before the Step 1 DB lookup — so a throttled request
+    // never reaches Argon2id or the DB. Keyed by peer.ip() only (not the
+    // full SocketAddr: ephemeral source port varies per TCP connection from
+    // the same client).
+    let source_key = peer.ip().to_string();
+    if let Err(retry_after_ms) = state.signin_rate_limiter.check(&source_key).await {
+        return signin_throttled(retry_after_ms);
+    }
 
     // ── 1. Fetch user by email ────────────────────────────────────────────────
     let row = match sqlx::query(
@@ -180,19 +207,26 @@ pub async fn signin(
 
     // ── 3. Argon2id password verification ────────────────────────────────────
     // AC-3: wrong password → identical 401 shape to unknown email (oracle protection).
-    let parsed_hash = match PasswordHash::new(&password_hash) {
-        Ok(h) => h,
-        Err(e) => return internal_err("parse password hash", e),
+    // AC-ASH-01: runs off the async reactor's worker threads via spawn_blocking,
+    // per ADR-003's mandate — mirrors provision.rs:187 / sdk_keys.rs:162's own
+    // established shape, adapted to signin's own match-and-early-return idiom
+    // (signin returns Response directly, not Result<_, StatusCode>). Reuses
+    // embyr_core::auth::argon2::verify_password (ADR-036 Decision 8) instead of
+    // signin's own prior duplicate inline Argon2::new(...) call.
+    let password_owned = body.password.clone();
+    let hash_owned = password_hash.clone();
+    let verify_result = tokio::task::spawn_blocking(move || {
+        embyr_core::auth::argon2::verify_password(password_owned.as_bytes(), &hash_owned)
+    })
+    .await;
+
+    let password_matches = match verify_result {
+        Ok(Ok(matches)) => matches,
+        Ok(Err(e)) => return internal_err("verify password hash", e),
+        Err(e) => return internal_err("spawn_blocking join error (password verify)", e),
     };
-    let argon2 = Argon2::new(
-        Argon2Algorithm::Argon2id,
-        Version::V0x13,
-        Params::new(65536, 3, 4, None).expect("valid Argon2id params"),
-    );
-    if argon2
-        .verify_password(body.password.as_bytes(), &parsed_hash)
-        .is_err()
-    {
+
+    if !password_matches {
         return invalid_credentials();
     }
 

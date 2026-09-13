@@ -64,6 +64,7 @@ use embyr_server::{
         system_db::SystemDb,
     },
     admin::router::build_admin_router,
+    middleware::signin_rate_limit::SigninRateLimiter,
 };
 
 // ─── Test server ─────────────────────────────────────────────────────────────
@@ -107,6 +108,26 @@ pub struct AdminTestContext {
     pub admin_totp_secret_b32: String,
     /// UUID of the seeded Admin user (string form).
     pub admin_id: String,
+}
+
+/// Generate a valid TOTP code for a given base64url(no-pad)-encoded raw secret
+/// at the CURRENT system time. Free function (no `&self`) so it can be called
+/// from inside a `tokio::spawn`-ed task's own async body, evaluated at
+/// whatever wall-clock moment that task actually runs — not baked in eagerly
+/// at spawn time. This matters under concurrent-load tests: totp-rs's
+/// `generate_current`/verification freshness window is ~90s (period=30s,
+/// window=1); a code computed once up front and captured into a task that
+/// then waits behind a large concurrent batch before actually running can go
+/// stale before the server ever sees it. Extracted from the three
+/// near-identical `*_totp_code_now` methods below (admin-signin-hardening,
+/// ADR-076 test-fragility fix).
+pub fn totp_code_for_secret(secret_b32: &str) -> String {
+    let totp_raw = URL_SAFE_NO_PAD
+        .decode(secret_b32)
+        .expect("secret_b32 must be valid base64url-no-pad");
+    let totp = TOTP::new(TotpAlgorithm::SHA1, 6, 1, 30, totp_raw, None, String::new())
+        .expect("TOTP::new failed");
+    totp.generate_current().expect("generate_current failed")
 }
 
 impl AdminTestContext {
@@ -380,6 +401,12 @@ impl AdminTestContext {
             // fresh, unshared cache is sufficient (card-payments-backend
             // ADR-020, step 03-01 signature addition).
             Arc::new(CapStatusCache::new()),
+            // admin-signin-hardening (ADR-076): in-process only (mirrors
+            // build_with_secret_fetchers's own test-safety precedent) — no
+            // acceptance test run under a shared testcontainers Postgres
+            // instance can pollute another test's throttle counters via a
+            // shared table row.
+            SigninRateLimiter::new(150.0, 10.0 / 60.0),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -389,9 +416,17 @@ impl AdminTestContext {
         let base_url = format!("http://127.0.0.1:{}", addr.port());
 
         tokio::spawn(async move {
-            axum::serve(listener, router)
-                .await
-                .expect("admin server task panicked");
+            // admin-signin-hardening (D-ASH-5, ADR-076): signin's own
+            // ConnectInfo<SocketAddr> extractor requires the real peer
+            // address to be threaded through — axum::serve needs the
+            // explicit connect-info wrapper to do this (unlike lib.rs's
+            // hand-rolled accept loop, which inserts it manually).
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .expect("admin server task panicked");
         });
 
         // Yield to let the spawned server task start accepting connections.
@@ -425,20 +460,7 @@ impl AdminTestContext {
 
     /// Generate a valid TOTP code for the seeded user's secret at the current system time.
     pub fn totp_code_now(&self) -> String {
-        let totp_raw = URL_SAFE_NO_PAD
-            .decode(&self.totp_secret_b32)
-            .expect("totp_secret_b32 must be valid base64url-no-pad");
-        let totp = TOTP::new(
-            TotpAlgorithm::SHA1,
-            6,
-            1,
-            30,
-            totp_raw,
-            None,
-            String::new(),
-        )
-        .expect("TOTP::new failed");
-        totp.generate_current().expect("generate_current failed")
+        totp_code_for_secret(&self.totp_secret_b32)
     }
 
     /// Generate an intentionally wrong TOTP code (always "000000").
@@ -448,38 +470,12 @@ impl AdminTestContext {
 
     /// Generate a valid TOTP code for the seeded Viewer user's secret at the current system time.
     pub fn viewer_totp_code_now(&self) -> String {
-        let totp_raw = URL_SAFE_NO_PAD
-            .decode(&self.viewer_totp_secret_b32)
-            .expect("viewer_totp_secret_b32 must be valid base64url-no-pad");
-        let totp = TOTP::new(
-            TotpAlgorithm::SHA1,
-            6,
-            1,
-            30,
-            totp_raw,
-            None,
-            String::new(),
-        )
-        .expect("TOTP::new failed for viewer");
-        totp.generate_current().expect("generate_current failed for viewer")
+        totp_code_for_secret(&self.viewer_totp_secret_b32)
     }
 
     /// Generate a valid TOTP code for the seeded Admin user's secret at the current system time.
     pub fn admin_totp_code_now(&self) -> String {
-        let totp_raw = URL_SAFE_NO_PAD
-            .decode(&self.admin_totp_secret_b32)
-            .expect("admin_totp_secret_b32 must be valid base64url-no-pad");
-        let totp = TOTP::new(
-            TotpAlgorithm::SHA1,
-            6,
-            1,
-            30,
-            totp_raw,
-            None,
-            String::new(),
-        )
-        .expect("TOTP::new failed for admin");
-        totp.generate_current().expect("generate_current failed for admin")
+        totp_code_for_secret(&self.admin_totp_secret_b32)
     }
 
     /// Returns the full URL for the given admin API path.

@@ -9,6 +9,7 @@
 //! [`advisory_lock_key`] is extracted here rather than duplicated per module.
 
 pub mod cap_usage_refresher;
+pub mod signin_rate_limit_sweeper;
 pub mod soft_delete_purge_sweeper;
 pub mod transaction_sweeper;
 

@@ -18,6 +18,7 @@ use crate::adapters::{
     stripe_gateway::StripeGateway,
     system_db::SystemDb,
 };
+use crate::middleware::signin_rate_limit::SigninRateLimiter;
 
 /// State for operator-only routes (Bearer EMBYR_ADMIN_KEY).
 /// Renamed from `AdminState` (AA-08, ADR-009).
@@ -82,6 +83,10 @@ pub struct UserAdminState {
     /// worsens it).
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+    /// admin-signin-hardening (ADR-076): per-source-IP token bucket gating
+    /// `POST /admin/v1/auth/signin` — checked as the first statement in
+    /// `signin()`, before any DB call.
+    pub signin_rate_limiter: Arc<SigninRateLimiter>,
 }
 
 /// State for the Stripe webhook sub-router (US-203). No session/operator

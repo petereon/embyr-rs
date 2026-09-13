@@ -40,15 +40,21 @@ const UNCONFIRMED_PROJECT_LABEL: &str = "unconfirmed";
 // ---------------------------------------------------------------------------
 
 /// A single token bucket for one project.
-struct TokenBucket {
-    capacity: f64,
-    tokens: f64,
-    refill_rate: f64, // tokens per second
-    last_refill: Instant,
+///
+/// `pub(crate)`: the ALGORITHM (not the table, not the `RateLimiter` struct)
+/// is reused by `signin_rate_limit::SigninRateLimiter` (admin-signin-hardening,
+/// ADR-076) — a schema-independent, source-IP-keyed sibling that cannot reuse
+/// `RateLimiter` itself (its `rate_buckets` table carries a hard FK to
+/// `projects`, incompatible with an IP key).
+pub(crate) struct TokenBucket {
+    pub(crate) capacity: f64,
+    pub(crate) tokens: f64,
+    pub(crate) refill_rate: f64, // tokens per second
+    pub(crate) last_refill: Instant,
 }
 
 impl TokenBucket {
-    fn new(capacity: f64, refill_rate: f64) -> Self {
+    pub(crate) fn new(capacity: f64, refill_rate: f64) -> Self {
         Self {
             capacity,
             tokens: capacity,
@@ -58,7 +64,7 @@ impl TokenBucket {
     }
 
     /// Try to consume one token. Returns `true` if allowed.
-    fn try_consume(&mut self) -> bool {
+    pub(crate) fn try_consume(&mut self) -> bool {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
         self.tokens = (self.tokens + elapsed * self.refill_rate).min(self.capacity);

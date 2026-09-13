@@ -32,6 +32,7 @@ use embyr_server::{
         email::NoopEmailSender, stripe_gateway::StripeGateway, system_db::SystemDb,
     },
     admin::router::build_admin_router,
+    middleware::signin_rate_limit::SigninRateLimiter,
 };
 
 // ─── Universe — port-exposed observable names ─────────────────────────────────
@@ -110,6 +111,7 @@ impl AnonymousIdentityAdminContext {
             stripe_gateway,
             None,
             Arc::new(CapStatusCache::new()),
+            SigninRateLimiter::new(150.0, 10.0 / 60.0),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

@@ -482,7 +482,7 @@ fn spawn_admin_server(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let (stream, _peer) = match listener.accept().await {
+            let (stream, peer) = match listener.accept().await {
                 Ok(pair) => pair,
                 Err(_) => break,
             };
@@ -500,18 +500,24 @@ fn spawn_admin_server(
                 let svc = tower::service_fn(move |req: http::Request<hyper::body::Incoming>| {
                     let app = app.clone();
                     async move {
+                        // admin-signin-hardening (D-ASH-5, ADR-076): insert the
+                        // real peer SocketAddr as a ConnectInfo extension so
+                        // signin's own ConnectInfo<SocketAddr> extractor
+                        // resolves correctly — this hand-rolled accept loop
+                        // has no axum::serve/IntoMakeServiceWithConnectInfo
+                        // equivalent to do it automatically.
+                        let mut req = req.map(rest::grpc_web::incoming_to_axum_body);
+                        req.extensions_mut()
+                            .insert(axum::extract::ConnectInfo(peer));
                         Ok::<_, std::convert::Infallible>(
-                            tower::ServiceExt::oneshot(
-                                app,
-                                req.map(rest::grpc_web::incoming_to_axum_body),
-                            )
-                            .await
-                            .unwrap_or_else(|_: std::convert::Infallible| {
-                                http::Response::builder()
-                                    .status(500)
-                                    .body(axum::body::Body::empty())
-                                    .unwrap()
-                            }),
+                            tower::ServiceExt::oneshot(app, req).await.unwrap_or_else(
+                                |_: std::convert::Infallible| {
+                                    http::Response::builder()
+                                        .status(500)
+                                        .body(axum::body::Body::empty())
+                                        .unwrap()
+                                },
+                            ),
                         )
                     }
                 });

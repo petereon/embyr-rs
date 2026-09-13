@@ -80,6 +80,7 @@ use super::middleware::operator_auth::operator_auth_middleware;
 use super::middleware::session_auth::session_auth_middleware;
 use super::middleware::stripe_signature::stripe_signature_middleware;
 use super::state::{OperatorState, UserAdminState, WebhookState};
+use crate::middleware::signin_rate_limit::SigninRateLimiter;
 
 /// Build the admin router with all five sub-routers merged under /admin/v1.
 ///
@@ -121,6 +122,9 @@ pub fn build_admin_router(
     // silently defeating AC-206-01/02/05 regardless of `run_cycle`'s own
     // correctness).
     cap_status_cache: Arc<CapStatusCache>,
+    // admin-signin-hardening (ADR-076): per-source-IP token bucket gating
+    // POST /admin/v1/auth/signin — threaded into UserAdminState.
+    signin_rate_limiter: Arc<SigninRateLimiter>,
 ) -> Router {
     let operator_state = OperatorState {
         system_db: system_db.clone(),
@@ -168,6 +172,7 @@ pub fn build_admin_router(
         cap_status_cache,
         aws_secret_fetcher,
         gcp_secret_fetcher,
+        signin_rate_limiter,
     };
 
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by
@@ -489,6 +494,11 @@ pub fn build_with_secret_fetchers(
     // and never exercise billing routes) get a no-I/O placeholder StripeGateway —
     // mirrors main.rs's own "billing unwired" placeholder-key fallback.
     let stripe_gateway = Arc::new(StripeGateway::new("stripe-secret-key-not-configured"));
+    // In-process only (mirrors RateLimiter::new(_, _, None)'s existing
+    // test-safety precedent) — no acceptance test run under a shared
+    // testcontainers Postgres instance can pollute another test's throttle
+    // counters via a shared table row.
+    let signin_rate_limiter = SigninRateLimiter::new(150.0, 10.0 / 60.0);
     build_admin_router(
         system_db,
         admin_key,
@@ -504,5 +514,6 @@ pub fn build_with_secret_fetchers(
         stripe_gateway,
         None,
         Arc::new(CapStatusCache::new()),
+        signin_rate_limiter,
     )
 }

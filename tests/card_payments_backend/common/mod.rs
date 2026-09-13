@@ -36,6 +36,7 @@ use embyr_server::{
         email::NoopEmailSender, stripe_gateway::StripeGateway, system_db::SystemDb,
     },
     admin::{handlers::lifecycle::LifecycleDeps, router::build_admin_router},
+    middleware::signin_rate_limit::SigninRateLimiter,
 };
 
 /// Background `CapUsageRefresher` cycle interval for acceptance tests —
@@ -251,6 +252,7 @@ impl CpbTestContext {
             stripe_gateway,
             Some(webhook_signing_secret.to_string()),
             cap_status_cache.clone(),
+            SigninRateLimiter::new(150.0, 10.0 / 60.0),
         );
 
         let _cap_usage_refresher = embyr_server::sweepers::cap_usage_refresher::spawn(
@@ -343,6 +345,7 @@ impl CpbTestContext {
             stripe_gateway,
             Some(webhook_signing_secret.to_string()),
             cap_status_cache.clone(),
+            SigninRateLimiter::new(150.0, 10.0 / 60.0),
         );
 
         let _cap_usage_refresher = embyr_server::sweepers::cap_usage_refresher::spawn(

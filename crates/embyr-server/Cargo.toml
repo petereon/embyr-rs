@@ -1103,6 +1103,13 @@ path = "../../tests/sanitize_backend_error_messages/acceptance/sbm04_listen_unre
 name = "agent_field_path_validation_afp06_cross_binary_parity"
 path = "../../tests/agent_field_path_validation/acceptance/afp06_cross_binary_parity.rs"
 
+# admin-signin-hardening (US-02 item 6, ADR-076) — SigninRateLimitSweeper
+# bounds signin_rate_limits table growth against an IP-rotating attacker;
+# mirrors soft_delete_purge_sweeper's own test shape.
+[[test]]
+name = "admin_signin_hardening_us02_sweeper_bounds_table_growth"
+path = "../../tests/admin_signin_hardening/acceptance/us02_sweeper_bounds_table_growth.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true

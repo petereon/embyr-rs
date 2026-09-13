@@ -38,6 +38,7 @@ use embyr_server::{
     config::{ServerConfig, CLOUD_SECRET_FETCHER_TTL_SECS, GCP_SECRET_MANAGER_BASE_URL},
     grpc::{handler::FirestoreService, healthz::healthz_handler},
     middleware::rate_limit::RateLimiter,
+    middleware::signin_rate_limit::SigninRateLimiter,
     observability::get_or_install_prometheus_handle,
     realtime::listen_registry::ListenRegistry,
     spawn_all_servers,
@@ -147,6 +148,11 @@ async fn main() {
     );
     let rate_limiter =
         RateLimiter::with_pg(cfg.rate_limit_rps, cfg.rate_limit_rps, system_db.pool().clone());
+
+    // admin-signin-hardening (ADR-076): per-source-IP token bucket gating
+    // POST /admin/v1/auth/signin. capacity=150 tokens, refill=10/minute.
+    let signin_rate_limiter =
+        SigninRateLimiter::with_pg(150.0, 10.0 / 60.0, system_db.pool().clone());
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -274,6 +280,7 @@ async fn main() {
         Arc::clone(&stripe_gateway),
         webhook_signing_secret,
         Arc::clone(&cap_status_cache),
+        Arc::clone(&signin_rate_limiter),
     )
     .route("/healthz", axum::routing::get(healthz_handler));
 
@@ -321,6 +328,15 @@ async fn main() {
         Arc::clone(&system_db),
         std::time::Duration::from_secs(cfg.soft_delete_sweep_interval_secs),
         cfg.soft_delete_grace_days,
+    );
+
+    // admin-signin-hardening (ADR-076): 4th background sweeper — bounds
+    // signin_rate_limits table growth against an IP-rotating attacker.
+    // Hourly cadence, 24h retention (hardcoded in the sweeper module — no
+    // new ServerConfig field, consistent with this feature's narrow scope).
+    let _signin_rate_limit_sweeper = embyr_server::sweepers::signin_rate_limit_sweeper::spawn(
+        Arc::clone(&system_db),
+        std::time::Duration::from_secs(3600),
     );
 
     // ── Step 11: spawn gRPC + REST + admin servers ────────────────────────
