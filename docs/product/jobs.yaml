@@ -783,6 +783,19 @@ jobs:
     # TLS; mTLS was named only in the gap's title, with no evidenced customer
     # need. See docs/feature/firestore-tls-support/feature-delta.md § Reading
     # Confirmation, § Out of Scope.
+    # NOTE (healthz-dependency-checks DISCUSS, 2026-09-14): JOB-13 now also
+    # covers POST-startup dependency health, not just the startup-time
+    # migrate-then-probe gate this job already established. `/healthz` today
+    # is a hardcoded 200 OK with no ongoing Postgres check (production-
+    # readiness-audit-2026-09-08.md finding #15) — this extension adds a
+    # liveness signal (process-alive only, never depends on Postgres, so a
+    # Postgres outage can never trigger a restart storm) and a readiness
+    # signal (reuses the already-existing SystemDb::probe() primitive, scoped
+    # to the shared system Postgres pool only, not per-tenant customer DBs)
+    # so an orchestrator can distinguish "restart this pod" from "stop
+    # routing traffic to this pod" — same job, same persona (P2 Sam Chen),
+    # not a new job. See docs/feature/healthz-dependency-checks/
+    # feature-delta.md § Investigation 1-3, § Persona & Job.
 
   - id: JOB-14
     name: manage-subscription
