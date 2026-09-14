@@ -390,6 +390,8 @@ pub fn spawn_all_servers(
         aws_secret_fetcher: service.aws_secret_fetcher.clone(),
         gcp_secret_fetcher: service.gcp_secret_fetcher.clone(),
         email_sender,
+        tenant_db_max_connections: service.tenant_db_max_connections,
+        tenant_db_acquire_timeout: service.tenant_db_acquire_timeout,
     };
     let oauth_provider_state = rest::sign_in_with_idp::OAuthProviderState {
         system_db: std::sync::Arc::clone(&service.system_db),
@@ -575,6 +577,10 @@ pub async fn start_test_server_with_keepalive(
         aws_secret_fetcher: None,
         gcp_secret_fetcher: None,
         rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -639,6 +645,10 @@ pub async fn start_test_server_with_email_sender(
         aws_secret_fetcher: None,
         gcp_secret_fetcher: None,
         rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -697,6 +707,10 @@ pub async fn start_test_server_with_oauth(
         aws_secret_fetcher: None,
         gcp_secret_fetcher: None,
         rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -750,6 +764,10 @@ pub async fn start_test_server_with_aws_fetcher(
         aws_secret_fetcher: Some(Arc::clone(&aws_fetcher)),
         gcp_secret_fetcher: None,
         rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -803,6 +821,10 @@ pub async fn start_test_server_with_gcp_fetcher(
         aws_secret_fetcher: None,
         gcp_secret_fetcher: Some(Arc::clone(&gcp_fetcher)),
         rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
     };
 
     let admin_app = admin::router::build_with_gcp(
@@ -861,6 +883,10 @@ pub async fn start_test_server_with_distributed_rate_limit(
         aws_secret_fetcher: None,
         gcp_secret_fetcher: None,
         rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -922,6 +948,10 @@ pub async fn start_test_server_with_rate_limit(
         aws_secret_fetcher: None,
         gcp_secret_fetcher: None,
         rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -978,6 +1008,10 @@ pub async fn start_test_server_with_tls(
         aws_secret_fetcher: None,
         gcp_secret_fetcher: None,
         rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
     };
 
     // healthz-dependency-checks (ADR-078): clone BEFORE `system_db` moves by

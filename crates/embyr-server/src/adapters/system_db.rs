@@ -236,6 +236,24 @@ impl SystemDb {
         Ok(Self { pool })
     }
 
+    /// Connect with an operator-configured `max_connections`
+    /// (pool-sizing-and-limits, ADR-079). `acquire_timeout` stays the
+    /// hardcoded 5s literal above — this site's fix is scoped to
+    /// `max_connections` only. Additive: `new()` above is unchanged for its
+    /// 60+ existing callers.
+    pub async fn with_pool_config(
+        database_url: &str,
+        max_connections: u32,
+    ) -> Result<Self, CoreError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(database_url)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        Ok(Self { pool })
+    }
+
     /// Run sqlx migrations from the `migrations/` directory (workspace root).
     pub async fn migrate(&self) -> Result<(), CoreError> {
         sqlx::migrate!("../../migrations")

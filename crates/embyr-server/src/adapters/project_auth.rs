@@ -63,6 +63,7 @@ pub enum ProjectAuthError {
     Internal(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve_customer_db_adapter(
     system_db: &SystemDb,
     credential_cache: &CredentialCache,
@@ -70,6 +71,8 @@ pub async fn resolve_customer_db_adapter(
     gcp_secret_fetcher: Option<&GcpSecretFetcher>,
     project_id: &str,
     api_key: &str,
+    tenant_db_max_connections: u32,
+    tenant_db_acquire_timeout: std::time::Duration,
 ) -> Result<Arc<PostgresBackendAdapter>, ProjectAuthError> {
     let api_key_blake3 = blake3::derive_cache_key(api_key.as_bytes());
     let domain_project_id =
@@ -86,7 +89,11 @@ pub async fn resolve_customer_db_adapter(
         if status == "suspended" || status == "deleted" {
             return Err(ProjectAuthError::ProjectNotFound);
         }
-        let adapter = PostgresBackendAdapter::new(&dsn)
+        let adapter = PostgresBackendAdapter::with_pool_config(
+            &dsn,
+            tenant_db_max_connections,
+            tenant_db_acquire_timeout,
+        )
             .await
             .map_err(|e| ProjectAuthError::Internal(e.to_string()))?;
         return Ok(Arc::new(adapter));
@@ -153,7 +160,11 @@ pub async fn resolve_customer_db_adapter(
         }
     };
 
-    let concrete = PostgresBackendAdapter::new(&dsn)
+    let concrete = PostgresBackendAdapter::with_pool_config(
+        &dsn,
+        tenant_db_max_connections,
+        tenant_db_acquire_timeout,
+    )
         .await
         .map_err(|e| ProjectAuthError::Internal(e.to_string()))?;
     let concrete = Arc::new(concrete);

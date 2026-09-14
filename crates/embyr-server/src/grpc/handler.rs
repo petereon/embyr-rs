@@ -90,6 +90,18 @@ pub struct FirestoreService {
     /// Per-project token bucket rate limiter. Applied before authentication to skip
     /// Argon2id on requests that would be rate-limited anyway.
     pub rate_limiter: Arc<RateLimiter>,
+    /// pool-sizing-and-limits (ADR-079): per-tenant customer-document pool
+    /// sizing, sourced from `EMBYR_TENANT_DB_MAX_CONNECTIONS`.
+    pub tenant_db_max_connections: u32,
+    /// pool-sizing-and-limits (ADR-079): per-tenant customer-document pool
+    /// acquire timeout, sourced from `EMBYR_TENANT_DB_ACQUIRE_TIMEOUT_SECS`.
+    pub tenant_db_acquire_timeout: std::time::Duration,
+    /// pool-sizing-and-limits (ADR-079): per-tenant realtime-listener pool
+    /// sizing, sourced from `EMBYR_LISTENER_DB_MAX_CONNECTIONS`.
+    pub listener_db_max_connections: u32,
+    /// pool-sizing-and-limits (ADR-079): per-tenant realtime-listener pool
+    /// acquire timeout, sourced from `EMBYR_LISTENER_DB_ACQUIRE_TIMEOUT_SECS`.
+    pub listener_db_acquire_timeout: std::time::Duration,
 }
 
 impl FirestoreService {
@@ -285,7 +297,11 @@ impl FirestoreService {
                 .get_dsn(&arn)
                 .await
                 .map_err(|e| Status::internal(format!("aws secret fetch failed: {e}")))?;
-            let adapter = PostgresBackendAdapter::new(&dsn)
+            let adapter = PostgresBackendAdapter::with_pool_config(
+                &dsn,
+                self.tenant_db_max_connections,
+                self.tenant_db_acquire_timeout,
+            )
                 .await
                 .map_err(|e| sanitize_backend_error(e, "authenticate: aws_secret backend connect"))?;
             let shared: SharedBackendAdapter = Arc::new(adapter);
@@ -303,7 +319,11 @@ impl FirestoreService {
                 .get_dsn(&resource_name)
                 .await
                 .map_err(|e| Status::internal(format!("gcp secret fetch failed: {e}")))?;
-            let adapter = PostgresBackendAdapter::new(&dsn)
+            let adapter = PostgresBackendAdapter::with_pool_config(
+                &dsn,
+                self.tenant_db_max_connections,
+                self.tenant_db_acquire_timeout,
+            )
                 .await
                 .map_err(|e| sanitize_backend_error(e, "authenticate: gcp_secret backend connect"))?;
             let shared: SharedBackendAdapter = Arc::new(adapter);
@@ -354,7 +374,11 @@ impl FirestoreService {
             let dsn = String::from_utf8(dsn_bytes)
                 .map_err(|_| Status::internal("DSN is not valid UTF-8"))?;
 
-            let adapter = PostgresBackendAdapter::new(&dsn)
+            let adapter = PostgresBackendAdapter::with_pool_config(
+                &dsn,
+                self.tenant_db_max_connections,
+                self.tenant_db_acquire_timeout,
+            )
                 .await
                 .map_err(|e| sanitize_backend_error(e, "authenticate: direct_pg backend connect"))?;
             let shared: SharedBackendAdapter = Arc::new(adapter);
@@ -3562,7 +3586,8 @@ impl FirestoreService {
                 // (dyn BackendAdapter) so we can't downcast. Instead, build a new pool
                 // from the DSN specifically for the listener's fetch queries.
                 let pool = sqlx::postgres::PgPoolOptions::new()
-                    .max_connections(2)
+                    .max_connections(self.listener_db_max_connections)
+                    .acquire_timeout(self.listener_db_acquire_timeout)
                     .connect(&dsn)
                     .await
                     .map_err(|e| sanitize_backend_error(e, "handle_listen: provision notify-listener pool"))?;

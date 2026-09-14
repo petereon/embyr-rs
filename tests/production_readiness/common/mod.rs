@@ -380,3 +380,210 @@ impl Drop for ServerProcess {
         let _ = self.child.wait();
     }
 }
+
+// ─── pool-sizing-and-limits (finding #16/#30, ADR-079) ─────────────────────────
+//
+// Shared helpers for pr11/pr12/pr13 — provisioning a real tenant project
+// against a real `ServerProcess` (not the in-process `start_test_server_*`
+// harness, which DESIGN confirms is hardcoded and does NOT read the new
+// pool-sizing env vars) and driving real Firestore gRPC writes, including a
+// precondition-carrying `Commit` (needed to trigger the `FOR UPDATE` row
+// lock `commit_transaction`'s own OCC path already takes on
+// `MustExist`/`MustNotExist`/`UpdateTime` preconditions — the deterministic
+// mechanism this feature's saturation tests use to hold a real SUT pool
+// connection busy without racing on query speed).
+
+/// Fixed operator Bearer key `ServerProcess::start`/`start_env_only` are
+/// always given via `EMBYR_ADMIN_KEY` in this file's own call sites.
+pub const ADMIN_KEY: &str = "testkey";
+
+/// Provision a project via the real operator-Bearer-key admin API
+/// (`POST /admin/v1/projects`, mirrors `pr10_healthz_dependency_checks.rs`'s
+/// own provisioning call) against a real, already-running `ServerProcess`.
+/// Returns the server-generated `api_key` for that project.
+pub async fn provision_project(admin_port: u16, project_id: &str, dsn: &str) -> String {
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("http://127.0.0.1:{admin_port}/admin/v1/projects"))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .json(&serde_json::json!({
+            "project_id": project_id,
+            "dsn": dsn,
+            "backend_mode": "direct_pg",
+        }))
+        .send()
+        .await
+        .expect("POST /admin/v1/projects request failed");
+    assert!(
+        resp.status().is_success(),
+        "provisioning project {project_id} must succeed; status={}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("provision response body must be JSON");
+    body["api_key"]
+        .as_str()
+        .expect("provision response must include api_key")
+        .to_string()
+}
+
+/// Lazily-connecting gRPC channel to a real subprocess's `grpc_port`.
+pub fn grpc_channel(grpc_port: u16) -> tonic::transport::Channel {
+    tonic::transport::Endpoint::new(format!("http://127.0.0.1:{grpc_port}"))
+        .expect("valid endpoint")
+        .connect_lazy()
+}
+
+/// A single string-valued Firestore document field.
+pub fn string_field(value: &str) -> embyr_proto::firestore::Value {
+    embyr_proto::firestore::Value {
+        value_type: Some(embyr_proto::firestore::value::ValueType::StringValue(
+            value.to_string(),
+        )),
+    }
+}
+
+/// Real gRPC `CreateDocument` call against a real subprocess's `grpc_port`.
+pub async fn create_doc(
+    client: &mut embyr_proto::firestore::firestore_client::FirestoreClient<tonic::transport::Channel>,
+    project_id: &str,
+    api_key: &str,
+    collection_id: &str,
+    document_id: &str,
+    fields: std::collections::HashMap<String, embyr_proto::firestore::Value>,
+) {
+    use embyr_proto::firestore::{CreateDocumentRequest, Document};
+
+    let mut request = tonic::Request::new(CreateDocumentRequest {
+        parent: format!("projects/{project_id}/databases/(default)/documents"),
+        collection_id: collection_id.to_string(),
+        document_id: document_id.to_string(),
+        document: Some(Document { name: String::new(), fields, ..Default::default() }),
+        ..Default::default()
+    });
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {api_key}").parse().expect("valid header"));
+
+    client
+        .create_document(request)
+        .await
+        .expect("seed document should succeed");
+}
+
+/// Real gRPC `BeginTransaction` call — `begin_transaction`'s own INSERT
+/// into `transactions` (`backend_adapter.rs`) is a single, fast, acquire-
+/// and-release query. Under a pool with genuine SPARE capacity it does not
+/// contend with this file's own row-lock-based saturation mechanism below
+/// — but when `max_connections` is small enough that every connection is
+/// already checked out (AC-PSL-04's own saturated-pool scenario), this
+/// INSERT's own `pool.acquire()` legitimately queues and can itself hit
+/// `acquire_timeout` before `Commit` is ever attempted. Returns `Result`
+/// (not a bare value) so that a saturated-pool failure here is surfaced as
+/// the SAME clean, typed error `commit_update_requiring_exists`'s own
+/// callers already assert on via `result.is_err()`, rather than panicking.
+async fn begin_transaction(
+    client: &mut embyr_proto::firestore::firestore_client::FirestoreClient<tonic::transport::Channel>,
+    project_id: &str,
+    api_key: &str,
+) -> Result<Vec<u8>, tonic::Status> {
+    use embyr_proto::firestore::BeginTransactionRequest;
+
+    let mut request = tonic::Request::new(BeginTransactionRequest {
+        database: format!("projects/{project_id}/databases/(default)"),
+        options: None,
+    });
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {api_key}").parse().expect("valid header"));
+
+    Ok(client.begin_transaction(request).await?.into_inner().transaction)
+}
+
+/// Real gRPC `BeginTransaction` + `Commit` carrying ONE
+/// `Write { current_document: Exists(true) }` — the exact precondition
+/// shape that forces `commit_transaction`'s own `FOR UPDATE` existence
+/// check (`backend_adapter.rs`, MustExist branch) on the target document
+/// row. `Commit` requires a real transaction id (an empty `transaction`
+/// field is rejected as `InvalidArgument` — confirmed empirically during
+/// DISTILL), so this helper begins one first, mirroring
+/// `security_rules_write_path/common/mod.rs::begin_transaction`+
+/// `commit_writes`'s own two-call shape exactly.
+///
+/// A real, uncommitted `SELECT ... FOR UPDATE` held open by another session
+/// against the SAME document row will block the `Commit` call (not the
+/// `BeginTransaction` call) inside Postgres for as long as that lock is
+/// held — legitimately checking out and holding one of the SUT's own pool
+/// connections for that duration. This is the deterministic saturation
+/// mechanism AC-PSL-04/06 rely on (no reliance on racing fast queries
+/// against each other).
+pub async fn commit_update_requiring_exists(
+    client: &mut embyr_proto::firestore::firestore_client::FirestoreClient<tonic::transport::Channel>,
+    project_id: &str,
+    api_key: &str,
+    collection_id: &str,
+    document_id: &str,
+    field_value: &str,
+) -> Result<tonic::Response<embyr_proto::firestore::CommitResponse>, tonic::Status> {
+    use embyr_proto::firestore::{
+        precondition::ConditionType, write::Operation, CommitRequest, Document, Precondition,
+        Write,
+    };
+
+    let transaction = begin_transaction(client, project_id, api_key).await?;
+
+    let resource_name = format!(
+        "projects/{project_id}/databases/(default)/documents/{collection_id}/{document_id}"
+    );
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("touched".to_string(), string_field(field_value));
+
+    let write = Write {
+        update_mask: None,
+        update_transforms: vec![],
+        current_document: Some(Precondition {
+            condition_type: Some(ConditionType::Exists(true)),
+        }),
+        operation: Some(Operation::Update(Document {
+            name: resource_name,
+            fields,
+            ..Default::default()
+        })),
+    };
+
+    let mut request = tonic::Request::new(CommitRequest {
+        database: format!("projects/{project_id}/databases/(default)"),
+        writes: vec![write],
+        transaction,
+    });
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {api_key}").parse().expect("valid header"));
+
+    client.commit(request).await
+}
+
+/// Open a raw, direct (bypassing the SUT entirely) transaction against
+/// `dsn` and take `FOR UPDATE` on one document row, WITHOUT committing —
+/// held open until the returned transaction is dropped/rolled back by the
+/// caller. Mirrors the exact WHERE clause `commit_transaction`'s own OCC
+/// checks use (`backend_adapter.rs`) so the lock genuinely conflicts.
+pub async fn lock_document_row_for_update<'a>(
+    pool: &'a sqlx::PgPool,
+    project_id: &str,
+    collection_path: &str,
+    document_id: &str,
+) -> sqlx::Transaction<'a, sqlx::Postgres> {
+    let mut txn = pool.begin().await.expect("begin raw lock transaction");
+    sqlx::query(
+        "SELECT 1 FROM documents \
+         WHERE project_id = $1 AND collection_path = $2 AND document_id = $3 AND NOT deleted \
+         FOR UPDATE",
+    )
+    .bind(project_id)
+    .bind(collection_path)
+    .bind(document_id)
+    .fetch_one(&mut *txn)
+    .await
+    .expect("row must exist to be lockable — seed it before locking");
+    txn
+}

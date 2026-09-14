@@ -47,6 +47,24 @@ impl PostgresBackendAdapter {
         Ok(Self { pool })
     }
 
+    /// Connect with an operator-configured `max_connections` and
+    /// `acquire_timeout` (pool-sizing-and-limits, ADR-079) — this site had
+    /// no `acquire_timeout` at all before. Additive: `new()` above is
+    /// unchanged for its 8+ existing callers.
+    pub async fn with_pool_config(
+        database_url: &str,
+        max_connections: u32,
+        acquire_timeout: std::time::Duration,
+    ) -> Result<Self, CoreError> {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_connections)
+            .acquire_timeout(acquire_timeout)
+            .connect(database_url)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        Ok(Self { pool })
+    }
+
     /// Construct from an already-connected pool (used by test harnesses).
     pub fn new_from_pool(pool: PgPool) -> Self {
         Self { pool }

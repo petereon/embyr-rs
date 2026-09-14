@@ -106,7 +106,7 @@ async fn main() {
 
     // ── Step 4: connect to system DB ──────────────────────────────────────
     let system_db = Arc::new(
-        SystemDb::new(&cfg.db_url)
+        SystemDb::with_pool_config(&cfg.db_url, cfg.system_db_max_connections)
             .await
             .unwrap_or_else(|e| fail_startup(e, "startup failed: system DB connection")),
     );
@@ -207,6 +207,10 @@ async fn main() {
         aws_secret_fetcher: aws_secret_fetcher.clone(),
         gcp_secret_fetcher: gcp_secret_fetcher.clone(),
         rate_limiter,
+        tenant_db_max_connections: cfg.tenant_db_max_connections,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(cfg.tenant_db_acquire_timeout_secs as u64),
+        listener_db_max_connections: cfg.listener_db_max_connections,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(cfg.listener_db_acquire_timeout_secs as u64),
     };
 
     // ── Step 10: build admin router + healthz on admin port ───────────────

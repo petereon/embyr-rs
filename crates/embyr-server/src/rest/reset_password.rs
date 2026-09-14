@@ -129,6 +129,8 @@ pub async fn send_oob_code(
         state.gcp_secret_fetcher.as_deref(),
         &project_id,
         &api_key,
+        state.tenant_db_max_connections,
+        state.tenant_db_acquire_timeout,
     )
     .await
     {
@@ -246,6 +248,8 @@ pub async fn reset_password(
         state.gcp_secret_fetcher.as_deref(),
         &project_id,
         &api_key,
+        state.tenant_db_max_connections,
+        state.tenant_db_acquire_timeout,
     )
     .await
     {

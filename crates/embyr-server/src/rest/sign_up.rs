@@ -79,6 +79,12 @@ pub struct HostedIdentityState {
     /// Slice 04: reset-request's own driven port for "if this account
     /// exists, a reset was sent" (ADR-036, ADR-011). V1: `NoopEmailSender`.
     pub email_sender: Arc<dyn embyr_core::admin::email::IEmailSender + Send + Sync>,
+    /// pool-sizing-and-limits (ADR-079): threaded into
+    /// `resolve_customer_db_adapter`'s `with_pool_config` call — same
+    /// `EMBYR_TENANT_DB_MAX_CONNECTIONS`-sourced value the gRPC path uses.
+    pub tenant_db_max_connections: u32,
+    /// pool-sizing-and-limits (ADR-079): same as above, for `acquire_timeout`.
+    pub tenant_db_acquire_timeout: std::time::Duration,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +163,8 @@ pub async fn sign_up(
         state.gcp_secret_fetcher.as_deref(),
         &project_id,
         &api_key,
+        state.tenant_db_max_connections,
+        state.tenant_db_acquire_timeout,
     )
     .await
     {

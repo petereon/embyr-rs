@@ -43,6 +43,13 @@
 //!      as readiness (real `SystemDb::probe()`, shared system pool only,
 //!      3s timeout), new `/livez` added for liveness (zero I/O). ADR-078.
 //!      (AC-HDC-01 through AC-HDC-11)
+//!   11. pr11/pr12/pr13 — pool-sizing-and-limits (findings #16 High + #30
+//!      Medium, ADR-079): env-var-overridable `max_connections`/
+//!      `acquire_timeout` for the 3 `embyr-server`-resident Postgres pools
+//!      (shared system, per-tenant customer, per-tenant listener); invalid
+//!      values fail startup; a saturated pool fails fast and cleanly
+//!      instead of sqlx's 30s default; per-tenant isolation preserved.
+//!      (AC-PSL-01 through AC-PSL-06)
 //!
 //! Pre-requisites before running any test:
 //!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
@@ -62,4 +69,7 @@ mod acceptance {
     mod pr08_realtime_listener_reconnect;
     mod pr09_wire_secret_fetchers;
     mod pr10_healthz_dependency_checks;
+    mod pr11_pool_sizing_tenant_pool;
+    mod pr12_pool_sizing_invalid_config;
+    mod pr13_pool_sizing_listener_pool;
 }

@@ -139,6 +139,23 @@ pub struct ServerConfig {
     /// `None` = today's plaintext behavior on all 3 listeners, unchanged
     /// (AC-TLS-01, hard regression guard).
     pub tls: Option<TlsMaterial>,
+    /// `EMBYR_SYSTEM_DB_MAX_CONNECTIONS` — pool-sizing-and-limits (ADR-079);
+    /// default 5, matching today's hardcoded value byte-for-byte.
+    pub system_db_max_connections: u32,
+    /// `EMBYR_TENANT_DB_MAX_CONNECTIONS` — pool-sizing-and-limits (ADR-079);
+    /// default 5, matching today's hardcoded value byte-for-byte.
+    pub tenant_db_max_connections: u32,
+    /// `EMBYR_TENANT_DB_ACQUIRE_TIMEOUT_SECS` — pool-sizing-and-limits
+    /// (ADR-079); default 5 (this pool previously had no acquire_timeout at
+    /// all).
+    pub tenant_db_acquire_timeout_secs: u32,
+    /// `EMBYR_LISTENER_DB_MAX_CONNECTIONS` — pool-sizing-and-limits
+    /// (ADR-079); default 2, matching today's hardcoded value byte-for-byte.
+    pub listener_db_max_connections: u32,
+    /// `EMBYR_LISTENER_DB_ACQUIRE_TIMEOUT_SECS` — pool-sizing-and-limits
+    /// (ADR-079); default 5 (this pool previously had no acquire_timeout at
+    /// all).
+    pub listener_db_acquire_timeout_secs: u32,
 }
 
 /// Validated TLS material for firestore-tls-support: one cert/key pair
@@ -198,6 +215,9 @@ pub enum ConfigError {
     /// valid PEM, or the private key does not match the certificate
     /// (AC-TLS-07).
     TlsInvalidPem { var: String, reason: String },
+    /// A pool-sizing/timeout variable (pool-sizing-and-limits, ADR-079) is
+    /// present but not a positive integer (`parse_positive_u32`).
+    InvalidPoolConfig { var: String, value: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -246,6 +266,12 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::TlsInvalidPem { var, reason } => {
                 write!(f, "invalid PEM content for {var}: {reason}")
+            }
+            ConfigError::InvalidPoolConfig { var, value } => {
+                write!(
+                    f,
+                    "invalid value for {var}: '{value}' (must be a positive integer)"
+                )
             }
         }
     }
@@ -373,6 +399,18 @@ impl ServerConfig {
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(7);
 
+        // pool-sizing-and-limits (ADR-079): 5 env-overridable pool-sizing/
+        // timeout knobs, all optional/defaulted, invalid values already
+        // returned via `?` above (never a silent fallback).
+        let system_db_max_connections = parse_positive_u32("EMBYR_SYSTEM_DB_MAX_CONNECTIONS", 5)?;
+        let tenant_db_max_connections = parse_positive_u32("EMBYR_TENANT_DB_MAX_CONNECTIONS", 5)?;
+        let tenant_db_acquire_timeout_secs =
+            parse_positive_u32("EMBYR_TENANT_DB_ACQUIRE_TIMEOUT_SECS", 5)?;
+        let listener_db_max_connections =
+            parse_positive_u32("EMBYR_LISTENER_DB_MAX_CONNECTIONS", 2)?;
+        let listener_db_acquire_timeout_secs =
+            parse_positive_u32("EMBYR_LISTENER_DB_ACQUIRE_TIMEOUT_SECS", 5)?;
+
         Ok(ServerConfig {
             db_url: db_url_opt.unwrap(),
             admin_key,
@@ -393,6 +431,11 @@ impl ServerConfig {
             soft_delete_sweep_interval_secs,
             soft_delete_grace_days,
             tls,
+            system_db_max_connections,
+            tenant_db_max_connections,
+            tenant_db_acquire_timeout_secs,
+            listener_db_max_connections,
+            listener_db_acquire_timeout_secs,
         })
     }
 }
@@ -796,6 +839,23 @@ fn parse_port(name: &str, default: u16) -> Result<u16, ConfigError> {
     }
 }
 
+/// Parse an optional pool-sizing/timeout variable (pool-sizing-and-limits,
+/// ADR-079). Returns `default` when the variable is absent. Present but
+/// non-numeric or `0` (non-positive) is `ConfigError::InvalidPoolConfig` —
+/// never a silent fallback. Mirrors `parse_port`'s exact shape.
+fn parse_positive_u32(name: &str, default: u32) -> Result<u32, ConfigError> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(v) => {
+            let n = v.parse::<u32>().ok().filter(|n| *n > 0);
+            n.ok_or_else(|| ConfigError::InvalidPoolConfig {
+                var: name.to_string(),
+                value: v,
+            })
+        }
+    }
+}
+
 /// Parse `EMBYR_RATE_LIMIT_RPS`. Returns 1000.0 when the variable is absent.
 fn parse_rate_limit_rps() -> Result<f64, ConfigError> {
     match std::env::var("EMBYR_RATE_LIMIT_RPS") {
@@ -873,6 +933,28 @@ mod tests {
         let result = parse_port("_EMBYR_TEST_PORT_INVALID_XYZZY_99", 9090);
         std::env::remove_var("_EMBYR_TEST_PORT_INVALID_XYZZY_99");
         assert!(matches!(result, Err(ConfigError::InvalidPort { .. })));
+    }
+
+    #[test]
+    fn parse_positive_u32_absent_returns_default() {
+        let result = parse_positive_u32("_EMBYR_TEST_POOL_ABSENT_XYZZY_99", 5);
+        assert_eq!(result.unwrap(), 5);
+    }
+
+    #[test]
+    fn parse_positive_u32_non_numeric_returns_error() {
+        std::env::set_var("_EMBYR_TEST_POOL_NONNUM_XYZZY_99", "not_a_number");
+        let result = parse_positive_u32("_EMBYR_TEST_POOL_NONNUM_XYZZY_99", 5);
+        std::env::remove_var("_EMBYR_TEST_POOL_NONNUM_XYZZY_99");
+        assert!(matches!(result, Err(ConfigError::InvalidPoolConfig { .. })));
+    }
+
+    #[test]
+    fn parse_positive_u32_zero_returns_error() {
+        std::env::set_var("_EMBYR_TEST_POOL_ZERO_XYZZY_99", "0");
+        let result = parse_positive_u32("_EMBYR_TEST_POOL_ZERO_XYZZY_99", 5);
+        std::env::remove_var("_EMBYR_TEST_POOL_ZERO_XYZZY_99");
+        assert!(matches!(result, Err(ConfigError::InvalidPoolConfig { .. })));
     }
 
     #[test]

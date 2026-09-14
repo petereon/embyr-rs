@@ -97,6 +97,8 @@ pub async fn sign_in_with_password(
         state.gcp_secret_fetcher.as_deref(),
         &project_id,
         &api_key,
+        state.tenant_db_max_connections,
+        state.tenant_db_acquire_timeout,
     )
     .await
     {
