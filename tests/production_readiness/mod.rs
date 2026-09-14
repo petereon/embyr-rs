@@ -39,6 +39,10 @@
 //!      build_admin_router, transaction_sweeper::spawn) instead of
 //!      hardcoding None, None (production-readiness-audit-2026-09-08.md
 //!      finding #7) (AC-WSF-01 through AC-WSF-06)
+//!   10. pr10 — healthz-dependency-checks (finding #15): `/healthz` redefined
+//!      as readiness (real `SystemDb::probe()`, shared system pool only,
+//!      3s timeout), new `/livez` added for liveness (zero I/O). ADR-078.
+//!      (AC-HDC-01 through AC-HDC-11)
 //!
 //! Pre-requisites before running any test:
 //!   - none — `cargo test` builds `embyr-server` automatically via `CARGO_BIN_EXE_embyr-server`
@@ -57,4 +61,5 @@ mod acceptance {
     mod pr07_stripe_webhook_body_limit;
     mod pr08_realtime_listener_reconnect;
     mod pr09_wire_secret_fetchers;
+    mod pr10_healthz_dependency_checks;
 }

@@ -344,15 +344,27 @@ pub fn spawn_all_servers(
 ) -> tokio::task::JoinHandle<()> {
     let service_for_rest = service.clone();
 
+    // healthz-dependency-checks (ADR-078): `/livez`/`/healthz` need a
+    // different state type (`Arc<SystemDb>`) than the rest of `axum_app`
+    // (`BrowserChannelState`) — cloned from `service` BEFORE `service` moves
+    // into `FirestoreServer::new(service)` below, resolved to `Router<()>`
+    // via `.with_state()`, then merged, mirroring `accounts_bridge_app`'s
+    // own established pattern in this exact function.
+    let readyz_state = Arc::clone(&service.system_db);
+    let healthz_app = axum::Router::new()
+        .route("/livez", axum::routing::get(grpc::healthz::livez_handler))
+        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
+        .with_state(readyz_state);
+
     let bc_state = rest::browser_channel::BrowserChannelState::new();
     let axum_app = axum::Router::new()
-        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
         .route(
             "/channel",
             axum::routing::get(rest::browser_channel::browser_channel_get)
                 .post(rest::browser_channel::browser_channel_post),
         )
         .with_state(bc_state);
+    let axum_app = axum_app.merge(healthz_app);
 
     // client-auth (US-02, ADR-026) + client-auth-hosted-identity (US-02,
     // ADR-036 Decision 6): both `accounts:signInWithCustomToken` and
@@ -968,13 +980,20 @@ pub async fn start_test_server_with_tls(
         rate_limiter,
     };
 
+    // healthz-dependency-checks (ADR-078): clone BEFORE `system_db` moves by
+    // value into `build_with_aws` below.
+    let readyz_state = Arc::clone(&system_db);
+    let healthz_app = axum::Router::new()
+        .route("/livez", axum::routing::get(grpc::healthz::livez_handler))
+        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
+        .with_state(readyz_state);
     let admin_app = admin::router::build_with_aws(
         system_db,
         "test-admin-key-secret".to_string(),
         c.cache_for_admin,
         None,
     )
-    .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler));
+    .merge(healthz_app);
 
     let tonic_tls_config = tonic::transport::ServerTlsConfig::new()
         .identity(tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem));

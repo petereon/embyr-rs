@@ -36,7 +36,10 @@ use embyr_server::{
     },
     admin::router::build_admin_router,
     config::{ServerConfig, CLOUD_SECRET_FETCHER_TTL_SECS, GCP_SECRET_MANAGER_BASE_URL},
-    grpc::{handler::FirestoreService, healthz::healthz_handler},
+    grpc::{
+        handler::FirestoreService,
+        healthz::{healthz_handler, livez_handler},
+    },
     middleware::rate_limit::RateLimiter,
     middleware::signin_rate_limit::SigninRateLimiter,
     observability::get_or_install_prometheus_handle,
@@ -265,6 +268,13 @@ async fn main() {
         None
     };
 
+    // healthz-dependency-checks (ADR-078): `/livez`/`/healthz` need
+    // `Arc<SystemDb>` state, resolved to `Router<()>` via `.with_state()`
+    // then merged onto the admin router's own return value.
+    let healthz_app = axum::Router::new()
+        .route("/livez", axum::routing::get(livez_handler))
+        .route("/healthz", axum::routing::get(healthz_handler))
+        .with_state(Arc::clone(&system_db));
     let admin_app = build_admin_router(
         Arc::clone(&system_db),
         cfg.admin_key.clone(),
@@ -282,7 +292,7 @@ async fn main() {
         Arc::clone(&cap_status_cache),
         Arc::clone(&signin_rate_limiter),
     )
-    .route("/healthz", axum::routing::get(healthz_handler));
+    .merge(healthz_app);
 
     // card-payments-backend (ADR-020): background cap-check refresher. Only
     // meaningful once STRIPE_SECRET_KEY is configured (Free-plan accounts
