@@ -182,6 +182,52 @@ async fn cached_schema_capability_reads_are_negligible_versus_uncached_catalog_p
     );
 }
 
+/// AC-CGI-11 (cached-`Unavailable` overhead half) — the TTL-freshness guard
+/// must actually short-circuit repeat `Unavailable` reads within the TTL
+/// window, not just return the correct value slowly. Mirrors AC-CGI-13's own
+/// cached-vs-uncached proxy above, but for the `Unavailable` branch: without
+/// this, a broken freshness check (e.g. one that always treats the cache as
+/// stale) would silently re-probe `information_schema` on every call and
+/// still read correct results, since an un-migrated database is genuinely
+/// `Unavailable` either way — a purely-behavioral assertion can't catch
+/// that, only a cost proxy can.
+#[tokio::test]
+async fn cached_unavailable_reads_are_negligible_versus_uncached_catalog_probes() {
+    let (_pg, pool, adapter) = customer_db_missing_latest_migration().await;
+    let ttl = Duration::from_secs(30);
+
+    // Warm the cache once.
+    assert_eq!(adapter.schema_capability(ttl).await, SchemaCapability::Unavailable);
+
+    let cached_p99 = p99_of(50, || {
+        let adapter = &adapter;
+        async move {
+            adapter.schema_capability(ttl).await;
+        }
+    })
+    .await;
+
+    let uncached_p99 = p99_of(50, || {
+        let pool = &pool;
+        async move {
+            let _: Option<i32> = sqlx::query_scalar(
+                "SELECT 1 FROM information_schema.columns \
+                 WHERE table_name = 'documents' AND column_name = 'collection_id' LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await
+            .expect("uncached catalog probe failed");
+        }
+    })
+    .await;
+
+    assert!(
+        cached_p99 <= uncached_p99.mul_f64(1.05).max(Duration::from_micros(1)),
+        "AC-CGI-11: cached Unavailable reads (p99={cached_p99:?}) within the TTL must not fall \
+         back to re-probing the catalog (p99={uncached_p99:?}) on every call"
+    );
+}
+
 async fn p99_of<F, Fut>(n: usize, mut f: F) -> Duration
 where
     F: FnMut() -> Fut,

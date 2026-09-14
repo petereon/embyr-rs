@@ -63,6 +63,7 @@ async fn backfilling_pre_existing_documents_does_not_block_concurrent_writes() {
 
     let summary = backfill_handle.await.expect("backfill task should not panic");
     assert_eq!(summary.rows_backfilled, 30, "AC-CGI-06/09: every pre-existing document must be backfilled");
+    assert_eq!(summary.batches_run, 6, "30 rows at batch_size 5 must run exactly 6 batches");
 
     let max_latency = write_latencies.iter().max().copied().unwrap_or_default();
     assert!(

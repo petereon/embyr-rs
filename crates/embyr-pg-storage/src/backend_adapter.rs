@@ -384,7 +384,7 @@ impl PostgresBackendAdapter {
         .await
         .unwrap_or(false);
 
-        if create_result.is_ok() && valid {
+        if index_build_succeeded(create_result.is_ok(), valid) {
             return Ok(());
         }
 
@@ -398,7 +398,22 @@ impl PostgresBackendAdapter {
             "failed to build index {index_name} concurrently"
         )))
     }
+}
 
+/// ADR-080 Decision D, mirroring ADR-072's own `build_succeeded` (reused
+/// pattern, `composite_index_builder.rs`): an index build only counts as
+/// succeeded when BOTH the `CREATE INDEX CONCURRENTLY` statement itself
+/// returned `Ok` AND the authoritative `pg_index.indisvalid` re-check
+/// confirms it — either signal alone can lie (a mid-build connection drop
+/// can leave `create_ok=true` with an invalid index; a stale leftover index
+/// under the same deterministic name could read `indisvalid=true` after a
+/// failed create). Extracted as a standalone pure function so this decision
+/// is directly unit-testable without a database.
+fn index_build_succeeded(create_ok: bool, indisvalid: bool) -> bool {
+    create_ok && indisvalid
+}
+
+impl PostgresBackendAdapter {
     /// ADR-080 Decision C: cached schema-capability probe. `unavailable_ttl`
     /// is accepted as a parameter (rather than a hardcoded 30s constant) so
     /// acceptance tests can exercise the TTL-expiry/auto-pickup behavior
@@ -1686,5 +1701,18 @@ mod to_datetime_tests {
     fn out_of_range_seconds_is_rejected() {
         let err = to_datetime(i64::MAX, 0).unwrap_err();
         assert!(err.to_string().contains("seconds"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod index_build_succeeded_tests {
+    use super::index_build_succeeded;
+
+    #[test]
+    fn succeeds_only_when_create_ok_and_indisvalid_both_hold() {
+        assert!(index_build_succeeded(true, true));
+        assert!(!index_build_succeeded(true, false));
+        assert!(!index_build_succeeded(false, true));
+        assert!(!index_build_succeeded(false, false));
     }
 }
