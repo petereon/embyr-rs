@@ -17,6 +17,14 @@ pub struct DbPrepConfig {
     /// its role name via `SELECT current_user`. NEVER logged, never reused
     /// beyond that one query.
     pub dml_role_dsn: Option<String>,
+    /// `EMBYR_DB_PREP_BACKFILL_BATCH_SIZE` (optional, collection-group-query
+    /// -index, ADR-080 Decision B) — rows per backfill batch. Defaults to
+    /// 1000 (ADR-080's own working default). Overridable so acceptance
+    /// tests can keep batches small on an 8GB machine.
+    pub backfill_batch_size: u32,
+    /// `EMBYR_DB_PREP_BACKFILL_THROTTLE_MS` (optional, ADR-080 Decision B) —
+    /// milliseconds slept between backfill batches. Defaults to 50.
+    pub backfill_throttle_ms: u64,
 }
 
 impl DbPrepConfig {
@@ -40,11 +48,28 @@ impl DbPrepConfig {
             .ok()
             .filter(|s| !s.is_empty());
 
+        let backfill_batch_size = env_u32_or("EMBYR_DB_PREP_BACKFILL_BATCH_SIZE", 1000);
+        let backfill_throttle_ms = env_u64_or("EMBYR_DB_PREP_BACKFILL_THROTTLE_MS", 50);
+
         Ok(DbPrepConfig {
             dsn: dsn.unwrap(),
             dml_role_dsn,
+            backfill_batch_size,
+            backfill_throttle_ms,
         })
     }
+}
+
+/// Read an optional u32 env var, falling back to `default` when absent or
+/// unparseable — never a hard error for a working-default-carrying setting.
+fn env_u32_or(name: &str, default: u32) -> u32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Read an optional u64 env var, falling back to `default` when absent or
+/// unparseable.
+fn env_u64_or(name: &str, default: u64) -> u64 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 /// Read a required variable; on failure push a diagnostic and return `None`.

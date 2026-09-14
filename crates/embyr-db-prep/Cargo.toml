@@ -63,6 +63,14 @@ path = "../../tests/customer_db_onboarding/acceptance/cdo10_full_flow_idempotent
 name = "cdo11_role_name_with_special_characters_quoted_safely"
 path = "../../tests/customer_db_onboarding/acceptance/cdo11_role_name_with_special_characters_quoted_safely.rs"
 
+# collection-group-query-index (US-02 walking skeleton) — the embyr-db-prep
+# CLI driving port must itself invoke ensure_collection_group_indexes()/
+# backfill_collection_id() after migrate(), not just the adapter methods in
+# isolation. Reuses customer_db_onboarding's own common module (#[path]).
+[[test]]
+name = "cgi_ws_db_prep_backfills_and_indexes"
+path = "../../tests/collection_group_query_index/acceptance/cgi_ws_db_prep_backfills_and_indexes.rs"
+
 [dev-dependencies]
 embyr-pg-storage.workspace = true
 embyr-core.workspace = true

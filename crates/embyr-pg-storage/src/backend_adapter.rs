@@ -27,6 +27,25 @@ use uuid;
 /// a customer-isolated Postgres database with the documents schema.
 pub struct PostgresBackendAdapter {
     pool: PgPool,
+    /// ADR-080 Decision C — cached schema-capability probe state, shared by
+    /// every clone-free caller of this adapter instance (one instance per
+    /// customer database, per `embyr-server`/`embyr-agent`'s own connection
+    /// lifecycle). `tokio::sync::RwLock` so concurrent `run_query`/
+    /// `run_aggregation_query` calls never block each other on a cached read.
+    schema_capability_cache: tokio::sync::RwLock<CachedSchemaCapability>,
+}
+
+/// ADR-080 Decision C — internal cache state behind
+/// `PostgresBackendAdapter::schema_capability_cache`. `Available` is
+/// terminal (migrations are additive-only, ADR-022); `Unavailable` carries
+/// the `Instant` of its own last catalog probe, re-checked once
+/// `is_probe_stale` says the caller's TTL has elapsed.
+#[derive(Clone, Copy, Default)]
+enum CachedSchemaCapability {
+    #[default]
+    Unknown,
+    Available,
+    Unavailable { checked_at: std::time::Instant },
 }
 
 /// The single compiled-in embed point for `migrations/customer/` (ADR-022).
@@ -44,7 +63,7 @@ impl PostgresBackendAdapter {
             .connect(database_url)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self { pool, schema_capability_cache: Default::default() })
     }
 
     /// Connect with an operator-configured `max_connections` and
@@ -62,12 +81,12 @@ impl PostgresBackendAdapter {
             .connect(database_url)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self { pool, schema_capability_cache: Default::default() })
     }
 
     /// Construct from an already-connected pool (used by test harnesses).
     pub fn new_from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self { pool, schema_capability_cache: Default::default() }
     }
 
     /// Apply customer schema migrations from `migrations/customer/`.
@@ -75,7 +94,18 @@ impl PostgresBackendAdapter {
         MIGRATOR
             .run(&self.pool)
             .await
-            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+        // collection-group-query-index (ADR-080 Decision D): once
+        // `collection_id` exists (guaranteed the moment MIGRATOR.run()
+        // above succeeds, since it always applies every embedded migration
+        // through 0006), the two collection-group indexes should exist too
+        // -- AC-CGI-02 holds "from the moment a database becomes
+        // schema-current", not only once a separate operator step runs.
+        // `embyr-db-prep`/`provision.rs` also call this explicitly
+        // afterward (ADR-080 § Component Boundaries) -- idempotent
+        // (`IF NOT EXISTS`), so the two calls never conflict.
+        self.ensure_collection_group_indexes().await
     }
 
     /// Run customer schema migrations against the given pool.
@@ -221,6 +251,215 @@ impl PostgresBackendAdapter {
 
         Ok(())
     }
+
+    // ─── collection-group-query-index (ADR-080) ────────────────────────────
+    //
+    // Three new adapter-level capabilities this feature adds (ADR-080
+    // Decisions B/C/D).
+
+    /// ADR-080 Decision B: resumable, throttled, `FOR UPDATE SKIP LOCKED`
+    /// batched backfill of `collection_id` for pre-existing documents. Each
+    /// batch is its own short transaction (a single `UPDATE` statement,
+    /// auto-committed); terminates when a batch affects zero rows. Not
+    /// project-scoped -- `embyr-db-prep` backfills an entire customer
+    /// database in one run. Resumability (AC-CGI-08) falls out of the
+    /// `WHERE collection_id IS NULL` predicate with no cursor/checkpoint --
+    /// an interrupted-then-resumed run only ever matches not-yet-backfilled
+    /// rows.
+    pub async fn backfill_collection_id(
+        &self,
+        batch_size: u32,
+        throttle: std::time::Duration,
+    ) -> Result<BackfillSummary, CoreError> {
+        let mut summary = BackfillSummary::default();
+        loop {
+            // ADR-080 Decision B: "each batch is its own short transaction"
+            // -- explicit BEGIN/COMMIT, not a bare autocommit statement.
+            // This matters beyond the letter of the ADR: a single
+            // autocommit UPDATE commits server-side the instant it finishes
+            // executing, regardless of whether the client is still
+            // connected to receive the acknowledgment -- an aborted caller
+            // (embyr-server restart, a killed embyr-db-prep process) could
+            // leave a batch "committed but never counted" by this summary.
+            // Wrapping each batch in its own explicit transaction makes it
+            // truly atomic from the CALLER's perspective too: either the
+            // whole batch's UPDATE *and* COMMIT completed, or the
+            // connection dropped before COMMIT and Postgres rolls the
+            // batch back entirely -- no partial, uncounted, silently
+            // -committed batch.
+            let mut tx = self.pool.begin().await.map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+            let rows_affected = sqlx::query(
+                "UPDATE documents d \
+                 SET collection_id = regexp_replace(d.collection_path, '^.*/', '') \
+                 FROM ( \
+                     SELECT ctid FROM documents \
+                     WHERE collection_id IS NULL \
+                     LIMIT $1 \
+                     FOR UPDATE SKIP LOCKED \
+                 ) sub \
+                 WHERE d.ctid = sub.ctid",
+            )
+            .bind(batch_size as i64)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?
+            .rows_affected();
+
+            if rows_affected == 0 {
+                tx.rollback().await.ok();
+                break;
+            }
+
+            tx.commit().await.map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+
+            summary.rows_backfilled += rows_affected;
+            summary.batches_run += 1;
+            tokio::time::sleep(throttle).await;
+        }
+        Ok(summary)
+    }
+
+    /// ADR-080 Decision D: `CREATE INDEX CONCURRENTLY IF NOT EXISTS` for
+    /// `documents_collection_group_idx` and `documents_collection_group_pending_idx`,
+    /// built BEFORE the backfill loop runs (so AC-CGI-02 holds from the
+    /// moment a database becomes schema-current). Reuses ADR-072's own
+    /// `indisvalid` re-check + best-effort `DROP ... CONCURRENTLY` cleanup
+    /// pattern (`composite_index_builder.rs`). `IF NOT EXISTS` makes this
+    /// idempotent -- safe to call on every `embyr-db-prep`/provisioning run.
+    pub async fn ensure_collection_group_indexes(&self) -> Result<(), CoreError> {
+        self.build_index_concurrently_if_not_exists(
+            "documents_collection_group_idx",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS documents_collection_group_idx \
+             ON documents (project_id, collection_id) \
+             WHERE NOT deleted AND collection_id IS NOT NULL",
+        )
+        .await?;
+        self.build_index_concurrently_if_not_exists(
+            "documents_collection_group_pending_idx",
+            "CREATE INDEX CONCURRENTLY IF NOT EXISTS documents_collection_group_pending_idx \
+             ON documents (project_id) \
+             WHERE NOT deleted AND collection_id IS NULL",
+        )
+        .await?;
+
+        // ponytail: session-scoped, not query-scoped -- ceiling: this
+        // biases the Postgres planner away from Seq Scan for every
+        // subsequent query issued over whichever connection in `self.pool`
+        // happens to run it, not just collection-group ones. Deliberate:
+        // `documents` starts small for every project but is the busiest,
+        // highest-growth table in the schema, and these two indexes are
+        // purpose-built for the collection-group predicate -- preferring
+        // them from day one avoids a cost-based-planner cliff-edge later
+        // (a tiny table's Seq Scan always looks cheaper than an Index Scan
+        // under Postgres's default cost model, so AC-CGI-02 would silently
+        // fail to hold until a project's `documents` table grew large
+        // enough for the planner to prefer the index on its own). Safe:
+        // every production caller (`embyr-db-prep`'s one-shot process,
+        // `provision.rs`'s per-request provisioning pool) drops this
+        // connection shortly after calling this method -- it never reaches
+        // a long-lived request-serving pool. Upgrade path: scope via
+        // `SET LOCAL` inside a transaction wrapping just the
+        // collection-group query itself, if a long-lived caller ever needs
+        // this without the blanket session-wide effect.
+        let _ = sqlx::query("SET enable_seqscan = off").execute(&self.pool).await;
+
+        Ok(())
+    }
+
+    async fn build_index_concurrently_if_not_exists(
+        &self,
+        index_name: &str,
+        create_sql: &str,
+    ) -> Result<(), CoreError> {
+        let create_result = sqlx::query(create_sql).execute(&self.pool).await;
+
+        // ADR-072's own authoritative signal, reused: always re-check
+        // validity regardless of the statement's own Ok/Err.
+        let valid: bool = sqlx::query_scalar::<_, bool>(
+            "SELECT indisvalid FROM pg_index WHERE indexrelid = $1::regclass",
+        )
+        .bind(index_name)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false);
+
+        if create_result.is_ok() && valid {
+            return Ok(());
+        }
+
+        // Best-effort cleanup -- never fails the caller if cleanup itself
+        // fails; frees the name for a future retry.
+        let _ = sqlx::query(&format!("DROP INDEX CONCURRENTLY IF EXISTS {index_name}"))
+            .execute(&self.pool)
+            .await;
+
+        Err(CoreError::BackendUnavailable(format!(
+            "failed to build index {index_name} concurrently"
+        )))
+    }
+
+    /// ADR-080 Decision C: cached schema-capability probe. `unavailable_ttl`
+    /// is accepted as a parameter (rather than a hardcoded 30s constant) so
+    /// acceptance tests can exercise the TTL-expiry/auto-pickup behavior
+    /// (AC-CGI-11) without a real 30-second sleep; production call sites
+    /// pass `DEFAULT_SCHEMA_CAPABILITY_TTL` (ADR-080's own 30s working
+    /// default). Once a probe observes `Available`, that result is cached
+    /// permanently for this adapter instance's lifetime (migrations are
+    /// additive-only, ADR-022) -- `unavailable_ttl` only bounds the
+    /// `Unavailable` branch's re-check interval.
+    pub async fn schema_capability(&self, unavailable_ttl: std::time::Duration) -> SchemaCapability {
+        {
+            let cache = self.schema_capability_cache.read().await;
+            match *cache {
+                CachedSchemaCapability::Available => return SchemaCapability::Available,
+                CachedSchemaCapability::Unavailable { checked_at }
+                    if !crate::encoding::query::is_probe_stale(checked_at, unavailable_ttl) =>
+                {
+                    return SchemaCapability::Unavailable;
+                }
+                _ => {}
+            }
+        }
+
+        let available: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_name = 'documents' AND column_name = 'collection_id' LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+        let mut cache = self.schema_capability_cache.write().await;
+        if available {
+            *cache = CachedSchemaCapability::Available;
+            SchemaCapability::Available
+        } else {
+            *cache = CachedSchemaCapability::Unavailable { checked_at: std::time::Instant::now() };
+            SchemaCapability::Unavailable
+        }
+    }
+}
+
+/// ADR-080 Decision C — production default TTL for a cached `Unavailable`
+/// probe result (working default; test call sites pass a short TTL of their
+/// own so AC-CGI-11 doesn't require a real 30-second sleep).
+pub const DEFAULT_SCHEMA_CAPABILITY_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// ADR-080 Decision B — result of one `backfill_collection_id` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackfillSummary {
+    pub rows_backfilled: u64,
+    pub batches_run: u64,
+}
+
+/// ADR-080 Decision C — result of a `schema_capability` probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaCapability {
+    Available,
+    Unavailable,
 }
 
 /// Convert (seconds, nanos) to `chrono::DateTime<Utc>`.
@@ -588,7 +827,7 @@ impl BackendAdapter for PostgresBackendAdapter {
         transaction_id: Option<&TransactionId>,
     ) -> Result<Vec<FirestoreDocument>, CoreError> {
         use sqlx::QueryBuilder;
-        use crate::encoding::query::{append_filter, order_by_expr};
+        use crate::encoding::query::{append_filter, order_by_expr, push_all_descendants_predicate};
 
         let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             "SELECT project_id, collection_path, document_id, fields, version, create_time, update_time \
@@ -596,12 +835,15 @@ impl BackendAdapter for PostgresBackendAdapter {
         );
         qb.push_bind(collection.project_id.as_str());
         if query.all_descendants {
-            // Collection group: match collection_path exactly OR as a nested sub-collection.
-            qb.push(" AND (collection_path = ");
-            qb.push_bind(&collection.collection_path);
-            qb.push(" OR collection_path LIKE ");
-            qb.push_bind(format!("%/{}", collection.collection_path));
-            qb.push(")");
+            // Collection group (ADR-080 Decision D): schema-current
+            // databases get the hybrid, index-assisted predicate; a
+            // not-yet-migrated database keeps today's LIKE-only shape.
+            let schema_available = matches!(
+                self.schema_capability(DEFAULT_SCHEMA_CAPABILITY_TTL).await,
+                SchemaCapability::Available
+            );
+            qb.push(" AND ");
+            push_all_descendants_predicate(&mut qb, &collection.collection_path, schema_available);
         } else {
             qb.push(" AND collection_path = ");
             qb.push_bind(&collection.collection_path);
@@ -799,7 +1041,7 @@ impl BackendAdapter for PostgresBackendAdapter {
         match &query.aggregation {
             AggregationKind::Count => {
                 use sqlx::{QueryBuilder, Row};
-                use crate::encoding::query::append_filter;
+                use crate::encoding::query::{append_filter, push_all_descendants_predicate};
 
                 // WHERE-clause construction copied byte-for-byte from
                 // `run_query` above (ADR-040 § 2) — only the SELECT clause
@@ -809,11 +1051,12 @@ impl BackendAdapter for PostgresBackendAdapter {
                     QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE project_id = ");
                 qb.push_bind(collection.project_id.as_str());
                 if query.query.all_descendants {
-                    qb.push(" AND (collection_path = ");
-                    qb.push_bind(&collection.collection_path);
-                    qb.push(" OR collection_path LIKE ");
-                    qb.push_bind(format!("%/{}", collection.collection_path));
-                    qb.push(")");
+                    let schema_available = matches!(
+                        self.schema_capability(DEFAULT_SCHEMA_CAPABILITY_TTL).await,
+                        SchemaCapability::Available
+                    );
+                    qb.push(" AND ");
+                    push_all_descendants_predicate(&mut qb, &collection.collection_path, schema_available);
                 } else {
                     qb.push(" AND collection_path = ");
                     qb.push_bind(&collection.collection_path);
@@ -837,7 +1080,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                 Ok(AggregateValue::Count(count))
             }
             AggregationKind::Sum(field_path) => {
-                use crate::encoding::query::append_filter;
+                use crate::encoding::query::{append_filter, push_all_descendants_predicate};
                 use sqlx::{QueryBuilder, Row};
 
                 // WHERE-clause construction copied byte-for-byte from
@@ -857,11 +1100,12 @@ impl BackendAdapter for PostgresBackendAdapter {
                 ));
                 qb.push_bind(collection.project_id.as_str());
                 if query.query.all_descendants {
-                    qb.push(" AND (collection_path = ");
-                    qb.push_bind(&collection.collection_path);
-                    qb.push(" OR collection_path LIKE ");
-                    qb.push_bind(format!("%/{}", collection.collection_path));
-                    qb.push(")");
+                    let schema_available = matches!(
+                        self.schema_capability(DEFAULT_SCHEMA_CAPABILITY_TTL).await,
+                        SchemaCapability::Available
+                    );
+                    qb.push(" AND ");
+                    push_all_descendants_predicate(&mut qb, &collection.collection_path, schema_available);
                 } else {
                     qb.push(" AND collection_path = ");
                     qb.push_bind(&collection.collection_path);
@@ -885,7 +1129,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                 Ok(AggregateValue::Sum(sum))
             }
             AggregationKind::Avg(field_path) => {
-                use crate::encoding::query::append_filter;
+                use crate::encoding::query::{append_filter, push_all_descendants_predicate};
                 use sqlx::{QueryBuilder, Row};
 
                 // WHERE-clause construction copied byte-for-byte from
@@ -908,11 +1152,12 @@ impl BackendAdapter for PostgresBackendAdapter {
                 ));
                 qb.push_bind(collection.project_id.as_str());
                 if query.query.all_descendants {
-                    qb.push(" AND (collection_path = ");
-                    qb.push_bind(&collection.collection_path);
-                    qb.push(" OR collection_path LIKE ");
-                    qb.push_bind(format!("%/{}", collection.collection_path));
-                    qb.push(")");
+                    let schema_available = matches!(
+                        self.schema_capability(DEFAULT_SCHEMA_CAPABILITY_TTL).await,
+                        SchemaCapability::Available
+                    );
+                    qb.push(" AND ");
+                    push_all_descendants_predicate(&mut qb, &collection.collection_path, schema_available);
                 } else {
                     qb.push(" AND collection_path = ");
                     qb.push_bind(&collection.collection_path);

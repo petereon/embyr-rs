@@ -345,6 +345,58 @@ pub fn order_by_expr_bigint(field_path: &str, dir: &str) -> String {
     format!("(fields->'{}'->>'v')::bigint {}", field_path, dir)
 }
 
+// ─── collection-group-query-index (ADR-080 Decision D) ────────────────────
+//
+// Single-source-of-truth builder for the `all_descendants=true` predicate,
+// extracted as a public, pure function so it can be shared (mirroring
+// `append_filter`/`order_by_expr`'s own existing "one function, four call
+// sites" convention, ADR-040 §2) by all 4 mirrored call sites in
+// `backend_adapter.rs` (`run_query` + `run_aggregation_query`'s `Count`/
+// `Sum`/`Avg` arms) AND by this feature's own acceptance tests (so an
+// `EXPLAIN` in a test reflects the exact SQL production code executes, with
+// zero drift risk — the same reasoning `composite_index_real_creation`'s own
+// `explain_category_equal_electronics_order_by_score_desc` test helper
+// already established for a different predicate).
+//
+// `schema_available == true`: push ADR-080's hybrid shape —
+//   collection_id = $N OR (collection_id IS NULL AND (collection_path = $N
+//   OR collection_path LIKE '%/' || $N))
+// `schema_available == false`: push today's byte-for-byte-unchanged LIKE-only
+//   shape (never references `collection_id`).
+pub fn push_all_descendants_predicate(
+    qb: &mut QueryBuilder<Postgres>,
+    collection_id: &str,
+    schema_available: bool,
+) {
+    if schema_available {
+        qb.push("(collection_id = ");
+        qb.push_bind(collection_id.to_string());
+        qb.push(" OR (collection_id IS NULL AND (collection_path = ");
+        qb.push_bind(collection_id.to_string());
+        qb.push(" OR collection_path LIKE ");
+        qb.push_bind(format!("%/{collection_id}"));
+        qb.push(")))");
+    } else {
+        qb.push("(collection_path = ");
+        qb.push_bind(collection_id.to_string());
+        qb.push(" OR collection_path LIKE ");
+        qb.push_bind(format!("%/{collection_id}"));
+        qb.push(")");
+    }
+}
+
+/// ADR-080 Decision C — pure TTL-boundary decision for the schema-capability
+/// cache's `Unavailable` branch. `Available` is cached permanently (never
+/// calls this); `Unavailable` re-checks once `checked_at.elapsed() >= ttl`.
+/// Extracted as a standalone pure function (not inlined in
+/// `PostgresBackendAdapter::schema_capability`) specifically so this
+/// feature's one new piece of non-trivial decision logic is directly
+/// unit-testable without a database (DISTILL's own "Not scaffolded" note —
+/// this is DELIVER's own inner-loop extraction).
+pub fn is_probe_stale(checked_at: std::time::Instant, ttl: std::time::Duration) -> bool {
+    checked_at.elapsed() >= ttl
+}
+
 #[cfg(test)]
 mod tests {
     //! firestore-query-filter-operator-support (Slices 01-04) — pure, IO
@@ -566,6 +618,28 @@ mod tests {
     fn in_with_a_non_array_value_panics_with_a_named_message() {
         let f = filter("status", FilterOp::In, FieldValue::String("not-an-array".to_string()));
         generated_sql(&f);
+    }
+
+    /// ADR-080 Decision C — `is_probe_stale` TTL boundary: not-yet-elapsed
+    /// is fresh (not stale), already-elapsed is stale. Two behaviors
+    /// (fresh, stale), parametrized per this feature's own test-budget
+    /// discipline rather than two separate near-duplicate test functions.
+    #[test]
+    fn is_probe_stale_reflects_whether_the_ttl_has_elapsed() {
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        let checked_at = std::time::Instant::now();
+        assert!(
+            !is_probe_stale(checked_at, Duration::from_secs(30)),
+            "a freshly-checked timestamp under a long TTL must not be stale"
+        );
+
+        sleep(Duration::from_millis(20));
+        assert!(
+            is_probe_stale(checked_at, Duration::from_millis(10)),
+            "an elapsed-past-TTL timestamp must be stale"
+        );
     }
 
     /// Coverage for `push_scalar_comparison`'s own 4 typed-cast match arms

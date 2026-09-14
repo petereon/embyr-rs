@@ -103,6 +103,37 @@ async fn main() {
         );
     }
 
+    // collection-group-query-index (ADR-080 § Component Boundaries): after
+    // migrate() succeeds, build the two collection-group indexes then
+    // backfill collection_id for any pre-existing NULL rows. Both calls are
+    // idempotent -- a no-op in practice for a fresh project (zero
+    // pre-existing rows / indexes already present), real work for a DBA
+    // re-running this tool against an existing, already-provisioned
+    // database. Runs unconditionally, matching this codebase's existing
+    // preference for one code path over a conditional one.
+    if let Err(e) = adapter.ensure_collection_group_indexes().await {
+        eprintln!("embyr-db-prep: failed to build collection-group indexes: {e}");
+        std::process::exit(1);
+    }
+    match adapter
+        .backfill_collection_id(
+            cfg.backfill_batch_size,
+            Duration::from_millis(cfg.backfill_throttle_ms),
+        )
+        .await
+    {
+        Ok(summary) => {
+            println!(
+                "collection_id backfill complete: {} documents backfilled",
+                summary.rows_backfilled
+            );
+        }
+        Err(e) => {
+            eprintln!("embyr-db-prep: collection_id backfill failed: {e}");
+            std::process::exit(1);
+        }
+    }
+
     match &cfg.dml_role_dsn {
         None => {
             println!(
