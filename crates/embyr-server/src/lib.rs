@@ -341,6 +341,7 @@ pub fn spawn_all_servers(
     google_jwks_cache: Arc<adapters::google_jwks_cache::GoogleJwksCache>,
     tonic_tls_config: Option<tonic::transport::ServerTlsConfig>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    cors_allowed_origins: Vec<String>,
 ) -> tokio::task::JoinHandle<()> {
     let service_for_rest = service.clone();
 
@@ -430,7 +431,25 @@ pub fn spawn_all_servers(
             middleware::rate_limit::rest_rate_limit_middleware,
         ))
         .with_state(accounts_bridge_state);
-    let axum_app = axum_app.merge(accounts_bridge_app);
+
+    // cors-origin-policy (finding #21): outermost layer on the whole merged
+    // :8081 router — tower_http's CorsLayer intercepts and answers preflight
+    // OPTIONS itself, before axum routing runs, so it must sit outermost to
+    // cover every route including any added later. Empty `cors_allowed_origins`
+    // (default) ⇒ `AllowOrigin::list([])` never matches any `Origin` header ⇒
+    // no `Access-Control-Allow-Origin` ever emitted — byte-identical to
+    // today's no-CORS-layer behavior. `:9090` (admin_app) is untouched.
+    let cors_origins: Vec<axum::http::HeaderValue> = cors_allowed_origins
+        .iter()
+        .map(|o| o.parse())
+        .collect::<Result<_, _>>()
+        .expect("cors origins validated in ServerConfig::from_env()");
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(tower_http::cors::AllowOrigin::list(cors_origins))
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
+        .allow_headers([axum::http::header::CONTENT_TYPE])
+        .allow_credentials(false);
+    let axum_app = axum_app.merge(accounts_bridge_app).layer(cors);
 
     let rest_task = rest::grpc_web::spawn_hybrid_server(
         rest_listener,
@@ -596,6 +615,75 @@ pub async fn start_test_server_with_keepalive(
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
         None, None,
+        Vec::new(),
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    TestServer {
+        grpc_addr: c.grpc_addr,
+        rest_addr: c.rest_addr,
+        admin_addr: c.admin_addr,
+        listen_registry: listen_registry_ret,
+        rate_limiter: rate_limiter_ret,
+        shutdown_tx: Some(c.shutdown_tx),
+    }
+}
+
+/// Start an in-process server with an explicit `EMBYR_CORS_ALLOWED_ORIGINS`
+/// allowlist (cors-origin-policy, finding #21). Production keep-alive
+/// interval (30s); mirrors `start_test_server`'s shape otherwise.
+pub async fn start_test_server_with_cors_origins(
+    system_db: Arc<SystemDb>,
+    cors_allowed_origins: Vec<String>,
+) -> TestServer {
+    let c = alloc_test_components(&system_db).await;
+    let listen_registry_ret = Arc::clone(&c.listen_registry);
+
+    let rate_limit_rps = default_rate_limit_capacity();
+    let rate_limiter = RateLimiter::new(rate_limit_rps, rate_limit_rps);
+    let rate_limiter_ret = Arc::clone(&rate_limiter);
+
+    let service = FirestoreService {
+        system_db: Arc::clone(&system_db),
+        credential_cache: c.cache,
+        index_manager: c.idx_mgr,
+        metrics_adapter: c.metrics,
+        keepalive_interval: std::time::Duration::from_secs(30),
+        listen_registry: c.listen_registry,
+        active_listeners: c.active_listeners,
+        aws_secret_fetcher: None,
+        gcp_secret_fetcher: None,
+        rate_limiter,
+        tenant_db_max_connections: 5,
+        tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
+        listener_db_max_connections: 2,
+        listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+    };
+
+    // healthz-dependency-checks (ADR-078): /livez on the admin port too, so
+    // the "admin port untouched by CORS" assertion has a zero-I/O endpoint
+    // to hit that mirrors the data-port /livez route exactly.
+    let readyz_state = Arc::clone(&system_db);
+    let healthz_app = axum::Router::new()
+        .route("/livez", axum::routing::get(grpc::healthz::livez_handler))
+        .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
+        .with_state(readyz_state);
+    let admin_app = admin::router::build_with_aws(
+        system_db,
+        "test-admin-key-secret".to_string(),
+        c.cache_for_admin,
+        None,
+    )
+    .merge(healthz_app);
+
+    spawn_all_servers(
+        c.grpc_listener, c.rest_listener, c.admin_listener,
+        service, admin_app, c.shutdown_rx, Arc::new(NoopEmailSender),
+        [0u8; 32], None,
+        Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
+        None, None,
+        cors_allowed_origins,
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -664,6 +752,7 @@ pub async fn start_test_server_with_email_sender(
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
         None, None,
+        Vec::new(),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -726,6 +815,7 @@ pub async fn start_test_server_with_oauth(
         encryption_key, None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::new(google_jwks_base_url)),
         None, None,
+        Vec::new(),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -783,6 +873,7 @@ pub async fn start_test_server_with_aws_fetcher(
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
         None, None,
+        Vec::new(),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -840,6 +931,7 @@ pub async fn start_test_server_with_gcp_fetcher(
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
         None, None,
+        Vec::new(),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -902,6 +994,7 @@ pub async fn start_test_server_with_distributed_rate_limit(
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
         None, None,
+        Vec::new(),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -967,6 +1060,7 @@ pub async fn start_test_server_with_rate_limit(
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
         None, None,
+        Vec::new(),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1039,6 +1133,7 @@ pub async fn start_test_server_with_tls(
         [0u8; 32], None,
         Arc::new(adapters::google_jwks_cache::GoogleJwksCache::production()),
         Some(tonic_tls_config), Some(tls_acceptor),
+        Vec::new(),
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -382,6 +382,7 @@ async fn main() {
         Arc::new(GoogleJwksCache::production()),
         tonic_tls_config,
         tls_acceptor,
+        cfg.cors_allowed_origins.clone(),
     );
 
     // ── Step 12: log ready ────────────────────────────────────────────────

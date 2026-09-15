@@ -156,6 +156,12 @@ pub struct ServerConfig {
     /// (ADR-079); default 5 (this pool previously had no acquire_timeout at
     /// all).
     pub listener_db_acquire_timeout_secs: u32,
+    /// `EMBYR_CORS_ALLOWED_ORIGINS` — comma-separated browser origins
+    /// permitted to call the :8081 REST/gRPC-Web/BrowserChannel surface
+    /// cross-origin (cors-origin-policy, finding #21). Empty (default,
+    /// unset) = no origin is allowed, matching today's pre-CORS-layer
+    /// behavior exactly (fails closed is the deliberate baseline).
+    pub cors_allowed_origins: Vec<String>,
 }
 
 /// Validated TLS material for firestore-tls-support: one cert/key pair
@@ -218,6 +224,9 @@ pub enum ConfigError {
     /// A pool-sizing/timeout variable (pool-sizing-and-limits, ADR-079) is
     /// present but not a positive integer (`parse_positive_u32`).
     InvalidPoolConfig { var: String, value: String },
+    /// An entry in `EMBYR_CORS_ALLOWED_ORIGINS` cannot be parsed as an HTTP
+    /// header value (e.g. contains a raw newline) — cors-origin-policy.
+    InvalidCorsOrigin { value: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -271,6 +280,12 @@ impl fmt::Display for ConfigError {
                 write!(
                     f,
                     "invalid value for {var}: '{value}' (must be a positive integer)"
+                )
+            }
+            ConfigError::InvalidCorsOrigin { value } => {
+                write!(
+                    f,
+                    "invalid EMBYR_CORS_ALLOWED_ORIGINS entry: '{value}' is not a valid HTTP header value"
                 )
             }
         }
@@ -411,6 +426,17 @@ impl ServerConfig {
         let listener_db_acquire_timeout_secs =
             parse_positive_u32("EMBYR_LISTENER_DB_ACQUIRE_TIMEOUT_SECS", 5)?;
 
+        // cors-origin-policy (finding #21): validate each origin parses as an
+        // HTTP header value now, at startup — so a malformed origin fails
+        // fast here rather than surfacing later as an `.expect()` panic in
+        // `spawn_all_servers`.
+        let cors_allowed_origins = parse_cors_allowed_origins();
+        for origin in &cors_allowed_origins {
+            origin
+                .parse::<axum::http::HeaderValue>()
+                .map_err(|_| ConfigError::InvalidCorsOrigin { value: origin.clone() })?;
+        }
+
         Ok(ServerConfig {
             db_url: db_url_opt.unwrap(),
             admin_key,
@@ -436,8 +462,24 @@ impl ServerConfig {
             tenant_db_acquire_timeout_secs,
             listener_db_max_connections,
             listener_db_acquire_timeout_secs,
+            cors_allowed_origins,
         })
     }
+}
+
+/// Parse `EMBYR_CORS_ALLOWED_ORIGINS` — comma-separated, whitespace-trimmed,
+/// empty entries dropped. Returns an empty `Vec` when the variable is unset
+/// (deny-all default, cors-origin-policy).
+fn parse_cors_allowed_origins() -> Vec<String> {
+    std::env::var("EMBYR_CORS_ALLOWED_ORIGINS")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Read and parse the cert/key PEM pair. Installs the process-wide rustls
@@ -1185,6 +1227,31 @@ mod tests {
         assert_eq!(
             current, previous,
             "resolved bytes must be equal despite differing env text case"
+        );
+    }
+
+    // ── cors-origin-policy (finding #21) ────────────────────────────────────
+
+    #[test]
+    fn parse_cors_allowed_origins_absent_returns_empty() {
+        std::env::remove_var("EMBYR_CORS_ALLOWED_ORIGINS");
+        assert_eq!(parse_cors_allowed_origins(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_cors_allowed_origins_trims_and_drops_empty_entries() {
+        std::env::set_var(
+            "EMBYR_CORS_ALLOWED_ORIGINS",
+            "https://a.example.com, https://b.example.com ,,",
+        );
+        let result = parse_cors_allowed_origins();
+        std::env::remove_var("EMBYR_CORS_ALLOWED_ORIGINS");
+        assert_eq!(
+            result,
+            vec![
+                "https://a.example.com".to_string(),
+                "https://b.example.com".to_string(),
+            ]
         );
     }
 }
