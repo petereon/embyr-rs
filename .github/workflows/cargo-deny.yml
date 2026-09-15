@@ -1,0 +1,48 @@
+# Dedicated advisory-check workflow, split out of ci.yml's `lint` job.
+#
+# Why separate: ci.yml only triggers on push/pull_request — extending that
+# workflow's `on:` with `schedule:` would run the FULL job graph (test,
+# lint, docker, agent — including Postgres services and full workspace
+# compiles) daily, not just the advisory check. A standalone workflow lets
+# `cargo deny check` run on its own schedule without dragging the rest of
+# CI along. Closes finding #23: a newly published RUSTSEC advisory against
+# an unchanged dependency was previously invisible until someone pushed.
+name: cargo-deny
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Daily at 06:00 UTC — catches new RUSTSEC advisories against
+    # dependencies that haven't changed and so never trigger a push/PR run.
+    - cron: "0 6 * * *"
+
+jobs:
+  cargo-deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # toolchain: pinned to match rust-toolchain.toml exactly — see the
+      # equivalent comment in ci.yml's `test` job for why drift here has
+      # broken CI before.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+
+      - uses: Swatinem/rust-cache@v2
+
+      # taiki-e/install-action downloads a prebuilt cargo-deny binary
+      # instead of compiling from source — same choice ci.yml's old
+      # lint-job step made, kept here for the same reason (fast, no
+      # cross-run cache needed).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check

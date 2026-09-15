@@ -102,7 +102,11 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
-  # ─── lint: clippy -D warnings + cargo deny check ─────────────────────────────
+  # ─── lint: clippy -D warnings ──────────────────────────────────────────────
+  # cargo-deny check moved to its own workflow (cargo-deny.yml) — see that
+  # file's header comment for why (finding #23: needs a `schedule:` trigger
+  # too, which this push/pull_request-only workflow can't add without
+  # scheduling the full test/lint/docker/agent job graph daily).
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -124,19 +128,6 @@ jobs:
 
       - name: Clippy — deny all warnings
         run: cargo clippy --workspace -- -D warnings
-
-      # EmbarkStudios/cargo-deny-action@v1 runs its own bundled/containerized
-      # cargo, isolated from the dtolnay/rust-toolchain step above — that
-      # bundled toolchain can't parse this workspace's Cargo.lock (v4 format).
-      # taiki-e/install-action downloads a prebuilt cargo-deny binary instead
-      # of compiling from source (`cargo install` took 2-4 min every run with
-      # no cross-run cache) — same fix as the action swap, just fast.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
-
-      - name: cargo deny check
-        run: cargo deny check
 
   # ─── docker: build the container image (validates Dockerfile) ────────────────
   docker:
