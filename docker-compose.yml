@@ -1,0 +1,39 @@
+# Local/single-host evaluation stack (finding #19, US-DRP-02).
+# Builds embyr-server from the repository's own root Dockerfile — no second,
+# divergent build definition. NOT for production use: EMBYR_ADMIN_KEY and
+# EMBYR_ENCRYPTION_KEY below are dev-only placeholders.
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres   # dev-only placeholder — do not reuse in any shared/production environment
+      POSTGRES_DB: embyr
+    ports:
+      - "5433:5432"   # host 5433 (not 5432) avoids clashing with a locally-installed Postgres
+    volumes:
+      - embyr_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  embyr-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+      - "9090:9090"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/embyr
+      EMBYR_ADMIN_KEY: dev-only-admin-key-do-not-use-in-production          # dev-only placeholder — do not reuse in any shared/production environment
+      EMBYR_ENCRYPTION_KEY: 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20   # dev-only placeholder — 64 hex chars, mirrors ci.yml's own fixture value
+
+volumes:
+  embyr_pgdata:

@@ -77,12 +77,17 @@ async fn main() {
     });
 
     // ── Step 2: tracing (stderr; honours RUST_LOG or cfg.log_level) ──────
+    // ANSI color codes are only emitted for an interactive terminal — piped
+    // output (subprocess capture, `docker compose logs`, log aggregators)
+    // stays plain text so structured fields (e.g. `version="0.1.1"`) remain
+    // machine-parseable.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new(&cfg.log_level)),
         )
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     if cfg.encryption_key_previous.is_some() {
@@ -381,10 +386,12 @@ async fn main() {
 
     // ── Step 12: log ready ────────────────────────────────────────────────
     tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
         grpc = %format!("0.0.0.0:{}", cfg.grpc_port),
         rest = %format!("0.0.0.0:{}", cfg.rest_port),
         admin = %format!("0.0.0.0:{}", cfg.admin_port),
-        "embyr-server ready"
+        "embyr-server v{} ready",
+        env!("CARGO_PKG_VERSION")
     );
 
     // ── Step 13: await SIGTERM or Ctrl-C ─────────────────────────────────

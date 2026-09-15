@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "embyr-admin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1792,7 +1792,7 @@ dependencies = [
 
 [[package]]
 name = "embyr-admin-ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1813,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "embyr-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "chrono",
@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "embyr-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1872,7 +1872,7 @@ dependencies = [
 
 [[package]]
 name = "embyr-db-prep"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "embyr-core",
  "embyr-pg-storage",
@@ -1886,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "embyr-pg-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "embyr-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "prost",
  "prost-types",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "embyr-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "argon2",

@@ -1118,6 +1118,12 @@ path = "../../tests/agent_field_path_validation/acceptance/afp06_cross_binary_pa
 name = "admin_signin_hardening_us02_sweeper_bounds_table_growth"
 path = "../../tests/admin_signin_hardening/acceptance/us02_sweeper_bounds_table_growth.rs"
 
+# deployment-release-process (finding #19) — version/tag/CHANGELOG/startup-log
+# convention (US-DRP-01) + docker-compose.yml for local evaluation (US-DRP-02).
+[[test]]
+name = "deployment_release_process"
+path = "../../tests/deployment_release_process/mod.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
