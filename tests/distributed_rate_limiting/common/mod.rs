@@ -88,6 +88,11 @@ pub struct DrlTestContext {
     pub system_db: Arc<embyr_server::adapters::system_db::SystemDb>,
     /// Direct pool for DB assertion queries (rate_buckets, projects, etc.).
     pub pool: sqlx::PgPool,
+    /// Superuser connection string for this test's Postgres container
+    /// (`postgres://postgres:postgres@127.0.0.1:{port}/postgres`) — used by
+    /// `rate-limiter-fail-open`'s fault-injection helpers to derive a
+    /// scoped, non-superuser role DSN pointing at the SAME container.
+    pub db_url: String,
     /// Configured RPS limit for this test context (default 10.0 — small enough to exhaust quickly).
     pub rate_limit_rps: f64,
     /// gRPC server address — set via `with_grpc_addr()` after starting the distributed server.
@@ -138,6 +143,7 @@ impl DrlTestContext {
             _container: container,
             system_db,
             pool,
+            db_url,
             rate_limit_rps,
             grpc_addr: None,
             admin_client,
@@ -233,6 +239,31 @@ impl DrlTestContext {
     // instead — see the acceptance tests in `acceptance/b17_*`/`b18_*` for
     // the row-existence-based proof this feature relies on.
 
+    /// A customer-DB DSN pointing at THIS SAME, real, reachable Postgres
+    /// container with valid (superuser) credentials.
+    ///
+    /// rate-limiter-fail-open (finding #20): `authenticate()`'s downstream
+    /// customer-DB connect/document-fetch is out of scope for b19's own
+    /// rate-limiter assertions, but a bogus/unreachable/bad-credential DSN
+    /// makes `authenticate()`'s adapter connect FAIL every single call —
+    /// and `FirestoreServiceImpl::credential_cache` only caches a project's
+    /// `SharedBackendAdapter` on a SUCCESSFUL connect. A permanently-failing
+    /// DSN means every request (even repeats for the same project/api_key)
+    /// pays the full cache-miss cost — a ~1.4s Argon2id verification PLUS,
+    /// for an unroutable/unresolvable host, sqlx's pool retrying the
+    /// connection for the full 5s `acquire_timeout`. That multi-second
+    /// per-request latency lets the token bucket refill mid-test and breaks
+    /// b19's bucket-exhaustion timing assertions ("N requests in quick
+    /// succession"). A DSN that actually CONNECTS lets the adapter get
+    /// cached after the first call, so repeat requests for the same project
+    /// skip both Argon2id and reconnect (cache hit, sub-ms). The customer
+    /// `documents` table is never actually queried successfully here (no
+    /// customer-schema migrations applied against this DSN) — GetDocument
+    /// still errors downstream, just fast and cache-eligible.
+    fn cacheable_customer_dsn(&self) -> String {
+        self.db_url.clone()
+    }
+
     // ── Project seeding helpers ───────────────────────────────────────────────
 
     /// Insert a project directly into the projects table WITHOUT a rate_buckets row.
@@ -242,7 +273,7 @@ impl DrlTestContext {
         let api_key_hash =
             argon2::hash_api_key(api_key.as_bytes()).expect("argon2::hash_api_key failed");
         let pub_key = ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_dsn = ecies::encrypt(&pub_key, b"postgres://placeholder:5432/test")
+        let encrypted_dsn = ecies::encrypt(&pub_key, self.cacheable_customer_dsn().as_bytes())
             .expect("ecies::encrypt failed");
 
         sqlx::query(
@@ -271,7 +302,7 @@ impl DrlTestContext {
         let api_key_hash =
             argon2::hash_api_key(api_key.as_bytes()).expect("argon2::hash_api_key failed");
         let pub_key = ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_dsn = ecies::encrypt(&pub_key, b"postgres://placeholder:5432/test")
+        let encrypted_dsn = ecies::encrypt(&pub_key, self.cacheable_customer_dsn().as_bytes())
             .expect("ecies::encrypt failed");
 
         sqlx::query(
@@ -329,6 +360,57 @@ pub fn classify_grpc_status<T>(result: &Result<tonic::Response<T>, tonic::Status
             code => format!("other:{code:?}"),
         },
     }
+}
+
+/// Pay the one-time Argon2id authentication cost for `(project_id, api_key)`
+/// and populate `FirestoreService`'s in-process credential cache for it,
+/// BEFORE any timing-sensitive rate-limit assertions run (rate-limiter-fail-
+/// open, finding #20).
+///
+/// Without this, the FIRST `GetDocument` call for a never-before-seen
+/// project/key pays a real ~1.4s Argon2id verification cost (CLAUDE.md's
+/// non-negotiable `memory=65536KiB, iter=3, par=4` parameters) INSIDE the
+/// same request whose rate-limiter decrement already ran (`authenticate()`
+/// runs strictly after `rate_limiter.check()` in `handle_get_document`) —
+/// delaying the CLIENT's next request by that same ~1.4s. Since
+/// `rate_buckets.tokens` refills based on real elapsed wall-clock time
+/// (`EXTRACT(EPOCH FROM (now() - last_refill))`), that ~1.4s gap is enough
+/// for the bucket to refill mid-test, silently invalidating "N requests in
+/// quick succession, N+1th rejected" assertions.
+///
+/// MUST be called while Postgres is still healthy — BEFORE any
+/// `force_*_errors_on_rate_buckets` fault injection is installed — so the
+/// warm-up's own token consumption lands on the real DB row (reset back to
+/// `starting_tokens` by a direct superuser `UPDATE` afterward), never on
+/// `check_in_process`'s in-memory fallback bucket (which starts fresh, per
+/// project, the first time ANY test call actually hits it).
+pub async fn warm_credential_cache_and_reset_bucket(
+    ctx: &DrlTestContext,
+    client: &mut FirestoreClient<tonic::transport::Channel>,
+    project_id: &str,
+    api_key: &str,
+    starting_tokens: f64,
+) {
+    // Guarantee the warm-up call itself is ALLOWED (reaches
+    // `authenticate()`/Argon2id) regardless of `starting_tokens` — some
+    // callers intentionally seed at 0 tokens as their own test precondition
+    // (e.g. AC-RLFO-03's meridian-labs). A rate-limiter REJECT short-circuits
+    // before `authenticate()` ever runs (`handle_get_document`), so it would
+    // never pay the Argon2id cost this helper exists to pre-pay.
+    sqlx::query("UPDATE rate_buckets SET tokens = 1000.0 WHERE project_id = $1")
+        .bind(project_id)
+        .execute(&ctx.pool)
+        .await
+        .expect("bump tokens for credential-cache warm-up");
+    let _ = client
+        .get_document(get_document_request(project_id, api_key))
+        .await;
+    sqlx::query("UPDATE rate_buckets SET tokens = $1, last_refill = now() WHERE project_id = $2")
+        .bind(starting_tokens)
+        .bind(project_id)
+        .execute(&ctx.pool)
+        .await
+        .expect("reset rate_buckets after credential-cache warm-up");
 }
 
 // ─── Metrics scrape helpers (rate-limiter-project-id-validation, AC-RLV-01) ───
@@ -443,4 +525,211 @@ pub async fn start_distributed_grpc_server(
     .await;
     let addr = server.grpc_addr;
     (addr, server)
+}
+
+/// Same as `start_distributed_grpc_server`, but wires the `RateLimiter`'s own
+/// Postgres pool to `pg_pool` instead of deriving it from `ctx.system_db`.
+///
+/// Used by `rate-limiter-fail-open` (finding #20) to hand the rate limiter a
+/// SCOPED, non-superuser pool (see `force_select_errors`/`force_update_errors`
+/// below) while every OTHER server subsystem (auth, project lookup) keeps
+/// using `ctx.system_db`'s own unaffected superuser pool.
+pub async fn start_distributed_grpc_server_with_pool(
+    ctx: &DrlTestContext,
+    pg_pool: sqlx::PgPool,
+) -> (std::net::SocketAddr, embyr_server::TestServer) {
+    let system_db = Arc::clone(&ctx.system_db);
+    let server = embyr_server::start_test_server_with_distributed_rate_limit(
+        system_db,
+        ctx.rate_limit_rps,
+        pg_pool,
+    )
+    .await;
+    let addr = server.grpc_addr;
+    (addr, server)
+}
+
+// ─── Postgres fault injection (rate-limiter-fail-open, finding #20) ──────────
+//
+// Goal: force a REAL, fast-returning `sqlx::Error` at exactly one of
+// `check_pg`'s two call sites (the atomic UPDATE, or the disambiguating
+// `SELECT EXISTS`) — never a timeout, and clearly distinct from "the query
+// genuinely succeeded and found no row" (which returns `Ok(None)`/`Ok(false)`,
+// never `Err`).
+//
+// Why not `pg_terminate_backend` / container stop-start (this workspace's own
+// precedent, `pr08_realtime_listener_reconnect.rs`): those break the WHOLE
+// connection, so both of `check_pg`'s sequential queries fail identically —
+// there is no way to make the UPDATE succeed with a legitimate "0 rows" and
+// then have ONLY the follow-up EXISTS query error, which is exactly the shape
+// AC-RLFO-03 needs. Postgres row-level security (RLS) can target a specific
+// STATEMENT TYPE (`FOR SELECT` vs `FOR UPDATE`) independent of which columns
+// each statement references — but RLS (and all privilege checks) are ALWAYS
+// bypassed for a superuser role, which is what testcontainers' default
+// `postgres` role is. `create_scoped_rate_limiter_role` therefore creates a
+// dedicated, ordinary (non-superuser, non-owner) role scoped to exactly the
+// privileges `check_pg` needs, so the RLS policies below actually apply to it.
+// This changes only which DSN the TEST wires into `RateLimiter::with_pg` —
+// zero production code is touched.
+
+const RATE_LIMITER_ROLE: &str = "test_rate_limiter_app";
+const RATE_LIMITER_ROLE_PASSWORD: &str = "test-rate-limiter-app-pw";
+
+/// Create the scoped, non-superuser role (idempotent) and grant it exactly
+/// the privileges `check_pg`'s three queries need on `rate_buckets`.
+pub async fn create_scoped_rate_limiter_role(admin_pool: &sqlx::PgPool) {
+    sqlx::query(&format!(
+        "DO $$ BEGIN \
+           IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RATE_LIMITER_ROLE}') THEN \
+             CREATE ROLE {RATE_LIMITER_ROLE} LOGIN PASSWORD '{RATE_LIMITER_ROLE_PASSWORD}'; \
+           END IF; \
+         END $$;"
+    ))
+    .execute(admin_pool)
+    .await
+    .expect("create scoped rate-limiter role");
+    sqlx::query(&format!(
+        "GRANT SELECT, UPDATE, INSERT ON rate_buckets TO {RATE_LIMITER_ROLE}"
+    ))
+    .execute(admin_pool)
+    .await
+    .expect("grant rate_buckets privileges to scoped role");
+}
+
+/// Build the scoped role's DSN pointing at the SAME Postgres container
+/// `ctx.db_url` (superuser DSN) already targets.
+pub fn scoped_rate_limiter_db_url(ctx: &DrlTestContext) -> String {
+    ctx.db_url.replacen(
+        "postgres:postgres@",
+        &format!("{RATE_LIMITER_ROLE}:{RATE_LIMITER_ROLE_PASSWORD}@"),
+        1,
+    )
+}
+
+/// Connect a small dedicated pool as the scoped role — this is the pool
+/// handed to `RateLimiter::with_pg` in the fault-injection tests.
+pub async fn scoped_rate_limiter_pool(ctx: &DrlTestContext) -> sqlx::PgPool {
+    create_scoped_rate_limiter_role(&ctx.pool).await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .min_connections(1)
+        .max_connections(1)
+        .connect(&scoped_rate_limiter_db_url(ctx))
+        .await
+        .expect("connect scoped rate-limiter pool");
+    // Warm up: establish + return the ONE connection to the pool before any
+    // timed request runs. Without this, the FIRST `check_pg` call pays real
+    // connection-establishment/auth latency (empirically ~9ms in this
+    // sandbox) on top of the fault-injection query itself, which can push
+    // total elapsed time past the hard-coded 20ms budget and trigger the
+    // EXISTING timeout fallback instead of the NEW error-triggered one this
+    // feature adds — confounding AC-RLFO-02/03/05 with AC-RLFO-06. A single
+    // connection (`max_connections(1)`) is used throughout so `check_pg`'s
+    // two sequential queries always reuse the SAME warm connection.
+    sqlx::query("SELECT 1").execute(&pool).await.expect("warm up scoped pool");
+    pool
+}
+
+/// Install the PL/pgSQL function used as every fault-injection policy's
+/// `USING` predicate — unconditionally raises, producing a genuine
+/// `sqlx::Error::Database`, not a mocked error.
+async fn install_raise_fn(admin_pool: &sqlx::PgPool) {
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION test_force_pg_error() RETURNS boolean \
+         LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'DISTILL fault injection: forced Postgres error (rate-limiter-fail-open)'; \
+         END; $$",
+    )
+    .execute(admin_pool)
+    .await
+    .expect("install test_force_pg_error() function");
+}
+
+async fn drop_policies_if_exist(admin_pool: &sqlx::PgPool, names: &[&str]) {
+    for name in names {
+        sqlx::query(&format!("DROP POLICY IF EXISTS {name} ON rate_buckets"))
+            .execute(admin_pool)
+            .await
+            .ok();
+    }
+}
+
+/// Force every SELECT the scoped role issues against `rate_buckets`
+/// (including `check_pg`'s disambiguating `SELECT EXISTS(...)`, AC-RLFO-03)
+/// to fail with a genuine Postgres error, while UPDATE/INSERT stay
+/// functional. Call with `ctx.pool` (superuser — required to alter RLS).
+pub async fn force_select_errors_on_rate_buckets(admin_pool: &sqlx::PgPool) {
+    install_raise_fn(admin_pool).await;
+    sqlx::query("ALTER TABLE rate_buckets ENABLE ROW LEVEL SECURITY")
+        .execute(admin_pool)
+        .await
+        .expect("enable RLS on rate_buckets");
+    drop_policies_if_exist(
+        admin_pool,
+        &["test_block_all", "test_block_select", "test_block_update", "test_allow_select", "test_allow_update", "test_allow_insert"],
+    )
+    .await;
+    sqlx::query("CREATE POLICY test_block_select ON rate_buckets FOR SELECT USING (test_force_pg_error())")
+        .execute(admin_pool)
+        .await
+        .expect("create block-select policy");
+    sqlx::query("CREATE POLICY test_allow_update ON rate_buckets FOR UPDATE USING (true) WITH CHECK (true)")
+        .execute(admin_pool)
+        .await
+        .expect("create allow-update policy");
+    sqlx::query("CREATE POLICY test_allow_insert ON rate_buckets FOR INSERT WITH CHECK (true)")
+        .execute(admin_pool)
+        .await
+        .expect("create allow-insert policy");
+}
+
+/// Force every UPDATE the scoped role issues against `rate_buckets` (the
+/// atomic token-bucket UPDATE, AC-RLFO-02) to fail with a genuine Postgres
+/// error, while SELECT/INSERT stay functional.
+pub async fn force_update_errors_on_rate_buckets(admin_pool: &sqlx::PgPool) {
+    install_raise_fn(admin_pool).await;
+    sqlx::query("ALTER TABLE rate_buckets ENABLE ROW LEVEL SECURITY")
+        .execute(admin_pool)
+        .await
+        .expect("enable RLS on rate_buckets");
+    drop_policies_if_exist(
+        admin_pool,
+        &["test_block_all", "test_block_select", "test_block_update", "test_allow_select", "test_allow_update", "test_allow_insert"],
+    )
+    .await;
+    sqlx::query("CREATE POLICY test_block_update ON rate_buckets FOR UPDATE USING (test_force_pg_error())")
+        .execute(admin_pool)
+        .await
+        .expect("create block-update policy");
+    sqlx::query("CREATE POLICY test_allow_select ON rate_buckets FOR SELECT USING (true)")
+        .execute(admin_pool)
+        .await
+        .expect("create allow-select policy");
+    sqlx::query("CREATE POLICY test_allow_insert ON rate_buckets FOR INSERT WITH CHECK (true)")
+        .execute(admin_pool)
+        .await
+        .expect("create allow-insert policy");
+}
+
+/// Force EVERY statement (SELECT, UPDATE, INSERT) the scoped role issues
+/// against `rate_buckets` to fail — simulates a sustained, full outage of the
+/// rate limiter's own data path (AC-RLFO-05) while the rest of the server
+/// (auth, project lookups — `ctx.system_db`'s own separate superuser pool)
+/// stays unaffected.
+pub async fn force_all_errors_on_rate_buckets(admin_pool: &sqlx::PgPool) {
+    install_raise_fn(admin_pool).await;
+    sqlx::query("ALTER TABLE rate_buckets ENABLE ROW LEVEL SECURITY")
+        .execute(admin_pool)
+        .await
+        .expect("enable RLS on rate_buckets");
+    drop_policies_if_exist(
+        admin_pool,
+        &["test_block_all", "test_block_select", "test_block_update", "test_allow_select", "test_allow_update", "test_allow_insert"],
+    )
+    .await;
+    sqlx::query(
+        "CREATE POLICY test_block_all ON rate_buckets FOR ALL USING (test_force_pg_error()) WITH CHECK (test_force_pg_error())",
+    )
+    .execute(admin_pool)
+    .await
+    .expect("create block-all policy");
 }

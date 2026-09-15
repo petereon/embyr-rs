@@ -202,7 +202,16 @@ impl RateLimiter {
             )
             .await
             {
-                Ok(result_and_existed) => return result_and_existed,
+                Ok(Ok(result_and_existed)) => return result_and_existed,
+                Ok(Err(pg_error)) => {
+                    tracing::warn!(
+                        project_id = project_id,
+                        error = %pg_error,
+                        "rate_limit_pg_error: Postgres check failed, falling back to in-process bucket",
+                    );
+                    metrics::counter!("embyr_rate_limit_pg_error_total").increment(1);
+                    // Fall through to in-process
+                }
                 Err(_timeout) => {
                     tracing::warn!(
                         project_id = project_id,
@@ -222,14 +231,14 @@ impl RateLimiter {
     /// Attempt an atomic UPDATE against the `rate_buckets` Postgres table.
     ///
     /// On success, returns `Ok(info)` or `Err(info)` based on whether tokens
-    /// were available.  On Postgres error, returns `Ok(info)` with a synthetic
-    /// full-capacity token count (fail-open behaviour: DB errors are not
-    /// penalised).
+    /// were available.  On Postgres error, returns `Err(sqlx::Error)` — the
+    /// caller (`check_inner`) routes this to the per-instance fallback
+    /// (`check_in_process`), never to an unconditional allow.
     async fn check_pg(
         &self,
         project_id: &str,
         pool: &sqlx::PgPool,
-    ) -> (Result<RateLimitInfo, RateLimitInfo>, bool) {
+    ) -> Result<(Result<RateLimitInfo, RateLimitInfo>, bool), sqlx::Error> {
         let capacity = self.capacity;
         let refill_rate = self.refill_rate;
 
@@ -248,9 +257,7 @@ impl RateLimiter {
         .bind(refill_rate)
         .bind(project_id)
         .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
+        .await?;
 
         match allowed {
             Some(remaining) => {
@@ -259,7 +266,14 @@ impl RateLimiter {
                 } else {
                     0
                 };
-                (Ok(RateLimitInfo { remaining, limit: capacity, reset_ms }), true)
+                Ok((
+                    Ok(RateLimitInfo {
+                        remaining,
+                        limit: capacity,
+                        reset_ms,
+                    }),
+                    true,
+                ))
             }
             None => {
                 // No row updated: either rate-limited or project row absent.
@@ -269,8 +283,7 @@ impl RateLimiter {
                 )
                 .bind(project_id)
                 .fetch_one(pool)
-                .await
-                .unwrap_or(false);
+                .await?;
 
                 if !row_exists {
                     // Project existed before migration 0018 — insert a default row and allow.
@@ -282,14 +295,14 @@ impl RateLimiter {
                     .bind(capacity - 1.0)
                     .execute(pool)
                     .await;
-                    return (
+                    return Ok((
                         Ok(RateLimitInfo {
                             remaining: capacity - 1.0,
                             limit: capacity,
                             reset_ms: 0,
                         }),
                         false,
-                    );
+                    ));
                 }
 
                 // Genuinely rate-limited — query current token level for headers.
@@ -312,7 +325,14 @@ impl RateLimiter {
                 } else {
                     0
                 };
-                (Err(RateLimitInfo { remaining: current, limit: capacity, reset_ms }), true)
+                Ok((
+                    Err(RateLimitInfo {
+                        remaining: current,
+                        limit: capacity,
+                        reset_ms,
+                    }),
+                    true,
+                ))
             }
         }
     }

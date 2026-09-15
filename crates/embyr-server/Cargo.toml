@@ -229,6 +229,10 @@ path = "../../tests/distributed_rate_limiting/acceptance/b17_preauth_project_id_
 name = "drl_b18_preauth_project_id_amplification_rest"
 path = "../../tests/distributed_rate_limiting/acceptance/b18_preauth_project_id_amplification_rest.rs"
 
+[[test]]
+name = "drl_b19_fail_open_on_pg_error"
+path = "../../tests/distributed_rate_limiting/acceptance/b19_fail_open_on_pg_error.rs"
+
 # production-readiness acceptance tests
 [[test]]
 name = "production_readiness"

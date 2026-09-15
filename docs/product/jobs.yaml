@@ -629,6 +629,21 @@ jobs:
     # part of the 3-feature crash-elimination arc that FINALIZE closed. See
     # docs/feature/firestore-malformed-filter-shape-validation/
     # feature-delta.md § Resolution 1/2.
+    # NOTE (rate-limiter-fail-open DISCUSS, 2026-09-15): this job's own
+    # functional dimension already promises "per-instance fallback caps at
+    # 1x limit when system DB unreachable (not uncapped, not 2x)" — DISCUSS
+    # confirmed by direct code reading that `rate_limit.rs::check_pg` only
+    # honors this promise for the 20ms Postgres TIMEOUT case (D3/ADR-015).
+    # A separate, non-timeout Postgres error path (a fast-returning
+    # `sqlx::Error` from either the atomic UPDATE or its disambiguating
+    # `SELECT EXISTS` query) silently violates the SAME promise: both
+    # `.ok().flatten()` and `.unwrap_or(false)` collapse a genuine DB error
+    # into "treat as allowed," never falling back to the bounded per-instance
+    # bucket the job's own functional dimension already requires. Closes
+    # audit finding #20 (Medium, Security) — same job, same persona (P2 Sam
+    # Chen), not a new job; this is a conformance fix to an already-stated
+    # requirement, not a scope extension. See
+    # docs/feature/rate-limiter-fail-open/feature-delta.md.
 
   - id: JOB-12
     name: observability

@@ -324,3 +324,23 @@ in `embyr-server`.
 - Behavioral: `tests/acceptance/us_drl_03_graceful_fallback.rs` (CI) injects a 500ms Postgres delay
   and asserts the 20ms timeout fires with fallback activation and counter increment. This is the
   Earned Trust behavioral layer for the Postgres dependency.
+
+## Addendum (2026-09-15) — Finding #20 Conformance Fix (`rate-limiter-fail-open`)
+
+This ADR's own § "check_pg() internal method — return type explanation" (above) already specified
+`check_pg`'s return type as `Result<Result<RateLimitInfo, RateLimitInfo>, sqlx::Error>` and step 2d
+of the decision path as "`Ok(Err(sqlx_error))` (hard DB error) → log WARN → in-process fallback."
+The 2026-08-08 implementation of this ADR did not build that arm: `check_pg` instead collapsed
+`sqlx::Error` internally via `.ok().flatten()` (atomic UPDATE) and `.unwrap_or(false)` (EXISTS check),
+so a real Postgres error was silently treated as "row absent," inserting a fresh full-capacity bucket
+and unconditionally allowing the request — production-readiness-audit-2026-09-08 finding #20 (Medium,
+Security).
+
+`rate-limiter-fail-open` (2026-09-15) brings the code into conformance with this ADR's own
+already-specified design. This is a bug fix against an existing decision, not a new decision, with
+one exception: the § "Metric" section above states hard Postgres errors "do not increment this
+counter" (`rate_limit_pg_timeout_total`) and are "logged at WARN level" only. This is superseded:
+hard errors now additionally increment a new, distinct `embyr_rate_limit_pg_error_total` counter
+(separate time series from the timeout counter), giving Sam Chen an operationally distinct signal for
+"the DB errored" vs. "the DB was slow" via `/metrics` — consistent with ADR-016's existing metric
+conventions. No other part of this ADR changes.
