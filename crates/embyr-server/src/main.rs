@@ -106,6 +106,15 @@ async fn main() {
         );
     }
 
+    if cfg.tls.is_none() {
+        tracing::warn!(
+            tls_enabled = false,
+            vars = "EMBYR_TLS_CERT_PATH, EMBYR_TLS_KEY_PATH",
+            "TLS is disabled — gRPC/REST/admin listeners bind 0.0.0.0 in plaintext; \
+             set EMBYR_TLS_CERT_PATH and EMBYR_TLS_KEY_PATH to enable TLS"
+        );
+    }
+
     // ── Step 3: Prometheus recorder (ADR-016: before any TCP listener) ────
     let prom_handle = get_or_install_prometheus_handle();
 

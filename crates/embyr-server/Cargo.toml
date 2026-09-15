@@ -1135,6 +1135,12 @@ path = "../../tests/deployment_release_process/mod.rs"
 name = "cors_origin_policy"
 path = "../../tests/cors_origin_policy/cors01_origin_allowlist.rs"
 
+# tls-startup-warning (finding #22, Medium) — startup log warns when TLS is
+# disabled and all 3 listeners bind 0.0.0.0 in plaintext.
+[[test]]
+name = "tls_startup_warning"
+path = "../../tests/tls_startup_warning/mod.rs"
+
 [dev-dependencies]
 embyr-proto.workspace = true
 embyr-core.workspace = true
