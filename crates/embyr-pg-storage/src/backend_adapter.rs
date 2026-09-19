@@ -1843,3 +1843,61 @@ mod index_build_succeeded_tests {
         assert!(!index_build_succeeded(false, false));
     }
 }
+
+#[cfg(test)]
+mod cursor_operator_tests {
+    //! finding #37: `cursor_operator` is the pure ASC/DESC-flip decision
+    //! behind startAt/startAfter/endAt/endBefore SQL predicates. This exact
+    //! class of logic already produced a real bug once (a pre-existing
+    //! startAt DESC-direction defect found while delivering
+    //! firestore-end-cursor-support) — worth a direct table-driven test
+    //! rather than relying solely on Docker-backed acceptance coverage.
+    use super::cursor_operator;
+    use embyr_core::domain::query::OrderDirection;
+
+    #[test]
+    fn resolves_sql_operator_per_spec_cursors_table() {
+        // (is_end, before, direction, expected) — mirrors SPEC.md §Cursors:
+        // ASC: startAt=">=", startAfter=">", endAt="<=", endBefore="<".
+        // DESC flips every operator.
+        let cases = [
+            (false, true, OrderDirection::Ascending, ">="),   // startAt
+            (false, false, OrderDirection::Ascending, ">"),   // startAfter
+            (true, false, OrderDirection::Ascending, "<="),   // endAt
+            (true, true, OrderDirection::Ascending, "<"),     // endBefore
+            (false, true, OrderDirection::Descending, "<="),  // startAt, DESC
+            (false, false, OrderDirection::Descending, "<"),  // startAfter, DESC
+            (true, false, OrderDirection::Descending, ">="),  // endAt, DESC
+            (true, true, OrderDirection::Descending, ">"),    // endBefore, DESC
+        ];
+
+        for (is_end, before, direction, expected) in cases {
+            assert_eq!(
+                cursor_operator(is_end, before, &direction),
+                expected,
+                "is_end={is_end} before={before} direction={direction:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod uuid_from_bytes_tests {
+    use super::uuid_from_bytes;
+
+    #[test]
+    fn accepts_exactly_16_bytes() {
+        let bytes = [7u8; 16];
+        let uuid = uuid_from_bytes(&bytes).expect("16 bytes must parse");
+        assert_eq!(uuid.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn rejects_any_length_other_than_16() {
+        for len in [0usize, 1, 15, 17, 32] {
+            let bytes = vec![0u8; len];
+            let err = uuid_from_bytes(&bytes).expect_err("wrong length must be rejected");
+            assert!(err.to_string().contains("transaction ID"), "got: {err}");
+        }
+    }
+}
