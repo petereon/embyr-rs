@@ -1,0 +1,97 @@
+# Prometheus alerting rules for embyr-server.
+#
+# NOT auto-loaded by the server or CI — this is a checked-in artifact an
+# operator applies to their own Prometheus (`rule_files:` in prometheus.yml,
+# or a PrometheusRule CR if using the Prometheus Operator). See
+# docs/operations/runbook.md for what to do when each alert fires, and
+# docs/operations/grafana-dashboard.json for the matching dashboard.
+#
+# Metric source: crates/embyr-server/src/observability.rs,
+# src/middleware/{rate_limit,signin_rate_limit}.rs,
+# src/admin/handlers/prometheus_metrics.rs — GET /metrics on :9090.
+
+groups:
+  - name: embyr-server.rules
+    rules:
+      # --- Postgres-down-after-startup (finding #15 / #29) ---------------
+      # embyr-server keeps no local metric for its own /healthz HTTP status
+      # (a status code isn't a metric). This alert uses the closest built-in
+      # proxy: the shared system-DB pool's idle-connection gauge collapsing
+      # to zero while the pool itself isn't growing — the same failure mode
+      # that makes SystemDb::probe() (what /healthz calls) start failing.
+      # For a direct /healthz check, deploy blackbox_exporter separately and
+      # use `probe_success{instance=".../healthz"} == 0` instead/in addition.
+      - alert: EmbyrSystemDbPoolExhausted
+        expr: embyr_pg_pool_idle{pool="system"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "embyr-server system DB pool has zero idle connections"
+          description: >-
+            embyr_pg_pool_idle{{ $labels.pool }} has been 0 for 2 minutes.
+            Likely precursor to or symptom of the Postgres-down scenario
+            (finding #15/ADR-078): /healthz readiness will start returning
+            503 once queries can no longer acquire a connection. See
+            docs/operations/runbook.md#postgres-down-after-startup.
+
+      # --- Rate limiter Postgres degradation (finding #20) ----------------
+      - alert: EmbyrRateLimiterPgErrorsClimbing
+        expr: rate(embyr_rate_limit_pg_error_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Project rate limiter is falling back to in-process buckets on Postgres errors"
+          description: >-
+            embyr_rate_limit_pg_error_total is incrementing. Since finding #20
+            closed (2026-09-15), this is a BOUNDED fail-open (falls back to
+            the per-instance in-memory bucket, not a global allow), but it
+            means distributed rate-limit enforcement across replicas is
+            degraded for the duration. Correlate with the system DB pool
+            panel — likely the same underlying Postgres degradation as
+            EmbyrSystemDbPoolExhausted.
+
+      - alert: EmbyrRateLimiterPgTimeoutsHigh
+        expr: rate(embyr_rate_limit_pg_timeout_total[5m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Project rate limiter Postgres checks are timing out (>20ms) frequently"
+          description: >-
+            embyr_rate_limit_pg_timeout_total rate exceeds 1/s for 10m —
+            the distributed rate-limit check is missing its 20ms budget
+            often enough to be a latency/load signal on the system DB, even
+            though each individual request still gets a (per-instance)
+            answer.
+
+      # --- gRPC service health ---------------------------------------------
+      - alert: EmbyrGrpcErrorRateHigh
+        expr: >-
+          sum(rate(embyr_grpc_requests_total{status!="ok"}[5m]))
+          / sum(rate(embyr_grpc_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "embyr-server gRPC error ratio above 5%"
+          description: >-
+            More than 5% of gRPC responses across all methods were non-OK
+            over the last 5 minutes. Break down by `method`/`status` on the
+            dashboard's error-rate panel to isolate the failing RPC.
+
+      - alert: EmbyrGrpcLatencySLOBreach
+        expr: >-
+          histogram_quantile(0.99,
+            sum(rate(embyr_grpc_request_duration_seconds_bucket[10m])) by (le, method)
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "embyr-server gRPC p99 latency above the 2s Firestore SLA threshold"
+          description: >-
+            {{ $labels.method }} p99 latency has exceeded 2s (AC-05c SLA
+            threshold, the same boundary the histogram's own bucket
+            configuration is aligned to) for 10 minutes.

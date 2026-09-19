@@ -1,0 +1,181 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource scraping embyr-server's GET /metrics on :9090 (Bearer EMBYR_ADMIN_KEY).",
+      "type": "datasource",
+      "pluginId": "prometheus"
+    }
+  ],
+  "title": "embyr-rs — Server Overview",
+  "uid": "embyr-server-overview",
+  "tags": ["embyr", "prometheus"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "gRPC request rate by method",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(embyr_grpc_requests_total[5m])) by (method)",
+          "legendFormat": "{{method}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "gRPC error rate (non-OK status)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(embyr_grpc_requests_total{status!=\"ok\"}[5m])) / sum(rate(embyr_grpc_requests_total[5m]))",
+          "legendFormat": "error ratio"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "gRPC p99 latency by method (Firestore SLA: 2s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 2.0 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum(rate(embyr_grpc_request_duration_seconds_bucket[5m])) by (le, method))",
+          "legendFormat": "{{method}} p99"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Rate limiter outcomes (project rate limit)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(embyr_rate_limit_requests_total[5m])) by (outcome)",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Rate limiter Postgres fallback events",
+      "description": "embyr_rate_limit_pg_timeout_total: distributed check exceeded 20ms, fell back to in-process bucket. embyr_rate_limit_pg_error_total: Postgres check errored (finding #20 — bounded fail-open to in-process bucket, not a global allow). Sustained climb = system DB degradation.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(embyr_rate_limit_pg_timeout_total[5m])",
+          "legendFormat": "pg_timeout"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(embyr_rate_limit_pg_error_total[5m])",
+          "legendFormat": "pg_error"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Sign-in rate limiter (outcomes + pg fallback)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(embyr_signin_rate_limit_requests_total[5m])) by (outcome)",
+          "legendFormat": "{{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(embyr_signin_rate_limit_pg_timeout_total[5m])",
+          "legendFormat": "pg_timeout"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "System DB pool — size vs idle connections",
+      "description": "embyr_pg_pool_size / embyr_pg_pool_idle for pool=\"system\" (the shared system Postgres pool, updated every 15s and at each scrape). idle approaching 0 while size is flat is a pool-exhaustion precursor to the finding #15 Postgres-down scenario.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "embyr_pg_pool_size{pool=\"system\"}",
+          "legendFormat": "size"
+        },
+        {
+          "refId": "B",
+          "expr": "embyr_pg_pool_idle{pool=\"system\"}",
+          "legendFormat": "idle"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "/healthz readiness probe (requires blackbox_exporter, not bundled)",
+      "description": "This panel only renders data if a blackbox_exporter instance is deployed separately and configured to probe http://<host>:8081/healthz — embyr-server does not itself export a Prometheus metric for its own HTTP endpoints. See runbook.md for the primary (built-in-metric) detection path for the finding #15 Postgres-down scenario.",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "probe_success{instance=~\".*:8081/healthz\"}",
+          "legendFormat": "healthz"
+        }
+      ]
+    }
+  ]
+}
