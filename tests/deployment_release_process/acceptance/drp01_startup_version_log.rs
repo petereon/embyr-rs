@@ -18,12 +18,12 @@
 //! Walking skeleton for US-DRP-01: NOT #[ignore]. Proves the version-in-log
 //! mechanism end-to-end against a real running server + real Postgres.
 //!
-//! Assertion style: plain `assert!`/descriptive panic messages, matching the
-//! established precedent for this exact layer (subprocess/FS acceptance) in
-//! this repo — `tests/production_readiness/acceptance/pr01_config_from_env.rs`
-//! — rather than `assert_state_delta`/Universe. Chosen for consistency with
-//! the already-reviewed sibling test at the identical layer, not as a
-//! deviation from Mandate 8.
+//! Assertion style: real `serde_json` parsing of each captured log line, not
+//! substring matching — structured-json-logging (finding #25) switched the
+//! formatter to `.json()`, so `output.contains("version=...")`-style checks
+//! no longer match the `"version":"0.1.1"` colon-shape JSON renders. See
+//! `docs/feature/structured-json-logging/feature-delta.md` "Self-review"
+//! section, which flagged this exact test as at-risk.
 //!
 //! Scaffold classification target: RED until `main.rs` Step 12 is extended
 //! with the `version` field (DELIVER, per DESIGN's exact diff in
@@ -32,6 +32,21 @@
 use std::time::Duration;
 
 use crate::common::{start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY};
+
+/// Parse every non-empty captured line as JSON. Fails with the offending
+/// line if any line is not valid JSON — proves the log stream is genuinely
+/// machine-parseable (structured-json-logging, finding #25), not merely
+/// "looks structured" under a substring check.
+fn parse_json_lines(output: &str) -> Vec<serde_json::Value> {
+    output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("log line is not valid JSON ({e}): {line}"))
+        })
+        .collect()
+}
 
 #[tokio::test]
 async fn startup_log_names_the_running_version() {
@@ -60,16 +75,40 @@ async fn startup_log_names_the_running_version() {
     // the value the running server should have reported.
     let expected_version = env!("CARGO_PKG_VERSION");
 
-    assert!(
-        output.contains(&format!("version={expected_version}"))
-            || output.contains(&format!("version=\"{expected_version}\"")),
-        "startup log must report the running version ({expected_version}) as a \
-         structured `version` field; captured output:\n{output}"
+    // Every line the process emitted must be genuine, parseable JSON —
+    // proves the whole startup stream (not just the "ready" line) is
+    // structured, including the TLS-disabled warning emitted earlier in the
+    // same run (no EMBYR_TLS_CERT_PATH/EMBYR_TLS_KEY_PATH set above).
+    // `tracing_subscriber::fmt().json()` nests every `tracing::info!`/`warn!`
+    // key-value pair (including `message`) under a top-level `"fields"`
+    // object — confirmed against real captured output, not assumed.
+    let lines = parse_json_lines(&output);
+    let field = |v: &serde_json::Value, name: &str| v["fields"].get(name).cloned();
+
+    let ready_line = lines
+        .iter()
+        .find(|v| field(v, "version").is_some())
+        .unwrap_or_else(|| panic!("no JSON log line carried a `version` field; captured output:\n{output}"));
+    assert_eq!(
+        field(ready_line, "version").as_ref().and_then(|v| v.as_str()),
+        Some(expected_version),
+        "startup log's `version` JSON field must equal {expected_version}; line: {ready_line}"
     );
-    assert!(
-        output.contains(&format!("v{expected_version}")),
+    assert_eq!(
+        field(ready_line, "message").as_ref().and_then(|v| v.as_str()),
+        Some(format!("embyr-server v{expected_version} ready").as_str()),
         "startup log's human-readable message must name the version as \
-         v{expected_version} (matching the vX.Y.Z git tag format); captured output:\n{output}"
+         v{expected_version} (matching the vX.Y.Z git tag format); line: {ready_line}"
+    );
+
+    let tls_warning_line = lines
+        .iter()
+        .find(|v| field(v, "tls_enabled").and_then(|b| b.as_bool()) == Some(false))
+        .unwrap_or_else(|| panic!("no JSON log line carried tls_enabled=false; captured output:\n{output}"));
+    assert_eq!(
+        field(tls_warning_line, "vars").as_ref().and_then(|v| v.as_str()),
+        Some("EMBYR_TLS_CERT_PATH, EMBYR_TLS_KEY_PATH"),
+        "TLS-disabled warning's `vars` JSON field must name both env vars; line: {tls_warning_line}"
     );
     // _pg dropped here — container stopped after server exits.
 }

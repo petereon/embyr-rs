@@ -77,17 +77,18 @@ async fn main() {
     });
 
     // ── Step 2: tracing (stderr; honours RUST_LOG or cfg.log_level) ──────
-    // ANSI color codes are only emitted for an interactive terminal — piped
-    // output (subprocess capture, `docker compose logs`, log aggregators)
-    // stays plain text so structured fields (e.g. `version="0.1.1"`) remain
-    // machine-parseable.
+    // JSON output (finding #25): every line is a single JSON object with
+    // structured fields (e.g. `"version":"0.1.1"`) — reliably parseable by
+    // Loki/CloudWatch/Datadog, unlike the prior plain-text `key=value` shape.
+    // JSON never colorizes, so ANSI/`IsTerminal` handling (finding #19) is
+    // moot and removed outright.
     tracing_subscriber::fmt()
+        .json()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new(&cfg.log_level)),
         )
         .with_writer(std::io::stderr)
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     if cfg.encryption_key_previous.is_some() {
