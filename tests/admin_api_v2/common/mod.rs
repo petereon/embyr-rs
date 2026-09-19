@@ -12,7 +12,7 @@
 //! Infrastructure policy (from docs/architecture/atdd-infrastructure-policy.md):
 //!   Driving port:    reqwest::Client against Axum admin server on ephemeral port.
 //!   Driven internal: testcontainers-rs Postgres image; sqlx::migrate!; fresh per test module.
-//!   Driven external: NoopEmailSender (in-process); FakeEmailSender (capture variant).
+//!   Driven external: NoopEmailSender (in-process).
 //!   Clock:           tokio::time::advance (paused clock) per #[tokio::test(start_paused = true)].
 
 // ─── State-delta re-export ────────────────────────────────────────────────────
@@ -484,30 +484,3 @@ impl AdminTestContext {
     }
 }
 
-// ─── FakeEmailSender ─────────────────────────────────────────────────────────
-
-/// Captures emails sent during a test for assertion.
-///
-/// # RED scaffold
-/// Placeholder until IEmailSender port integration in a later slice.
-#[derive(Debug, Default)]
-pub struct FakeEmailSender {
-    pub sent: std::sync::Mutex<Vec<CapturedEmail>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CapturedEmail {
-    pub to: String,
-    pub subject: String,
-    pub body: String,
-}
-
-impl FakeEmailSender {
-    pub fn sent_count(&self) -> usize {
-        self.sent.lock().unwrap().len()
-    }
-
-    pub fn last_email(&self) -> Option<CapturedEmail> {
-        self.sent.lock().unwrap().last().cloned()
-    }
-}

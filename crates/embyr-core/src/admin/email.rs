@@ -2,7 +2,6 @@
 //!
 //! V1: NoopEmailSender (logs and returns Ok).
 //! V2: SmtpEmailSender (lettre — future slice).
-//! Tests: FakeEmailSender (in tests/admin_api_v2/common/mod.rs).
 
 /// A message to be sent by the email port.
 #[derive(Debug, Clone)]

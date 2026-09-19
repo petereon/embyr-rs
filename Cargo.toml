@@ -24,7 +24,6 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 http-body-util = "0.1"
 http = "1"
-http-body = "1"
 tower = { version = "0.5", features = ["util"] }
 bytes = "1"
 

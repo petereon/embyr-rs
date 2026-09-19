@@ -1708,22 +1708,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embyr-admin"
-version = "0.1.1"
-dependencies = [
- "axum",
- "chrono",
- "embyr-core",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "embyr-admin-ui"
 version = "0.1.1"
 dependencies = [
@@ -1874,7 +1858,6 @@ dependencies = [
  "hkdf",
  "hmac 0.12.1",
  "http 1.4.0",
- "http-body 1.0.1",
  "http-body-util",
  "hyper",
  "hyper-util",
