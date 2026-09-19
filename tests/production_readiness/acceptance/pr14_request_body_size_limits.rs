@@ -221,8 +221,13 @@ async fn request_body_ceilings_enforced_on_every_listener_surface() {
         under_admin_resp.status()
     );
 
+    // Exactly 1 byte over (not the usual ~1 KiB margin): a `1 * 1024 * 1024`
+    // ceiling has a degenerate first operand, so mutating `*` to `+` here
+    // yields `1 + 1024 * 1024` = ceiling + 1 byte, not the huge swing a
+    // `1024 * 1024` operand mutation produces. A KiB-scale margin can't see
+    // a 1-byte drift; byte-exact can (cargo-mutants finding, QUALITY_GATE).
     let over_admin_body =
-        provision_body_of_len("rbl-admin-over", &tenant_db_url, ADMIN_CEILING_BYTES + 1024);
+        provision_body_of_len("rbl-admin-over", &tenant_db_url, ADMIN_CEILING_BYTES + 1);
     let over_admin_resp = http
         .post(&admin_url)
         .header("Authorization", format!("Bearer {}", common::ADMIN_KEY))
