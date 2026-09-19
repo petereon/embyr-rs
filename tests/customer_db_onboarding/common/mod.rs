@@ -190,7 +190,11 @@ pub fn role_connection_url(base_url: &str, role_name: &str) -> String {
 /// Uses `option_env!` (checked at runtime, not `env!`'s compile-time hard
 /// error) because this `common/mod.rs` is `#[path]`-included into BOTH
 /// `embyr-db-prep`'s and `embyr-server`'s `[[test]]` targets — the var is
-/// only defined when compiled under the owning package.
+/// only defined when compiled under the owning package. `env!` here would
+/// be a hard compile error for whichever package isn't currently building,
+/// so `clippy::option_env_unwrap`'s suggestion doesn't apply to this
+/// cross-package-shared file (finding #36).
+#[allow(clippy::option_env_unwrap)]
 pub fn embyr_db_prep_binary() -> PathBuf {
     PathBuf::from(
         option_env!("CARGO_BIN_EXE_embyr-db-prep")
@@ -303,9 +307,10 @@ pub struct ServerProcess {
 }
 
 impl ServerProcess {
+    #[allow(clippy::option_env_unwrap)]
     pub fn embyr_server_binary() -> PathBuf {
         // option_env! (not env!) for the same cross-package-compile reason
-        // as embyr_db_prep_binary() above.
+        // as embyr_db_prep_binary() above (finding #36).
         PathBuf::from(
             option_env!("CARGO_BIN_EXE_embyr-server")
                 .expect("CARGO_BIN_EXE_embyr-server only set when compiled as an embyr-server [[test]] target"),

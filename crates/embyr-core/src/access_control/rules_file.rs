@@ -663,7 +663,7 @@ fn find_path_pattern_end(after_match: &str) -> Option<usize> {
     }
     let mut idx = 0usize;
     loop {
-        if after_match[idx..].as_bytes().first() != Some(&b'/') {
+        if after_match.as_bytes()[idx..].first() != Some(&b'/') {
             break;
         }
         idx += 1;
@@ -676,7 +676,7 @@ fn find_path_pattern_end(after_match: &str) -> Option<usize> {
                 .unwrap_or(after_match[idx..].len());
             idx += rel_end;
         }
-        if after_match[idx..].as_bytes().first() != Some(&b'/') {
+        if after_match.as_bytes()[idx..].first() != Some(&b'/') {
             break;
         }
     }
