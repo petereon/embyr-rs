@@ -954,7 +954,7 @@ impl FirestoreService {
             &condition,
             &embyr_core::access_control::EvalContext {
                 auth: auth_ctx.as_ref(),
-                resource_fields: resource_fields,
+                resource_fields,
                 request_resource_fields: request_fields,
                 path_variable_value: Some(path.document_id.as_str()),
                 ancestor_path_variable_values: &std::collections::BTreeMap::new(),
@@ -1464,7 +1464,7 @@ impl FirestoreService {
                                 &condition,
                                 &embyr_core::access_control::EvalContext {
                                     auth: auth_ctx.as_ref(),
-                                    resource_fields: resource_fields,
+                                    resource_fields,
                                     request_resource_fields: &empty_fields,
                                     path_variable_value: Some(path.document_id.as_str()),
                                     ancestor_path_variable_values: &ancestor_bindings,
@@ -1554,7 +1554,7 @@ impl FirestoreService {
                     &condition,
                     &embyr_core::access_control::EvalContext {
                         auth: auth_ctx.as_ref(),
-                        resource_fields: resource_fields,
+                        resource_fields,
                         request_resource_fields: &empty_fields,
                         path_variable_value: Some(path.document_id.as_str()),
                         ancestor_path_variable_values: &std::collections::BTreeMap::new(),
@@ -1939,7 +1939,7 @@ impl FirestoreService {
                     &condition,
                     &embyr_core::access_control::EvalContext {
                         auth: auth_ctx.as_ref(),
-                        resource_fields: resource_fields,
+                        resource_fields,
                         request_resource_fields: &fields,
                         path_variable_value: Some(path.document_id.as_str()),
                         ancestor_path_variable_values: &std::collections::BTreeMap::new(),
@@ -2014,7 +2014,7 @@ impl FirestoreService {
                             &condition,
                             &embyr_core::access_control::EvalContext {
                                 auth: auth_ctx.as_ref(),
-                                resource_fields: resource_fields,
+                                resource_fields,
                                 request_resource_fields: &fields,
                                 path_variable_value: Some(path.document_id.as_str()),
                                 ancestor_path_variable_values: &ancestor_bindings,
@@ -2149,7 +2149,7 @@ impl FirestoreService {
                     &condition,
                     &embyr_core::access_control::EvalContext {
                         auth: auth_ctx.as_ref(),
-                        resource_fields: resource_fields,
+                        resource_fields,
                         request_resource_fields: &request_resource_fields,
                         path_variable_value: Some(path.document_id.as_str()),
                         ancestor_path_variable_values: &std::collections::BTreeMap::new(),
@@ -2213,7 +2213,7 @@ impl FirestoreService {
                             &condition,
                             &embyr_core::access_control::EvalContext {
                                 auth: auth_ctx.as_ref(),
-                                resource_fields: resource_fields,
+                                resource_fields,
                                 request_resource_fields: &request_resource_fields,
                                 path_variable_value: Some(path.document_id.as_str()),
                                 ancestor_path_variable_values: &ancestor_bindings,
@@ -2665,7 +2665,7 @@ impl FirestoreService {
                         &condition,
                         &embyr_core::access_control::EvalContext {
                             auth: auth_ctx.as_ref(),
-                            resource_fields: resource_fields,
+                            resource_fields,
                             request_resource_fields: &empty_fields,
                             path_variable_value: None,
                             ancestor_path_variable_values: &std::collections::BTreeMap::new(),

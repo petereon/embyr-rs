@@ -65,7 +65,6 @@ deny = [
     # Async runtime — banned from embyr-core
     { name = "tokio", wrappers = [
         "embyr-server",
-        "embyr-admin",
         "embyr-admin-ui",
         "embyr-agent",
         # embyr-db-prep (customer-db-onboarding, ADR-022) — customer-run
@@ -114,7 +113,6 @@ deny = [
     # HTTP framework — banned from embyr-core
     { name = "axum", wrappers = [
         "embyr-server",
-        "embyr-admin",
         "embyr-admin-ui",
         "tonic",
     ] },

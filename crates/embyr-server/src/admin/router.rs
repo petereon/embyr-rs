@@ -92,7 +92,7 @@ use crate::middleware::signin_rate_limit::SigninRateLimiter;
 // directly (bypassing the `Bytes`/`Json` extractors), so it never consults
 // the `DefaultBodyLimit` extension this layer sets — confirmed independent
 // of its own separate, already-shipped 5 MiB ceiling (ADR-070).
-const MAX_ADMIN_BODY_BYTES: usize = 1 * 1024 * 1024; // 1 MiB
+const MAX_ADMIN_BODY_BYTES: usize = 1024 * 1024; // 1 MiB
 
 /// Build the admin router with all five sub-routers merged under /admin/v1.
 ///
