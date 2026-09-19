@@ -62,10 +62,13 @@ impl SigninRateLimiter {
                     Self::record(result.is_ok());
                     return result;
                 }
-                Ok(Err(e)) => tracing::warn!(
-                    error = %e,
-                    "signin_rate_limit: pg query error; falling back to in-process"
-                ),
+                Ok(Err(e)) => {
+                    metrics::counter!("embyr_signin_rate_limit_pg_error_total").increment(1);
+                    tracing::warn!(
+                        error = %e,
+                        "signin_rate_limit: pg query error; falling back to in-process"
+                    );
+                }
                 Err(_timeout) => {
                     metrics::counter!("embyr_signin_rate_limit_pg_timeout_total").increment(1);
                     tracing::warn!(
@@ -183,6 +186,60 @@ mod tests {
         let db = SystemDb::new(&url).await.expect("connect");
         db.migrate().await.expect("migrate"); // applies 0037_signin_rate_limits.sql
         (container, db.pool().clone())
+    }
+
+    /// Reads a labelless Prometheus counter's current value out of a
+    /// `PrometheusHandle::render()` body — mirrors
+    /// `tests/distributed_rate_limiting/acceptance/b19_fail_open_on_pg_error.rs`'s
+    /// own `labelless_metric` helper (same `name value` line shape, since both
+    /// counters are registered with no labels).
+    fn metric_value(body: &str, name: &str) -> f64 {
+        let prefix = format!("{name} ");
+        body.lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0.0)
+    }
+
+    /// finding #56: `embyr_signin_rate_limit_pg_error_total` increments on a
+    /// genuine Postgres error (dropped table -> immediate `sqlx::Error`, not
+    /// a 20ms timeout), and the pre-existing timeout counter stays untouched
+    /// — mirrors finding #20's own error-vs-timeout distinction in
+    /// `rate_limit.rs`'s `embyr_rate_limit_pg_error_total`.
+    #[tokio::test]
+    async fn check_increments_pg_error_counter_on_genuine_db_error_not_timeout() {
+        let (_container, pool) = start_pg().await;
+        sqlx::query("DROP TABLE signin_rate_limits")
+            .execute(&pool)
+            .await
+            .expect("drop table to force a genuine query error");
+
+        let limiter = SigninRateLimiter::with_pg(5.0, 1.0, pool);
+        let handle = crate::observability::get_or_install_prometheus_handle();
+
+        let before_errors =
+            metric_value(&handle.render(), "embyr_signin_rate_limit_pg_error_total");
+        let before_timeouts =
+            metric_value(&handle.render(), "embyr_signin_rate_limit_pg_timeout_total");
+
+        let result = limiter.check("198.51.100.4").await;
+        assert!(
+            result.is_ok(),
+            "a genuine DB error must fall open to the fresh in-process bucket"
+        );
+
+        let after = handle.render();
+        let after_errors = metric_value(&after, "embyr_signin_rate_limit_pg_error_total");
+        let after_timeouts = metric_value(&after, "embyr_signin_rate_limit_pg_timeout_total");
+        assert_eq!(
+            after_errors,
+            before_errors + 1.0,
+            "expected embyr_signin_rate_limit_pg_error_total to increment on a genuine DB error"
+        );
+        assert_eq!(
+            after_timeouts, before_timeouts,
+            "a genuine DB error must not also increment the timeout counter"
+        );
     }
 
     #[tokio::test]

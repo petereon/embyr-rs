@@ -128,6 +128,11 @@
           "refId": "B",
           "expr": "rate(embyr_signin_rate_limit_pg_timeout_total[5m])",
           "legendFormat": "pg_timeout"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(embyr_signin_rate_limit_pg_error_total[5m])",
+          "legendFormat": "pg_error"
         }
       ]
     },
