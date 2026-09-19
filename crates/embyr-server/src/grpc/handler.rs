@@ -3106,6 +3106,19 @@ impl FirestoreService {
                 .collect();
             values.map(|vals| Cursor { values: vals, before: c.before })
         });
+        // finding #44 (timestamp-cursor-pagination): a cursor bound is a
+        // range comparison under the hood (`push_scalar_comparison` in
+        // embyr-pg-storage) — same non-orderable-type rejection
+        // `translate_filter` already applies to range-operator filters
+        // above, applied here so a malformed cursor value gets a clean
+        // `invalid_argument` instead of silently reaching the SQL builder's
+        // own defensive panic.
+        if let Some(c) = &start_at {
+            validate_cursor_value_types(&c.values).map_err(Status::invalid_argument)?;
+        }
+        if let Some(c) = &end_at {
+            validate_cursor_value_types(&c.values).map_err(Status::invalid_argument)?;
+        }
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -3997,6 +4010,55 @@ fn group_rule_not_defined_rejection() -> Status {
         "query rejected [GROUP_RULE_NOT_DEFINED]: no collection-group rule \
          is defined for this collection id",
     )
+}
+
+/// finding #44 (timestamp-cursor-pagination): reject cursor values with no
+/// meaningful ordering, before they reach `embyr_pg_storage`'s own SQL
+/// builder. Mirrors `translate_filter`'s existing rejection of range
+/// comparisons against `Array`/`Map`/`Null` (same reasoning: a cursor bound
+/// IS a range comparison). `Integer`/`String`/`Double`/`Boolean`/
+/// `Timestamp`/`Bytes`/`Reference` are all orderable and pass through.
+fn validate_cursor_value_types(values: &[FieldValue]) -> Result<(), String> {
+    for v in values {
+        let kind = match v {
+            FieldValue::Array(_) => "array",
+            FieldValue::Map(_) => "map",
+            FieldValue::Null => "null",
+            _ => continue,
+        };
+        return Err(format!("cursor bound does not support {kind} values"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod cursor_value_type_validation_tests {
+    //! finding #44 (timestamp-cursor-pagination): `validate_cursor_value_
+    //! types` IS its own driving port (pure function, public signature) —
+    //! calling it directly is port-to-port at domain scope. The orderable
+    //! path (Integer/String/Double/Boolean/Timestamp/Bytes/Reference) is
+    //! already covered by the acceptance suite's cursor tests
+    //! (`tests/acceptance/us_04_query_collection.rs`); this covers the one
+    //! remaining behavior — rejection of non-orderable types — via a single
+    //! parametrized test (Mandate 5).
+    use super::validate_cursor_value_types;
+    use embyr_core::domain::field_value::FieldValue;
+
+    #[test]
+    fn rejects_non_orderable_cursor_value_types() {
+        for (value, expected_kind) in [
+            (FieldValue::Array(vec![FieldValue::Integer(1)]), "array"),
+            (FieldValue::Map(Default::default()), "map"),
+            (FieldValue::Null, "null"),
+        ] {
+            let err = validate_cursor_value_types(&[value])
+                .expect_err("non-orderable cursor value must be rejected");
+            assert!(
+                err.contains(expected_kind),
+                "expected error to name '{expected_kind}', got: {err}"
+            );
+        }
+    }
 }
 
 /// Translate a proto `Filter` to a domain `QueryFilter`.

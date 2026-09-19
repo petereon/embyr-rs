@@ -203,14 +203,25 @@ pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
 /// range comparisons need the unwrapped, type-cast `->>'v'` extraction this
 /// function provides, while equality/inequality against a whole stored
 /// value does not (and, as discovered via AC-QFO-10's own failing test,
-/// must NOT use it — see `push_value_equality`'s own doc). This function's
-/// own `_ => panic!(...)` fallback still fires for `Timestamp`/`Bytes`/
-/// `Reference`/`Array`/`Map`-valued RANGE-comparison targets — a real,
-/// separately-evidenced, deferred gap (candidate id `firestore-range
-/// -operator-value-type-support`), since range comparisons need ordering,
-/// not equality, and whole-object JSON comparison has no meaningful
-/// "less than" for a composite type.
-fn push_scalar_comparison(qb: &mut QueryBuilder<Postgres>, field_path: &str, op: &str, value: &FieldValue) {
+/// must NOT use it — see `push_value_equality`'s own doc). `Array`/`Map`
+/// still hit this function's own `_ => panic!(...)` fallback — real
+/// Firestore has no meaningful ordering for a composite type, so both are
+/// rejected upstream in `handler.rs::translate_filter` before reaching here
+/// (candidate id `firestore-range-operator-value-type-support`).
+///
+/// (finding #44, timestamp-cursor-pagination) `pub(crate)` — reused
+/// verbatim by `embyr_pg_storage::backend_adapter`'s startAt/startAfter and
+/// endAt/endBefore cursor-bound blocks. A cursor bound is a strict `<`/
+/// `<=`/`>`/`>=` comparison, the exact same shape a range-operator filter
+/// needs, so the SAME type-aware casting this function already established
+/// for `Integer`/`String`/`Double`/`Boolean`/`Timestamp`/`Bytes`/`Reference`
+/// closes the cursor-side gap too instead of re-deriving it.
+pub(crate) fn push_scalar_comparison(
+    qb: &mut QueryBuilder<Postgres>,
+    field_path: &str,
+    op: &str,
+    value: &FieldValue,
+) {
     match value {
         FieldValue::Integer(v) => {
             qb.push(format!("(fields->'{field_path}'->>'v')::bigint {op} "));

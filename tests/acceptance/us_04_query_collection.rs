@@ -123,6 +123,12 @@ fn string_value(s: &str) -> Value {
     Value { value_type: Some(ValueType::StringValue(s.to_string())) }
 }
 
+fn timestamp_value(seconds: i64) -> Value {
+    Value {
+        value_type: Some(ValueType::TimestampValue(prost_types::Timestamp { seconds, nanos: 0 })),
+    }
+}
+
 fn field_ref(path: &str) -> FieldReference {
     FieldReference { field_path: path.to_string() }
 }
@@ -705,6 +711,91 @@ async fn end_cursor_bounds_results_for_integer_and_double_field_types() {
         })
         .collect();
     assert_eq!(prices, vec![2.5, 3.5], "startAt(2.5) on a Double field must exclude 1.5, got {prices:?}");
+}
+
+/// finding #44 (production-readiness-audit-2026-09-08, Follow-Up Scan
+/// 2026-09-19): a Timestamp-valued cursor must genuinely bound the result
+/// set, the same way Integer/Double cursors already do (see the sibling
+/// test above). Before the fix, the startAt/endAt SQL builder's `_ => {}`
+/// match arm silently dropped the boundary predicate for every non-
+/// Integer/String/Double cursor value — a client paginating by a Timestamp
+/// field (the single most common real-world orderBy+cursor pairing) got
+/// every page starting back at the beginning: silent wrong data, not a
+/// crash.
+///
+/// Given:  4 documents with created_at seconds 100, 200, 300, 400
+/// When:   endAt(300) is applied, ordered by created_at ascending
+/// Then:   only 100/200/300 are returned, 400 excluded
+/// And:    startAt(200) returns 200/300/400, excluding 100
+#[tokio::test]
+async fn end_cursor_bounds_results_for_timestamp_field_type() {
+    let env = setup("test-sk-ecs-ts-01", "ecs-ts-project-01").await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    for seconds in [100i64, 200, 300, 400] {
+        let mut fields = HashMap::new();
+        fields.insert("created_at".to_string(), timestamp_value(seconds));
+        seed_document(
+            &mut client,
+            &env.project_id,
+            &env.api_key,
+            "events",
+            &format!("event-{seconds}"),
+            fields,
+        )
+        .await;
+    }
+
+    let extract_seconds = |docs: &[Document]| -> Vec<i64> {
+        docs.iter()
+            .map(|d| match &d.fields.get("created_at").expect("created_at field missing").value_type {
+                Some(ValueType::TimestampValue(ts)) => ts.seconds,
+                other => panic!("expected TimestampValue for created_at, got {other:?}"),
+            })
+            .collect()
+    };
+
+    // endAt(300) must include 300 and exclude 400.
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "events".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("created_at")), direction: Direction::Ascending as i32 }],
+        end_at: Some(Cursor { values: vec![timestamp_value(300)], before: false }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+    let seconds = extract_seconds(&docs);
+    assert_eq!(
+        seconds,
+        vec![100, 200, 300],
+        "endAt(300) on a Timestamp field must include 300 and exclude 400, got {seconds:?}"
+    );
+
+    // startAt(200) must exclude 100 and include 200/300/400.
+    let parent = format!("projects/{}/databases/(default)/documents", env.project_id);
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector { collection_id: "events".to_string(), all_descendants: false }],
+        order_by: vec![Order { field: Some(field_ref("created_at")), direction: Direction::Ascending as i32 }],
+        start_at: Some(Cursor { values: vec![timestamp_value(200)], before: true }),
+        ..Default::default()
+    };
+    let req = make_authed_request(
+        RunQueryRequest { parent, query_type: Some(QueryType::StructuredQuery(sq)), ..Default::default() },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let docs = collect_query_docs(stream).await;
+    let seconds = extract_seconds(&docs);
+    assert_eq!(
+        seconds,
+        vec![200, 300, 400],
+        "startAt(200) on a Timestamp field must exclude 100, got {seconds:?}"
+    );
 }
 
 /// AC-04e: IS_NAN filter behaves identically to where("score", "==", NaN)

@@ -845,7 +845,9 @@ impl BackendAdapter for PostgresBackendAdapter {
         transaction_id: Option<&TransactionId>,
     ) -> Result<Vec<FirestoreDocument>, CoreError> {
         use sqlx::QueryBuilder;
-        use crate::encoding::query::{append_filter, order_by_expr, push_all_descendants_predicate};
+        use crate::encoding::query::{
+            append_filter, order_by_expr, push_all_descendants_predicate, push_scalar_comparison,
+        };
 
         let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
             "SELECT project_id, collection_path, document_id, fields, version, create_time, update_time \
@@ -892,30 +894,13 @@ impl BackendAdapter for PostgresBackendAdapter {
                     panic!("invalid field path reached SQL builder: {e}");
                 }
                 let op = cursor_operator(false, cursor.before, &ob.direction);
-                match &cursor.values[0] {
-                    embyr_core::domain::field_value::FieldValue::Integer(v) => {
-                        qb.push(format!(
-                            " AND (fields->'{}'->>'v')::bigint {} ",
-                            ob.field_path, op
-                        ));
-                        qb.push_bind(*v);
-                    }
-                    embyr_core::domain::field_value::FieldValue::String(s) => {
-                        qb.push(format!(
-                            " AND fields->'{}'->>'v' {} ",
-                            ob.field_path, op
-                        ));
-                        qb.push_bind(s.clone());
-                    }
-                    embyr_core::domain::field_value::FieldValue::Double(d) => {
-                        qb.push(format!(
-                            " AND (fields->'{}'->>'v')::float8 {} ",
-                            ob.field_path, op
-                        ));
-                        qb.push_bind(*d);
-                    }
-                    _ => {}
-                }
+                // finding #44 (timestamp-cursor-pagination): reuse the SAME
+                // type-aware comparison `append_field_filter`'s range
+                // operators already use — covers Integer/String/Double/
+                // Boolean/Timestamp/Bytes/Reference. Array/Map/Null are
+                // rejected upstream in handler.rs before reaching here.
+                qb.push(" AND ");
+                push_scalar_comparison(&mut qb, &ob.field_path, op, &cursor.values[0]);
             }
         }
 
@@ -931,30 +916,10 @@ impl BackendAdapter for PostgresBackendAdapter {
                     panic!("invalid field path reached SQL builder: {e}");
                 }
                 let op = cursor_operator(true, cursor.before, &ob.direction);
-                match &cursor.values[0] {
-                    embyr_core::domain::field_value::FieldValue::Integer(v) => {
-                        qb.push(format!(
-                            " AND (fields->'{}'->>'v')::bigint {} ",
-                            ob.field_path, op
-                        ));
-                        qb.push_bind(*v);
-                    }
-                    embyr_core::domain::field_value::FieldValue::String(s) => {
-                        qb.push(format!(
-                            " AND fields->'{}'->>'v' {} ",
-                            ob.field_path, op
-                        ));
-                        qb.push_bind(s.clone());
-                    }
-                    embyr_core::domain::field_value::FieldValue::Double(d) => {
-                        qb.push(format!(
-                            " AND (fields->'{}'->>'v')::float8 {} ",
-                            ob.field_path, op
-                        ));
-                        qb.push_bind(*d);
-                    }
-                    _ => {}
-                }
+                // finding #44 (timestamp-cursor-pagination): see the
+                // startAt/startAfter block above — identical reasoning.
+                qb.push(" AND ");
+                push_scalar_comparison(&mut qb, &ob.field_path, op, &cursor.values[0]);
             }
         }
 
