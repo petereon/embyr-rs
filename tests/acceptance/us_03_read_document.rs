@@ -256,7 +256,7 @@ async fn all_field_types_round_trip_correctly() {
     // Double
     fields.insert(
         "double_field".to_string(),
-        Value { value_type: Some(ValueType::DoubleValue(3.14)) },
+        Value { value_type: Some(ValueType::DoubleValue(3.15)) },
     );
     // String
     fields.insert(
@@ -385,10 +385,10 @@ async fn all_field_types_round_trip_correctly() {
     let double_val = doc.fields.get("double_field").expect("double_field missing");
     match &double_val.value_type {
         Some(ValueType::DoubleValue(d)) => {
-            let diff = (*d - 3.14_f64).abs();
-            assert!(diff < 1e-9_f64, "double_field: expected ≈3.14, got {d}");
+            let diff = (*d - 3.15_f64).abs();
+            assert!(diff < 1e-9_f64, "double_field: expected ≈3.15, got {d}");
         }
-        other => panic!("double_field: expected DoubleValue(3.14), got {other:?}"),
+        other => panic!("double_field: expected DoubleValue(3.15), got {other:?}"),
     }
 
     // String

@@ -6,12 +6,11 @@ each customer's own Postgres.
 
 ## Workspace layout
 
-5-crate Cargo workspace:
+7-crate Cargo workspace:
 
 - `embyr-proto` — generated Firestore + agent gRPC stubs (no domain logic)
 - `embyr-core` — pure domain types and port traits (no IO: no tokio, sqlx, tonic, axum)
 - `embyr-server` — composition root; opens 3 TCP listeners (`:8080` gRPC, `:8081` REST/gRPC-Web/BrowserChannel, `:9090` Admin HTTP)
-- `embyr-admin` — thin stub; the real admin HTTP server is the `:9090` listener inside `embyr-server`
 - `embyr-agent` — customer-VPC agent binary (separate deployment, talks to the customer's own Postgres)
 - `embyr-db-prep` — one-shot CLI that provisions/migrates a customer database before an agent connects
 - `embyr-admin-ui` — Leptos SPA served by the admin HTTP surface
