@@ -129,28 +129,62 @@ jobs:
       - name: Clippy — deny all warnings
         run: cargo clippy --workspace -- -D warnings
 
-  # ─── docker: build the container image (validates Dockerfile) ────────────────
+  # ─── docker: build the container image, push to ghcr.io on master (finding #42) ─
+  # ghcr.io chosen over ECR/Docker Hub: zero new secrets (uses the workflow's own
+  # GITHUB_TOKEN with `packages: write`), free for this repo, no external account
+  # setup — and no existing registry reference exists anywhere else in the repo.
+  # PRs still build (validates the Dockerfile) but never push, so PR runs can't
+  # pollute the registry with untagged/throwaway images.
   docker:
     name: Docker build
     runs-on: ubuntu-latest
     needs: [test]
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      SHOULD_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
+      # Tag scheme matches docs/operations/release-process.md's vMAJOR.MINOR.PATCH
+      # convention: `:master` (always the latest master build) plus a version-
+      # pinned tag read straight from [workspace.package] version, so a specific
+      # release stays pullable even after `master` has moved on.
+      - name: Extract workspace version
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        if: env.SHOULD_PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # GitHub-hosted runners are ephemeral — cargo-chef's dependency-layer
       # caching inside the Dockerfile only helps within a single build; without
       # an external cache backend every run rebuilds the entire dependency
-      # layer from scratch. --cache-to/--cache-from type=gha persists layers
+      # layer from scratch. cache-to/cache-from type=gha persists layers
       # in GitHub's Actions cache across runs, so unchanged Cargo.toml/lock
       # layers are reused instead of recompiling every dependency every time.
-      - name: Build Docker image
-        run: >
-          docker build . -t embyr-server:ci
-          --cache-from type=gha
-          --cache-to type=gha,mode=max
+      - name: Build (and push on master) Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ env.SHOULD_PUSH }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/embyr-server:master
+            ghcr.io/${{ github.repository_owner }}/embyr-server:${{ steps.version.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   # ─── agent: build + verify + package the embyr-agent static binary ───────────
   # Produces the artifact ADR-001 requires: a separately compiled,
@@ -160,6 +194,12 @@ jobs:
   agent:
     name: Agent build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      SHOULD_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -210,13 +250,33 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Validates crates/embyr-agent/Dockerfile builds — build-and-tag-only,
-      # no registry push, same pattern the existing `docker` job already
-      # uses for embyr-server (registry publishing is finding #19's scope).
-      # scope=agent keeps this job's GHA cache isolated from the existing
-      # `docker` job's own cache (AC-EARP-04: no shared state).
-      - name: Build embyr-agent container image
-        run: >
-          docker build . -f crates/embyr-agent/Dockerfile -t embyr-agent:ci
-          --cache-from type=gha,scope=agent
-          --cache-to type=gha,mode=max,scope=agent
+      - name: Extract workspace version
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        if: env.SHOULD_PUSH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Builds crates/embyr-agent/Dockerfile and, on push to master, pushes it
+      # to ghcr.io (finding #42/#43) — closing the gap where a customer had no
+      # documented way to pull this image at all (previously build-and-tag-only,
+      # discarded at job end). scope=agent keeps this job's GHA cache isolated
+      # from the existing `docker` job's own cache (AC-EARP-04: no shared state).
+      - name: Build (and push on master) embyr-agent container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/embyr-agent/Dockerfile
+          push: ${{ env.SHOULD_PUSH }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/embyr-agent:master
+            ghcr.io/${{ github.repository_owner }}/embyr-agent:${{ steps.version.outputs.tag }}
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent

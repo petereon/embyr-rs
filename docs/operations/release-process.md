@@ -58,6 +58,29 @@ tag against `cargo metadata`'s workspace version.
 5. Read the regressed version's own `CHANGELOG.md` entry to narrow root-cause analysis before
    re-attempting the release.
 
+## Container Registry
+
+Both images are published to [GitHub Container Registry](https://ghcr.io) on every push to
+`master` (never on pull requests, to avoid registry pollution) — see finding #42/#43 in
+`docs/product/production-readiness-audit-2026-09-08.md`.
+
+- `ghcr.io/petereon/embyr-server`
+- `ghcr.io/petereon/embyr-agent`
+
+Each push publishes two tags: `:master` (always the latest master build) and a version-pinned
+`:vMAJOR.MINOR.PATCH` tag read from `[workspace.package] version` — matching the git tag
+convention above. Pull a specific release with:
+
+```bash
+docker pull ghcr.io/petereon/embyr-server:v0.1.1
+docker pull ghcr.io/petereon/embyr-agent:v0.1.1
+```
+
+ghcr.io packages default to **private** on first push regardless of repo visibility — a repo
+admin must set each package's visibility to Public once (Package settings → Change visibility)
+before an external customer can `docker pull` without authenticating. Until that one-time step is
+done, pulling requires `docker login ghcr.io` with a PAT that has `read:packages` on this repo.
+
 ## Runtime Correlation
 
 `embyr-server`'s startup log names its own version (sourced from `CARGO_PKG_VERSION`), e.g.:
