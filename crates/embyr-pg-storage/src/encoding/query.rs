@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use embyr_core::domain::{
     field_value::FieldValue,
-    query::{FilterOp, FieldFilter, OrderBy, OrderDirection, QueryFilter},
+    query::{validate_field_path, FilterOp, FieldFilter, OrderBy, OrderDirection, QueryFilter},
 };
 use sqlx::{Postgres, QueryBuilder};
 
@@ -43,6 +43,16 @@ pub fn append_filter(qb: &mut QueryBuilder<Postgres>, filter: &QueryFilter) {
 /// Values are bound via `push_bind` — never interpolated — to prevent SQL injection.
 /// IS_NAN uses string sentinel equality: `fields->'f'->>'v' = 'NaN'`.
 pub fn append_field_filter(qb: &mut QueryBuilder<Postgres>, f: &FieldFilter) {
+    // field-path-defense-in-depth (finding #26): every current caller
+    // already validates upstream before reaching here — this guard is
+    // purely additive hardening for a future caller that doesn't. Panics
+    // (not `Result`) to match this file's own existing convention for the
+    // identical class of "assumed validated upstream, can only fire on a
+    // caller bug" defect (see the `_ => panic!(...)` arms below).
+    if let Err(e) = validate_field_path(&f.field_path) {
+        panic!("invalid field path reached SQL builder: {e}");
+    }
+
     // Handle IS_NAN and IS_NOT_NAN as special cases (no value binding required).
     match f.op {
         FilterOp::IsNan => {
@@ -333,6 +343,11 @@ fn push_value_equality(qb: &mut QueryBuilder<Postgres>, field_path: &str, target
 /// This string is pushed as raw SQL (no bind parameter), since ORDER BY
 /// expressions cannot be parameterised in Postgres.
 pub fn order_by_expr(ob: &OrderBy) -> String {
+    // field-path-defense-in-depth (finding #26): see `append_field_filter`'s
+    // own identical guard comment for the full rationale.
+    if let Err(e) = validate_field_path(&ob.field_path) {
+        panic!("invalid field path reached SQL builder: {e}");
+    }
     let dir = match ob.direction {
         OrderDirection::Ascending => "ASC",
         OrderDirection::Descending => "DESC",
@@ -342,6 +357,13 @@ pub fn order_by_expr(ob: &OrderBy) -> String {
 
 /// Return a raw SQL ORDER BY expression with explicit bigint cast (for integer fields).
 pub fn order_by_expr_bigint(field_path: &str, dir: &str) -> String {
+    // field-path-defense-in-depth (finding #26): see `append_field_filter`'s
+    // own identical guard comment for the full rationale. Dead code today
+    // (zero callers workspace-wide) but still `pub fn` and part of the
+    // exported SQL-building surface.
+    if let Err(e) = validate_field_path(field_path) {
+        panic!("invalid field path reached SQL builder: {e}");
+    }
     format!("(fields->'{}'->>'v')::bigint {}", field_path, dir)
 }
 
@@ -728,5 +750,62 @@ mod tests {
     fn array_still_panics_if_it_somehow_reaches_push_scalar_comparison_directly() {
         let f = filter("tags", FilterOp::GreaterThan, FieldValue::Array(vec![]));
         generated_sql(&f);
+    }
+
+    // field-path-defense-in-depth (finding #26): `append_field_filter`,
+    // `order_by_expr`, `order_by_expr_bigint` are 3 of the 7 SQL-building
+    // call sites that must now independently reject an unvalidated field
+    // path, rather than trusting every upstream caller validated first.
+    // Calling these functions DIRECTLY with a malicious path — bypassing
+    // the real upstream gate entirely — is the actual defense being tested.
+
+    /// Defense-in-depth: a caller that skips upstream `validate_field_path`
+    /// and calls `append_field_filter` directly with an injection-shaped
+    /// field path must panic, never silently build interpolable SQL text.
+    #[test]
+    #[should_panic(expected = "invalid field path")]
+    fn append_field_filter_panics_on_unvalidated_malicious_field_path() {
+        let f = filter(
+            "x'); DROP TABLE documents; --",
+            FilterOp::Equal,
+            FieldValue::String("v".to_string()),
+        );
+        generated_sql(&f);
+    }
+
+    /// Regression guard: a legitimate field path is unaffected by the new
+    /// guard — `order_by_expr` still produces the same ORDER BY fragment.
+    #[test]
+    fn order_by_expr_still_works_for_a_legitimate_field_path() {
+        let ob = OrderBy { field_path: "created_at".to_string(), direction: OrderDirection::Descending };
+        assert_eq!(order_by_expr(&ob), "fields->'created_at'->>'v' DESC");
+    }
+
+    /// Defense-in-depth: `order_by_expr` called directly with a malicious
+    /// field path (bypassing upstream validation) must panic, not build SQL.
+    #[test]
+    #[should_panic(expected = "invalid field path")]
+    fn order_by_expr_panics_on_unvalidated_malicious_field_path() {
+        let ob = OrderBy {
+            field_path: "x'); DROP TABLE documents; --".to_string(),
+            direction: OrderDirection::Ascending,
+        };
+        order_by_expr(&ob);
+    }
+
+    /// Regression guard: a legitimate field path is unaffected by the new
+    /// guard — `order_by_expr_bigint` still produces the same fragment.
+    #[test]
+    fn order_by_expr_bigint_still_works_for_a_legitimate_field_path() {
+        assert_eq!(order_by_expr_bigint("score", "ASC"), "(fields->'score'->>'v')::bigint ASC");
+    }
+
+    /// Defense-in-depth: `order_by_expr_bigint` (dead code today, but still
+    /// `pub fn` and part of the exported SQL-building surface) called
+    /// directly with a malicious field path must panic, not build SQL.
+    #[test]
+    #[should_panic(expected = "invalid field path")]
+    fn order_by_expr_bigint_panics_on_unvalidated_malicious_field_path() {
+        order_by_expr_bigint("x'); DROP TABLE documents; --", "ASC");
     }
 }

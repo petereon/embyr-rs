@@ -12,7 +12,10 @@ use embyr_core::{
         field_transform::apply_field_transform,
         field_value::FieldValue,
         project::ProjectId,
-        query::{AggregateValue, AggregationKind, AggregationQuery, OrderDirection, StructuredQuery},
+        query::{
+            validate_field_path, AggregateValue, AggregationKind, AggregationQuery, OrderDirection,
+            StructuredQuery,
+        },
         schema_readiness::SchemaReadiness,
         transaction::{TransactionId, TransactionOptions},
     },
@@ -883,6 +886,11 @@ impl BackendAdapter for PostgresBackendAdapter {
         if let (Some(cursor), false) = (&query.start_at, query.order_by.is_empty()) {
             if !cursor.values.is_empty() {
                 let ob = &query.order_by[0];
+                // field-path-defense-in-depth (finding #26): see
+                // `append_field_filter`'s own identical guard comment.
+                if let Err(e) = validate_field_path(&ob.field_path) {
+                    panic!("invalid field path reached SQL builder: {e}");
+                }
                 let op = cursor_operator(false, cursor.before, &ob.direction);
                 match &cursor.values[0] {
                     embyr_core::domain::field_value::FieldValue::Integer(v) => {
@@ -917,6 +925,11 @@ impl BackendAdapter for PostgresBackendAdapter {
         if let (Some(cursor), false) = (&query.end_at, query.order_by.is_empty()) {
             if !cursor.values.is_empty() {
                 let ob = &query.order_by[0];
+                // field-path-defense-in-depth (finding #26): see
+                // `append_field_filter`'s own identical guard comment.
+                if let Err(e) = validate_field_path(&ob.field_path) {
+                    panic!("invalid field path reached SQL builder: {e}");
+                }
                 let op = cursor_operator(true, cursor.before, &ob.direction);
                 match &cursor.values[0] {
                     embyr_core::domain::field_value::FieldValue::Integer(v) => {
@@ -1107,6 +1120,12 @@ impl BackendAdapter for PostgresBackendAdapter {
                 // `append_field_filter` interpolates a validated field path;
                 // the type-tag check (`'t' IN ('I','D')`) plus `COALESCE`
                 // are what make AC-01-12/AC-01-13 true by construction.
+                //
+                // field-path-defense-in-depth (finding #26): see
+                // `append_field_filter`'s own identical guard comment.
+                if let Err(e) = validate_field_path(field_path) {
+                    panic!("invalid field path reached SQL builder: {e}");
+                }
                 let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
                     "SELECT COALESCE(SUM(CASE WHEN fields->'{fp}'->>'t' IN ('I','D') \
                      THEN (fields->'{fp}'->>'v')::float8 ELSE NULL END), 0) \
@@ -1159,6 +1178,12 @@ impl BackendAdapter for PostgresBackendAdapter {
                 // result set, which is exactly AC-01-19's required
                 // null-vs-zero distinction, delivered by the primitive
                 // itself.
+                //
+                // field-path-defense-in-depth (finding #26): see
+                // `append_field_filter`'s own identical guard comment.
+                if let Err(e) = validate_field_path(field_path) {
+                    panic!("invalid field path reached SQL builder: {e}");
+                }
                 let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
                     "SELECT AVG(CASE WHEN fields->'{fp}'->>'t' IN ('I','D') \
                      THEN (fields->'{fp}'->>'v')::float8 ELSE NULL END) \
@@ -1701,6 +1726,108 @@ mod to_datetime_tests {
     fn out_of_range_seconds_is_rejected() {
         let err = to_datetime(i64::MAX, 0).unwrap_err();
         assert!(err.to_string().contains("seconds"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod field_path_guard_tests {
+    //! field-path-defense-in-depth (finding #26): the 4 remaining
+    //! guard-insertion points (startAt/startAfter cursor block, endAt/
+    //! endBefore cursor block, run_aggregation_query's Sum arm, Avg arm)
+    //! live inside `PostgresBackendAdapter`'s own trait methods, not
+    //! extracted pure functions — proving the guard fires requires calling
+    //! `run_query`/`run_aggregation_query` directly with a malicious field
+    //! path, bypassing the real upstream RPC-ingestion validation entirely.
+    //!
+    //! A `connect_lazy` pool (never dials Postgres) is sufficient: each
+    //! guard panics before the first `qb.build().fetch_*(&self.pool)` call
+    //! is ever reached, so no live database is needed to prove it fires.
+    use super::*;
+    use embyr_core::domain::{
+        document::CollectionPath,
+        project::ProjectId,
+        query::{AggregationKind, AggregationQuery, Cursor, OrderBy, OrderDirection, StructuredQuery},
+    };
+
+    const MALICIOUS_FIELD_PATH: &str = "x'); DROP TABLE documents; --";
+
+    fn adapter() -> PostgresBackendAdapter {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://user:pass@localhost:1/nonexistent")
+            .expect("connect_lazy never touches the network");
+        PostgresBackendAdapter::new_from_pool(pool)
+    }
+
+    fn collection() -> CollectionPath {
+        CollectionPath {
+            project_id: ProjectId::new("test-project").unwrap(),
+            collection_path: "docs".to_string(),
+        }
+    }
+
+    fn base_query() -> StructuredQuery {
+        StructuredQuery {
+            collection_id: "docs".to_string(),
+            all_descendants: false,
+            filter: None,
+            order_by: vec![OrderBy {
+                field_path: MALICIOUS_FIELD_PATH.to_string(),
+                direction: OrderDirection::Ascending,
+            }],
+            limit: None,
+            offset: None,
+            start_at: None,
+            end_at: None,
+            since_update_time: None,
+        }
+    }
+
+    /// Defense-in-depth: `run_query`'s startAt/startAfter cursor block,
+    /// called directly with a malicious order-by field path (bypassing
+    /// upstream validation), must panic — never silently build interpolable
+    /// SQL text.
+    #[tokio::test]
+    #[should_panic(expected = "invalid field path")]
+    async fn run_query_start_at_cursor_panics_on_unvalidated_malicious_field_path() {
+        let mut query = base_query();
+        query.start_at = Some(Cursor { values: vec![FieldValue::String("v".to_string())], before: false });
+        let _ = adapter().run_query(&collection(), &query, None).await;
+    }
+
+    /// Defense-in-depth: `run_query`'s endAt/endBefore cursor block, called
+    /// directly with a malicious order-by field path, must panic.
+    #[tokio::test]
+    #[should_panic(expected = "invalid field path")]
+    async fn run_query_end_at_cursor_panics_on_unvalidated_malicious_field_path() {
+        let mut query = base_query();
+        query.end_at = Some(Cursor { values: vec![FieldValue::String("v".to_string())], before: false });
+        let _ = adapter().run_query(&collection(), &query, None).await;
+    }
+
+    /// Defense-in-depth: `run_aggregation_query`'s `Sum` arm, called
+    /// directly with a malicious aggregation field path, must panic.
+    #[tokio::test]
+    #[should_panic(expected = "invalid field path")]
+    async fn run_aggregation_query_sum_panics_on_unvalidated_malicious_field_path() {
+        let query = AggregationQuery {
+            query: StructuredQuery { order_by: vec![], ..base_query() },
+            aggregation: AggregationKind::Sum(MALICIOUS_FIELD_PATH.to_string()),
+            alias: "total".to_string(),
+        };
+        let _ = adapter().run_aggregation_query(&collection(), &query, None).await;
+    }
+
+    /// Defense-in-depth: `run_aggregation_query`'s `Avg` arm, called
+    /// directly with a malicious aggregation field path, must panic.
+    #[tokio::test]
+    #[should_panic(expected = "invalid field path")]
+    async fn run_aggregation_query_avg_panics_on_unvalidated_malicious_field_path() {
+        let query = AggregationQuery {
+            query: StructuredQuery { order_by: vec![], ..base_query() },
+            aggregation: AggregationKind::Avg(MALICIOUS_FIELD_PATH.to_string()),
+            alias: "avg".to_string(),
+        };
+        let _ = adapter().run_aggregation_query(&collection(), &query, None).await;
     }
 }
 
