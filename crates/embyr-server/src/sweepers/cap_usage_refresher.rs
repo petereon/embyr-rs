@@ -110,6 +110,7 @@ async fn run_cycle(
     .await
     .unwrap_or_else(|e| {
         tracing::warn!(error = %e, "CapUsageRefresher: failed to list Free-plan accounts");
+        super::record_sweeper_error("cap_usage_refresher");
         Vec::new()
     });
 
@@ -139,6 +140,7 @@ async fn run_cycle(
                     error = %e,
                     "CapUsageRefresher: failed to sum usage for account"
                 );
+                super::record_sweeper_error("cap_usage_refresher");
                 continue;
             }
         };
@@ -166,6 +168,7 @@ async fn run_cycle(
                     status = ?e,
                     "CapUsageRefresher: failed to suspend account projects on cap crossing"
                 );
+                super::record_sweeper_error("cap_usage_refresher");
                 continue;
             }
 
@@ -182,6 +185,7 @@ async fn run_cycle(
                     error = %e,
                     "CapUsageRefresher: failed to persist free_cap_exceeded status"
                 );
+                super::record_sweeper_error("cap_usage_refresher");
             }
         }
     }

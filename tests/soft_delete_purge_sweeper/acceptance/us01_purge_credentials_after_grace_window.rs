@@ -183,6 +183,21 @@ fn read_counter(name: &str) -> f64 {
     0.0
 }
 
+/// Same as `read_counter` but for a labeled series, e.g.
+/// `embyr_sweeper_error_total{sweeper="soft_delete_purge_sweeper"}` (finding
+/// #47's shared cross-sweeper error counter — one counter name, `sweeper`
+/// label, rather than a bare per-sweeper name).
+fn read_labeled_counter(name: &str, label_value: &str) -> f64 {
+    let body = embyr_server::observability::get_or_install_prometheus_handle().render();
+    let target = format!("{name}{{sweeper=\"{label_value}\"}} ");
+    for line in body.lines() {
+        if let Some(value) = line.strip_prefix(&target) {
+            return value.trim().parse().unwrap_or(0.0);
+        }
+    }
+    0.0
+}
+
 // ─── AC-SDP-01 (direct_pg) + AC-SDP-06: walking skeleton ───────────────────
 
 /// Walking skeleton: real `soft_delete_purge_sweeper::spawn` (real interval,
@@ -519,5 +534,33 @@ async fn purge_never_touches_status_deleted_at_updated_at_or_referencing_rows() 
     assert_eq!(
         sdk_keys_after, sdk_keys_before,
         "sdk_api_keys rows referencing the project must be untouched by the purge"
+    );
+}
+
+// ─── Finding #47 (production-readiness-audit-2026-09-08.md § Follow-Up Scan) ─
+
+/// A genuine purge-query failure (closed pool, not a mock) increments the new
+/// shared `embyr_sweeper_error_total{sweeper="soft_delete_purge_sweeper"}`
+/// counter — previously this error branch only had `tracing::warn!`, making a
+/// stalled/failing sweeper invisible to the Grafana dashboard built for
+/// finding #29.
+#[tokio::test]
+async fn purge_query_failure_increments_the_shared_sweeper_error_counter() {
+    let (_sys_container, system_db) = start_system_db().await;
+
+    let before = read_labeled_counter("embyr_sweeper_error_total", "soft_delete_purge_sweeper");
+
+    // Real failure path: close the pool so the sweeper's own purge query
+    // genuinely errors (sqlx::Error::PoolClosed) inside `run_cycle`'s
+    // existing `Err(e) => { tracing::warn!(...); ... }` branch.
+    system_db.pool().close().await;
+
+    soft_delete_purge_sweeper::run_cycle(&system_db, GRACE_DAYS).await;
+
+    let after = read_labeled_counter("embyr_sweeper_error_total", "soft_delete_purge_sweeper");
+    assert!(
+        after >= before + 1.0,
+        "expected embyr_sweeper_error_total{{sweeper=\"soft_delete_purge_sweeper\"}} to increment \
+         on a closed-pool query failure: before={before}, after={after}"
     );
 }

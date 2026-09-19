@@ -123,6 +123,7 @@ pub async fn run_cycle(system_db: &Arc<SystemDb>, grace_days: i64) {
         }
         Err(e) => {
             tracing::warn!(error = %e, "SoftDeletePurgeSweeper: purge query failed");
+            super::record_sweeper_error("soft_delete_purge_sweeper");
         }
     }
 }

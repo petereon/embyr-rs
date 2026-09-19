@@ -176,6 +176,22 @@
           "legendFormat": "healthz"
         }
       ]
+    },
+    {
+      "id": 9,
+      "title": "Background sweeper error rate",
+      "description": "embyr_sweeper_error_total{sweeper=...}: shared failure counter for the 4 background sweepers (cap_usage_refresher, transaction_sweeper, soft_delete_purge_sweeper, signin_rate_limit_sweeper — finding #47). Previously these errors only reached tracing::warn!/error! and were invisible here. Any sustained non-zero rate means a sweeper is silently failing every cycle — soft_delete_purge_sweeper failing is the highest-priority case, since it purges sensitive credential columns.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(embyr_sweeper_error_total[5m])) by (sweeper)",
+          "legendFormat": "{{sweeper}}"
+        }
+      ]
     }
   ]
 }

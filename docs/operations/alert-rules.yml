@@ -8,7 +8,9 @@
 #
 # Metric source: crates/embyr-server/src/observability.rs,
 # src/middleware/{rate_limit,signin_rate_limit}.rs,
-# src/admin/handlers/prometheus_metrics.rs — GET /metrics on :9090.
+# src/admin/handlers/prometheus_metrics.rs,
+# src/sweepers/{cap_usage_refresher,transaction_sweeper,soft_delete_purge_sweeper,
+# signin_rate_limit_sweeper}.rs — GET /metrics on :9090.
 
 groups:
   - name: embyr-server.rules
@@ -65,6 +67,30 @@ groups:
             often enough to be a latency/load signal on the system DB, even
             though each individual request still gets a (per-instance)
             answer.
+
+      # --- Background sweeper failures (finding #47) -----------------------
+      # embyr_sweeper_error_total{sweeper=...} is the shared failure counter
+      # for all 4 background sweepers, added because they previously only
+      # logged tracing::warn!/error! on failure — invisible to this dashboard
+      # and no alert. A sustained non-zero rate means a sweeper is failing
+      # every cycle, not just once transiently.
+      - alert: EmbyrSweeperFailingRepeatedly
+        expr: increase(embyr_sweeper_error_total[15m]) >= 3
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.sweeper }} has failed at least 3 times in 15 minutes"
+          description: >-
+            embyr_sweeper_error_total{{ $labels.sweeper }} increased by
+            {{ $value }} over the last 15 minutes. A stalled or
+            persistently-failing sweeper previously had no dashboard/alert
+            visibility (finding #47) — check tracing logs for the
+            corresponding warn!/error! line to see the underlying Postgres
+            error. If sweeper="soft_delete_purge_sweeper", treat as
+            HIGHER priority: it purges sensitive encrypted-credential
+            columns on soft-deleted projects, so a failing sweeper means
+            those columns stay retained past their grace window.
 
       # --- gRPC service health ---------------------------------------------
       - alert: EmbyrGrpcErrorRateHigh

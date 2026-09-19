@@ -30,6 +30,17 @@ pub fn advisory_lock_key(s: &str) -> i64 {
     hash as i64
 }
 
+/// Increments `embyr_sweeper_error_total{sweeper=<name>}` — the shared
+/// failure-visibility counter for all 4 background sweepers (finding #47,
+/// production-readiness-audit-2026-09-08.md § Follow-Up Scan). A single
+/// counter name with a `sweeper` label, mirroring `embyr_rate_limit_requests_
+/// total{outcome}`'s label-dimension shape rather than one counter per
+/// sweeper. Call alongside the existing `tracing::warn!`/`error!` on every
+/// sweeper error branch — never a replacement for the log line.
+pub fn record_sweeper_error(sweeper: &'static str) {
+    metrics::counter!("embyr_sweeper_error_total", "sweeper" => sweeper).increment(1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -137,6 +137,7 @@ pub async fn run_cycle(
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "TransactionSweeper: failed to enumerate PG-reachable projects");
+            super::record_sweeper_error("transaction_sweeper");
             Vec::new()
         });
 
@@ -193,6 +194,7 @@ async fn sweep_one_project(
                 error = %e,
                 "TransactionSweeper: failed to connect to customer database"
             );
+            super::record_sweeper_error("transaction_sweeper");
             return;
         }
     };
@@ -221,6 +223,7 @@ async fn sweep_one_project(
                 error = %e,
                 "TransactionSweeper: reclaim query failed"
             );
+            super::record_sweeper_error("transaction_sweeper");
         }
     }
 
@@ -249,6 +252,7 @@ async fn sweep_one_project(
                 error = %e,
                 "TransactionSweeper: purge query failed"
             );
+            super::record_sweeper_error("transaction_sweeper");
         }
     }
 }

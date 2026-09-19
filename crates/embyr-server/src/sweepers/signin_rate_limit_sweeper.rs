@@ -89,7 +89,10 @@ pub async fn run_cycle(system_db: &Arc<SystemDb>) {
             );
         }
         Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "SigninRateLimitSweeper: purge query failed"),
+        Err(e) => {
+            tracing::warn!(error = %e, "SigninRateLimitSweeper: purge query failed");
+            super::record_sweeper_error("signin_rate_limit_sweeper");
+        }
     }
 }
 
