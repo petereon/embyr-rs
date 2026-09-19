@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use chrono::{Duration as ChronoDuration, Utc};
 use embyr_core::{
     access_control::{
-        check_query_compliance, evaluate, parse_condition, AuthContext, Condition,
+        check_query_compliance, evaluate, parse_condition, AuthContext, Condition, EvalContext,
         EvaluationOutcome, QueryComplianceOutcome,
     },
     client_identity::VerifiedEndUserIdentity,
@@ -354,26 +354,22 @@ pub async fn handle_add_target(
                             // (previously always `None`, permanently
                             // fail-closed for any `PathVariable`-referencing
                             // rule).
+                            // security-rules-cel-expression-grammar (Slice 06, ADR-065) /
+                            // security-rules-cel-cross-document-reads (Slice 01, ADR-066):
+                            // both mechanical — Listen's per-event re-check is out of
+                            // this feature's own locked scope (DISCUSS Resolution 5 — a
+                            // real per-event I/O cost multiplier).
                             if evaluate(
                                 condition,
-                                auth_ctx.as_ref(),
-                                &doc.fields,
-                                &empty_fields,
-                                Some(doc.path.document_id.as_str()),
-                                &event_bindings,
-                                // security-rules-cel-expression-grammar
-                                // (Slice 06, ADR-065): mechanical `None` —
-                                // Listen's per-event re-check is out of
-                                // this feature's own locked scope.
-                                None,
-                                // security-rules-cel-cross-document-reads
-                                // (Slice 01, ADR-066): mechanical
-                                // empty-map — Listen's own per-event
-                                // re-check is explicitly out of this
-                                // feature's own locked scope too
-                                // (DISCUSS Resolution 5 — a real per-event
-                                // I/O cost multiplier).
-                                &std::collections::BTreeMap::new(),
+                                &EvalContext {
+                                    auth: auth_ctx.as_ref(),
+                                    resource_fields: &doc.fields,
+                                    request_resource_fields: &empty_fields,
+                                    path_variable_value: Some(doc.path.document_id.as_str()),
+                                    ancestor_path_variable_values: &event_bindings,
+                                    request_time: None,
+                                    cross_document_reads: &std::collections::BTreeMap::new(),
+                                },
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-04: withheld, never sent, never a crash (AC-17-118/119).
@@ -427,19 +423,20 @@ pub async fn handle_add_target(
                             // document's own already-known leaf ID, zero new
                             // I/O — closes 4a's own deferred `OQ-CP-04`,
                             // mirroring the `Changed` arm's own fix above.
+                            // security-rules-cel-expression-grammar (Slice 06, ADR-065):
+                            // mechanical `None` — Listen's per-event re-check is out of
+                            // this feature's own locked scope.
                             if evaluate(
                                 condition,
-                                auth_ctx.as_ref(),
-                                &fields,
-                                &empty_fields,
-                                Some(path.document_id.as_str()),
-                                &event_bindings,
-                                // security-rules-cel-expression-grammar
-                                // (Slice 06, ADR-065): mechanical `None` —
-                                // Listen's per-event re-check is out of
-                                // this feature's own locked scope.
-                                None,
-                                &std::collections::BTreeMap::new(),
+                                &EvalContext {
+                                    auth: auth_ctx.as_ref(),
+                                    resource_fields: &fields,
+                                    request_resource_fields: &empty_fields,
+                                    path_variable_value: Some(path.document_id.as_str()),
+                                    ancestor_path_variable_values: &event_bindings,
+                                    request_time: None,
+                                    cross_document_reads: &std::collections::BTreeMap::new(),
+                                },
                             ) == EvaluationOutcome::Deny
                             {
                                 continue; // US-05: withheld, never sent.

@@ -16,10 +16,16 @@ fn derive_static_secret(api_key: &[u8]) -> StaticSecret {
     StaticSecret::from(okm)
 }
 
-fn derive_aes_key(shared_secret: &[u8]) -> [u8; 32] {
+/// Derives the AES key, binding both the ephemeral and recipient public keys
+/// into the HKDF `info` parameter (standard ECIES domain separation against
+/// key-substitution attacks — see docs/evolution/2026-09-19-ecies-kdf-domain-separation.md).
+fn derive_aes_key(shared_secret: &[u8], eph_pub: &[u8; 32], recipient_pub: &[u8; 32]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(Some(b"embyr-ecies-v1-enc"), shared_secret);
+    let mut info = [0u8; 64];
+    info[..32].copy_from_slice(eph_pub);
+    info[32..].copy_from_slice(recipient_pub);
     let mut okm = [0u8; 32];
-    hk.expand(&[], &mut okm).expect("32 bytes valid");
+    hk.expand(&info, &mut okm).expect("32 bytes valid");
     okm
 }
 
@@ -32,7 +38,7 @@ pub fn encrypt(recipient_pubkey: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>,
     let eph_secret = EphemeralSecret::random_from_rng(OsRng);
     let eph_pub = PublicKey::from(&eph_secret);
     let shared = eph_secret.diffie_hellman(&PublicKey::from(*recipient_pubkey));
-    let aes_key = derive_aes_key(shared.as_bytes());
+    let aes_key = derive_aes_key(shared.as_bytes(), eph_pub.as_bytes(), recipient_pubkey);
     let cipher = Aes256Gcm::new(&aes_key.into());
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ct = cipher
@@ -53,8 +59,9 @@ pub fn decrypt(api_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CoreError> 
     let nonce_bytes: [u8; 12] = ciphertext[32..44].try_into().unwrap();
     let ct = &ciphertext[44..];
     let static_secret = derive_static_secret(api_key);
+    let recipient_pub = PublicKey::from(&static_secret);
     let shared = static_secret.diffie_hellman(&PublicKey::from(eph_pub_bytes));
-    let aes_key = derive_aes_key(shared.as_bytes());
+    let aes_key = derive_aes_key(shared.as_bytes(), &eph_pub_bytes, recipient_pub.as_bytes());
     let cipher = Aes256Gcm::new(&aes_key.into());
     cipher
         .decrypt(&nonce_bytes.into(), ct)
@@ -88,6 +95,30 @@ mod tests {
     fn ecies_derive_public_key_is_deterministic() {
         let k = b"some-api-key";
         assert_eq!(derive_public_key(k), derive_public_key(k));
+    }
+
+    // Finding #33: HKDF info must bind ephemeral + recipient pubkeys, so the
+    // same raw DH output yields a different AES key under a different
+    // eph/recipient pairing (domain separation against key-substitution).
+    #[test]
+    fn ecies_derive_aes_key_binds_ephemeral_and_recipient_pubkeys() {
+        let shared_secret = [7u8; 32];
+        let eph_a = [1u8; 32];
+        let eph_b = [2u8; 32];
+        let recipient_a = [3u8; 32];
+        let recipient_b = [4u8; 32];
+
+        let base = derive_aes_key(&shared_secret, &eph_a, &recipient_a);
+        assert_ne!(
+            base,
+            derive_aes_key(&shared_secret, &eph_b, &recipient_a),
+            "changing the ephemeral pubkey must change the derived key"
+        );
+        assert_ne!(
+            base,
+            derive_aes_key(&shared_secret, &eph_a, &recipient_b),
+            "changing the recipient pubkey must change the derived key"
+        );
     }
 
     // Kills: replace < with ==, replace < with <=, replace + with -

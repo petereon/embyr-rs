@@ -102,6 +102,35 @@ to — see `GRPC_DURATION_BUCKETS` in `observability.rs`).
    is disproportionately represented (finding #17's collection-group scan cost is one
    known source of slow queries; `docs/evolution/2026-09-14-collection-group-query-index.md`).
 
+## Incident: customer API-key compromise (finding #33)
+
+**Why this is here:** every backend DSN / TOTP secret / OIDC client secret is
+ECIES-encrypted with a recipient key *deterministically re-derived from the
+project's API key* (`crates/embyr-core/src/auth/ecies.rs:derive_static_secret`).
+There is no separate, independently-rotatable recipient keypair. This is a
+deliberate design trade-off (no key-management infrastructure to operate), but
+it means **API-key compromise = retroactive decryption of every ciphertext
+ever encrypted for that project**, not just future ones.
+
+**On confirmed or suspected compromise of a project's API key:**
+1. Rotate the project's API key immediately (admin API key-rotation endpoint).
+   This changes `derive_static_secret`'s input, so the recipient keypair
+   changes too — but existing ciphertexts were encrypted under the *old*
+   derived key and do not automatically re-encrypt.
+2. Re-encrypt every ECIES ciphertext for that project under the new key:
+   `backend_pg_dsn_enc`, `totp_secret_enc` (per user), `client_secret_enc`
+   (per OIDC provider), any `hosted_identity_signing_keys.private_key_enc`
+   rows. There is no automated re-encryption tool as of this writing — this
+   is a manual/scripted admin-API operation (decrypt with old key, encrypt
+   with new key, per row) until one is built.
+3. Treat any secret whose plaintext could have been read (customer Postgres
+   DSN, TOTP seed, OIDC client secret) as compromised in its own right —
+   rotate it at its source (customer DB password, OIDC provider), not just
+   the ECIES wrapper.
+4. The 2026-09-19 KDF domain-separation fix (`docs/evolution/2026-09-19-ecies-kdf-domain-separation.md`)
+   does not mitigate this scenario — it hardens against key-substitution
+   attacks in the DH exchange, not against the API key itself leaking.
+
 ## Where to look next
 
 - `docs/operations/grafana-dashboard.json` — the dashboard these alerts and panels above

@@ -48,8 +48,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::domain::field_value::FieldValue;
 use crate::domain::document::FirestoreDocument;
+use crate::domain::field_value::FieldValue;
 use crate::domain::query::QueryFilter;
 
 // security-rules-cel-parity (Slice 01, US-01, ADR-062): the outer
@@ -288,8 +288,13 @@ pub enum UnsupportedConstruct {
 /// distinguishable from `SyntaxError` in the caller-facing message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConditionParseError {
-    SyntaxError { detail: String },
-    UnsupportedConstruct { construct: UnsupportedConstruct, detail: String },
+    SyntaxError {
+        detail: String,
+    },
+    UnsupportedConstruct {
+        construct: UnsupportedConstruct,
+        detail: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +315,10 @@ pub fn parse_condition(source: &str) -> Result<Condition, ConditionParseError> {
         return Err(err);
     }
     let tokens = tokenize(source)?;
-    let mut parser = Parser { tokens: &tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens: &tokens,
+        pos: 0,
+    };
     let condition = parser.parse_or()?;
     if parser.pos != tokens.len() {
         return Err(syntax_error("unexpected trailing input after condition"));
@@ -323,7 +331,9 @@ pub fn parse_condition(source: &str) -> Result<Condition, ConditionParseError> {
 // ---------------------------------------------------------------------------
 
 fn syntax_error(detail: impl Into<String>) -> ConditionParseError {
-    ConditionParseError::SyntaxError { detail: detail.into() }
+    ConditionParseError::SyntaxError {
+        detail: detail.into(),
+    }
 }
 
 /// Recognizes named out-of-v1-grammar shapes BEFORE tokenizing, since their
@@ -673,9 +683,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ConditionParseError> {
                     j += 1;
                 }
                 if j == field_start {
-                    return Err(syntax_error(
-                        "expected a field name after 'get(...).data.'",
-                    ));
+                    return Err(syntax_error("expected a field name after 'get(...).data.'"));
                 }
                 let field: String = chars[field_start..j].iter().collect();
                 tokens.push(Token::GetCall(raw_path, field));
@@ -793,7 +801,10 @@ fn parse_path_template(raw_path: &str) -> Result<PathTemplate, ConditionParseErr
     }
     let mut segments = Vec::new();
     for raw_segment in &all_segments[expected_prefix.len()..] {
-        if let Some(inner) = raw_segment.strip_prefix("$(").and_then(|s| s.strip_suffix(')')) {
+        if let Some(inner) = raw_segment
+            .strip_prefix("$(")
+            .and_then(|s| s.strip_suffix(')'))
+        {
             match inner {
                 "request.auth.uid" => segments.push(PathTemplateSegment::AuthUid),
                 w if w.starts_with("request.path.") => {
@@ -873,7 +884,9 @@ fn word_to_operand(word: &str) -> Result<Operand, ConditionParseError> {
         w if w.starts_with("request.resource.data.") => {
             let field = &w["request.resource.data.".len()..];
             if field.is_empty() {
-                return Err(syntax_error("'request.resource.data.' requires a field name"));
+                return Err(syntax_error(
+                    "'request.resource.data.' requires a field name",
+                ));
             }
             Ok(Operand::RequestResourceField(field.to_string()))
         }
@@ -968,10 +981,16 @@ impl<'a> Parser<'a> {
             // condition's own first token (unevidenced, not built).
             Some(Token::ExistsCall(_)) => {
                 let operand = self.parse_base_operand()?;
-                Ok(Condition::Compare(operand, CompareOp::Eq, Operand::BoolLiteral(true)))
+                Ok(Condition::Compare(
+                    operand,
+                    CompareOp::Eq,
+                    Operand::BoolLiteral(true),
+                ))
             }
             Some(Token::Word(_)) | Some(Token::GetCall(..)) => self.parse_comparison(),
-            _ => Err(syntax_error("expected a condition (operand, 'true'/'false', or '(')")),
+            _ => Err(syntax_error(
+                "expected a condition (operand, 'true'/'false', or '(')",
+            )),
         }
     }
 
@@ -1071,7 +1090,11 @@ impl<'a> Parser<'a> {
         }
         let amount = match self.advance() {
             Some(Token::IntLiteral(v)) => *v,
-            _ => return Err(syntax_error("expected an integer literal amount in 'duration.value(...)'")),
+            _ => {
+                return Err(syntax_error(
+                    "expected an integer literal amount in 'duration.value(...)'",
+                ))
+            }
         };
         match self.advance() {
             Some(Token::Comma) => {}
@@ -1168,6 +1191,29 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Bundles the 7 parameters threaded through `evaluate()`'s entire recursive
+/// call graph (`eval_bool`, `compare_operands`, `resolve_field_value`).
+/// Finding #40 (production-readiness audit): named fields eliminate the
+/// transposition risk of positional same-typed `BTreeMap<String, FieldValue>`
+/// params (`resource_fields` vs `request_resource_fields`) on every
+/// rules-gated request — a swap compiles silently with positional args
+/// (both are the same type) but is a compile error with named struct fields.
+pub struct EvalContext<'a> {
+    pub auth: Option<&'a AuthContext>,
+    /// Pre-write document fields (empty for Create — no document exists yet).
+    pub resource_fields: &'a BTreeMap<String, FieldValue>,
+    /// Proposed new document fields (Create/Update only; empty for Read/Delete).
+    pub request_resource_fields: &'a BTreeMap<String, FieldValue>,
+    /// Leaf path-variable capture (ADR-062); `None` at call sites not yet wired.
+    pub path_variable_value: Option<&'a str>,
+    /// Ancestor (intermediate) path-variable captures, name-keyed (ADR-063).
+    pub ancestor_path_variable_values: &'a BTreeMap<String, String>,
+    /// `request.time` — the request's own server timestamp (ADR-065).
+    pub request_time: Option<&'a FieldValue>,
+    /// Pre-fetched cross-document read results, keyed by concrete path (ADR-066).
+    pub cross_document_reads: &'a BTreeMap<String, Option<FirestoreDocument>>,
+}
+
 /// Evaluate a parsed `Condition` against an `(auth, resource, request_resource)`
 /// triple. Infallible and total by construction once implemented — see §
 /// Fail-Closed Semantics below (ADR-027, extended ADR-030).
@@ -1186,69 +1232,8 @@ impl<'a> Parser<'a> {
 /// regardless of the other side's error). There is no `Result::Err` branch
 /// to forget to handle, because there is no `Result` in this function's
 /// return type.
-///
-/// `request_resource_fields` is the proposed new document (Create/Update) —
-/// empty for Read (`handle_get_document`, ADR-030: no "proposed new
-/// document" concept) and Delete (no proposed new state). `resource_fields`
-/// is the pre-write document — empty for Create (no document exists yet).
-pub fn evaluate(
-    condition: &Condition,
-    auth: Option<&AuthContext>,
-    resource_fields: &BTreeMap<String, FieldValue>,
-    request_resource_fields: &BTreeMap<String, FieldValue>,
-    // security-rules-cel-parity (Slice 02, US-02, ADR-062 § Decision —
-    // evaluate() signature): the document's own already-known ID at the
-    // call site (`GetDocument`, ADR-062's own zero-new-I/O guarantee) —
-    // `None` at every call site that doesn't yet thread a real value
-    // (write handlers/Listen's per-event re-check/simulation, all deferred
-    // to later slices) fails `PathVariable` closed via the existing
-    // `FieldMissing` short-circuit, never a new control-flow shape. UNCHANGED
-    // by security-rules-cel-path-matching (ADR-063) — the leaf capture,
-    // never touched by ancestor routing.
-    path_variable_value: Option<&str>,
-    // security-rules-cel-path-matching (Slice 02, US-02, ADR-063 § Decision
-    // — evaluate() signature): NEW 6th parameter — ancestor (intermediate)
-    // path-variable captures, name-keyed, produced by
-    // `path_routing::bind_ancestor` at the routing call site. Every call
-    // site not yet wired to routing (write handlers/Listen, Slice 03; every
-    // exact-match branch) passes `&BTreeMap::new()`, mechanically, zero
-    // behavior change.
-    ancestor_path_variable_values: &BTreeMap<String, String>,
-    // security-rules-cel-expression-grammar (Slice 06, US-06, ADR-065 §
-    // Decision — evaluate() Signature): NEW 7th parameter — the request's
-    // own server timestamp, resolved by `Operand::RequestTime`. Mirrors
-    // `path_variable_value`'s own zero-new-I/O precedent exactly: every
-    // real call site already has (or trivially computes) a `chrono::
-    // Utc::now()` value; `None` at every call site not yet wired (every
-    // call site except this feature's own Slice 06/07 CreateDocument/
-    // UpdateDocument/GetDocument/simulate_access_rule sites) fails
-    // `RequestTime` closed via the existing `FieldMissing` short-circuit,
-    // never a new control-flow shape.
-    request_time: Option<&FieldValue>,
-    // security-rules-cel-cross-document-reads (Slice 01, US-01, ADR-066 §
-    // Decision — evaluate() Signature): NEW 8th parameter — the
-    // pre-fetched cross-document read results, keyed by the SAME concrete
-    // path strings `discover_cross_document_paths` produces. Mirrors
-    // `request_time`'s own zero-new-I/O precedent exactly (embyr-core
-    // itself never fetches — the caller pre-resolves and threads the
-    // result in): `&BTreeMap::new()` at every call site not yet wired
-    // fails `CrossDocumentExists`/`CrossDocumentGet` closed via the
-    // existing `FieldMissing` short-circuit (`CrossDocumentExists`
-    // resolves to `false`, never `FieldMissing`, matching real
-    // Firestore's own `exists()` always returning a clean boolean) — a
-    // condition with no cross-document operand is completely unaffected.
-    cross_document_reads: &BTreeMap<String, Option<FirestoreDocument>>,
-) -> EvaluationOutcome {
-    match eval_bool(
-        condition,
-        auth,
-        resource_fields,
-        request_resource_fields,
-        path_variable_value,
-        ancestor_path_variable_values,
-        request_time,
-        cross_document_reads,
-    ) {
+pub fn evaluate(condition: &Condition, ctx: &EvalContext) -> EvaluationOutcome {
+    match eval_bool(condition, ctx) {
         Ok(true) => EvaluationOutcome::Allow,
         Ok(false) | Err(FieldMissing) => EvaluationOutcome::Deny,
     }
@@ -1265,47 +1250,11 @@ pub fn evaluate(
 /// short-circuit evaluation (ADR-027).
 struct FieldMissing;
 
-fn eval_bool(
-    condition: &Condition,
-    auth: Option<&AuthContext>,
-    resource_fields: &BTreeMap<String, FieldValue>,
-    request_resource_fields: &BTreeMap<String, FieldValue>,
-    path_variable_value: Option<&str>,
-    ancestor_path_variable_values: &BTreeMap<String, String>,
-    request_time: Option<&FieldValue>,
-    cross_document_reads: &BTreeMap<String, Option<FirestoreDocument>>,
-) -> Result<bool, FieldMissing> {
+fn eval_bool(condition: &Condition, ctx: &EvalContext) -> Result<bool, FieldMissing> {
     match condition {
         Condition::Literal(value) => Ok(*value),
-        Condition::Not(inner) => Ok(!eval_bool(
-            inner,
-            auth,
-            resource_fields,
-            request_resource_fields,
-            path_variable_value,
-            ancestor_path_variable_values,
-            request_time,
-            cross_document_reads,
-        )?),
-        Condition::And(left, right) => Ok(eval_bool(
-            left,
-            auth,
-            resource_fields,
-            request_resource_fields,
-            path_variable_value,
-            ancestor_path_variable_values,
-            request_time,
-            cross_document_reads,
-        )? && eval_bool(
-            right,
-            auth,
-            resource_fields,
-            request_resource_fields,
-            path_variable_value,
-            ancestor_path_variable_values,
-            request_time,
-            cross_document_reads,
-        )?),
+        Condition::Not(inner) => Ok(!eval_bool(inner, ctx)?),
+        Condition::And(left, right) => Ok(eval_bool(left, ctx)? && eval_bool(right, ctx)?),
         Condition::Or(left, right) => {
             // custom-claims (US-02, ADR-034, AC-17-142): a claim reference is
             // legitimately absent for many callers (unlike resource fields,
@@ -1316,35 +1265,12 @@ fn eval_bool(
             // token carries no `is_moderator` claim at all). Mirrors real
             // Firestore's own `||` semantics: a definite `true` on either
             // side wins regardless of the other side's error; only "neither
-            // side is definitively true" fails closed. Verified zero
-            // regression: no pre-existing condition anywhere in the 136+
-            // -scenario suite reaches this arm with a `FieldMissing` on
-            // either side (direct grep — `||` never previously appeared in
-            // an evaluated, as opposed to parsed-only or
-            // compliance-checked, condition).
-            let left_result = eval_bool(
-                left,
-                auth,
-                resource_fields,
-                request_resource_fields,
-                path_variable_value,
-                ancestor_path_variable_values,
-                request_time,
-                cross_document_reads,
-            );
+            // side is definitively true" fails closed.
+            let left_result = eval_bool(left, ctx);
             if let Ok(true) = left_result {
                 return Ok(true);
             }
-            let right_result = eval_bool(
-                right,
-                auth,
-                resource_fields,
-                request_resource_fields,
-                path_variable_value,
-                ancestor_path_variable_values,
-                request_time,
-                cross_document_reads,
-            );
+            let right_result = eval_bool(right, ctx);
             match (left_result, right_result) {
                 (_, Ok(true)) => Ok(true),
                 (Ok(false), Ok(false)) => Ok(false),
@@ -1353,17 +1279,7 @@ fn eval_bool(
         }
         Condition::Compare(left, op, right) => match op {
             CompareOp::Eq | CompareOp::Ne => {
-                let equal = compare_operands(
-                    left,
-                    right,
-                    auth,
-                    resource_fields,
-                    request_resource_fields,
-                    path_variable_value,
-                    ancestor_path_variable_values,
-                    request_time,
-                    cross_document_reads,
-                )?;
+                let equal = compare_operands(left, right, ctx)?;
                 Ok(match op {
                     CompareOp::Eq => equal,
                     CompareOp::Ne => !equal,
@@ -1382,26 +1298,8 @@ fn eval_bool(
             // present-but-non-numeric value on either side is `false`
             // (Deny), never a panic — AC-CEG-05, `evaluate()` stays total.
             CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
-                let left_value = resolve_field_value(
-                    left,
-                    auth,
-                    resource_fields,
-                    request_resource_fields,
-                    path_variable_value,
-                    ancestor_path_variable_values,
-                    request_time,
-                    cross_document_reads,
-                )?;
-                let right_value = resolve_field_value(
-                    right,
-                    auth,
-                    resource_fields,
-                    request_resource_fields,
-                    path_variable_value,
-                    ancestor_path_variable_values,
-                    request_time,
-                    cross_document_reads,
-                )?;
+                let left_value = resolve_field_value(left, ctx)?;
+                let right_value = resolve_field_value(right, ctx)?;
                 Ok(compare_relational(*op, &left_value, &right_value))
             }
         },
@@ -1411,34 +1309,16 @@ fn eval_bool(
         // resolution failure just means "this item can't match" (never
         // aborts the whole membership check) — `evaluate()` stays total.
         Condition::In(left, list) => {
-            let left_value = resolve_field_value(
-                left,
-                auth,
-                resource_fields,
-                request_resource_fields,
-                path_variable_value,
-                ancestor_path_variable_values,
-                request_time,
-                cross_document_reads,
-            )?;
+            let left_value = resolve_field_value(left, ctx)?;
             let Operand::ListLiteral(items) = list else {
                 // Parser invariant: the RHS is always a ListLiteral —
                 // unreachable in practice, falls closed defensively.
                 return Ok(false);
             };
             Ok(items.iter().any(|item| {
-                resolve_field_value(
-                    item,
-                    auth,
-                    resource_fields,
-                    request_resource_fields,
-                    path_variable_value,
-                    ancestor_path_variable_values,
-                    request_time,
-                    cross_document_reads,
-                )
-                .map(|v| v == left_value)
-                .unwrap_or(false)
+                resolve_field_value(item, ctx)
+                    .map(|v| v == left_value)
+                    .unwrap_or(false)
             }))
         }
     }
@@ -1455,19 +1335,13 @@ fn eval_bool(
 fn compare_operands(
     left: &Operand,
     right: &Operand,
-    auth: Option<&AuthContext>,
-    resource_fields: &BTreeMap<String, FieldValue>,
-    request_resource_fields: &BTreeMap<String, FieldValue>,
-    path_variable_value: Option<&str>,
-    ancestor_path_variable_values: &BTreeMap<String, String>,
-    request_time: Option<&FieldValue>,
-    cross_document_reads: &BTreeMap<String, Option<FirestoreDocument>>,
+    ctx: &EvalContext,
 ) -> Result<bool, FieldMissing> {
     match (left, right) {
         (Operand::AuthUid, Operand::ResourceField(name))
         | (Operand::ResourceField(name), Operand::AuthUid) => {
-            let auth = auth.ok_or(FieldMissing)?;
-            let field = resource_fields.get(name).ok_or(FieldMissing)?;
+            let auth = ctx.auth.ok_or(FieldMissing)?;
+            let field = ctx.resource_fields.get(name).ok_or(FieldMissing)?;
             Ok(matches!(field, FieldValue::String(v) if v == &auth.uid))
         }
         // security-rules-write-path (ADR-030): the proposed-new-document
@@ -1475,8 +1349,8 @@ fn compare_operands(
         // request.auth.uid` (US-02's own domain example).
         (Operand::AuthUid, Operand::RequestResourceField(name))
         | (Operand::RequestResourceField(name), Operand::AuthUid) => {
-            let auth = auth.ok_or(FieldMissing)?;
-            let field = request_resource_fields.get(name).ok_or(FieldMissing)?;
+            let auth = ctx.auth.ok_or(FieldMissing)?;
+            let field = ctx.request_resource_fields.get(name).ok_or(FieldMissing)?;
             Ok(matches!(field, FieldValue::String(v) if v == &auth.uid))
         }
         // The `request.auth == null` / `!= null` idiom (AC-17-11/12): auth
@@ -1484,58 +1358,28 @@ fn compare_operands(
         (Operand::AuthNullSentinel, Operand::NullLiteral)
         | (Operand::NullLiteral, Operand::AuthNullSentinel)
         | (Operand::AuthUid, Operand::NullLiteral)
-        | (Operand::NullLiteral, Operand::AuthUid) => Ok(auth.is_none()),
+        | (Operand::NullLiteral, Operand::AuthUid) => Ok(ctx.auth.is_none()),
         _ => {
-            let left_value = resolve_field_value(
-                left,
-                auth,
-                resource_fields,
-                request_resource_fields,
-                path_variable_value,
-                ancestor_path_variable_values,
-                request_time,
-                cross_document_reads,
-            )?;
-            let right_value = resolve_field_value(
-                right,
-                auth,
-                resource_fields,
-                request_resource_fields,
-                path_variable_value,
-                ancestor_path_variable_values,
-                request_time,
-                cross_document_reads,
-            )?;
+            let left_value = resolve_field_value(left, ctx)?;
+            let right_value = resolve_field_value(right, ctx)?;
             Ok(left_value == right_value)
         }
     }
 }
 
-fn resolve_field_value(
-    operand: &Operand,
-    auth: Option<&AuthContext>,
-    resource_fields: &BTreeMap<String, FieldValue>,
-    request_resource_fields: &BTreeMap<String, FieldValue>,
-    path_variable_value: Option<&str>,
-    ancestor_path_variable_values: &BTreeMap<String, String>,
-    request_time: Option<&FieldValue>,
-    cross_document_reads: &BTreeMap<String, Option<FirestoreDocument>>,
-) -> Result<FieldValue, FieldMissing> {
+fn resolve_field_value(operand: &Operand, ctx: &EvalContext) -> Result<FieldValue, FieldMissing> {
     match operand {
-        Operand::ResourceField(name) => resource_fields.get(name).cloned().ok_or(FieldMissing),
+        Operand::ResourceField(name) => ctx.resource_fields.get(name).cloned().ok_or(FieldMissing),
         // security-rules-write-path (ADR-030): identical fail-closed shape
         // to `ResourceField` above, resolved against the OTHER map — the
         // SAME `FieldMissing` short-circuit, reused verbatim (AC-17-28).
-        Operand::RequestResourceField(name) => {
-            request_resource_fields.get(name).cloned().ok_or(FieldMissing)
-        }
+        Operand::RequestResourceField(name) => ctx
+            .request_resource_fields
+            .get(name)
+            .cloned()
+            .ok_or(FieldMissing),
         Operand::BoolLiteral(value) => Ok(FieldValue::Boolean(*value)),
         Operand::NullLiteral => Ok(FieldValue::Null),
-        // custom-claims (US-06, ADR-034 § StringLiteral and the tokenizer):
-        // no new `compare_operands` arm needed — every pairing involving
-        // `StringLiteral` falls through to the generic `_` arm, which
-        // resolves both sides via this function and compares by
-        // `FieldValue::PartialEq`.
         Operand::StringLiteral(value) => Ok(FieldValue::String(value.clone())),
         // custom-claims (ADR-034 § Decision — resolve_field_value): fail-closed
         // in exactly two cases — no verified caller at all (AC-17-147), then a
@@ -1543,12 +1387,13 @@ fn resolve_field_value(
         // collapse to the existing top-level `FieldMissing` short-circuit, no
         // new error class.
         Operand::AuthTokenClaim(key) => {
-            let auth = auth.ok_or(FieldMissing)?;
+            let auth = ctx.auth.ok_or(FieldMissing)?;
             auth.claims.get(key).cloned().ok_or(FieldMissing)
         }
-        Operand::AuthUid | Operand::AuthNullSentinel => {
-            auth.map(|a| FieldValue::String(a.uid.clone())).ok_or(FieldMissing)
-        }
+        Operand::AuthUid | Operand::AuthNullSentinel => ctx
+            .auth
+            .map(|a| FieldValue::String(a.uid.clone()))
+            .ok_or(FieldMissing),
         // security-rules-cel-path-matching (Slice 02, US-02, ADR-063 §
         // Decision — evaluate() signature): the captured variable's NAME is
         // now consulted — first against `ancestor_path_variable_values`
@@ -1559,31 +1404,30 @@ fn resolve_field_value(
         // ADR-063 § Decision — evaluate() signature). `None`/absent-from-map
         // at both fails closed via the SAME `FieldMissing` short-circuit
         // every other operand family already uses.
-        Operand::PathVariable(name) => ancestor_path_variable_values
+        Operand::PathVariable(name) => ctx
+            .ancestor_path_variable_values
             .get(name)
             .cloned()
             .map(FieldValue::String)
-            .or_else(|| path_variable_value.map(|v| FieldValue::String(v.to_string())))
+            .or_else(|| {
+                ctx.path_variable_value
+                    .map(|v| FieldValue::String(v.to_string()))
+            })
             .ok_or(FieldMissing),
-        // security-rules-cel-expression-grammar (Slice 01, ADR-065): a
-        // literal always resolves — never `FieldMissing`, mirroring
-        // `BoolLiteral`/`NullLiteral`/`StringLiteral` above exactly.
         Operand::IntLiteral(value) => Ok(FieldValue::Integer(*value)),
         Operand::DoubleLiteral(value) => Ok(FieldValue::Double(*value)),
         // security-rules-cel-expression-grammar (Slice 04, ADR-065): a
         // `ListLiteral` is only ever meaningful as `Condition::In`'s own
         // right-hand operand, consumed directly by `eval_bool`'s `In` arm
         // (never through this generic resolver) — unreachable in
-        // practice, since the parser never PRODUCES a `ListLiteral` in any
-        // other operand position; falls closed defensively rather than
-        // panicking, consistent with `evaluate()`'s total guarantee.
+        // practice; falls closed defensively rather than panicking.
         Operand::ListLiteral(_) => Err(FieldMissing),
         // security-rules-cel-expression-grammar (Slice 06, ADR-065):
         // `request.time` resolves to the caller-supplied "now" value —
         // `FieldMissing` (fails closed) at any call site not yet wired to
         // thread a real value, the identical shape `path_variable_value`
         // already uses.
-        Operand::RequestTime => request_time.cloned().ok_or(FieldMissing),
+        Operand::RequestTime => ctx.request_time.cloned().ok_or(FieldMissing),
         // security-rules-cel-expression-grammar (Slice 06, ADR-065 §
         // Decision — evaluate() comparison logic): both sides resolve
         // recursively (the right side may itself be a `DurationLiteral`,
@@ -1593,16 +1437,7 @@ fn resolve_field_value(
         // time — never parse time, mirroring every other operand's
         // runtime type never being parse-time checked.
         Operand::Arithmetic(left, op, right) => {
-            let left_value = resolve_field_value(
-                left,
-                auth,
-                resource_fields,
-                request_resource_fields,
-                path_variable_value,
-                ancestor_path_variable_values,
-                request_time,
-                cross_document_reads,
-            )?;
+            let left_value = resolve_field_value(left, ctx)?;
             match (&left_value, right.as_ref()) {
                 (FieldValue::Timestamp(secs, nanos), Operand::DurationLiteral(amount, unit)) => {
                     let offset_secs = unit.as_seconds(*amount);
@@ -1613,16 +1448,7 @@ fn resolve_field_value(
                     Ok(FieldValue::Timestamp(new_secs, *nanos))
                 }
                 _ => {
-                    let right_value = resolve_field_value(
-                        right,
-                        auth,
-                        resource_fields,
-                        request_resource_fields,
-                        path_variable_value,
-                        ancestor_path_variable_values,
-                        request_time,
-                        cross_document_reads,
-                    )?;
+                    let right_value = resolve_field_value(right, ctx)?;
                     match (&left_value, &right_value) {
                         (FieldValue::Integer(l), FieldValue::Integer(r)) => {
                             Ok(FieldValue::Integer(match op {
@@ -1658,34 +1484,32 @@ fn resolve_field_value(
         // resolution routine), looks up the pre-fetched map. A resolved
         // template ALWAYS produces a definite boolean, never `FieldMissing`
         // — mirrors real Firestore's own `exists()` always returning a
-        // clean true/false (independently web-verified, DISCUSS § Reading
-        // Confirmation).
+        // clean true/false.
         Operand::CrossDocumentExists(template) => {
             let path = resolve_path_template(
                 template,
-                auth,
-                path_variable_value,
-                ancestor_path_variable_values,
+                ctx.auth,
+                ctx.path_variable_value,
+                ctx.ancestor_path_variable_values,
             )?;
             Ok(FieldValue::Boolean(
-                cross_document_reads.get(&path).is_some_and(|doc| doc.is_some()),
+                ctx.cross_document_reads
+                    .get(&path)
+                    .is_some_and(|doc| doc.is_some()),
             ))
         }
         // A missing document, or a document missing the named field, both
         // fail closed via FieldMissing — the IDENTICAL mechanism AC-17-09
         // already uses for any other missing field, zero new control-flow
-        // shape (independently web-verified: real Firestore's own `get()`
-        // -then-`.data` access on a nonexistent document throws, which
-        // composes with real Firestore's own fail-closed-on-error
-        // semantics to the SAME Deny outcome).
+        // shape.
         Operand::CrossDocumentGet(template, field) => {
             let path = resolve_path_template(
                 template,
-                auth,
-                path_variable_value,
-                ancestor_path_variable_values,
+                ctx.auth,
+                ctx.path_variable_value,
+                ctx.ancestor_path_variable_values,
             )?;
-            cross_document_reads
+            ctx.cross_document_reads
                 .get(&path)
                 .and_then(|doc| doc.as_ref())
                 .and_then(|doc| doc.fields.get(field))
@@ -1950,7 +1774,9 @@ pub enum QueryComplianceOutcome {
     Admitted,
     /// The rule is a fully decidable shape, but the query does not satisfy
     /// one or more conjuncts. Carries every conjunct that failed.
-    Rejected { unsatisfied_conjuncts: Vec<UnsatisfiedConjunct> },
+    Rejected {
+        unsatisfied_conjuncts: Vec<UnsatisfiedConjunct>,
+    },
     /// The rule's `Condition` tree contains a shape outside this slice's
     /// locked decidable set (only pure ownership-equality, Slice 01) —
     /// the entire rule is undecidable; every query against the collection
@@ -2057,7 +1883,9 @@ pub fn check_query_compliance(
     if unsatisfied.is_empty() {
         QueryComplianceOutcome::Admitted
     } else {
-        QueryComplianceOutcome::Rejected { unsatisfied_conjuncts: unsatisfied }
+        QueryComplianceOutcome::Rejected {
+            unsatisfied_conjuncts: unsatisfied,
+        }
     }
 }
 
@@ -2293,7 +2121,10 @@ mod tests {
         let result = parse_condition(
             "get(/databases/(default)/documents/users/$(request.auth.uid)).data.role != null",
         );
-        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+        assert!(matches!(
+            result,
+            Err(ConditionParseError::SyntaxError { .. })
+        ));
     }
 
     /// A generic, non-`get`/`exists`/`duration.value` function-call-shaped
@@ -2326,7 +2157,10 @@ mod tests {
     #[test]
     fn an_unterminated_exists_call_is_a_syntax_error_not_a_panic() {
         let result = parse_condition("exists(/databases/$(database)/documents/orgs/x");
-        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+        assert!(matches!(
+            result,
+            Err(ConditionParseError::SyntaxError { .. })
+        ));
     }
 
     /// The tokenizer's `get(...).data.<field>` field-name scan, when the
@@ -2342,7 +2176,9 @@ mod tests {
             Ok(Condition::Compare(_, _, Operand::CrossDocumentGet(_, field))) => {
                 assert_eq!(field, "role");
             }
-            other => panic!("expected a successfully parsed CrossDocumentGet(.., \"role\"), got {other:?}"),
+            other => panic!(
+                "expected a successfully parsed CrossDocumentGet(.., \"role\"), got {other:?}"
+            ),
         }
     }
 
@@ -2372,10 +2208,14 @@ mod tests {
     /// (a chained `get()` never cleanly strip_prefix/suffix's as `$(...)`).
     #[test]
     fn a_cleanly_parenthesized_unsupported_substitution_is_a_named_rejection() {
-        let result = parse_condition("exists(/databases/$(database)/documents/orgs/$(request.auth.email))");
+        let result =
+            parse_condition("exists(/databases/$(database)/documents/orgs/$(request.auth.email))");
         match result {
             Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
-                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+                assert_eq!(
+                    construct,
+                    UnsupportedConstruct::UnsupportedExpressionGrammar
+                );
             }
             other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
         }
@@ -2627,11 +2467,25 @@ mod tests {
                     op,
                     Operand::IntLiteral(b),
                 );
-                let outcome =
-                    evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new());
+                let outcome = evaluate(
+                    &condition,
+                    &EvalContext {
+                        auth: None,
+                        resource_fields: &resource,
+                        request_resource_fields: &empty_fields(),
+                        path_variable_value: None,
+                        ancestor_path_variable_values: &BTreeMap::new(),
+                        request_time: None,
+                        cross_document_reads: &BTreeMap::new(),
+                    },
+                );
                 assert_eq!(
                     outcome,
-                    if expected { EvaluationOutcome::Allow } else { EvaluationOutcome::Deny },
+                    if expected {
+                        EvaluationOutcome::Allow
+                    } else {
+                        EvaluationOutcome::Deny
+                    },
                     "a={a} op={op:?} b={b} expected {expected}"
                 );
             }
@@ -2647,7 +2501,18 @@ mod tests {
             Operand::IntLiteral(20),
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -2715,7 +2580,10 @@ mod tests {
         let result = parse_condition("resource.data.status in resource.data.other");
         match result {
             Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
-                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+                assert_eq!(
+                    construct,
+                    UnsupportedConstruct::UnsupportedExpressionGrammar
+                );
             }
             other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
         }
@@ -2735,7 +2603,18 @@ mod tests {
             ]),
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow
         );
     }
@@ -2751,7 +2630,18 @@ mod tests {
             ]),
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -2774,7 +2664,8 @@ mod tests {
 
     #[test]
     fn timestamp_plus_duration_parses_into_an_arithmetic_ast() {
-        let result = parse_condition("resource.data.created_at + duration.value(24, 'h') > request.time");
+        let result =
+            parse_condition("resource.data.created_at + duration.value(24, 'h') > request.time");
         assert_eq!(
             result,
             Ok(Condition::Compare(
@@ -2791,7 +2682,8 @@ mod tests {
 
     #[test]
     fn timestamp_minus_duration_parses_with_the_sub_operator() {
-        let result = parse_condition("resource.data.expires_at - duration.value(1, 'd') < request.time");
+        let result =
+            parse_condition("resource.data.expires_at - duration.value(1, 'd') < request.time");
         assert_eq!(
             result,
             Ok(Condition::Compare(
@@ -2815,7 +2707,8 @@ mod tests {
             ("d", DurationUnit::Days),
         ];
         for (unit_text, expected_unit) in cases {
-            let source = format!("resource.data.x + duration.value(1, '{unit_text}') > request.time");
+            let source =
+                format!("resource.data.x + duration.value(1, '{unit_text}') > request.time");
             let result = parse_condition(&source);
             assert_eq!(
                 result,
@@ -2838,7 +2731,10 @@ mod tests {
         let result = parse_condition("resource.data.x + duration.value(1, 'weeks') > request.time");
         match result {
             Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
-                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+                assert_eq!(
+                    construct,
+                    UnsupportedConstruct::UnsupportedExpressionGrammar
+                );
             }
             other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
         }
@@ -2853,7 +2749,10 @@ mod tests {
         // exemption), so a bare `duration.value(...)` comparison operand
         // is a plain syntax error, not a special construct rejection.
         let result = parse_condition("duration.value(1, 'h') == resource.data.x");
-        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+        assert!(matches!(
+            result,
+            Err(ConditionParseError::SyntaxError { .. })
+        ));
     }
 
     #[test]
@@ -2861,7 +2760,10 @@ mod tests {
         let result = parse_condition("resource.data.a + 1 + 2 <= 20");
         match result {
             Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
-                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+                assert_eq!(
+                    construct,
+                    UnsupportedConstruct::UnsupportedExpressionGrammar
+                );
             }
             other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
         }
@@ -2874,9 +2776,14 @@ mod tests {
             let result = parse_condition(&source);
             match result {
                 Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
-                    assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+                    assert_eq!(
+                        construct,
+                        UnsupportedConstruct::UnsupportedExpressionGrammar
+                    );
                 }
-                other => panic!("operator '{op}': expected UnsupportedExpressionGrammar, got {other:?}"),
+                other => {
+                    panic!("operator '{op}': expected UnsupportedExpressionGrammar, got {other:?}")
+                }
             }
         }
     }
@@ -2899,7 +2806,18 @@ mod tests {
             Operand::RequestTime,
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), Some(&now), &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: Some(&now),
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow
         );
     }
@@ -2919,7 +2837,18 @@ mod tests {
             Operand::RequestTime,
         );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), Some(&now), &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: Some(&now),
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -2927,9 +2856,24 @@ mod tests {
     #[test]
     fn request_time_absent_from_evaluate_call_fails_closed() {
         let resource = resource_with("created_at", FieldValue::Timestamp(1_000_000, 0));
-        let condition = Condition::Compare(Operand::RequestTime, CompareOp::Gt, Operand::ResourceField("created_at".to_string()));
+        let condition = Condition::Compare(
+            Operand::RequestTime,
+            CompareOp::Gt,
+            Operand::ResourceField("created_at".to_string()),
+        );
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -2992,7 +2936,10 @@ mod tests {
     #[test]
     fn a_path_missing_the_required_prefix_is_a_syntax_error() {
         let result = parse_condition("exists(/organizations/$(request.auth.uid))");
-        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+        assert!(matches!(
+            result,
+            Err(ConditionParseError::SyntaxError { .. })
+        ));
     }
 
     #[test]
@@ -3006,7 +2953,10 @@ mod tests {
         );
         match result {
             Err(ConditionParseError::UnsupportedConstruct { construct, .. }) => {
-                assert_eq!(construct, UnsupportedConstruct::UnsupportedExpressionGrammar);
+                assert_eq!(
+                    construct,
+                    UnsupportedConstruct::UnsupportedExpressionGrammar
+                );
             }
             other => panic!("expected UnsupportedExpressionGrammar, got {other:?}"),
         }
@@ -3014,8 +2964,12 @@ mod tests {
 
     #[test]
     fn get_without_a_data_field_suffix_is_a_syntax_error() {
-        let result = parse_condition("get(/databases/$(database)/documents/organizations/x) == null");
-        assert!(matches!(result, Err(ConditionParseError::SyntaxError { .. })));
+        let result =
+            parse_condition("get(/databases/$(database)/documents/organizations/x) == null");
+        assert!(matches!(
+            result,
+            Err(ConditionParseError::SyntaxError { .. })
+        ));
     }
 
     // ── evaluate: get()/exists() cross-document reads ──
@@ -3047,7 +3001,10 @@ mod tests {
             CompareOp::Eq,
             Operand::BoolLiteral(true),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let mut cross_document_reads = BTreeMap::new();
         cross_document_reads.insert(
             "organizations/maria-santos".to_string(),
@@ -3056,13 +3013,15 @@ mod tests {
         assert_eq!(
             evaluate(
                 &condition,
-                Some(&auth),
-                &empty_fields(),
-                &empty_fields(),
-                None,
-                &BTreeMap::new(),
-                None,
-                &cross_document_reads,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &cross_document_reads,
+                },
             ),
             EvaluationOutcome::Allow
         );
@@ -3080,20 +3039,25 @@ mod tests {
             CompareOp::Eq,
             Operand::BoolLiteral(true),
         );
-        let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "dana-kim".to_string(),
+            claims: BTreeMap::new(),
+        };
         // "organizations/dana-kim" is deliberately absent from the map —
         // mirrors a real backend fetch that found nothing.
         let cross_document_reads = BTreeMap::new();
         assert_eq!(
             evaluate(
                 &condition,
-                Some(&auth),
-                &empty_fields(),
-                &empty_fields(),
-                None,
-                &BTreeMap::new(),
-                None,
-                &cross_document_reads,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &cross_document_reads,
+                },
             ),
             EvaluationOutcome::Deny
         );
@@ -3114,13 +3078,15 @@ mod tests {
         assert_eq!(
             evaluate(
                 &condition,
-                None,
-                &empty_fields(),
-                &empty_fields(),
-                None,
-                &BTreeMap::new(),
-                None,
-                &BTreeMap::new(),
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
             ),
             EvaluationOutcome::Deny
         );
@@ -3141,22 +3107,29 @@ mod tests {
             CompareOp::Eq,
             Operand::StringLiteral("admin".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let mut cross_document_reads = BTreeMap::new();
         let mut fields = BTreeMap::new();
         fields.insert("role".to_string(), FieldValue::String("admin".to_string()));
-        cross_document_reads
-            .insert("organizations/maria-santos".to_string(), Some(org_doc(fields)));
+        cross_document_reads.insert(
+            "organizations/maria-santos".to_string(),
+            Some(org_doc(fields)),
+        );
         assert_eq!(
             evaluate(
                 &condition,
-                Some(&auth),
-                &empty_fields(),
-                &empty_fields(),
-                None,
-                &BTreeMap::new(),
-                None,
-                &cross_document_reads,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &cross_document_reads,
+                },
             ),
             EvaluationOutcome::Allow
         );
@@ -3179,18 +3152,23 @@ mod tests {
             CompareOp::Eq,
             Operand::StringLiteral("admin".to_string()),
         );
-        let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "dana-kim".to_string(),
+            claims: BTreeMap::new(),
+        };
         let cross_document_reads = BTreeMap::new();
         assert_eq!(
             evaluate(
                 &condition,
-                Some(&auth),
-                &empty_fields(),
-                &empty_fields(),
-                None,
-                &BTreeMap::new(),
-                None,
-                &cross_document_reads,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &cross_document_reads,
+                },
             ),
             EvaluationOutcome::Deny
         );
@@ -3213,22 +3191,29 @@ mod tests {
             CompareOp::Eq,
             Operand::StringLiteral("admin".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let mut cross_document_reads = BTreeMap::new();
         let mut fields = BTreeMap::new();
         fields.insert("role".to_string(), FieldValue::String("member".to_string()));
-        cross_document_reads
-            .insert("organizations/maria-santos".to_string(), Some(org_doc(fields)));
+        cross_document_reads.insert(
+            "organizations/maria-santos".to_string(),
+            Some(org_doc(fields)),
+        );
         assert_eq!(
             evaluate(
                 &condition,
-                Some(&auth),
-                &empty_fields(),
-                &empty_fields(),
-                None,
-                &BTreeMap::new(),
-                None,
-                &cross_document_reads,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &cross_document_reads,
+                },
             ),
             EvaluationOutcome::Deny
         );
@@ -3259,7 +3244,10 @@ mod tests {
             CompareOp::Eq,
             Operand::BoolLiteral(true),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let paths = discover_cross_document_paths(&condition, Some(&auth), None, &BTreeMap::new());
         assert_eq!(paths.len(), 1);
         assert!(paths.contains("organizations/maria-santos"));
@@ -3289,9 +3277,16 @@ mod tests {
                 Operand::StringLiteral("admin".to_string()),
             )),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let paths = discover_cross_document_paths(&condition, Some(&auth), None, &BTreeMap::new());
-        assert_eq!(paths.len(), 1, "the identical path must be discovered ONCE, not twice");
+        assert_eq!(
+            paths.len(),
+            1,
+            "the identical path must be discovered ONCE, not twice"
+        );
     }
 
     #[test]
@@ -3327,14 +3322,18 @@ mod tests {
         };
         let arithmetic_condition = Condition::Compare(
             Operand::Arithmetic(
-                Box::new(Operand::CrossDocumentGet(template.clone(), "count".to_string())),
+                Box::new(Operand::CrossDocumentGet(
+                    template.clone(),
+                    "count".to_string(),
+                )),
                 ArithmeticOp::Add,
                 Box::new(Operand::IntLiteral(1)),
             ),
             CompareOp::Eq,
             Operand::IntLiteral(2),
         );
-        let paths = discover_cross_document_paths(&arithmetic_condition, None, None, &BTreeMap::new());
+        let paths =
+            discover_cross_document_paths(&arithmetic_condition, None, None, &BTreeMap::new());
         assert_eq!(
             paths.len(),
             1,
@@ -3384,10 +3383,27 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Allow);
+        assert_eq!(
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
+            EvaluationOutcome::Allow
+        );
     }
 
     #[test]
@@ -3397,10 +3413,27 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "dana-kim".to_string(),
+            claims: BTreeMap::new(),
+        };
         let resource = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+        assert_eq!(
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
+            EvaluationOutcome::Deny
+        );
     }
 
     #[test]
@@ -3410,10 +3443,27 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new(); // owner_id absent
 
-        assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+        assert_eq!(
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
+            EvaluationOutcome::Deny
+        );
     }
 
     // ── evaluate: request.resource.data.<field> (security-rules-write-path, ADR-030) ──
@@ -3429,11 +3479,25 @@ mod tests {
             CompareOp::Eq,
             Operand::AuthUid,
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &proposed,
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow
         );
     }
@@ -3449,10 +3513,24 @@ mod tests {
             CompareOp::Eq,
             Operand::AuthUid,
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -3469,11 +3547,25 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let proposed = resource_with("owner_id", FieldValue::String("maria-santos".to_string()));
 
         assert_eq!(
-            evaluate(&condition, Some(&auth), &empty_fields(), &proposed, None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &empty_fields(),
+                    request_resource_fields: &proposed,
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -3488,14 +3580,39 @@ mod tests {
         );
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-        assert_eq!(evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+        assert_eq!(
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
+            EvaluationOutcome::Deny
+        );
     }
 
     #[test]
     fn bare_true_literal_allows_regardless_of_auth_or_resource_ac_17_12() {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
         assert_eq!(
-            evaluate(&Condition::Literal(true), None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &Condition::Literal(true),
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow
         );
     }
@@ -3527,7 +3644,18 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &is_moderator_condition(),
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow
         );
     }
@@ -3541,7 +3669,18 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &is_moderator_condition(),
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -3552,11 +3691,25 @@ mod tests {
         // identity with NO `is_moderator` claim at all — the SAME
         // `FieldMissing` short-circuit AC-17-09 already proves for a missing
         // resource field, now exercised against the claims map.
-        let auth = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "dana-kim".to_string(),
+            claims: BTreeMap::new(),
+        };
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &is_moderator_condition(),
+                &EvalContext {
+                    auth: Some(&auth),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -3566,7 +3719,18 @@ mod tests {
         let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
         assert_eq!(
-            evaluate(&is_moderator_condition(), None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &is_moderator_condition(),
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny
         );
     }
@@ -3591,23 +3755,62 @@ mod tests {
             claims: claims_with("is_moderator", FieldValue::Boolean(true)),
         };
         assert_eq!(
-            evaluate(&condition, Some(&priya), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&priya),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow,
             "a moderator must be admitted via the claim disjunct"
         );
 
         // Maria: satisfies the ownership disjunct, has no moderator claim.
-        let maria = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let maria = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         assert_eq!(
-            evaluate(&condition, Some(&maria), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&maria),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow,
             "the document owner must be admitted via the ownership disjunct"
         );
 
         // Dana: satisfies neither disjunct.
-        let dana = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        let dana = AuthContext {
+            uid: "dana-kim".to_string(),
+            claims: BTreeMap::new(),
+        };
         assert_eq!(
-            evaluate(&condition, Some(&dana), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&dana),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny,
             "neither a moderator nor the owner — must deny"
         );
@@ -3632,7 +3835,18 @@ mod tests {
         let matching_ticket =
             resource_with("department", FieldValue::String("billing".to_string()));
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &matching_ticket, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&jordan),
+                    resource_fields: &matching_ticket,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow,
             "AC-17-143: matching department claim/field must allow"
         );
@@ -3640,7 +3854,18 @@ mod tests {
         let other_ticket =
             resource_with("department", FieldValue::String("engineering".to_string()));
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &other_ticket, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&jordan),
+                    resource_fields: &other_ticket,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny,
             "AC-17-143: mismatched department claim/field must deny"
         );
@@ -3668,7 +3893,18 @@ mod tests {
             claims: claims_with("department", FieldValue::String("billing".to_string())),
         };
         assert_eq!(
-            evaluate(&condition, Some(&jordan), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&jordan),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow,
             "AC-17-151: a matching department claim/string-literal must allow"
         );
@@ -3678,7 +3914,18 @@ mod tests {
             claims: claims_with("department", FieldValue::String("engineering".to_string())),
         };
         assert_eq!(
-            evaluate(&condition, Some(&sam), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&sam),
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Deny,
             "AC-17-151: a mismatched department claim/string-literal must deny"
         );
@@ -3696,7 +3943,18 @@ mod tests {
         let resource = resource_with("status", FieldValue::String("published".to_string()));
 
         assert_eq!(
-            evaluate(&condition, None, &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()),
+            evaluate(
+                &condition,
+                &EvalContext {
+                    auth: None,
+                    resource_fields: &resource,
+                    request_resource_fields: &empty_fields(),
+                    path_variable_value: None,
+                    ancestor_path_variable_values: &BTreeMap::new(),
+                    request_time: None,
+                    cross_document_reads: &BTreeMap::new(),
+                },
+            ),
             EvaluationOutcome::Allow,
             "AC-17-152: a matching resource-field/string-literal comparison must allow, \
              independent of any claim or verified caller"
@@ -3726,7 +3984,18 @@ mod tests {
             let auth = AuthContext { uid, claims: BTreeMap::new() };
             let resource: BTreeMap<String, FieldValue> = BTreeMap::new();
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&auth),
+                resource_fields: &resource,
+                request_resource_fields: &empty_fields(),
+                path_variable_value: None,
+                ancestor_path_variable_values: &BTreeMap::new(),
+                request_time: None,
+                cross_document_reads: &BTreeMap::new(),
+                },
+            ), EvaluationOutcome::Deny);
         }
 
         /// Property (AC-17-10's underlying mechanism): for ANY
@@ -3750,7 +4019,18 @@ mod tests {
             let mut resource = resource_with("owner_id", FieldValue::String(owner_uid));
             resource.insert("title".to_string(), FieldValue::String(unrelated_value));
 
-            prop_assert_eq!(evaluate(&condition, Some(&auth), &resource, &empty_fields(), None, &BTreeMap::new(), None, &BTreeMap::new()), EvaluationOutcome::Deny);
+            prop_assert_eq!(evaluate(
+                &condition,
+                &EvalContext {
+                    auth: Some(&auth),
+                resource_fields: &resource,
+                request_resource_fields: &empty_fields(),
+                path_variable_value: None,
+                ancestor_path_variable_values: &BTreeMap::new(),
+                request_time: None,
+                cross_document_reads: &BTreeMap::new(),
+                },
+            ), EvaluationOutcome::Deny);
         }
     }
 
@@ -3780,7 +4060,10 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -3799,7 +4082,10 @@ mod tests {
             CompareOp::Eq,
             Operand::AuthUid,
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -3818,7 +4104,10 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = QueryFilter::Composite(vec![
             owner_id_field_equals("maria-santos"),
             QueryFilter::Field(FieldFilter {
@@ -3847,11 +4136,17 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let dana = AuthContext { uid: "dana-kim".to_string(), claims: BTreeMap::new() };
+        let dana = AuthContext {
+            uid: "dana-kim".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter_naming_someone_elses_uid = owner_id_field_equals("maria-santos");
 
-        let outcome =
-            check_query_compliance(&condition, Some(&filter_naming_someone_elses_uid), Some(&dana));
+        let outcome = check_query_compliance(
+            &condition,
+            Some(&filter_naming_someone_elses_uid),
+            Some(&dana),
+        );
 
         assert_eq!(
             outcome,
@@ -3874,7 +4169,10 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = QueryFilter::Field(FieldFilter {
             field_path: "Owner_Id".to_string(),
             op: FilterOp::Equal,
@@ -3902,7 +4200,10 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = QueryFilter::Field(FieldFilter {
             field_path: "owner_id".to_string(),
             op: FilterOp::IsNull,
@@ -3947,7 +4248,10 @@ mod tests {
             CompareOp::Eq,
             Operand::ResourceField("owner_id".to_string()),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
 
         assert_eq!(
             check_query_compliance(&condition, None, Some(&auth)),
@@ -3970,7 +4274,10 @@ mod tests {
         // — so this pinned example uses `Not` instead, which stays
         // undecidable.)
         let condition = Condition::Not(Box::new(Condition::Literal(true)));
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -3990,7 +4297,10 @@ mod tests {
 
     #[test]
     fn bare_true_rule_admits_regardless_of_filter_or_auth_ac_17_59() {
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -4007,7 +4317,10 @@ mod tests {
 
     #[test]
     fn bare_false_rule_denies_unconditionally_regardless_of_filter_or_auth() {
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -4027,9 +4340,15 @@ mod tests {
 
     #[test]
     fn auth_required_rule_admits_a_signed_in_caller_with_or_without_a_filter_ac_17_57() {
-        let condition =
-            Condition::Compare(Operand::AuthNullSentinel, CompareOp::Ne, Operand::NullLiteral);
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let condition = Condition::Compare(
+            Operand::AuthNullSentinel,
+            CompareOp::Ne,
+            Operand::NullLiteral,
+        );
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -4046,8 +4365,11 @@ mod tests {
 
     #[test]
     fn auth_required_rule_rejects_a_never_signed_in_caller_ac_17_58() {
-        let condition =
-            Condition::Compare(Operand::AuthNullSentinel, CompareOp::Ne, Operand::NullLiteral);
+        let condition = Condition::Compare(
+            Operand::AuthNullSentinel,
+            CompareOp::Ne,
+            Operand::NullLiteral,
+        );
         let filter = owner_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -4079,11 +4401,19 @@ mod tests {
     // parallel/duplicate one built for AND.
 
     fn auth_required_condition() -> Condition {
-        Condition::Compare(Operand::AuthNullSentinel, CompareOp::Ne, Operand::NullLiteral)
+        Condition::Compare(
+            Operand::AuthNullSentinel,
+            CompareOp::Ne,
+            Operand::NullLiteral,
+        )
     }
 
     fn ownership_condition(field: &str) -> Condition {
-        Condition::Compare(Operand::AuthUid, CompareOp::Eq, Operand::ResourceField(field.to_string()))
+        Condition::Compare(
+            Operand::AuthUid,
+            CompareOp::Eq,
+            Operand::ResourceField(field.to_string()),
+        )
     }
 
     fn curator_id_field_equals(value: &str) -> QueryFilter {
@@ -4102,7 +4432,10 @@ mod tests {
             Box::new(auth_required_condition()),
             Box::new(ownership_condition("curator_id")),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = curator_id_field_equals("maria-santos");
 
         assert_eq!(
@@ -4112,14 +4445,18 @@ mod tests {
     }
 
     #[test]
-    fn and_composed_rule_rejects_naming_only_the_ownership_conjunct_when_auth_is_satisfied_ac_17_62() {
+    fn and_composed_rule_rejects_naming_only_the_ownership_conjunct_when_auth_is_satisfied_ac_17_62(
+    ) {
         // Signed in (auth conjunct satisfied) but no filter at all (ownership
         // conjunct unsatisfied) — only the unmet conjunct is named.
         let condition = Condition::And(
             Box::new(auth_required_condition()),
             Box::new(ownership_condition("curator_id")),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
 
         assert_eq!(
             check_query_compliance(&condition, None, Some(&auth)),
@@ -4185,7 +4522,10 @@ mod tests {
             Box::new(Condition::Literal(false)),
             Box::new(ownership_condition("curator_id")),
         );
-        let auth = AuthContext { uid: "maria-santos".to_string(), claims: BTreeMap::new() };
+        let auth = AuthContext {
+            uid: "maria-santos".to_string(),
+            claims: BTreeMap::new(),
+        };
         let filter = curator_id_field_equals("maria-santos");
 
         assert_eq!(

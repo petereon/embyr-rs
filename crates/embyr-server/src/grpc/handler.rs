@@ -952,22 +952,15 @@ impl FirestoreService {
         // Mirrors `handle_get_document`'s own Slice 02 wiring exactly.
         match embyr_core::access_control::evaluate(
             &condition,
-            auth_ctx.as_ref(),
-            resource_fields,
-            request_fields,
-            Some(path.document_id.as_str()),
-            // security-rules-cel-path-matching (Slice 02, ADR-063 §
-            // Decision — evaluate() signature): mechanical empty-map
-            // argument — write-path routing wiring is Slice 03's own job
-            // (OUT of this slice's scope).
-            &std::collections::BTreeMap::new(),
-            Some(&now_field),
-            // security-rules-cel-cross-document-reads (Slice 01, ADR-066):
-            // mechanical empty-map — the shared Commit write-path helper's
-            // own cross-document wiring is out of this slice's own locked
-            // scope (GetDocument only); revisit alongside Slice 04's own
-            // CreateDocument/UpdateDocument write-parity work if evidenced.
-            &std::collections::BTreeMap::new(),
+            &embyr_core::access_control::EvalContext {
+                auth: auth_ctx.as_ref(),
+                resource_fields: resource_fields,
+                request_resource_fields: request_fields,
+                path_variable_value: Some(path.document_id.as_str()),
+                ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                request_time: Some(&now_field),
+                cross_document_reads: &std::collections::BTreeMap::new(),
+            },
         ) {
             embyr_core::access_control::EvaluationOutcome::Deny => {
                 Err(Status::permission_denied("access denied by write rule"))
@@ -1469,13 +1462,15 @@ impl FirestoreService {
                             // thread through the NEW 6th parameter.
                             match embyr_core::access_control::evaluate(
                                 &condition,
-                                auth_ctx.as_ref(),
-                                resource_fields,
-                                &empty_fields,
-                                Some(path.document_id.as_str()),
-                                &ancestor_bindings,
-                                Some(&now_field),
-                                &cross_document_reads,
+                                &embyr_core::access_control::EvalContext {
+                                    auth: auth_ctx.as_ref(),
+                                    resource_fields: resource_fields,
+                                    request_resource_fields: &empty_fields,
+                                    path_variable_value: Some(path.document_id.as_str()),
+                                    ancestor_path_variable_values: &ancestor_bindings,
+                                    request_time: Some(&now_field),
+                                    cross_document_reads: &cross_document_reads,
+                                },
                             ) {
                                 embyr_core::access_control::EvaluationOutcome::Deny => {
                                     Err(Status::permission_denied("access denied by rule"))
@@ -1557,18 +1552,15 @@ impl FirestoreService {
                 // real value.
                 match embyr_core::access_control::evaluate(
                     &condition,
-                    auth_ctx.as_ref(),
-                    resource_fields,
-                    &empty_fields,
-                    Some(path.document_id.as_str()),
-                    // security-rules-cel-path-matching (Slice 02, ADR-063 §
-                    // Decision — evaluate() signature): mechanical empty-map
-                    // argument on the EXACT-MATCH branch — this rule row has
-                    // no ancestor wildcard concept at all (US-05
-                    // zero-regression guardrail).
-                    &std::collections::BTreeMap::new(),
-                    Some(&now_field),
-                    &cross_document_reads,
+                    &embyr_core::access_control::EvalContext {
+                        auth: auth_ctx.as_ref(),
+                        resource_fields: resource_fields,
+                        request_resource_fields: &empty_fields,
+                        path_variable_value: Some(path.document_id.as_str()),
+                        ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                        request_time: Some(&now_field),
+                        cross_document_reads: &cross_document_reads,
+                    },
                 ) {
                     // AC-17-10: `Deny` ALWAYS produces the identical
                     // `PermissionDenied` response — never distinguishes
@@ -1711,17 +1703,15 @@ impl FirestoreService {
                 // Slice 02 wiring exactly.
                 match embyr_core::access_control::evaluate(
                     &condition,
-                    auth_ctx.as_ref(),
-                    &empty_resource_fields,
-                    &fields,
-                    Some(path.document_id.as_str()),
-                    // security-rules-cel-path-matching (ADR-063): this rule
-                    // row is an EXACT-MATCH row, no ancestor wildcard concept
-                    // at all (mirrors `handle_get_document`'s own exact-match
-                    // branch, US-05 zero-regression guardrail).
-                    &std::collections::BTreeMap::new(),
-                    Some(&now_field),
-                    &cross_document_reads,
+                    &embyr_core::access_control::EvalContext {
+                        auth: auth_ctx.as_ref(),
+                        resource_fields: &empty_resource_fields,
+                        request_resource_fields: &fields,
+                        path_variable_value: Some(path.document_id.as_str()),
+                        ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                        request_time: Some(&now_field),
+                        cross_document_reads: &cross_document_reads,
+                    },
                 ) {
                     embyr_core::access_control::EvaluationOutcome::Deny => {
                         return Err(Status::permission_denied("access denied by write rule"));
@@ -1789,13 +1779,15 @@ impl FirestoreService {
                         // whether or not a document already exists.
                         match embyr_core::access_control::evaluate(
                             &condition,
-                            auth_ctx.as_ref(),
-                            &empty_resource_fields,
-                            &fields,
-                            Some(path.document_id.as_str()),
-                            &ancestor_bindings,
-                            Some(&now_field),
-                            &std::collections::BTreeMap::new(),
+                            &embyr_core::access_control::EvalContext {
+                                auth: auth_ctx.as_ref(),
+                                resource_fields: &empty_resource_fields,
+                                request_resource_fields: &fields,
+                                path_variable_value: Some(path.document_id.as_str()),
+                                ancestor_path_variable_values: &ancestor_bindings,
+                                request_time: Some(&now_field),
+                                cross_document_reads: &std::collections::BTreeMap::new(),
+                            },
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Deny => {
                                 return Err(Status::permission_denied(
@@ -1945,17 +1937,15 @@ impl FirestoreService {
                 // `handle_get_document`'s own Slice 02 wiring exactly.
                 match embyr_core::access_control::evaluate(
                     &condition,
-                    auth_ctx.as_ref(),
-                    resource_fields,
-                    &fields,
-                    Some(path.document_id.as_str()),
-                    // security-rules-cel-path-matching (ADR-063): this rule
-                    // row is an EXACT-MATCH row, no ancestor wildcard concept
-                    // at all (mirrors `handle_get_document`'s own exact-match
-                    // branch, US-05 zero-regression guardrail).
-                    &std::collections::BTreeMap::new(),
-                    Some(&now_field),
-                    &cross_document_reads,
+                    &embyr_core::access_control::EvalContext {
+                        auth: auth_ctx.as_ref(),
+                        resource_fields: resource_fields,
+                        request_resource_fields: &fields,
+                        path_variable_value: Some(path.document_id.as_str()),
+                        ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                        request_time: Some(&now_field),
+                        cross_document_reads: &cross_document_reads,
+                    },
                 ) {
                     embyr_core::access_control::EvaluationOutcome::Deny => {
                         return Err(Status::permission_denied("access denied by write rule"));
@@ -2022,13 +2012,15 @@ impl FirestoreService {
                         // TARGET path, zero new I/O.
                         match embyr_core::access_control::evaluate(
                             &condition,
-                            auth_ctx.as_ref(),
-                            resource_fields,
-                            &fields,
-                            Some(path.document_id.as_str()),
-                            &ancestor_bindings,
-                            Some(&now_field),
-                            &std::collections::BTreeMap::new(),
+                            &embyr_core::access_control::EvalContext {
+                                auth: auth_ctx.as_ref(),
+                                resource_fields: resource_fields,
+                                request_resource_fields: &fields,
+                                path_variable_value: Some(path.document_id.as_str()),
+                                ancestor_path_variable_values: &ancestor_bindings,
+                                request_time: Some(&now_field),
+                                cross_document_reads: &std::collections::BTreeMap::new(),
+                            },
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Deny => {
                                 return Err(Status::permission_denied(
@@ -2155,25 +2147,15 @@ impl FirestoreService {
                 // `handle_get_document`'s own Slice 02 wiring exactly.
                 match embyr_core::access_control::evaluate(
                     &condition,
-                    auth_ctx.as_ref(),
-                    resource_fields,
-                    &request_resource_fields,
-                    Some(path.document_id.as_str()),
-                    // security-rules-cel-path-matching (ADR-063): this rule
-                    // row is an EXACT-MATCH row, no ancestor wildcard concept
-                    // at all (mirrors `handle_get_document`'s own exact-match
-                    // branch, US-05 zero-regression guardrail).
-                    &std::collections::BTreeMap::new(),
-                    // security-rules-cel-expression-grammar (Slice 06,
-                    // ADR-065): mechanical `None` — no domain example
-                    // requires a time-window check on Delete; out of this
-                    // feature's own locked scope entirely.
-                    None,
-                    // security-rules-cel-cross-document-reads (Slice 01,
-                    // ADR-066): mechanical empty-map — Delete's own
-                    // cross-document wiring is out of this feature's own
-                    // locked scope (never evidenced, § Out of Scope).
-                    &std::collections::BTreeMap::new(),
+                    &embyr_core::access_control::EvalContext {
+                        auth: auth_ctx.as_ref(),
+                        resource_fields: resource_fields,
+                        request_resource_fields: &request_resource_fields,
+                        path_variable_value: Some(path.document_id.as_str()),
+                        ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                        request_time: None,
+                        cross_document_reads: &std::collections::BTreeMap::new(),
+                    },
                 ) {
                     embyr_core::access_control::EvaluationOutcome::Deny => {
                         return Err(Status::permission_denied("access denied by write rule"));
@@ -2229,16 +2211,15 @@ impl FirestoreService {
 
                         match embyr_core::access_control::evaluate(
                             &condition,
-                            auth_ctx.as_ref(),
-                            resource_fields,
-                            &request_resource_fields,
-                            Some(path.document_id.as_str()),
-                            &ancestor_bindings,
-                            // security-rules-cel-expression-grammar (Slice
-                            // 06, ADR-065): mechanical `None` — out of this
-                            // feature's own locked scope for Delete.
-                            None,
-                            &std::collections::BTreeMap::new(),
+                            &embyr_core::access_control::EvalContext {
+                                auth: auth_ctx.as_ref(),
+                                resource_fields: resource_fields,
+                                request_resource_fields: &request_resource_fields,
+                                path_variable_value: Some(path.document_id.as_str()),
+                                ancestor_path_variable_values: &ancestor_bindings,
+                                request_time: None,
+                                cross_document_reads: &std::collections::BTreeMap::new(),
+                            },
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Deny => {
                                 return Err(Status::permission_denied(
@@ -2414,16 +2395,15 @@ impl FirestoreService {
                         // slice's own locked scope (`GetDocument` only).
                         match embyr_core::access_control::evaluate(
                             &condition,
-                            auth_ctx.as_ref(),
-                            &doc.fields,
-                            &empty_fields,
-                            None,
-                            &std::collections::BTreeMap::new(),
-                            // security-rules-cel-expression-grammar (Slice
-                            // 06, ADR-065): mechanical `None` — out of this
-                            // feature's own locked scope (`ListDocuments`).
-                            None,
-                            &std::collections::BTreeMap::new(),
+                            &embyr_core::access_control::EvalContext {
+                                auth: auth_ctx.as_ref(),
+                                resource_fields: &doc.fields,
+                                request_resource_fields: &empty_fields,
+                                path_variable_value: None,
+                                ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                                request_time: None,
+                                cross_document_reads: &std::collections::BTreeMap::new(),
+                            },
                         ) {
                             embyr_core::access_control::EvaluationOutcome::Allow => {
                                 all_docs.push(doc);
@@ -2683,16 +2663,15 @@ impl FirestoreService {
                     // locked scope (`GetDocument` only).
                     match embyr_core::access_control::evaluate(
                         &condition,
-                        auth_ctx.as_ref(),
-                        resource_fields,
-                        &empty_fields,
-                        None,
-                        &std::collections::BTreeMap::new(),
-                        // security-rules-cel-expression-grammar (Slice 06,
-                        // ADR-065): mechanical `None` — out of this
-                        // feature's own locked scope (`BatchGetDocuments`).
-                        None,
-                        &std::collections::BTreeMap::new(),
+                        &embyr_core::access_control::EvalContext {
+                            auth: auth_ctx.as_ref(),
+                            resource_fields: resource_fields,
+                            request_resource_fields: &empty_fields,
+                            path_variable_value: None,
+                            ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                            request_time: None,
+                            cross_document_reads: &std::collections::BTreeMap::new(),
+                        },
                     ) {
                         // ADR-042/DDD-BGD-5: `Deny` maps to a per-document
                         // `missing` item — the batch is NEVER aborted

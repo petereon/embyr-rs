@@ -83,7 +83,7 @@ use crate::admin::handlers::shared::verify_project_ownership;
 use crate::admin::state::UserAdminState;
 use embyr_core::access_control::{
     check_query_compliance, evaluate, parse_condition, path_routing, rules_file, AuthContext,
-    ConditionParseError, EvaluationOutcome, QueryComplianceOutcome,
+    ConditionParseError, EvalContext, EvaluationOutcome, QueryComplianceOutcome,
 };
 use embyr_core::admin::account::Role;
 use embyr_core::domain::document::{DocumentPath, FirestoreDocument};
@@ -1044,17 +1044,15 @@ pub async fn simulate_access_rule(
     // evaluate() signature), never a second resolution path.
     let outcome = evaluate(
         &condition,
-        auth_ctx.as_ref(),
-        &resource_fields,
-        &request_resource_fields,
-        body.path_variable.as_deref(),
-        // security-rules-cel-path-matching (Slice 02, ADR-063): mechanical
-        // empty-map argument — this route simulates 4a's own single-leaf-
-        // variable rules only; a routed-pattern simulation is US-06
-        // (Release 2, `simulate_route`), out of this slice's scope.
-        &std::collections::BTreeMap::new(),
-        request_time_field.as_ref(),
-        &cross_document_reads,
+        &EvalContext {
+            auth: auth_ctx.as_ref(),
+            resource_fields: &resource_fields,
+            request_resource_fields: &request_resource_fields,
+            path_variable_value: body.path_variable.as_deref(),
+            ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+            request_time: request_time_field.as_ref(),
+            cross_document_reads: &cross_document_reads,
+        },
     );
 
     Ok((
@@ -1228,19 +1226,15 @@ pub async fn simulate_routed_access_rule(
     // parameter (ADR-063), identical to real routed GetDocument evaluation.
     let outcome = evaluate(
         &condition,
-        auth_ctx.as_ref(),
-        &resource_fields,
-        &empty_request_resource,
-        leaf_value.as_deref(),
-        &ancestor_bindings,
-        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
-        // mechanical `None` — timestamp/duration simulation is US-07,
-        // out of this slice's own locked scope.
-        None,
-        // security-rules-cel-cross-document-reads (Slice 01, ADR-066):
-        // mechanical empty-map — this route's own cross-document
-        // synthetic-input support is Slice 05's own locked scope.
-        &std::collections::BTreeMap::new(),
+        &EvalContext {
+            auth: auth_ctx.as_ref(),
+            resource_fields: &resource_fields,
+            request_resource_fields: &empty_request_resource,
+            path_variable_value: leaf_value.as_deref(),
+            ancestor_path_variable_values: &ancestor_bindings,
+            request_time: None,
+            cross_document_reads: &std::collections::BTreeMap::new(),
+        },
     );
 
     // AC-17-228: report EVERY bound variable value, ancestor and leaf alike
@@ -1417,16 +1411,15 @@ async fn simulate_recursive_wildcard_candidate(
     let empty_request_resource: BTreeMap<String, FieldValue> = BTreeMap::new();
     let outcome = evaluate(
         &condition,
-        auth_ctx.as_ref(),
-        &resource_fields,
-        &empty_request_resource,
-        None,
-        &candidate_bindings,
-        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
-        // mechanical `None` — timestamp/duration simulation is US-07,
-        // out of this slice's own locked scope.
-        None,
-        &std::collections::BTreeMap::new(),
+        &EvalContext {
+            auth: auth_ctx.as_ref(),
+            resource_fields: &resource_fields,
+            request_resource_fields: &empty_request_resource,
+            path_variable_value: None,
+            ancestor_path_variable_values: &candidate_bindings,
+            request_time: None,
+            cross_document_reads: &std::collections::BTreeMap::new(),
+        },
     );
 
     Ok((
@@ -1481,16 +1474,15 @@ fn evaluate_stored_pattern_outcome(
     let empty_request_resource: BTreeMap<String, FieldValue> = BTreeMap::new();
     let outcome = evaluate(
         &condition,
-        auth_ctx.as_ref(),
-        &resource_fields,
-        &empty_request_resource,
-        None,
-        &bindings,
-        // security-rules-cel-expression-grammar (Slice 06, ADR-065):
-        // mechanical `None` — timestamp/duration simulation is US-07,
-        // out of this slice's own locked scope.
-        None,
-        &std::collections::BTreeMap::new(),
+        &EvalContext {
+            auth: auth_ctx.as_ref(),
+            resource_fields: &resource_fields,
+            request_resource_fields: &empty_request_resource,
+            path_variable_value: None,
+            ancestor_path_variable_values: &bindings,
+            request_time: None,
+            cross_document_reads: &std::collections::BTreeMap::new(),
+        },
     );
 
     Ok((
