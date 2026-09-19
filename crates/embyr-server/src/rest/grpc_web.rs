@@ -62,7 +62,13 @@ pub struct HybridService {
 
 impl HybridService {
     fn new(grpc_service: FirestoreService, axum_app: axum::Router) -> Self {
-        let grpc_web = GrpcWebLayer::new().layer(FirestoreServer::new(grpc_service));
+        // request-body-size-limits (finding #24, ADR-081): same 10 MiB
+        // ceiling as the native :8080 gRPC listener — shares the crate-root
+        // constant so the two surfaces cannot silently drift apart.
+        let grpc_web = GrpcWebLayer::new().layer(
+            FirestoreServer::new(grpc_service)
+                .max_decoding_message_size(crate::MAX_GRPC_MESSAGE_BYTES),
+        );
         Self {
             grpc_web,
             axum: axum_app,

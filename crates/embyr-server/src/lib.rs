@@ -29,6 +29,15 @@ use embyr_proto::firestore::firestore_server::FirestoreServer;
 use grpc::handler::FirestoreService;
 use realtime::listen_registry::ListenRegistry;
 
+// request-body-size-limits (finding #24, ADR-081): explicit, deliberately-
+// chosen byte ceilings for the gRPC (native + gRPC-Web) and REST listener
+// surfaces, replacing tonic's/axum's implicit library defaults. No env var
+// (ADR-081: protocol/payload-shape security ceilings, not operator-tunable
+// traffic knobs). `pub(crate)` so `rest::grpc_web` can share the identical
+// gRPC constant rather than duplicating the value.
+pub(crate) const MAX_GRPC_MESSAGE_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+const MAX_REST_BODY_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
+
 /// Handle to an in-process test server bound on ephemeral ports.
 ///
 /// Holds both the gRPC, REST, and admin addresses.  Sending on the shutdown
@@ -449,7 +458,14 @@ pub fn spawn_all_servers(
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
         .allow_headers([axum::http::header::CONTENT_TYPE])
         .allow_credentials(false);
-    let axum_app = axum_app.merge(accounts_bridge_app).layer(cors);
+    // request-body-size-limits (finding #24, ADR-081): explicit 2 MiB
+    // ceiling on the whole merged :8081 REST router — matches today's
+    // implicit axum `Bytes`/`Json` extractor default exactly (zero
+    // behavior change, now explicit/tested).
+    let axum_app = axum_app
+        .merge(accounts_bridge_app)
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_REST_BODY_BYTES))
+        .layer(cors);
 
     let rest_task = rest::grpc_web::spawn_hybrid_server(
         rest_listener,
@@ -477,8 +493,10 @@ pub fn spawn_all_servers(
                 .tls_config(tls)
                 .expect("tls config already validated in ServerConfig::from_env()");
         }
+        let firestore_svc =
+            FirestoreServer::new(service).max_decoding_message_size(MAX_GRPC_MESSAGE_BYTES);
         let grpc_fut = grpc_builder
-            .add_service(FirestoreServer::new(service))
+            .add_service(firestore_svc)
             .serve_with_incoming_shutdown(grpc_incoming, async {
                 let _ = grpc_shutdown_rx.await;
             });

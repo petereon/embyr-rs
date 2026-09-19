@@ -82,6 +82,18 @@ use super::middleware::stripe_signature::stripe_signature_middleware;
 use super::state::{OperatorState, UserAdminState, WebhookState};
 use crate::middleware::signin_rate_limit::SigninRateLimiter;
 
+// request-body-size-limits (finding #24, ADR-081): explicit 1 MiB ceiling on
+// every admin JSON route. Reflects real admin payload shape (project/index/
+// secret-rotation config, all sub-KB to low-KB in practice) — tightened from
+// axum's implicit 2 MiB `Bytes`/`Json` extractor default. No env var
+// (protocol/payload-shape ceiling, not an operator-tunable traffic knob).
+// Does NOT govern `/admin/v1/webhooks/stripe`: that route's own
+// `stripe_signature_middleware` reads the raw body via `axum::body::to_bytes`
+// directly (bypassing the `Bytes`/`Json` extractors), so it never consults
+// the `DefaultBodyLimit` extension this layer sets — confirmed independent
+// of its own separate, already-shipped 5 MiB ceiling (ADR-070).
+const MAX_ADMIN_BODY_BYTES: usize = 1 * 1024 * 1024; // 1 MiB
+
 /// Build the admin router with all five sub-routers merged under /admin/v1.
 ///
 /// Sub-router breakdown (ADR-009, AA-01):
@@ -431,7 +443,11 @@ pub fn build_admin_router(
     if let Some(webhook_router) = webhook_router {
         router = router.merge(webhook_router);
     }
-    router
+    // Single choke point: covers both `main.rs`'s direct call to this
+    // function AND the `build_with_aws`/`build_with_gcp` test-server
+    // wrappers below, without touching the Stripe webhook sub-router's own
+    // independent body-reading mechanism (see const doc comment above).
+    router.layer(axum::extract::DefaultBodyLimit::max(MAX_ADMIN_BODY_BYTES))
 }
 
 // ---------------------------------------------------------------------------
