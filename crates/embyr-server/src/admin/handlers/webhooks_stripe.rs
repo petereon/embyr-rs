@@ -75,7 +75,7 @@ pub async fn stripe_webhook_handler(
     // idle pooled connection well past any reasonable test timeout).
     metrics::counter!(
         "embyr_stripe_webhook_dispatch_total",
-        "event_type" => event.event_type.clone()
+        "event_type" => bounded_event_type_label(&event.event_type)
     )
     .increment(1);
 
@@ -277,6 +277,28 @@ async fn sync_subscription_deleted(pool: &sqlx::PgPool, event: &WebhookEvent) ->
     }
 }
 
+/// Bounds the `event_type` Prometheus label to a fixed, finite set —
+/// otherwise `event.event_type` (attacker-controlled: gated only by a valid
+/// Stripe signature, per audit finding #39) becomes an unbounded label
+/// value, the same label-cardinality DoS mechanism closed for the
+/// `project_id` label in finding #2
+/// (`docs/evolution/2026-09-09-rate-limiter-project-id-validation.md`,
+/// `UNCONFIRMED_PROJECT_LABEL` sentinel pattern). Any event type this
+/// handler doesn't actually dispatch on collapses to a constant `"other"`
+/// sentinel, bounding cardinality to the handled-type count + 1 regardless
+/// of what a valid-signature holder sends.
+const OTHER_EVENT_TYPE_LABEL: &str = "other";
+
+fn bounded_event_type_label(event_type: &str) -> &'static str {
+    match event_type {
+        "customer.subscription.updated" => "customer.subscription.updated",
+        "customer.subscription.deleted" => "customer.subscription.deleted",
+        "invoice.payment_failed" => "invoice.payment_failed",
+        "invoice.payment_succeeded" => "invoice.payment_succeeded",
+        _ => OTHER_EVENT_TYPE_LABEL,
+    }
+}
+
 /// Real Stripe Subscription-object shape: `items.data[0].price.id`. Absent
 /// on the synthetic test payloads used by AC-203-03/06 (no `items` array) —
 /// callers treat `None` as "cannot derive plan, leave unchanged".
@@ -285,4 +307,35 @@ fn subscription_item_price_id(object: &serde_json::Value) -> Option<&str> {
         .as_array()
         .and_then(|items| items.first())
         .and_then(|item| item["price"]["id"].as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_event_type_label_passes_through_known_handled_types() {
+        for known in [
+            "customer.subscription.updated",
+            "customer.subscription.deleted",
+            "invoice.payment_failed",
+            "invoice.payment_succeeded",
+        ] {
+            assert_eq!(bounded_event_type_label(known), known);
+        }
+    }
+
+    #[test]
+    fn bounded_event_type_label_collapses_arbitrary_input_to_other() {
+        // Finding #39: a valid-signature holder can send any event_type
+        // string; the label must never echo attacker-controlled text.
+        for garbage in [
+            "checkout.session.completed", // real Stripe type, just unhandled here
+            "not-a-real-stripe-event",
+            "",
+            &"x".repeat(10_000), // pathological length
+        ] {
+            assert_eq!(bounded_event_type_label(garbage), OTHER_EVENT_TYPE_LABEL);
+        }
+    }
 }

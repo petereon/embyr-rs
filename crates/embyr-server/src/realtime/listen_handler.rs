@@ -274,7 +274,7 @@ pub async fn handle_add_target(
     // Send NO_CHANGE with fresh resume token immediately after CURRENT.
     // The token encodes snapshot_ts (= now + 1s at snapshot time), ensuring that
     // on reconnect the delta filter update_time > token_ts excludes all initial-snapshot docs.
-    let fresh_token = rt::encode(snapshot_ts, collection.project_id.as_str());
+    let fresh_token = rt::encode(snapshot_ts);
     let no_change_with_token = ListenResponse {
         response_type: Some(listen_response::ResponseType::TargetChange(TargetChange {
             target_change_type: TargetChangeType::NoChange as i32,
@@ -291,10 +291,7 @@ pub async fn handle_add_target(
         tokio::select! {
             _ = tokio::time::sleep(keepalive) => {
                 // Keepalive token is anchored 1s in the future for the same precision reason.
-                let keepalive_token = rt::encode(
-                    Utc::now() + ChronoDuration::seconds(1),
-                    collection.project_id.as_str(),
-                );
+                let keepalive_token = rt::encode(Utc::now() + ChronoDuration::seconds(1));
                 let no_change = ListenResponse {
                     response_type: Some(listen_response::ResponseType::TargetChange(TargetChange {
                         target_change_type: TargetChangeType::NoChange as i32,
