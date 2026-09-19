@@ -292,6 +292,13 @@ path = "../../tests/customer_db_onboarding/acceptance/cdo17_regression_full_priv
 name = "cdo18_forward_compatible_found_version_exceeds_expected"
 path = "../../tests/customer_db_onboarding/acceptance/cdo18_forward_compatible_found_version_exceeds_expected.rs"
 
+# collection-group-query-index follow-up (finding #48) — reprovision path
+# must also backfill collection_id, same POST /admin/v1/projects driving
+# port as the customer-db-onboarding tests above.
+[[test]]
+name = "cgi_reprovision_backfills_pre_existing_documents"
+path = "../../tests/collection_group_query_index/acceptance/cgi_reprovision_backfills_pre_existing_documents.rs"
+
 # client-auth acceptance tests (Slices 01-04 + dedicated algorithm-confusion
 # regression, mirroring the caNN registration convention).
 [[test]]

@@ -52,6 +52,14 @@ fn default_backend_mode() -> String {
     "direct_pg".into()
 }
 
+/// Finding #48: same defaults as `embyr-db-prep`'s own
+/// `EMBYR_DB_PREP_BACKFILL_BATCH_SIZE` / `_THROTTLE_MS`
+/// (`crates/embyr-db-prep/src/config.rs`). This backfill is backgrounded
+/// (see the `Stale`/`NotPrepped` branch below), so request latency isn't a
+/// factor -- no need for embyr-server-specific tuning yet.
+const BACKFILL_BATCH_SIZE: u32 = 1000;
+const BACKFILL_THROTTLE_MS: u64 = 50;
+
 #[derive(Serialize)]
 pub struct ProvisionResponse {
     pub project_id: String,
@@ -417,6 +425,50 @@ pub async fn provision(
                 .migrate()
                 .await
                 .map_err(|e| not_ready_migrate_failure(&readiness, &e.to_string()))?;
+
+            // Finding #48: a Stale/NotPrepped reprovision can carry
+            // pre-existing documents from before the collection_id column
+            // existed -- migrate() alone leaves them NULL (plain
+            // ALTER TABLE ADD COLUMN, no inline backfill; see
+            // migrations/customer/0006_collection_group_index.sql). Backfill
+            // them now, same as embyr-db-prep already does after its own
+            // migrate() call (ADR-080 § Component Boundaries).
+            //
+            // Backgrounded, not awaited: unlike migrate() (fast, schema-only
+            // DDL), a full backfill scales with however many pre-existing
+            // documents the project already has -- matching this codebase's
+            // own precedent for slow admin-triggered Postgres work
+            // (composite_index_builder::spawn_build, fired from
+            // create_composite_index's own handler rather than blocking the
+            // HTTP response). No correctness risk in leaving it unawaited:
+            // the hybrid collection-group predicate already falls back
+            // correctly for NULL collection_id rows (ADR-080) -- this only
+            // improves query performance once it completes, it never gates
+            // provisioning readiness.
+            let backfill_pool = customer_pool.clone();
+            let backfill_project_id = req.project_id.clone();
+            tokio::spawn(async move {
+                let adapter = PostgresBackendAdapter::new_from_pool(backfill_pool);
+                match adapter
+                    .backfill_collection_id(
+                        BACKFILL_BATCH_SIZE,
+                        std::time::Duration::from_millis(BACKFILL_THROTTLE_MS),
+                    )
+                    .await
+                {
+                    Ok(summary) => tracing::info!(
+                        project_id = %backfill_project_id,
+                        rows_backfilled = summary.rows_backfilled,
+                        batches_run = summary.batches_run,
+                        "provision: reprovision collection_id backfill complete"
+                    ),
+                    Err(e) => tracing::error!(
+                        project_id = %backfill_project_id,
+                        error = %e,
+                        "provision: reprovision collection_id backfill failed"
+                    ),
+                }
+            });
         }
     }
 
