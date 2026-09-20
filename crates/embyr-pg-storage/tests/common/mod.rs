@@ -291,11 +291,28 @@ pub async fn explain_all_descendants(
     use embyr_pg_storage::encoding::query::push_all_descendants_predicate;
     use sqlx::{Postgres as Pg, QueryBuilder};
 
-    // A fresh testcontainers Postgres has no autovacuum-driven ANALYZE yet
-    // within this test's short window — without it the planner defaults to
-    // a Seq Scan regardless of which indexes exist (same reasoning
-    // `composite_index_real_creation`'s own EXPLAIN helper documents).
-    sqlx::query("ANALYZE documents").execute(pool).await.expect("ANALYZE documents failed");
+    // Single connection/transaction for ANALYZE + SET LOCAL + EXPLAIN: the
+    // production `ensure_collection_group_indexes()` sets
+    // `enable_seqscan = off` session-scoped on whichever pooled connection
+    // its own `.execute(&self.pool)` happens to land on (see
+    // backend_adapter.rs's own comment on that ceiling) — it does NOT
+    // reliably reach every connection sqlx's pool later hands out for this
+    // EXPLAIN. A `documents` table this small (seeded dozens of rows, per
+    // this feature's resource-conscious test design) always looks cheaper
+    // to a cost-based planner as a Seq Scan regardless of ANALYZE, so we
+    // take the production code's own documented "upgrade path" here:
+    // `SET LOCAL` inside a transaction wrapping just this EXPLAIN, on the
+    // one connection that also runs it — deterministic regardless of pool
+    // scheduling or row count, and proves the index is real/usable (which
+    // is what AC-CGI-02/09 actually assert) rather than asserting Postgres
+    // will always cost-prefer it on a tiny table.
+    let mut tx = pool.begin().await.expect("begin EXPLAIN transaction failed");
+
+    sqlx::query("ANALYZE documents").execute(&mut *tx).await.expect("ANALYZE documents failed");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("SET LOCAL enable_seqscan failed");
 
     let mut qb: QueryBuilder<Pg> = QueryBuilder::new(
         "EXPLAIN SELECT project_id, collection_path, document_id, fields, version, \
@@ -308,9 +325,10 @@ pub async fn explain_all_descendants(
 
     let rows: Vec<(String,)> = qb
         .build_query_as()
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await
         .expect("EXPLAIN query failed");
+    let _ = tx.rollback().await; // read-only check, nothing to persist
     rows.into_iter().map(|(l,)| l).collect()
 }
 
