@@ -105,21 +105,11 @@ pub async fn customer_db_missing_latest_migration()
 }
 
 async fn apply_all_but_last_migration(db_url: &str) {
-    use sqlx::migrate::Migrate;
-    use sqlx::Connection;
-
-    let migrator = sqlx::migrate!("../../migrations/customer");
-    let migrations: Vec<_> = migrator.iter().collect();
-    assert!(
-        migrations.len() >= 2,
-        "need at least 2 migrations to meaningfully simulate 'missing the latest one'"
-    );
-    let mut conn =
-        sqlx::PgConnection::connect(db_url).await.expect("connect for fixture migration setup");
-    conn.ensure_migrations_table().await.expect("ensure_migrations_table");
-    for m in &migrations[..migrations.len() - 1] {
-        conn.apply(m).await.expect("apply migration");
-    }
+    // Delegates to the sole embed point (ADR-022) — never invokes
+    // `sqlx::migrate!` independently here.
+    PostgresBackendAdapter::apply_all_but_last_migration(db_url)
+        .await
+        .expect("apply_all_but_last_migration failed");
 }
 
 /// Apply whatever migration(s) are missing relative to `migrated_customer_db`
