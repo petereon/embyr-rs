@@ -49,20 +49,16 @@ impl AgentNotifyBridge {
         let project_id = self.project_id.clone();
         let overflow = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(async move {
-            let channel_name = notify_channel(&project_id);
-            let mut pg_listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!("AgentNotifyBridge: failed to connect PgListener: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = pg_listener.listen(&channel_name).await {
-                tracing::error!("AgentNotifyBridge: failed to listen on {channel_name}: {e}");
-                return;
-            }
+        // LISTEN must be registered before subscribe() returns: a NOTIFY sent
+        // by a caller right after subscribe() (e.g. immediately following a
+        // write) is lost forever if the session isn't listening yet. Mirrors
+        // the connect-then-listen-before-spawn pattern in
+        // embyr-pg-storage::notify_listener::PostgresNotifyListener::start.
+        let channel_name = notify_channel(&project_id);
+        let mut pg_listener = sqlx::postgres::PgListener::connect_with(&pool).await?;
+        pg_listener.listen(&channel_name).await?;
 
+        tokio::spawn(async move {
             loop {
                 match pg_listener.recv().await {
                     Ok(notification) => {
