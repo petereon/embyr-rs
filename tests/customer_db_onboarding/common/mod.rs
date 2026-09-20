@@ -363,13 +363,45 @@ impl ServerProcess {
     pub fn admin_base(&self) -> String {
         format!("http://127.0.0.1:{}", self.admin_port)
     }
+
+    /// Like `wait_for_healthy`, but returns the last-observed `/healthz`
+    /// status/error on timeout instead of a bare bool, so a caller can
+    /// report *why* the server never came up instead of just that it didn't.
+    pub async fn wait_for_healthy_verbose(&self, timeout: Duration) -> Result<(), String> {
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/healthz", self.admin_port);
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut last = "no response received yet".to_string();
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(last);
+            }
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().as_u16() == 200 => return Ok(()),
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    last = format!("HTTP {status}: {body}");
+                }
+                Err(e) => last = format!("request error: {e}"),
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
 }
 
 /// Spawn `embyr-server` against `db_url` with the standard test admin key +
-/// encryption key env vars, and assert it becomes healthy within 30s.
+/// encryption key env vars, and assert it becomes healthy within 90s.
 ///
 /// Shared by the US-02 provisioning scenarios (cdo12-cdo18), which otherwise
 /// each repeated this identical spawn-and-wait sequence.
+///
+/// Timeout was 30s until 2026-09-20, when a contended CI runner (25m run vs
+/// the usual 13-17m) blew through it — binary cold-start + migrations + pool
+/// warmup genuinely took longer than 30s under load, not a server regression.
+/// Bumped to 90s and switched to `wait_for_healthy_verbose` so a future
+/// timeout panic carries the last poll's actual status/error, not just
+/// "must be healthy" with zero diagnostic.
 pub async fn start_healthy_server(db_url: &str) -> ServerProcess {
     let server = ServerProcess::start(
         db_url,
@@ -378,10 +410,9 @@ pub async fn start_healthy_server(db_url: &str) -> ServerProcess {
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
-    assert!(
-        server.wait_for_healthy(Duration::from_secs(30)).await,
-        "embyr-server must be healthy before provisioning"
-    );
+    if let Err(last) = server.wait_for_healthy_verbose(Duration::from_secs(90)).await {
+        panic!("embyr-server must be healthy before provisioning; last /healthz poll: {last}");
+    }
     server
 }
 
