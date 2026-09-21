@@ -964,13 +964,21 @@ pub async fn run(config: AgentConfig) -> Result<(), Box<dyn std::error::Error + 
     );
     let _sweep_handle = sweeper.spawn();
 
-    let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
-    let addr = listener.local_addr()?;
-    info!("listening on {addr}");
-
+    // Install the SIGTERM handler BEFORE binding/logging readiness. Once
+    // "listening on" is logged, a caller (e.g. an orchestrator or this
+    // crate's own acceptance test) may send SIGTERM immediately. If the
+    // handler isn't registered yet, that signal falls through to the OS
+    // default disposition (immediate, uncatchable termination) instead of
+    // the graceful drain below — killed-by-signal, no "shutdown complete"
+    // log, exit code has no code() (None). Registering first closes that
+    // window.
     let mut sigterm = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::terminate(),
     )?;
+
+    let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
+    let addr = listener.local_addr()?;
+    info!("listening on {addr}");
 
     tonic::transport::Server::builder()
         .tls_config(tls)?
