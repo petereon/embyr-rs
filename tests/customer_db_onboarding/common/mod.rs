@@ -366,6 +366,18 @@ impl ServerProcess {
             .env("REST_PORT", rest_port.to_string())
             .env("ADMIN_PORT", admin_port.to_string())
             .env("RUST_LOG", "info")
+            // CI sets STRIPE_SECRET_KEY at the job level for
+            // card_payments_backend's own tests (.github/workflows/ci.yml).
+            // Inherited without a matching STRIPE_WEBHOOK_SIGNING_SECRET,
+            // ServerConfig::from_env() treats that combination as a fatal
+            // MissingVars error (finding #1, 2026-09-08) and the spawned
+            // server exits(1) at Step 1 -- before ever binding a listener.
+            // Every sibling test harness that spawns embyr-server already
+            // strips both vars (tests/{deployment_release_process,
+            // production_readiness,tls_startup_warning}/common/mod.rs); this
+            // one was missing from that blast-radius list.
+            .env_remove("STRIPE_SECRET_KEY")
+            .env_remove("STRIPE_WEBHOOK_SIGNING_SECRET")
             .stderr(Stdio::piped())
             .stdout(Stdio::piped());
         for (key, val) in extra_env {
