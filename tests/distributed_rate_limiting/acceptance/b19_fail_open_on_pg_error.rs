@@ -85,6 +85,7 @@ use common::{
     universe, assert_state_delta, set_to, warm_credential_cache_and_reset_bucket, DrlTestContext,
 };
 use embyr_proto::firestore::firestore_client::FirestoreClient;
+use serial_test::serial;
 use std::collections::HashMap;
 
 /// Read a label-free Prometheus counter's current value from a scraped
@@ -143,6 +144,7 @@ async fn capture_bucket_universe(
 ///
 /// @driving_port @real-io @US-01 @AC-RLFO-01
 #[tokio::test]
+#[serial]
 async fn pg_healthy_rate_limiting_behaves_unchanged() {
     let ctx = DrlTestContext::new(2.0).await;
     ctx.insert_project_with_bucket("fernbank-analytics", "key-fb-01", 2.0).await;
@@ -201,6 +203,7 @@ async fn pg_healthy_rate_limiting_behaves_unchanged() {
 ///
 /// NOT #[ignore] — this is the walking skeleton.
 #[tokio::test]
+#[serial]
 async fn atomic_update_pg_error_falls_back_to_per_instance_bucket() {
     let ctx = DrlTestContext::new(3.0).await;
     ctx.insert_project_with_bucket("solstice-retail", "key-solstice-02", 3.0).await;
@@ -282,6 +285,7 @@ async fn atomic_update_pg_error_falls_back_to_per_instance_bucket() {
 ///
 /// @driving_port @real-io @infrastructure-failure @US-01 @AC-RLFO-03
 #[tokio::test]
+#[serial]
 async fn exists_check_pg_error_falls_back_to_per_instance_bucket() {
     let ctx = DrlTestContext::new(2.0).await;
     ctx.insert_project_with_bucket("meridian-labs", "key-meridian-03", 0.0).await;
@@ -356,6 +360,7 @@ async fn exists_check_pg_error_falls_back_to_per_instance_bucket() {
 ///
 /// @driving_port @real-io @US-01 @AC-RLFO-04
 #[tokio::test]
+#[serial]
 async fn legitimately_absent_row_still_allowed_with_fresh_bucket() {
     let ctx = DrlTestContext::new(5.0).await;
     ctx.insert_project_without_bucket("heritage-mutual", "key-heritage-04").await;
@@ -405,6 +410,7 @@ async fn legitimately_absent_row_still_allowed_with_fresh_bucket() {
 ///
 /// @driving_port @real-io @infrastructure-failure @US-01 @AC-RLFO-05
 #[tokio::test]
+#[serial]
 async fn sustained_pg_errors_do_not_disable_rate_limiting_for_any_project() {
     let ctx = DrlTestContext::new(2.0).await;
     ctx.insert_project_with_bucket("atlas-freight", "key-atlas-05", 2.0).await;
@@ -477,6 +483,7 @@ async fn sustained_pg_errors_do_not_disable_rate_limiting_for_any_project() {
 ///
 /// @driving_port @real-io @infrastructure-failure @US-01 @AC-RLFO-06
 #[tokio::test]
+#[serial]
 async fn existing_timeout_fallback_is_unchanged_by_this_fix() {
     let ctx = DrlTestContext::new(5.0).await;
     ctx.insert_project_with_bucket("summit-ventures", "key-summit-06", 5.0).await;

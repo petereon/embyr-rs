@@ -301,9 +301,45 @@ pub const TEST_ADMIN_KEY: &str = "testkey";
 /// Wraps a spawned `embyr-server` subprocess. Mirrors
 /// `tests/production_readiness/common/mod.rs::ServerProcess` (trimmed to
 /// what US-02's provisioning scenarios need). Killed on `Drop`.
+///
+/// `stdout`/`stderr` are drained continuously by background threads into
+/// `output_buf` from spawn time, mirroring the fix already applied to
+/// `tests/production_readiness/common/mod.rs` (2026-08-31): `Stdio::piped()`
+/// pipes have a bounded OS buffer (~64KB on Linux) — an unread pipe can
+/// deadlock the child on its own `write()` before it ever reaches
+/// `/healthz`. Also lets a healthz-timeout panic show the child's own
+/// stdout/stderr instead of just "connection failed" with zero insight into
+/// why the process never came up.
 pub struct ServerProcess {
     pub child: Child,
     pub admin_port: u16,
+    output_buf: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+/// Spawn stdout+stderr drain threads for a freshly-spawned child, taking
+/// ownership of both pipes so they're never left unread.
+fn spawn_output_drain(child: &mut Child) -> std::sync::Arc<std::sync::Mutex<String>> {
+    let output_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    for pipe in [
+        child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let buf = std::sync::Arc::clone(&output_buf);
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(pipe);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(mut guard) = buf.lock() {
+                    guard.push_str(&line);
+                    guard.push('\n');
+                }
+            }
+        });
+    }
+    output_buf
 }
 
 impl ServerProcess {
@@ -330,15 +366,28 @@ impl ServerProcess {
             .env("REST_PORT", rest_port.to_string())
             .env("ADMIN_PORT", admin_port.to_string())
             .env("RUST_LOG", "info")
+            // CI sets STRIPE_SECRET_KEY at the job level for
+            // card_payments_backend's own tests (.github/workflows/ci.yml).
+            // Inherited without a matching STRIPE_WEBHOOK_SIGNING_SECRET,
+            // ServerConfig::from_env() treats that combination as a fatal
+            // MissingVars error (finding #1, 2026-09-08) and the spawned
+            // server exits(1) at Step 1 -- before ever binding a listener.
+            // Every sibling test harness that spawns embyr-server already
+            // strips both vars (tests/{deployment_release_process,
+            // production_readiness,tls_startup_warning}/common/mod.rs); this
+            // one was missing from that blast-radius list.
+            .env_remove("STRIPE_SECRET_KEY")
+            .env_remove("STRIPE_WEBHOOK_SIGNING_SECRET")
             .stderr(Stdio::piped())
             .stdout(Stdio::piped());
         for (key, val) in extra_env {
             cmd.env(key, val);
         }
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn embyr-server at {bin:?}: {e}"));
-        ServerProcess { child, admin_port }
+        let output_buf = spawn_output_drain(&mut child);
+        ServerProcess { child, admin_port, output_buf }
     }
 
     /// Poll `GET /healthz` until HTTP 200 or timeout. Returns `true` if
@@ -363,26 +412,75 @@ impl ServerProcess {
     pub fn admin_base(&self) -> String {
         format!("http://127.0.0.1:{}", self.admin_port)
     }
+
+    /// Like `wait_for_healthy`, but returns the last-observed `/healthz`
+    /// status/error on timeout instead of a bare bool, so a caller can
+    /// report *why* the server never came up instead of just that it didn't.
+    pub async fn wait_for_healthy_verbose(&self, timeout: Duration) -> Result<(), String> {
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/healthz", self.admin_port);
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut last = "no response received yet".to_string();
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(last);
+            }
+            match client.get(&url).send().await {
+                Ok(resp) if resp.status().as_u16() == 200 => return Ok(()),
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    last = format!("HTTP {status}: {body}");
+                }
+                Err(e) => last = format!("request error: {e}"),
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
 }
 
 /// Spawn `embyr-server` against `db_url` with the standard test admin key +
-/// encryption key env vars, and assert it becomes healthy within 30s.
+/// encryption key env vars, and assert it becomes healthy within 90s.
 ///
 /// Shared by the US-02 provisioning scenarios (cdo12-cdo18), which otherwise
 /// each repeated this identical spawn-and-wait sequence.
+///
+/// Timeout was 30s until 2026-09-20, when a contended CI runner (25m run vs
+/// the usual 13-17m) blew through it — binary cold-start + migrations + pool
+/// warmup genuinely took longer than 30s under load, not a server regression.
+/// Bumped to 90s and switched to `wait_for_healthy_verbose` so a future
+/// timeout panic carries the last poll's actual status/error, not just
+/// "must be healthy" with zero diagnostic.
 pub async fn start_healthy_server(db_url: &str) -> ServerProcess {
-    let server = ServerProcess::start(
-        db_url,
-        &[
-            ("EMBYR_ADMIN_KEY", TEST_ADMIN_KEY),
-            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
-        ],
-    );
-    assert!(
-        server.wait_for_healthy(Duration::from_secs(30)).await,
-        "embyr-server must be healthy before provisioning"
-    );
-    server
+    let extra_env = [
+        ("EMBYR_ADMIN_KEY", TEST_ADMIN_KEY),
+        ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
+    ];
+    // find_free_port() binds :0 to learn a free port, then immediately drops
+    // the listener so the number can be handed to the child via env var --
+    // a TOCTOU gap. Up to 18 cdo tests each spawn their own embyr-server in
+    // the same CI job, several concurrently (cargo test parallelizes both
+    // test binaries and tests within a binary), so another one can grab that
+    // "free" port before this child actually binds it. Retry with freshly
+    // chosen ports instead of failing the test outright.
+    const MAX_ATTEMPTS: u32 = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let server = ServerProcess::start(db_url, &extra_env);
+        match server.wait_for_healthy_verbose(Duration::from_secs(90)).await {
+            Ok(()) => return server,
+            Err(last) => {
+                let output = server.output_buf.lock().map(|g| g.clone()).unwrap_or_default();
+                if attempt < MAX_ATTEMPTS && output.contains("Address already in use") {
+                    continue;
+                }
+                panic!(
+                    "embyr-server must be healthy before provisioning; last /healthz poll: {last}\n\
+                     --- captured embyr-server stdout/stderr ---\n{output}"
+                );
+            }
+        }
+    }
+    unreachable!("loop above always returns Ok(server) or panics")
 }
 
 impl Drop for ServerProcess {

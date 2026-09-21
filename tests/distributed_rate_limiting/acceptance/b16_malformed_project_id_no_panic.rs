@@ -83,10 +83,19 @@ async fn malformed_project_id_does_not_panic_the_server() {
     // gRPC error on that same call, but a crashed process makes the admin HTTP port
     // (a completely independent listener) unreachable. A successful scrape here
     // proves the process survived, not just that one connection didn't drop.
+    // NOTE: this used to check for `embyr_rate_limit_requests_total`, which
+    // preauth-db-amplification (finding #14, commit 8abd284) made unreliable
+    // here: `extract_project_id` now rejects every one of these charset-invalid
+    // IDs before `rate_limiter.check()` is ever called, so that counter is
+    // never incremented in this test's process — a deterministic failure, not
+    // the flake it was mistaken for. `embyr_grpc_requests_total` is recorded
+    // unconditionally for every gRPC call (obs_helpers::record_grpc_call, called
+    // from the Firestore trait wrapper regardless of outcome), so it still
+    // proves the same thing: the process served all 5 calls without crashing.
     let admin_client = reqwest::Client::new();
     let metrics_body = get_metrics(&admin_client, server.admin_addr).await;
     assert!(
-        metrics_body.contains("embyr_rate_limit_requests_total"),
+        metrics_body.contains("embyr_grpc_requests_total"),
         "admin :9090 /metrics must still be reachable and serving real metrics after \
          malformed project_id inputs (server process must not have panicked/crashed)"
     );

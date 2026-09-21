@@ -120,6 +120,35 @@ impl PostgresBackendAdapter {
         Self::new_from_pool(pool.clone()).migrate().await
     }
 
+    /// Apply every migration except the most recently added one.
+    ///
+    /// Test-only convenience for simulating a customer database mid-upgrade
+    /// (a DBA hasn't re-run `embyr-db-prep` since the latest migration
+    /// landed). Reads the same compiled-in `MIGRATOR` `migrate()` uses —
+    /// never invokes `sqlx::migrate!` independently (ADR-022: sole embed
+    /// point is this file).
+    pub async fn apply_all_but_last_migration(database_url: &str) -> Result<(), CoreError> {
+        use sqlx::migrate::Migrate;
+        use sqlx::Connection;
+
+        let migrations: Vec<_> = MIGRATOR.iter().collect();
+        if migrations.len() < 2 {
+            return Err(CoreError::BackendUnavailable(
+                "need at least 2 migrations to simulate 'missing the latest one'".to_string(),
+            ));
+        }
+        let mut conn = sqlx::PgConnection::connect(database_url)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        conn.ensure_migrations_table()
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        for m in &migrations[..migrations.len() - 1] {
+            conn.apply(m).await.map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Send a Postgres NOTIFY on the project's channel after a write.
     ///
     /// The payload is `{collection_path}/{document_id}`.

@@ -110,11 +110,22 @@ pub async fn run_metering(
 }
 
 /// Push every non-zero dimension for one project (AC-205-02: zero-usage
-/// dimensions are never pushed). Returns the count of dimensions Stripe
-/// genuinely recorded as new (excludes idempotent replays, AC-205-03). Any
+/// dimensions are never pushed). Returns the count of dimensions genuinely
+/// pushed this call (excludes already-processed re-runs, AC-205-03). Any
 /// single dimension's `StripeError` aborts the REST of this project's own
 /// pushes and propagates to the caller — the per-PROJECT isolation
 /// (AC-205-04) happens one level up in `run_metering`'s loop.
+///
+/// AC-205-03 idempotency is enforced LOCALLY via `usage_metering_pushed`
+/// (migrations/0038), not by trusting Stripe's idempotent-replay response
+/// timing: comparing the replayed event's `created` against this call's own
+/// start second (the prior approach) is racy whenever a re-run lands within
+/// the same wall-clock second as the original push — exactly what a fast
+/// local/integration re-run does. `INSERT ... ON CONFLICT DO NOTHING`
+/// mirrors `processed_webhook_events` (migrations/0020): a dimension is
+/// "claimed" before the Stripe call; if the claim is a no-op (already
+/// claimed), the dimension is skipped entirely. If the Stripe call then
+/// fails, the claim is released so a future re-run can retry it.
 async fn push_project_usage(
     state: &OperatorState,
     row: &DailyMetricsRow,
@@ -122,11 +133,32 @@ async fn push_project_usage(
     today: chrono::NaiveDate,
 ) -> Result<u32, crate::adapters::stripe_gateway::StripeError> {
     let yesterday = today - chrono::Duration::days(1);
+    let pool = state.system_db.pool();
     let mut pushed = 0u32;
 
     for (dimension, quantity_of) in DIMENSIONS {
         let quantity = quantity_of(row);
         if quantity <= 0 {
+            continue;
+        }
+
+        let claim = sqlx::query(
+            "INSERT INTO usage_metering_pushed (project_id, dimension, date) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(&row.project_id)
+        .bind(dimension)
+        .bind(yesterday)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            crate::adapters::stripe_gateway::StripeError::ApiError(format!(
+                "usage_metering_pushed claim failed: {e}"
+            ))
+        })?;
+
+        if claim.rows_affected() == 0 {
+            // Already pushed for this project/dimension/day — AC-205-03.
             continue;
         }
 
@@ -141,7 +173,7 @@ async fn push_project_usage(
         // rejects (`idempotency_error`: "same key, different parameters").
         let idempotency_key =
             format!("{stripe_customer_id}:{}:{dimension}:{yesterday}", row.project_id);
-        let is_new = state
+        let push_result = state
             .stripe_gateway
             .push_usage_record(
                 stripe_customer_id,
@@ -153,11 +185,22 @@ async fn push_project_usage(
                     .and_utc(),
                 &idempotency_key,
             )
-            .await?;
+            .await;
 
-        if is_new {
-            pushed += 1;
+        if push_result.is_err() {
+            // Release the claim so a future re-run can retry this dimension.
+            let _ = sqlx::query(
+                "DELETE FROM usage_metering_pushed WHERE project_id = $1 AND dimension = $2 AND date = $3",
+            )
+            .bind(&row.project_id)
+            .bind(dimension)
+            .bind(yesterday)
+            .execute(pool)
+            .await;
         }
+        push_result?;
+
+        pushed += 1;
     }
 
     Ok(pushed)
