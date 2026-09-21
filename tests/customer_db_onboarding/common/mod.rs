@@ -452,21 +452,35 @@ impl ServerProcess {
 /// timeout panic carries the last poll's actual status/error, not just
 /// "must be healthy" with zero diagnostic.
 pub async fn start_healthy_server(db_url: &str) -> ServerProcess {
-    let server = ServerProcess::start(
-        db_url,
-        &[
-            ("EMBYR_ADMIN_KEY", TEST_ADMIN_KEY),
-            ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
-        ],
-    );
-    if let Err(last) = server.wait_for_healthy_verbose(Duration::from_secs(90)).await {
-        let output = server.output_buf.lock().map(|g| g.clone()).unwrap_or_default();
-        panic!(
-            "embyr-server must be healthy before provisioning; last /healthz poll: {last}\n\
-             --- captured embyr-server stdout/stderr ---\n{output}"
-        );
+    let extra_env = [
+        ("EMBYR_ADMIN_KEY", TEST_ADMIN_KEY),
+        ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
+    ];
+    // find_free_port() binds :0 to learn a free port, then immediately drops
+    // the listener so the number can be handed to the child via env var --
+    // a TOCTOU gap. Up to 18 cdo tests each spawn their own embyr-server in
+    // the same CI job, several concurrently (cargo test parallelizes both
+    // test binaries and tests within a binary), so another one can grab that
+    // "free" port before this child actually binds it. Retry with freshly
+    // chosen ports instead of failing the test outright.
+    const MAX_ATTEMPTS: u32 = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let server = ServerProcess::start(db_url, &extra_env);
+        match server.wait_for_healthy_verbose(Duration::from_secs(90)).await {
+            Ok(()) => return server,
+            Err(last) => {
+                let output = server.output_buf.lock().map(|g| g.clone()).unwrap_or_default();
+                if attempt < MAX_ATTEMPTS && output.contains("Address already in use") {
+                    continue;
+                }
+                panic!(
+                    "embyr-server must be healthy before provisioning; last /healthz poll: {last}\n\
+                     --- captured embyr-server stdout/stderr ---\n{output}"
+                );
+            }
+        }
     }
-    server
+    unreachable!("loop above always returns Ok(server) or panics")
 }
 
 impl Drop for ServerProcess {
