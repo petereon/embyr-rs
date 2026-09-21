@@ -6,8 +6,15 @@
 //!   - **In-process only** (`new`): pure in-memory token bucket; sufficient for
 //!     single-instance deployments and tests that don't need cross-node enforcement.
 //!
-//! The 20 ms Postgres timeout ensures a slow/unavailable DB never adds latency
-//! to gRPC hot paths.
+//! The Postgres timeout ensures a slow/unavailable DB never adds much latency
+//! to gRPC hot paths. It must cover `check_pg`'s WORST case, not just its
+//! common case: the fast path (existing row, tokens available) is a single
+//! round trip, but the legitimately-absent-row path (pre-migration-0018
+//! project) is three sequential round trips (UPDATE, EXISTS, INSERT). A
+//! budget sized for one round trip left that path racing the clock — on a
+//! contended box the timeout could fire mid-INSERT, `tokio::time::timeout`
+//! drops the in-flight query, and the fallback allows the request without
+//! the fresh bucket row ever landing.
 
 use std::{
     collections::HashMap,
@@ -25,8 +32,11 @@ use axum::{
 };
 use embyr_core::rate_limit::RateLimitInfo;
 
-/// Hard cap on Postgres round-trip for distributed rate-limit enforcement.
-const RATE_LIMIT_PG_TIMEOUT_MS: u64 = 20;
+/// Hard cap on Postgres round-trip(s) for distributed rate-limit enforcement.
+/// Sized for `check_pg`'s worst case (3 sequential round trips on the
+/// legitimately-absent-row path), not its 1-round-trip common case — see
+/// module doc comment.
+const RATE_LIMIT_PG_TIMEOUT_MS: u64 = 60;
 
 /// Sentinel label for `project_id` values not confirmed to belong to a
 /// provisioned project at the time of this rate-limit check (ADR-069).
