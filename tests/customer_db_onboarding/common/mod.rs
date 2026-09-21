@@ -301,9 +301,45 @@ pub const TEST_ADMIN_KEY: &str = "testkey";
 /// Wraps a spawned `embyr-server` subprocess. Mirrors
 /// `tests/production_readiness/common/mod.rs::ServerProcess` (trimmed to
 /// what US-02's provisioning scenarios need). Killed on `Drop`.
+///
+/// `stdout`/`stderr` are drained continuously by background threads into
+/// `output_buf` from spawn time, mirroring the fix already applied to
+/// `tests/production_readiness/common/mod.rs` (2026-08-31): `Stdio::piped()`
+/// pipes have a bounded OS buffer (~64KB on Linux) — an unread pipe can
+/// deadlock the child on its own `write()` before it ever reaches
+/// `/healthz`. Also lets a healthz-timeout panic show the child's own
+/// stdout/stderr instead of just "connection failed" with zero insight into
+/// why the process never came up.
 pub struct ServerProcess {
     pub child: Child,
     pub admin_port: u16,
+    output_buf: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+/// Spawn stdout+stderr drain threads for a freshly-spawned child, taking
+/// ownership of both pipes so they're never left unread.
+fn spawn_output_drain(child: &mut Child) -> std::sync::Arc<std::sync::Mutex<String>> {
+    let output_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    for pipe in [
+        child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        child.stderr.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let buf = std::sync::Arc::clone(&output_buf);
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(pipe);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(mut guard) = buf.lock() {
+                    guard.push_str(&line);
+                    guard.push('\n');
+                }
+            }
+        });
+    }
+    output_buf
 }
 
 impl ServerProcess {
@@ -335,10 +371,11 @@ impl ServerProcess {
         for (key, val) in extra_env {
             cmd.env(key, val);
         }
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn embyr-server at {bin:?}: {e}"));
-        ServerProcess { child, admin_port }
+        let output_buf = spawn_output_drain(&mut child);
+        ServerProcess { child, admin_port, output_buf }
     }
 
     /// Poll `GET /healthz` until HTTP 200 or timeout. Returns `true` if
@@ -411,7 +448,11 @@ pub async fn start_healthy_server(db_url: &str) -> ServerProcess {
         ],
     );
     if let Err(last) = server.wait_for_healthy_verbose(Duration::from_secs(90)).await {
-        panic!("embyr-server must be healthy before provisioning; last /healthz poll: {last}");
+        let output = server.output_buf.lock().map(|g| g.clone()).unwrap_or_default();
+        panic!(
+            "embyr-server must be healthy before provisioning; last /healthz poll: {last}\n\
+             --- captured embyr-server stdout/stderr ---\n{output}"
+        );
     }
     server
 }
