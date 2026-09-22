@@ -269,6 +269,7 @@ async fn direct_pg_project_past_grace_window_has_credentials_purged_via_spawn_an
 /// alone — the sweeper's own `WHERE deleted_at < $1` predicate structurally
 /// excludes it.
 #[tokio::test]
+#[serial]
 async fn project_within_grace_window_is_left_completely_untouched() {
     let (_sys_container, system_db) = start_system_db().await;
     let account_id = insert_account(system_db.pool()).await;
@@ -350,6 +351,7 @@ async fn already_purged_project_is_a_no_op_on_the_next_cycle_with_no_duplicate_m
 /// deleted_at/created_at age — the sweeper's own `WHERE status = 'deleted'`
 /// predicate gates every other condition.
 #[tokio::test]
+#[serial]
 async fn active_project_is_never_purged_regardless_of_age() {
     let (_sys_container, system_db) = start_system_db().await;
     let account_id = insert_account(system_db.pool()).await;
@@ -386,6 +388,7 @@ async fn active_project_is_never_purged_regardless_of_age() {
 /// once released — mirrors customer_db_transaction_sweeper's own proven
 /// concurrent-serialization test shape exactly.
 #[tokio::test]
+#[serial]
 async fn concurrent_sweep_attempts_are_serialized_by_advisory_lock() {
     let (_sys_container, system_db) = start_system_db().await;
 
@@ -436,6 +439,7 @@ async fn concurrent_sweep_attempts_are_serialized_by_advisory_lock() {
 /// no `backend_mode` filter (ADR-073 Decision 2), unlike
 /// TransactionSweeper's own necessary exclusion.
 #[tokio::test]
+#[serial]
 async fn agent_mode_project_past_grace_window_has_tls_bundle_purged() {
     let (_sys_container, system_db) = start_system_db().await;
     let account_id = insert_account(system_db.pool()).await;
@@ -468,6 +472,7 @@ async fn agent_mode_project_past_grace_window_has_tls_bundle_purged() {
 /// `deleted_at`, and `updated_at` on the project's own row, and any row
 /// referencing the project's id (`sdk_api_keys`), are exactly unchanged.
 #[tokio::test]
+#[serial]
 async fn purge_never_touches_status_deleted_at_updated_at_or_referencing_rows() {
     let (_sys_container, system_db) = start_system_db().await;
     let account_id = insert_account(system_db.pool()).await;
@@ -545,6 +550,7 @@ async fn purge_never_touches_status_deleted_at_updated_at_or_referencing_rows() 
 /// stalled/failing sweeper invisible to the Grafana dashboard built for
 /// finding #29.
 #[tokio::test]
+#[serial]
 async fn purge_query_failure_increments_the_shared_sweeper_error_counter() {
     let (_sys_container, system_db) = start_system_db().await;
 
