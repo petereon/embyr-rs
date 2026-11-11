@@ -11,6 +11,10 @@ all-features = false
 # ---------------------------------------------------------------------------
 [advisories]
 ignore = [
+    # pin-utils 0.1.0 unmaintained (informational, no vulnerability) — pulled
+    # transitively by aws-smithy-http (AWS SDK). No safe upgrade exists;
+    # drop this once the AWS SDK moves off it upstream.
+    "RUSTSEC-2026-0441",
     # rustls-pemfile 1.x unmaintained — no safe upgrade available for sqlx 0.7.x dep
     "RUSTSEC-2025-0134",
     # rsa 0.9.10 Marvin Attack (timing sidechannel key recovery) — dev-only,

@@ -764,7 +764,15 @@ async fn argon2_verification_does_not_block_the_reactor_under_concurrent_signin_
     // the 150-token rate-limit capacity (ADR-076) so this test observes
     // 200/401, never 429 (that is AC-ASH-03/06's own concern, tested
     // separately below, at the full ~150-160 concurrency the AC names).
-    const FLOOD_SIZE: usize = 30;
+    //
+    // 2026-11-11 CI fix: was 30. On GitHub's 2-4 vCPU runners a 30-call
+    // flood takes 35s+, so the legitimate signin's TOTP code (30s step,
+    // ±1 skew) expires while its Argon2id verify is still queued, and the
+    // server correctly answers 401 — a test-harness timing artifact, not a
+    // reactor stall. 8 calls still exceed the runner's core count (so a
+    // serialized regression is still ~4-8x over the scaled bar below) while
+    // finishing well inside one TOTP step.
+    const FLOOD_SIZE: usize = 8;
 
     let ctx = AdminTestContext::new().await;
 
