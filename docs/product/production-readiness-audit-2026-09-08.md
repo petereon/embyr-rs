@@ -97,6 +97,20 @@ fixes earlier the same day.
 
 `Blockers: 2 (same root cause). High: 3. Medium: 7. Low: 4. Total: 16 new items.`
 
+## Follow-Up Scan — 2026-11-11 (security findings from the admin-UI wiring design)
+
+Found while mapping the admin SPA onto the real admin API (`docs/feature/admin-ui-api-wiring/`).
+Each was re-verified against the code by the orchestrator before being listed.
+
+| # | Domain | Finding | Location | Severity | Status |
+|---|---|---|---|---|---|
+| 58 | Security | **OIDC callback mints a session for the wrong user.** After validating the id_token (issuer, audience, signature) the handler ignores the token's subject/email. It selects a member with `role = 'owner'` (lowercase — never matches the stored `Owner`) and falls back to the account's first `account_members` row. Anyone holding a valid id_token from a configured, enabled provider for that client_id gets an admin session on the account. Reachable only once an Owner has configured a provider. | `crates/embyr-server/src/admin/handlers/auth.rs` (`oidc_callback`) | **Blocker** (when OIDC is enabled) | **OPEN** |
+| 59 | Security | **`PATCH /admin/v1/projects/:id` has no role check.** Only account ownership is checked, so a Viewer can rename, change logging/retention, write a new DSN, and set `status` to any string except `deleted` — including un-suspending a billing-suspended project. No credential-cache eviction on status change. | `crates/embyr-server/src/admin/handlers/projects.rs` (`patch_project`) | **High** | **OPEN** |
+| 60 | Security | **Invite allows privilege escalation.** `invite_member` requires Admin but does not compare the invited role to the caller's, so an Admin can invite an Owner. Email and role are unvalidated (a bad role surfaces as a 500 from the CHECK constraint). Latent today only because no invitation-accept endpoint exists. | `crates/embyr-server/src/admin/handlers/members.rs` (`invite_member`) | **High** (once accept ships) | **OPEN** |
+| 61 | Security | **Unbounded concurrent Argon2id.** 64 MiB per verify, run from `spawn_blocking` with no cap: a 150-signin burst inside the rate limit allocates ~9.6 GB. | `crates/embyr-core/src/auth/argon2.rs` | **High** | **FIX IN REVIEW** — PR #11 (process-wide gate, one permit per core) |
+| 62 | Security / design | **Two DSN stores with different trust models.** Request serving decrypts `ecies_encrypted_dsn` (key derived from the customer's API key — the server cannot read it at rest). The sweeper path reads `backend_pg_dsn_enc` (server-held AES key). `PATCH backend_pg_dsn` writes only the latter and provisioning writes only the former, so (a) editing a DSN via PATCH does not change what requests use, and (b) wherever `backend_pg_dsn_enc` is populated the "server cannot read the DSN" property no longer holds. Needs an explicit decision, not a patch. | `admin/handlers/provision.rs`, `admin/handlers/projects.rs`, `adapters/customer_db_connect.rs`, `adapters/project_auth.rs` | **Medium** | **OPEN — design decision pending** |
+| 63 | Operability | **No production path creates the first account/user/TOTP secret**, and invitations cannot be accepted (no token column, no accept/enrol/revoke endpoint). A fresh deployment needs hand-written SQL before anyone can sign in. | `migrations/` (accounts, users, invitations), `admin/handlers/members.rs` | **Blocker** (for a usable admin surface) | **OPEN** |
+
 ## Notes
 
 - This scan is a fresh pass, independent of `known-gaps.md` (which is fully closed — all 8 items resolved 2026-09-06 through 2026-09-08). No overlap between the two lists.
