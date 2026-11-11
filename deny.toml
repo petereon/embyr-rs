@@ -47,6 +47,9 @@ allow = [
     # webpki-roots (transitive via aws-config's TLS stack) — permissive,
     # data-only license (bundles Mozilla's CA root list), no copyleft terms.
     "CDLA-Permissive-2.0",
+    # quoted_printable (transitive via lettre, SMTP email) — public-domain
+    # equivalent, OSI-approved, no attribution or copyleft terms.
+    "0BSD",
 ]
 
 [sources]
@@ -75,6 +78,7 @@ deny = [
         # standalone binary; IO-permissive scope, same as embyr-agent/embyr-server.
         "embyr-db-prep",
         "embyr-pg-storage",
+        "lettre",
         "tokio-util",
         "tokio-stream",
         "tokio-tar",

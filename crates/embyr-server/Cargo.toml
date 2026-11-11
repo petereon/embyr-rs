@@ -72,6 +72,7 @@ ed25519-dalek = { workspace = true }
 # parses REAL operator-provided PEM cert/key files in PRODUCTION code, not
 # just test fixtures (mirrors ed25519-dalek's own documented promotion above).
 rustls-pemfile.workspace = true
+lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls", "hostname"] }
 
 [[test]]
 name = "us_13_browser_transport"
