@@ -305,18 +305,22 @@ mod tests {
         format!("{signing_input}.{sig_b64}")
     }
 
-    fn mint_hs256_confusion_token(public_key_bytes: &[u8; 32], sub: &str, aud: &str, exp_unix: i64) -> String {
+    fn mint_hs256_confusion_token(
+        public_key_bytes: &[u8; 32],
+        sub: &str,
+        aud: &str,
+        exp_unix: i64,
+    ) -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-        let payload = URL_SAFE_NO_PAD.encode(
-            serde_json::json!({"sub": sub, "aud": aud, "exp": exp_unix}).to_string(),
-        );
+        let payload = URL_SAFE_NO_PAD
+            .encode(serde_json::json!({"sub": sub, "aud": aud, "exp": exp_unix}).to_string());
         let signing_input = format!("{header}.{payload}");
-        let mut mac = Hmac::<Sha256>::new_from_slice(public_key_bytes)
-            .expect("HMAC accepts any key length");
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(public_key_bytes).expect("HMAC accepts any key length");
         mac.update(signing_input.as_bytes());
         let sig_b64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
         format!("{signing_input}.{sig_b64}")
@@ -390,7 +394,12 @@ mod tests {
     fn valid_unexpired_token_for_correct_project_verifies_successfully() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let credential = credential_for(&signing_key);
-        let token = mint_token(&signing_key, "maria-santos", "trailmark-prod", now_unix() + 3600);
+        let token = mint_token(
+            &signing_key,
+            "maria-santos",
+            "trailmark-prod",
+            now_unix() + 3600,
+        );
 
         let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
 
@@ -443,7 +452,12 @@ mod tests {
         // pre-existing test token already is produces an empty claims map.
         let signing_key = SigningKey::generate(&mut OsRng);
         let credential = credential_for(&signing_key);
-        let token = mint_token(&signing_key, "maria-santos", "trailmark-prod", now_unix() + 3600);
+        let token = mint_token(
+            &signing_key,
+            "maria-santos",
+            "trailmark-prod",
+            now_unix() + 3600,
+        );
 
         let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
 
@@ -469,11 +483,8 @@ mod tests {
         let signing_key = SigningKey::generate(&mut OsRng);
         let credential = credential_for(&signing_key);
 
-        let result = verify_client_identity_token(
-            Some("not-a-jwt-at-all"),
-            "trailmark-prod",
-            &credential,
-        );
+        let result =
+            verify_client_identity_token(Some("not-a-jwt-at-all"), "trailmark-prod", &credential);
 
         assert_eq!(result, Err(ClientIdentityVerifyError::Malformed));
     }
@@ -483,7 +494,12 @@ mod tests {
         let signing_key = SigningKey::generate(&mut OsRng);
         let credential = credential_for(&signing_key);
         // Dana Kim's token, minted 2h ago for a 1h validity window (US-02 Domain Example 2).
-        let token = mint_token(&signing_key, "dana-kim", "trailmark-prod", now_unix() - 3600);
+        let token = mint_token(
+            &signing_key,
+            "dana-kim",
+            "trailmark-prod",
+            now_unix() - 3600,
+        );
 
         let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
 
@@ -494,7 +510,12 @@ mod tests {
     fn token_minted_for_a_different_project_is_rejected_as_project_mismatch() {
         let signing_key = SigningKey::generate(&mut OsRng);
         let credential = credential_for(&signing_key);
-        let token = mint_token(&signing_key, "maria-santos", "trailmark-staging", now_unix() + 3600);
+        let token = mint_token(
+            &signing_key,
+            "maria-santos",
+            "trailmark-staging",
+            now_unix() + 3600,
+        );
 
         let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
 
@@ -510,7 +531,12 @@ mod tests {
         let real_key = SigningKey::generate(&mut OsRng);
         let attacker_key = SigningKey::generate(&mut OsRng);
         let credential = credential_for(&real_key);
-        let forged = mint_token(&attacker_key, "maria-santos", "trailmark-prod", now_unix() + 3600);
+        let forged = mint_token(
+            &attacker_key,
+            "maria-santos",
+            "trailmark-prod",
+            now_unix() + 3600,
+        );
 
         let result = verify_client_identity_token(Some(&forged), "trailmark-prod", &credential);
 
@@ -526,10 +552,15 @@ mod tests {
         let public_key_bytes = credential.public_key_current;
         // Attacker knows the PUBLIC key (by definition not secret) and
         // crafts an HS256 token using those bytes as the HMAC secret.
-        let confusion_token =
-            mint_hs256_confusion_token(&public_key_bytes, "maria-santos", "trailmark-prod", now_unix() + 3600);
+        let confusion_token = mint_hs256_confusion_token(
+            &public_key_bytes,
+            "maria-santos",
+            "trailmark-prod",
+            now_unix() + 3600,
+        );
 
-        let result = verify_client_identity_token(Some(&confusion_token), "trailmark-prod", &credential);
+        let result =
+            verify_client_identity_token(Some(&confusion_token), "trailmark-prod", &credential);
 
         assert_eq!(
             result,
@@ -549,15 +580,24 @@ mod tests {
             public_key_current: current_key.verifying_key().to_bytes(),
             public_key_previous: Some(previous_key.verifying_key().to_bytes()),
         };
-        let token = mint_token(&previous_key, "maria-santos", "trailmark-prod", now_unix() + 3600);
+        let token = mint_token(
+            &previous_key,
+            "maria-santos",
+            "trailmark-prod",
+            now_unix() + 3600,
+        );
 
         let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
 
-        assert!(result.is_ok(), "AC-16-11: immediately-previous-key tokens must still verify");
+        assert!(
+            result.is_ok(),
+            "AC-16-11: immediately-previous-key tokens must still verify"
+        );
     }
 
     #[test]
-    fn token_signed_under_a_key_two_rotations_ago_is_rejected_as_malformed_not_a_distinct_stale_class() {
+    fn token_signed_under_a_key_two_rotations_ago_is_rejected_as_malformed_not_a_distinct_stale_class(
+    ) {
         // ADR-025: "no separate 'stale credential' error class" — a key from
         // 2+ rotations ago is simply not in {current, previous} any more,
         // so it fails signature verification under both and is Malformed.
@@ -568,7 +608,12 @@ mod tests {
             public_key_current: current_key.verifying_key().to_bytes(),
             public_key_previous: Some(previous_key.verifying_key().to_bytes()),
         };
-        let token = mint_token(&stale_key, "maria-santos", "trailmark-prod", now_unix() + 3600);
+        let token = mint_token(
+            &stale_key,
+            "maria-santos",
+            "trailmark-prod",
+            now_unix() + 3600,
+        );
 
         let result = verify_client_identity_token(Some(&token), "trailmark-prod", &credential);
 
@@ -651,7 +696,11 @@ mod tests {
 
         let fp = credential_fingerprint(&public_key);
 
-        assert_eq!(fp.len(), 16, "fingerprint must be 16 hex chars (dc_<16hex> truncation precedent)");
+        assert_eq!(
+            fp.len(),
+            16,
+            "fingerprint must be 16 hex chars (dc_<16hex> truncation precedent)"
+        );
         assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
@@ -660,6 +709,9 @@ mod tests {
         let signing_key = SigningKey::generate(&mut OsRng);
         let public_key = signing_key.verifying_key().to_bytes();
 
-        assert_eq!(credential_fingerprint(&public_key), credential_fingerprint(&public_key));
+        assert_eq!(
+            credential_fingerprint(&public_key),
+            credential_fingerprint(&public_key)
+        );
     }
 }

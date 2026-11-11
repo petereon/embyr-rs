@@ -100,7 +100,7 @@ jobs:
         working-directory: crates/embyr-admin-ui
 
       - name: Run workspace tests
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast -- --ignored
 
   # ─── lint: clippy -D warnings ──────────────────────────────────────────────
   # cargo-deny check moved to its own workflow (cargo-deny.yml) — see that
