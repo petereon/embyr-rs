@@ -26,7 +26,6 @@ use embyr_server::{
     adapters::{
         aws_secret_fetcher::AwsSecretFetcher,
         credential_cache::CredentialCache,
-        email::NoopEmailSender,
         gcp_secret_fetcher::GcpSecretFetcher,
         google_jwks_cache::GoogleJwksCache,
         index_manager::IndexManager,
@@ -259,8 +258,24 @@ async fn main() {
         embyr_server::adapters::cap_status_cache::CapStatusCache::new(),
     );
 
+    // Real SMTP delivery when EMBYR_SMTP_URL + EMBYR_EMAIL_FROM are set;
+    // a half-configured pair refuses startup; neither set = emails dropped.
+    let env_nonempty = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let (smtp_url, email_from) = (env_nonempty("EMBYR_SMTP_URL"), env_nonempty("EMBYR_EMAIL_FROM"));
+    if smtp_url.is_none() && email_from.is_none() {
+        tracing::warn!(
+            "EMBYR_SMTP_URL is not set: member invites and password-reset emails will NOT be delivered"
+        );
+    }
     let email_sender: Arc<dyn embyr_core::admin::email::IEmailSender + Send + Sync> =
-        Arc::new(NoopEmailSender);
+        embyr_server::adapters::email::sender_from_settings(
+            smtp_url.as_deref(),
+            email_from.as_deref(),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        });
 
     // stripe-webhook-secret-required (D1/D2): mount the webhook sub-router
     // only when Stripe billing is genuinely enabled (non-empty
