@@ -53,6 +53,9 @@ async fn distributed_rate_limit_rejects_when_bucket_exhausted() {
     let (addr, _server) = start_distributed_grpc_server(&ctx).await;
     let ctx = ctx.with_grpc_addr(addr);
     let mut client = FirestoreClient::new(ctx.grpc_channel());
+    // Pre-pay the cold-start cost: siblings share this binary, and a cold first
+    // request can exceed the limiter's 20ms PG timeout (fail-open -> Internal).
+    warm_credential_cache_and_reset_bucket(&ctx, &mut client, "proj-ws", "key-ws", 0.0).await;
     let result = client.get_document(get_document_request("proj-ws", "key-ws")).await;
     assert_eq!(classify_grpc_status(&result), "resource_exhausted");
 }
