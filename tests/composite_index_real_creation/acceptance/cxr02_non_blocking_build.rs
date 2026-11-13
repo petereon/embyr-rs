@@ -120,6 +120,9 @@ async fn creating_an_index_against_a_large_live_collection_does_not_block_concur
 async fn listing_indexes_immediately_after_create_shows_a_status_distinct_from_ready() {
     let ctx = SecurityRulesFullContext::new("trailmark-prod-cxr02-distinguish").await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
+    // Seed rows so the build outlasts the status read (an empty table builds
+    // faster than one HTTP round-trip, making "not ready yet" a race).
+    seed_bulk_products(&ctx.cust_pool, &ctx.project_id, 3000).await;
 
     let create_body: serde_json::Value = reqwest::Client::new()
         .post(ctx.admin_url(&format!("/admin/v1/projects/{}/indexes", ctx.project_id)))
