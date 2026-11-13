@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
+use embyr_core::admin::account::Role;
+
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::handlers::get_project::GetProjectDetail;
 use crate::admin::state::UserAdminState;
@@ -84,6 +86,9 @@ pub async fn list_projects(
     Ok(Json(projects))
 }
 
+/// Statuses an Owner/Admin may set via PATCH. `deleted` is operator-only.
+const PATCHABLE_STATUSES: &[&str] = &["active", "suspended"];
+
 /// Partial-update body for PATCH /admin/v1/projects/:id.
 /// All fields are optional; absent fields are preserved via COALESCE.
 #[derive(Deserialize, Default)]
@@ -98,11 +103,15 @@ pub struct PatchProjectBody {
 /// PATCH /admin/v1/projects/:project_id — session-auth partial update.
 ///
 /// Rules enforced:
-/// - `status = "deleted"` is rejected with 422 (soft-delete is operator-only).
+/// - Viewer → 403 (Owner or Admin only).
+/// - `status` must be `active` or `suspended`; anything else (incl. `deleted`,
+///   which is operator-only) → 422.
+/// - `status = "active"` while the account is on a billing hold
+///   (`past_due` / `free_cap_exceeded`) → 409.
 /// - Account isolation: project must belong to `session.account_id`; otherwise 403.
 /// - `backend_pg_dsn` is AES-256-GCM encrypted before being written to
 ///   `backend_pg_dsn_enc`; the plaintext DSN is never persisted.
-/// - Credential cache is evicted after a DSN change.
+/// - Credential cache is evicted after a DSN or status change.
 /// - Absent patch fields are preserved via COALESCE.
 pub async fn patch_project(
     Path(project_id): Path<String>,
@@ -110,9 +119,17 @@ pub async fn patch_project(
     session: SessionContext,
     Json(body): Json<PatchProjectBody>,
 ) -> Result<Json<GetProjectDetail>, StatusCode> {
-    // ── Guard: soft-delete not patchable via PATCH ────────────────────────────
-    if body.status.as_deref() == Some("deleted") {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    // ── Guard: Owner or Admin only (audit finding #59) ────────────────────────
+    if session.role < Role::Admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // ── Guard: status allow-list, body-only, before any DB access (#59) ───────
+    // `deleted` (soft-delete is operator-only) and any unknown string → 422.
+    if let Some(status) = body.status.as_deref() {
+        if !PATCHABLE_STATUSES.contains(&status) {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
     }
 
     let pool = state.system_db.pool();
@@ -142,6 +159,28 @@ pub async fn patch_project(
     let project_account: Option<Uuid> = pre.try_get("account_id").unwrap_or(None);
     if project_account.as_ref() != Some(&session.account_id) {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    // ── Guard: a billing suspension cannot be reversed via PATCH (#59) ────────
+    // Billing suspensions (Stripe final payment failure → `past_due`, free-plan
+    // cap → `free_cap_exceeded`) are recorded on the account's subscription,
+    // and are lifted only by the billing paths (webhook payment_succeeded,
+    // plan upgrade). While the account is in either state, refuse reactivation.
+    if body.status.as_deref() == Some("active") && existing_status == "suspended" {
+        let billing_hold: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM subscriptions \
+             WHERE account_id = $1 AND status IN ('past_due', 'free_cap_exceeded'))",
+        )
+        .bind(session.account_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("patch_project billing-hold check DB error: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        if billing_hold {
+            return Err(StatusCode::CONFLICT);
+        }
     }
 
     // ── Encrypt DSN if provided ───────────────────────────────────────────────
@@ -190,8 +229,9 @@ pub async fn patch_project(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // ── Evict credential cache so next SDK request uses the updated DSN ───────
-    if body.backend_pg_dsn.is_some() {
+    // ── Evict credential cache: it holds both the DSN and the project status,
+    // so a stale entry would keep serving a just-suspended project (#59) ─────
+    if body.backend_pg_dsn.is_some() || body.status.is_some() {
         state.credential_cache.evict_project(&project_id).await;
     }
 

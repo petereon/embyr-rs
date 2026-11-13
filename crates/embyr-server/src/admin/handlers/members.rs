@@ -89,6 +89,17 @@ fn parse_role(s: &str) -> Option<Role> {
     }
 }
 
+/// Minimal plausibility check for an invitee address: 1..=254 chars, exactly
+/// one `@` with a non-empty local part and domain, no whitespace/control chars.
+/// ponytail: not RFC 5322; real proof of ownership is the invitation email.
+fn is_plausible_email(s: &str) -> bool {
+    if s.is_empty() || s.len() > 254 || s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    matches!(s.split_once('@'), Some((local, domain))
+        if !local.is_empty() && !domain.is_empty() && !domain.contains('@'))
+}
+
 /// Load all `account_members` rows for `account_id` and build the domain type
 /// required by `check_rbac`.
 async fn load_account_members(
@@ -205,6 +216,8 @@ pub async fn list_members(
 /// POST /admin/v1/members/invite
 ///
 /// Owner or Admin only (Viewer → 403).
+/// `role` must be Owner|Admin|Viewer and `email` plausible (else 422);
+/// `role` may not exceed the inviter's own role (Admin inviting Owner → 403).
 /// Inserts an invitations row with a 7-day expiry, then calls IEmailSender::send
 /// fire-and-forget (V1 uses NoopEmailSender; errors are ignored).
 /// Returns 202 + InvitationResponse.
@@ -215,6 +228,16 @@ pub async fn invite_member(
 ) -> Result<(StatusCode, Json<InvitationResponse>), StatusCode> {
     // Viewer cannot invite — Owner or Admin only.
     if session.role < Role::Admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Body validation before any DB access (audit finding #60).
+    let invited_role = parse_role(&body.role).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    if !is_plausible_email(&body.email) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    // No escalation: an Admin may not invite an Owner.
+    if invited_role > session.role {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -446,4 +469,18 @@ pub async fn remove_member(
     }
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_plausible_email;
+
+    #[test]
+    fn is_plausible_email_accepts_and_rejects() {
+        assert!(is_plausible_email("a@b.co"));
+        for bad in ["", "ab.co", "@b.co", "a@", "a@b@c", "a b@c.co", "a@b.co\n"] {
+            assert!(!is_plausible_email(bad), "{bad:?}");
+        }
+        assert!(!is_plausible_email(&format!("{}@b.co", "a".repeat(250))));
+    }
 }
