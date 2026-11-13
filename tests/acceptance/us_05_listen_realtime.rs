@@ -908,7 +908,7 @@ async fn idle_listen_stream_receives_no_change_keep_alive() {
 }
 
 #[tokio::test]
-#[ignore = "us-04 us-05 error — RED scaffold, not yet implemented"]
+#[ignore = "REAL GAP: Listen has no composite-index gate (only RunQuery does); body is still a panic! scaffold — see docs/product/ignored-test-triage-2026-11-13.md"]
 async fn subscription_with_multi_field_filter_without_index_is_rejected() {
     // AC-04f applied to Listen: composite filter without a READY index → FAILED_PRECONDITION
     panic!("RED scaffold — not yet implemented");

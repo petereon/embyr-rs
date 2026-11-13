@@ -2,7 +2,8 @@
 //! Slice 02 — Database Management + Overview acceptance scenarios.
 //! Stories: US-003 (Database CRUD), US-004 (Overview / Logging Toggle)
 //!
-//! All tests are #[ignore] (RED). Enable one at a time in DELIVER.
+//! All tests are enabled (un-ignored 2026-11-13) except any carrying an explicit
+//! `#[ignore = "..."]` reason string.
 
 use embyr_admin_ui::model::{Database, DbBackendMode, DbId, DbStatus, LogRetention};
 use embyr_admin_ui::msg::Msg;
@@ -81,7 +82,6 @@ fn reactivate_database_restores_active_status() {
 
 /// AC-003-05: Delete database removes it from list and cascades to SDK keys.
 #[test]
-#[ignore = "RED — implement update(_, Msg::DeleteDatabase) with cascade"]
 fn delete_database_removes_it_and_cascades_sdk_keys() {
     // AC-003-05
     use embyr_admin_ui::model::{KeyId, SdkKey};
@@ -113,7 +113,6 @@ fn delete_database_removes_it_and_cascades_sdk_keys() {
 
 /// Sad: DeleteDatabase with non-existent id is a no-op.
 #[test]
-#[ignore = "RED — implement DeleteDatabase no-op on missing id"]
 fn delete_nonexistent_database_is_noop() {
     let mut m = make_model_with_db();
     let count_before = m.databases.len();
@@ -130,7 +129,6 @@ fn delete_nonexistent_database_is_noop() {
 
 /// AC-004-03: Enabling logging updates model.databases[i].logging_enabled = true.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetDbLogging) enable"]
 fn enable_query_logging_updates_model() {
     // AC-004-03, AC-004-04
     let mut m = make_model_with_db();
@@ -145,7 +143,6 @@ fn enable_query_logging_updates_model() {
 
 /// AC-004-03: Disabling logging with confirmation updates model.databases[i].logging_enabled = false.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetDbLogging) disable"]
 fn disable_query_logging_updates_model() {
     // AC-004-03
     let mut m = make_model_with_db();
@@ -160,7 +157,6 @@ fn disable_query_logging_updates_model() {
 
 /// AC-004-03: SetLogRetention stores retention period when logging is enabled.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SetLogRetention)"]
 fn set_log_retention_stores_period() {
     // AC-004-03 (retention period selection)
     let mut m = make_model_with_db();
@@ -179,7 +175,6 @@ fn set_log_retention_stores_period() {
 
 /// Sad: SetDbLogging with wrong id is a no-op — no database logging state changes.
 #[test]
-#[ignore = "RED — implement SetDbLogging no-op guard"]
 fn enable_logging_wrong_id_is_noop() {
     let mut m = make_model_with_db();
     let phantom = DbId(Uuid::new_v4());

@@ -2,7 +2,8 @@
 //! Slice 03 — Connections + SDK Keys acceptance scenarios.
 //! Stories: US-005 (Backend Config), US-006 (SDK Keys)
 //!
-//! All tests are #[ignore] (RED). Enable one at a time in DELIVER.
+//! All tests are enabled (un-ignored 2026-11-13) except any carrying an explicit
+//! `#[ignore = "..."]` reason string.
 
 use embyr_admin_ui::model::{DbId, DbPatch, KeyId, SdkKey};
 use embyr_admin_ui::msg::Msg;
@@ -64,7 +65,6 @@ fn patch_db_unknown_id_is_noop() {
 
 /// AC-006-02: SdkKeyCreated appends the key to sdk_keys[db_id] with correct prefix.
 #[test]
-#[ignore = "RED — implement update(_, Msg::SdkKeyCreated)"]
 fn create_sdk_key_appends_to_model() {
     // AC-006-02
     let mut m = make_model_with_db();
@@ -100,7 +100,6 @@ fn create_sdk_key_appends_to_model() {
 
 /// AC-006-04: RevokeSdkKey removes the matching key from sdk_keys[db_id].
 #[test]
-#[ignore = "RED — implement update(_, Msg::RevokeSdkKey)"]
 fn revoke_sdk_key_removes_it_from_model() {
     // AC-006-04
     let mut m = make_model_with_db();
@@ -127,7 +126,6 @@ fn revoke_sdk_key_removes_it_from_model() {
 
 /// AC-006-05: DeleteDatabase cascades to revoke all SDK keys.
 #[test]
-#[ignore = "RED — implement DeleteDatabase cascade to SDK keys"]
 fn delete_database_cascades_revokes_all_sdk_keys() {
     // AC-006-05
     let mut m = make_model_with_db();
@@ -150,7 +148,6 @@ fn delete_database_cascades_revokes_all_sdk_keys() {
 
 /// Sad: RevokeSdkKey with non-existent key_id is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement RevokeSdkKey no-op guard"]
 fn revoke_sdk_key_nonexistent_is_noop() {
     let mut m = make_model_with_db();
     let db_id = m.databases[0].id.clone();
@@ -164,7 +161,6 @@ fn revoke_sdk_key_nonexistent_is_noop() {
 
 /// Sad: SdkKeyCreated with unknown db_id is a no-op (no new entry created).
 #[test]
-#[ignore = "RED — implement SdkKeyCreated no-op guard on unknown db"]
 fn create_sdk_key_for_unknown_db_is_noop() {
     let mut m = make_model_with_db();
     let phantom_db = DbId(Uuid::new_v4());

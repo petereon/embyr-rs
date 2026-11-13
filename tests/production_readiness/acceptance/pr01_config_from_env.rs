@@ -19,10 +19,7 @@
 //!               Health is observed via `GET :{admin_port}/healthz → HTTP 200`.
 //!
 //! Walking skeleton: `server_starts_with_all_required_env_vars_set` — NOT #[ignore].
-//! All other tests: #[ignore] — DELIVER unskips them one at a time.
-//!
-//! Scaffold classification target: RED for all #[ignore] tests (todo! panics).
-//! Walking skeleton: RED until `main.rs` startup sequence implemented (PR-01 DELIVER).
+//! All other tests: formerly #[ignore]; un-ignored 2026-11-13 (all pass in CI).
 
 use std::time::Duration;
 
@@ -83,7 +80,6 @@ async fn server_starts_with_all_required_env_vars_set() {
 ///
 /// @error @US-PR-01 @AC-PR-01-02
 #[tokio::test]
-#[ignore]
 async fn exits_1_when_database_url_missing() {
     let mut server = ServerProcess::start_env_only(&[
         ("EMBYR_ADMIN_KEY", "testkey"),
@@ -117,7 +113,6 @@ async fn exits_1_when_database_url_missing() {
 ///
 /// @error @US-PR-01 @AC-PR-01-03
 #[tokio::test]
-#[ignore]
 async fn exits_1_when_admin_key_missing() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -152,7 +147,6 @@ async fn exits_1_when_admin_key_missing() {
 ///
 /// @error @US-PR-01 @AC-PR-01-04
 #[tokio::test]
-#[ignore]
 async fn exits_1_when_encryption_key_missing() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -187,7 +181,6 @@ async fn exits_1_when_encryption_key_missing() {
 ///
 /// @error @boundary @US-PR-01 @AC-PR-01-05
 #[tokio::test]
-#[ignore]
 async fn exits_1_when_encryption_key_not_64_hex_chars() {
     // Use a key that is syntactically hex but wrong length.
     let mut server = ServerProcess::start_env_only(&[
@@ -222,7 +215,6 @@ async fn exits_1_when_encryption_key_not_64_hex_chars() {
 ///
 /// @error @US-PR-01 @AC-PR-01-06
 #[tokio::test]
-#[ignore]
 async fn exits_1_when_database_unreachable() {
     let mut server = ServerProcess::start_env_only(&[
         ("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:65535/embyr"),
@@ -262,7 +254,6 @@ async fn exits_1_when_database_unreachable() {
 ///
 /// @error @real-io @US-PR-01 @AC-PR-01-07
 #[tokio::test]
-#[ignore]
 async fn exits_1_when_db_probe_fails_projects_table_missing() {
     use embyr_server::adapters::system_db::SystemDb;
 
@@ -311,7 +302,6 @@ async fn exits_1_when_db_probe_fails_projects_table_missing() {
 ///
 /// @error @US-PR-01 @AC-PR-01-08
 #[tokio::test]
-#[ignore]
 async fn no_port_bound_on_missing_required_env_var() {
     let mut server = ServerProcess::start_env_only(&[
         ("EMBYR_ADMIN_KEY", "testkey"),
@@ -355,7 +345,6 @@ async fn no_port_bound_on_missing_required_env_var() {
 ///
 /// @US-PR-01 @AC-PR-01-09
 #[tokio::test]
-#[ignore]
 async fn non_default_ports_respected() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -413,7 +402,6 @@ async fn non_default_ports_respected() {
 ///
 /// @US-PR-01 @AC-PR-01-10
 #[tokio::test]
-#[ignore]
 async fn grpc_port_env_var_respected() {
     let (_pg, db_url) = start_postgres_container().await;
     let mut server = ServerProcess::start(
@@ -448,7 +436,6 @@ async fn grpc_port_env_var_respected() {
 ///
 /// @US-PR-01 @AC-PR-01-11
 #[tokio::test]
-#[ignore]
 async fn rest_port_env_var_respected() {
     let (_pg, db_url) = start_postgres_container().await;
     let mut server = ServerProcess::start(
@@ -488,7 +475,6 @@ async fn rest_port_env_var_respected() {
 ///
 /// @US-PR-01 @AC-PR-01-12
 #[tokio::test]
-#[ignore]
 async fn default_rate_limit_rps_is_1000() {
     let (_pg, db_url) = start_postgres_container().await;
 

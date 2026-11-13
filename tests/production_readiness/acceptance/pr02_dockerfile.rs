@@ -11,7 +11,11 @@
 //!
 //! Driving port: Docker CLI subprocess — `docker build`, `docker run`, `docker image inspect`.
 //!
-//! All tests are #[ignore] — DELIVER unskips them one at a time (after Dockerfile is created).
+//! All tests stay #[ignore]d (triaged 2026-11-13, see
+//! `docs/product/ignored-test-triage-2026-11-13.md`): they build/inspect one shared
+//! image tag, which races when run in parallel and is too slow for the default run
+//! (the CI `docker` job already builds the image). `docker_image_under_100mb` also
+//! documents a REAL GAP (image is ~150 MB).
 //!
 //! Docker availability: tests skip gracefully when `docker info` fails, so the test
 //! binary compiles and passes `cargo test` in environments without Docker.
@@ -57,7 +61,7 @@ fn workspace_root() -> PathBuf {
 ///
 /// @real-io @US-PR-02 @AC-PR-02-01
 #[test]
-#[ignore]
+#[ignore = "FAIL-env: full `docker build` of the image (minutes uncached, needs a Docker daemon); CI already builds it in the `docker` job"]
 fn docker_build_succeeds() {
     if !docker_available() {
         eprintln!("SKIP: docker not available in this environment");
@@ -88,7 +92,7 @@ fn docker_build_succeeds() {
 ///
 /// @real-io @US-PR-02 @AC-PR-02-02
 #[test]
-#[ignore]
+#[ignore = "FAIL-env: needs image embyr-server-test:ci pre-built; failed in the ignored-only run because docker_build_succeeds/cargo_chef_rebuild_fast concurrently re-tag the same image"]
 fn docker_image_runs_as_non_root() {
     if !docker_available() {
         eprintln!("SKIP: docker not available");
@@ -128,7 +132,7 @@ fn docker_image_runs_as_non_root() {
 ///
 /// @US-PR-02 @AC-PR-02-03
 #[test]
-#[ignore]
+#[ignore = "REAL GAP: built image is 150 MB, documented limit is <100 MB (AC-PR-02-03) — see docs/product/ignored-test-triage-2026-11-13.md"]
 fn docker_image_under_100mb() {
     if !docker_available() {
         eprintln!("SKIP: docker not available");
@@ -173,7 +177,7 @@ fn docker_image_under_100mb() {
 ///
 /// @US-PR-02 @AC-PR-02-04
 #[test]
-#[ignore]
+#[ignore = "FAIL-env: needs image embyr-server-test:ci pre-built; failed in the ignored-only run because docker_build_succeeds/cargo_chef_rebuild_fast concurrently re-tag the same image"]
 fn docker_image_exposes_correct_ports() {
     if !docker_available() {
         eprintln!("SKIP: docker not available");
@@ -215,7 +219,7 @@ fn docker_image_exposes_correct_ports() {
 ///
 /// @US-PR-02 @AC-PR-02-05
 #[test]
-#[ignore]
+#[ignore = "FAIL-env: needs image embyr-server-test:ci pre-built; failed in the ignored-only run because docker_build_succeeds/cargo_chef_rebuild_fast concurrently re-tag the same image"]
 fn docker_image_entrypoint_is_embyr_server() {
     if !docker_available() {
         eprintln!("SKIP: docker not available");
@@ -253,7 +257,7 @@ fn docker_image_entrypoint_is_embyr_server() {
 ///
 /// @US-PR-02 @AC-PR-02-06
 #[test]
-#[ignore]
+#[ignore = "FAIL-env: asserts a <60s rebuild, which only holds with a warm Docker layer cache (not true on a cold CI runner)"]
 fn cargo_chef_rebuild_fast() {
     if !docker_available() {
         eprintln!("SKIP: docker not available");

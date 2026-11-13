@@ -76,7 +76,6 @@ async fn get_doc(client: &mut StorageAgentClient<Channel>, name: &str) -> Docume
 ///   And   retrieving the document returns those fields
 ///   And   the document record shows it is at generation one
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn creating_new_document_stores_it_at_generation_one() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -111,7 +110,6 @@ async fn creating_new_document_stores_it_at_generation_one() {
 ///   And   customerId="C-489" and amount=1250 are still present
 ///   And   the document is now at generation two
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn updating_with_mask_preserves_unmentioned_fields() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -169,7 +167,6 @@ async fn updating_with_mask_preserves_unmentioned_fields() {
 ///   When  a caller removes it
 ///   Then  the removal succeeds without error
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn removing_absent_document_succeeds_without_error() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
     // This document was never created — delete should succeed (Firestore no-op semantics)
@@ -191,7 +188,6 @@ async fn removing_absent_document_succeeds_without_error() {
 ///   Then  a deletion record exists in project storage
 ///   And   retrieving the document returns not-found
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn removing_document_leaves_deletion_record() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -230,7 +226,6 @@ async fn removing_document_leaves_deletion_record() {
 ///   Then  the update succeeds
 ///   And   the document shows retryCount=1
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn increment_transform_on_absent_field_treats_starting_value_as_zero() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -276,7 +271,6 @@ async fn increment_transform_on_absent_field_treats_starting_value_as_zero() {
 ///   When  a caller creates a new document in "orders" with status="pending"
 ///   Then  the creation succeeds with a generated 20-character identifier
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn creating_document_without_identifier_generates_one() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -323,7 +317,6 @@ async fn creating_document_without_identifier_generates_one() {
 /// OCC semantics: both callers read the same update_time. The first write changes
 /// update_time; the second write uses the now-stale precondition and fails.
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn concurrent_write_on_same_generation_is_rejected() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -374,7 +367,6 @@ async fn concurrent_write_on_same_generation_is_rejected() {
 ///   When  a caller updates it with MustExist precondition
 ///   Then  the caller receives a not-found response; no document is created
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn updating_absent_document_returns_not_found() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -419,7 +411,6 @@ async fn updating_absent_document_returns_not_found() {
 ///   When  a caller attempts to create it again
 ///   Then  the caller receives an already-exists response; existing doc unchanged
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn creating_document_that_already_exists_is_rejected() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -482,7 +473,6 @@ async fn creating_document_that_already_exists_is_rejected() {
 ///   Then  the agent returns INVALID_ARGUMENT naming the "nanos" field, not a panic
 ///   And   the document is unchanged
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn updating_with_malformed_nanos_precondition_returns_invalid_argument() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 
@@ -546,7 +536,6 @@ async fn updating_with_malformed_nanos_precondition_returns_invalid_argument() {
 ///   When  the generation is read after each write
 ///   Then  the generations are 1, 2, 3 in that order; none repeat; none decrease
 #[tokio::test]
-#[ignore = "requires Docker — unskip in S02A delivery"]
 async fn document_generation_advances_by_one_on_every_successful_write() {
     let (_handle, mut client) = start_test_agent("finops-prod").await;
 

@@ -68,8 +68,8 @@
 //!   specified Handoff Package (§ Construction Decisions D-WSF-1..4).
 //!
 //! Walking skeleton: `aws_secret_project_serves_real_grpc_request_when_aws_credentials_available`
-//!   — NOT `#[ignore]`. All other tests: `#[ignore]` — DELIVER unskips them
-//!   one at a time, mirroring pr01-pr08's own established convention.
+//!   — NOT `#[ignore]`. All other tests: formerly `#[ignore]`, un-ignored
+//!   2026-11-13 (all pass in CI).
 //!
 //! ─────────────────────────────────────────────────────────────────────────
 //! DISTILL finding — GCP testability gap (see feature-delta.md
@@ -347,7 +347,6 @@ async fn aws_secret_project_serves_real_grpc_request_when_aws_credentials_availa
 ///
 /// @error @boundary @US-01 @AC-WSF-02 @requires_external
 #[tokio::test]
-#[ignore]
 async fn gcp_secret_project_wiring_reached_when_token_configured() {
     let (_sys, sys_url) = start_postgres_container().await;
 
@@ -423,7 +422,6 @@ async fn gcp_secret_project_wiring_reached_when_token_configured() {
 ///
 /// @error @boundary @US-01 @AC-WSF-04
 #[tokio::test]
-#[ignore]
 async fn server_with_neither_cloud_configured_starts_and_direct_pg_unaffected() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -554,7 +552,6 @@ async fn server_with_neither_cloud_configured_starts_and_direct_pg_unaffected() 
 ///
 /// @error @US-01 @AC-WSF-05
 #[tokio::test]
-#[ignore]
 async fn aws_secret_project_fails_closed_when_aws_credentials_absent() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -648,7 +645,6 @@ async fn aws_secret_project_fails_closed_when_aws_credentials_absent() {
 ///
 /// @error @US-01 @AC-WSF-05
 #[tokio::test]
-#[ignore]
 async fn gcp_secret_provisioning_rejected_when_token_unset() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -737,7 +733,6 @@ async fn gcp_secret_provisioning_rejected_when_token_unset() {
 ///
 /// @error @US-01 @AC-WSF-06
 #[tokio::test]
-#[ignore]
 async fn transaction_sweeper_reclaims_aws_secret_project_when_aws_credentials_available() {
     let (_localstack, endpoint_url) = start_localstack().await;
     let (_cust, cust_url) = start_postgres_container().await;

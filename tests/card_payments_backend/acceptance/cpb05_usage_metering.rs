@@ -205,7 +205,7 @@ async fn rerunning_the_same_days_metering_does_not_double_count() {
 ///
 /// @error @driving_port @real-io @US-205 @AC-205-04
 #[tokio::test]
-#[ignore] // ESCALATED — see doc comment above (step 02-01)
+#[ignore = "FAIL-env: all 3 projects share one Stripe customer so real Stripe I/O cannot fail exactly one (ESCALATED step 02-01, see doc comment); per-project isolation is implemented in run_metering"]
 async fn a_single_projects_stripe_failure_does_not_abort_the_whole_run() {
     let ctx = CpbTestContext::new().await;
     let cookie = ctx

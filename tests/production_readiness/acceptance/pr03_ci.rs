@@ -12,11 +12,10 @@
 //! Driving port: filesystem read of `.github/workflows/ci.yml`.
 //!               These are YAML-content acceptance tests — no subprocess needed.
 //!
-//! All tests are #[ignore] — DELIVER unskips them one at a time.
-//!
-//! RED behaviour: `.github/workflows/ci.yml` does not exist yet. Tests that try
-//! to read it will panic with a "file not found" error, which is RED — the CI
-//! pipeline file is missing, i.e., the implementation is absent.
+//! All tests run in CI (un-ignored 2026-11-13). The `lint`/`docker` assertions
+//! follow the shipped pipeline: `cargo deny check` lives in its own
+//! `.github/workflows/cargo-deny.yml`, and the `docker` job uses
+//! `docker/build-push-action` (finding #42).
 
 use std::path::PathBuf;
 
@@ -55,7 +54,6 @@ fn read_ci_yaml() -> String {
 ///
 /// @US-PR-03 @AC-PR-03-01
 #[test]
-#[ignore]
 fn ci_yaml_triggers_on_push_to_master() {
     let yaml = read_ci_yaml();
 
@@ -80,7 +78,6 @@ fn ci_yaml_triggers_on_push_to_master() {
 ///
 /// @US-PR-03 @AC-PR-03-02
 #[test]
-#[ignore]
 fn ci_yaml_triggers_on_pull_request() {
     let yaml = read_ci_yaml();
 
@@ -102,7 +99,6 @@ fn ci_yaml_triggers_on_pull_request() {
 ///
 /// @US-PR-03 @AC-PR-03-03
 #[test]
-#[ignore]
 fn ci_yaml_has_test_job_with_postgres_service() {
     let yaml = read_ci_yaml();
 
@@ -133,7 +129,6 @@ fn ci_yaml_has_test_job_with_postgres_service() {
 ///
 /// @US-PR-03 @AC-PR-03-04
 #[test]
-#[ignore]
 fn ci_yaml_has_lint_job_with_clippy_and_deny() {
     let yaml = read_ci_yaml();
 
@@ -141,9 +136,14 @@ fn ci_yaml_has_lint_job_with_clippy_and_deny() {
         yaml.contains("cargo clippy"),
         "ci.yml 'lint' job must run 'cargo clippy'; content:\n{yaml}"
     );
+    // `cargo deny check` was moved out of ci.yml into its own scheduled
+    // workflow (finding #23) — assert it still runs there.
+    let deny_path = ci_yaml_path().with_file_name("cargo-deny.yml");
+    let deny_yaml = std::fs::read_to_string(&deny_path)
+        .unwrap_or_else(|e| panic!("cargo-deny.yml not found at {deny_path:?}: {e}"));
     assert!(
-        yaml.contains("cargo deny check"),
-        "ci.yml 'lint' job must run 'cargo deny check'; content:\n{yaml}"
+        deny_yaml.contains("cargo deny check"),
+        "cargo-deny.yml must run 'cargo deny check'; content:\n{deny_yaml}"
     );
 }
 
@@ -159,13 +159,14 @@ fn ci_yaml_has_lint_job_with_clippy_and_deny() {
 ///
 /// @US-PR-03 @AC-PR-03-05
 #[test]
-#[ignore]
 fn ci_yaml_has_docker_job_depending_on_test() {
     let yaml = read_ci_yaml();
 
+    // The docker job builds via docker/build-push-action (finding #42), not a
+    // literal `docker build` shell step.
     assert!(
-        yaml.contains("docker build"),
-        "ci.yml 'docker' job must run 'docker build'; content:\n{yaml}"
+        yaml.contains("docker/build-push-action"),
+        "ci.yml 'docker' job must build the image (docker/build-push-action); content:\n{yaml}"
     );
     assert!(
         yaml.contains("needs:") && yaml.contains("test"),
@@ -184,7 +185,6 @@ fn ci_yaml_has_docker_job_depending_on_test() {
 ///
 /// @US-PR-03 @AC-PR-03-06
 #[test]
-#[ignore]
 fn ci_yaml_clippy_uses_deny_warnings() {
     let yaml = read_ci_yaml();
 

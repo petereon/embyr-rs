@@ -128,7 +128,7 @@ async fn project_exists(project_id: &str) -> bool {
 
 /// @walking_skeleton @driving_port @real-io @US-DRP-02
 #[tokio::test]
-#[ignore]
+#[ignore = "permanent: real docker compose I/O (~8 min, 2 containers); passes when run explicitly with --ignored (2026-11-11 run), never part of default cargo test"]
 async fn compose_up_restart_and_reset_round_trip() {
     let project_id = "compose-lifecycle-smoke";
 

@@ -135,7 +135,6 @@ async fn open_listen_and_wait_for_current(
 ///
 /// @real-io @driving_port @AC-PSL-01
 #[tokio::test]
-#[ignore]
 async fn listen_still_delivers_document_changes_with_listener_pool_fields_threaded_through() {
     let (_sys_pg, sys_url) = start_postgres_container().await;
     let (_cust_pg, cust_url) = start_postgres_container().await;

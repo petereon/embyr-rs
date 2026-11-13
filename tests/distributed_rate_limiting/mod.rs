@@ -15,5 +15,6 @@
 //! Implementation order (matches slice dependency graph):
 //!   1. b11 — DRL-05: provisioning inserts rate_buckets row (depends on DRL-01 schema)
 //!   2. b12 — DRL-02: atomic Postgres UPDATE enforces distributed limit
-//!   3. b13 — DRL-03: 20ms timeout + per-instance fallback
+//!   3. b13 — DRL-03: 20ms timeout + per-instance fallback (file deleted 2026-11-13:
+//!      its 3 scaffolds were superseded by b19's fault-injection tests)
 //!   4. b14 — DRL-04: x-ratelimit-* trailing metadata headers
