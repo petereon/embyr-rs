@@ -512,26 +512,11 @@ pub fn rate_limit_metric_project_id_labels(body: &str) -> std::collections::Hash
 /// shared `rate_buckets` table in the test Postgres container.
 /// The pool used for rate limiting is taken from `system_db.pool()` — the same
 /// connection pool that backs the system DB with the applied migrations.
-/// Open the pool's connections before the server starts. The limiter's PG call
-/// has a 60ms timeout and fails open on a cold pool (connect+auth handshake),
-/// which makes "bucket exhausted" / "token decremented" assertions flaky when
-/// many DRL tests share a loaded CI box.
-async fn prewarm_pool(pool: &sqlx::PgPool) {
-    let n = pool.options().get_max_connections().min(8);
-    let mut set = tokio::task::JoinSet::new();
-    for _ in 0..n {
-        let pool = pool.clone();
-        set.spawn(async move { sqlx::query("SELECT pg_sleep(0.05)").execute(&pool).await });
-    }
-    while set.join_next().await.is_some() {}
-}
-
 pub async fn start_distributed_grpc_server(
     ctx: &DrlTestContext,
 ) -> (std::net::SocketAddr, embyr_server::TestServer) {
     let system_db = Arc::clone(&ctx.system_db);
     let pg_pool = system_db.pool().clone();
-    prewarm_pool(&pg_pool).await;
     let server = embyr_server::start_test_server_with_distributed_rate_limit(
         system_db,
         ctx.rate_limit_rps,
@@ -553,7 +538,6 @@ pub async fn start_distributed_grpc_server_with_pool(
     ctx: &DrlTestContext,
     pg_pool: sqlx::PgPool,
 ) -> (std::net::SocketAddr, embyr_server::TestServer) {
-    prewarm_pool(&pg_pool).await;
     let system_db = Arc::clone(&ctx.system_db);
     let server = embyr_server::start_test_server_with_distributed_rate_limit(
         system_db,
