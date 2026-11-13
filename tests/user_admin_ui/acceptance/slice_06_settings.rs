@@ -2,7 +2,8 @@
 //! Slice 06 — Settings (OIDC Providers, Danger Zone) acceptance scenarios.
 //! Story: US-011 (Settings — Account Config, OIDC, Danger Zone)
 //!
-//! All tests are #[ignore] (RED). Enable one at a time in DELIVER.
+//! All tests are enabled (un-ignored 2026-11-13) except any carrying an explicit
+//! `#[ignore = "..."]` reason string.
 
 use embyr_admin_ui::model::{OidcId, OidcProvider, Toast, ToastId, ToastLevel};
 use embyr_admin_ui::msg::Msg;
@@ -83,7 +84,6 @@ fn toggle_oidc_enables_disabled_provider() {
 
 /// Sad: ToggleOidc with non-existent OidcId is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement ToggleOidc no-op guard"]
 fn toggle_oidc_phantom_id_is_noop() {
     let mut m = make_model_with_db();
     let phantom = OidcId(Uuid::new_v4());
@@ -99,7 +99,6 @@ fn toggle_oidc_phantom_id_is_noop() {
 
 /// AC-011-02: RemoveOidcProvider deletes the provider from the list.
 #[test]
-#[ignore = "RED — implement update(_, Msg::RemoveOidcProvider)"]
 fn remove_oidc_provider_removes_it() {
     // AC-011-02 (delete action)
     let mut m = make_model_with_db();
@@ -125,7 +124,6 @@ fn remove_oidc_provider_removes_it() {
 
 /// PushToast: Danger Zone action produces an error toast for non-reversible actions.
 #[test]
-#[ignore = "RED — implement update(_, Msg::PushToast)"]
 fn danger_zone_action_pushes_error_toast() {
     // AC-011-05 (error feedback via toast)
     let mut m = make_model_with_db();
@@ -147,7 +145,6 @@ fn danger_zone_action_pushes_error_toast() {
 
 /// DismissToast removes the matching toast.
 #[test]
-#[ignore = "RED — implement update(_, Msg::DismissToast)"]
 fn dismiss_toast_removes_it_from_queue() {
     let mut m = make_model_with_db();
     let toast_id = ToastId(Uuid::new_v4());
@@ -167,7 +164,6 @@ fn dismiss_toast_removes_it_from_queue() {
 
 /// Sad: DismissToast with phantom ToastId is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement DismissToast no-op guard"]
 fn dismiss_toast_phantom_id_is_noop() {
     let mut m = make_model_with_db();
     let phantom = ToastId(Uuid::new_v4());
@@ -179,7 +175,6 @@ fn dismiss_toast_phantom_id_is_noop() {
 
 /// Multiple OIDC providers can coexist and be toggled independently.
 #[test]
-#[ignore = "RED — implement ToggleOidc isolation (multiple providers)"]
 fn toggle_one_oidc_provider_does_not_affect_others() {
     // AC-011-04 isolation
     let mut m = make_model_with_db();

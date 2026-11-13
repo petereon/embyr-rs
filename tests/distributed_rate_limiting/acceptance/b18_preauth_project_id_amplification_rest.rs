@@ -40,7 +40,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
-    garbage_project_ids, get_metrics, metric_value, start_distributed_grpc_server, DrlTestContext,
+    garbage_project_ids, get_metrics, metric_value, start_distributed_grpc_server,
+    warm_credential_cache_and_reset_bucket, DrlTestContext,
 };
 
 fn accounts_url(rest_addr: std::net::SocketAddr, project_id: &str, action: &str) -> String {
@@ -183,8 +184,13 @@ async fn known_provisioned_project_id_rest_request_is_unaffected_by_the_guard() 
     let ctx = DrlTestContext::new(10.0).await;
     ctx.insert_project_with_bucket("known-rest-project", "known-rest-key", 10.0)
         .await;
-    let (_addr, server) = start_distributed_grpc_server(&ctx).await;
+    let (addr, server) = start_distributed_grpc_server(&ctx).await;
+    let ctx = ctx.with_grpc_addr(addr);
     let client = reqwest::Client::new();
+    // Pre-pay cold-start cost: a cold first request can exceed the limiter's
+    // 20ms PG timeout, fail open, and never decrement the Postgres bucket.
+    let mut grpc = embyr_proto::firestore::firestore_client::FirestoreClient::new(ctx.grpc_channel());
+    warm_credential_cache_and_reset_bucket(&ctx, &mut grpc, "known-rest-project", "known-rest-key", 10.0).await;
 
     let (tokens_before, _) = ctx
         .query_rate_bucket("known-rest-project")

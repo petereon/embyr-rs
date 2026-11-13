@@ -245,7 +245,6 @@ async fn tenant_pool_override_honored_and_saturated_request_fails_fast() {
 ///
 /// @real-io @error @AC-PSL-06
 #[tokio::test]
-#[ignore]
 async fn one_tenants_saturated_pool_does_not_affect_another_tenants_pool() {
     let (_sys_pg, _sys_url, server) = start_server(&[
         ("EMBYR_TENANT_DB_MAX_CONNECTIONS", "2"),
@@ -332,7 +331,6 @@ async fn one_tenants_saturated_pool_does_not_affect_another_tenants_pool() {
 ///
 /// @real-io @AC-PSL-01
 #[tokio::test]
-#[ignore]
 async fn tenant_pool_default_max_connections_preserved_when_unset() {
     let (_sys_pg, _sys_url, server) = start_server(&[]).await;
 

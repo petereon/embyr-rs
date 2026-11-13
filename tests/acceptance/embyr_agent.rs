@@ -2,8 +2,8 @@
 //! Integration test binary entry point for embyr-agent acceptance tests.
 //!
 //! Registers each US-A0N module as a submodule so `use super::` works in the
-//! individual test files.  All tests carry `#[ignore]` and are scaffolded RED
-//! — DELIVER unskips them one slice at a time.
+//! individual test files.  Tests were originally scaffolded RED and `#[ignore]`d;
+//! the ones that pass have since been un-ignored (2026-11-13) and run in CI.
 //!
 //! Registered in `crates/embyr-agent/Cargo.toml` as:
 //!   [[test]]

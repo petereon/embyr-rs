@@ -1,139 +1,180 @@
 // @driving_port @real-io @US-14
 #![allow(unused_imports)]
-//! US-14 — x-ratelimit-* trailing metadata headers on all gRPC responses.
+//! US-14 — x-ratelimit-* response metadata headers on gRPC responses.
 //!
 //! Acceptance criteria verified here:
-//!   AC-14-01: All 9 gRPC handlers return x-ratelimit-limit and x-ratelimit-remaining on every response.
-//!   AC-14-02: x-ratelimit-remaining decrements by 1.0 per allowed request.
+//!   AC-14-01: An allowed response carries x-ratelimit-limit / -remaining / -reset.
+//!   AC-14-02: x-ratelimit-remaining decrements by 1 per allowed request.
 //!   AC-14-03: RESOURCE_EXHAUSTED responses include retry-after-ms; allowed responses do not.
 //!
 //! Driving port: gRPC :8080 (tonic FirestoreClient → metadata inspection).
 //! Assertion level: real Postgres container (testcontainers-rs) + in-process gRPC server.
 //!
-//! Header location (tonic 0.12):
-//!   - Unary handlers: trailing metadata (Response<T>::metadata_mut())
-//!   - Streaming handlers: initial metadata (Response<BoxStream>::metadata_mut())
-//!   - Error responses: Status::metadata_mut()
+//! Header location: unary success → `Response::metadata()`; rejection →
+//! `Status::metadata()`. `GetDocument` is the representative handler (each
+//! handler's call site is covered by code review). Headers are only attached
+//! when the document is FOUND (see `handle_get_document`), so the success-path
+//! tests seed a document.
 //!
-//! The `attach_rate_limit_headers(md, info)` free function in rate_limit.rs sets these headers.
-//! `attach_retry_after(md, info, refill_rate)` is called only on rejection (Err(info)).
-//!
-//! All tests are #[ignore] — DELIVER unskips them as part of DRL-04.
-//!
-//! Implementation note for DELIVER (DRL-04):
-//!   - Each of the 9 handler call sites in handler.rs must call attach_rate_limit_headers.
-//!   - Rejection path must additionally call attach_retry_after.
-//!   - Header key names: "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset".
-//!   - Rejection only: "retry-after-ms".
+//! All tests run in CI (implemented 2026-11-13; formerly `todo!()` scaffolds
+//! `#[ignore]`d until DRL-04).
 
 #[path = "../common/mod.rs"]
 mod common;
-use common::{get_document_request, start_distributed_grpc_server, DrlTestContext};
+use common::{
+    classify_grpc_status, get_document_request, start_distributed_grpc_server,
+    warm_credential_cache_and_reset_bucket, DrlTestContext, ADMIN_KEY,
+};
+use testcontainers_modules::{
+    postgres::Postgres,
+    testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt},
+};
 use embyr_proto::firestore::firestore_client::FirestoreClient;
 
-// ─── AC-14-01: all handlers return rate-limit headers ────────────────────────
+/// Provision `project_id` via the admin API against a separate customer
+/// Postgres (the system DB has no `documents` table — that lives in the
+/// customer migrations), seed `test/doc1` there, and return the API key. The
+/// returned container/pool must outlive the test.
+async fn provision_with_doc(
+    ctx: &DrlTestContext,
+    admin_addr: std::net::SocketAddr,
+    project_id: &str,
+) -> (String, ContainerAsync<Postgres>, sqlx::PgPool) {
+    let container = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start customer Postgres container");
+    let port = container.get_host_port_ipv4(5432).await.expect("customer pg port");
+    let dsn = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
 
-/// All 9 gRPC handlers return x-ratelimit-limit and x-ratelimit-remaining.
+    let resp = ctx
+        .admin_client
+        .post(format!("http://{admin_addr}/admin/v1/projects"))
+        .header("Authorization", format!("Bearer {ADMIN_KEY}"))
+        .json(&serde_json::json!({
+            "project_id": project_id,
+            "dsn": dsn,
+            "backend_mode": "direct_pg",
+        }))
+        .send()
+        .await
+        .expect("POST /admin/v1/projects failed");
+    assert!(resp.status().is_success(), "provision failed: {}", resp.status());
+    let body: serde_json::Value = resp.json().await.expect("provision JSON");
+    let api_key = body["api_key"].as_str().expect("api_key in response").to_string();
+
+    let customer_pool = sqlx::PgPool::connect(&dsn).await.expect("connect customer pool");
+    sqlx::query(
+        "INSERT INTO documents (project_id, collection_path, document_id, fields, create_time, update_time, version) \
+         VALUES ($1, 'test', 'doc1', $2, now(), now(), 1)",
+    )
+    .bind(project_id)
+    .bind(serde_json::json!({"title": {"t": "S", "v": "hello"}}))
+    .execute(&customer_pool)
+    .await
+    .expect("seed document");
+    (api_key, container, customer_pool)
+}
+
+fn header<T>(resp: &tonic::Response<T>, name: &str) -> Option<f64> {
+    resp.metadata()
+        .get(name)
+        .map(|v| v.to_str().expect("ascii header").parse().expect("numeric header"))
+}
+
+// ─── AC-14-01: rate-limit headers on an allowed response ─────────────────────
+
+/// An allowed GetDocument response carries x-ratelimit-{limit,remaining,reset}
+/// and no retry-after-ms.
 ///
 /// AC-14-01
 ///
-/// Journey:
-///   Given: project "proj-headers" with token bucket at capacity (enough for all requests)
-///   When:  client calls GetDocument (representative of all 9 handlers)
-///   Then:  response trailing metadata contains "x-ratelimit-limit"
-///   And:   response trailing metadata contains "x-ratelimit-remaining"
-///   And:   response trailing metadata contains "x-ratelimit-reset"
-///   And:   "retry-after-ms" header is NOT present on allowed responses
-///
-/// NOTE: This test covers GetDocument as a representative handler.
-/// The "all 9 handlers" requirement is satisfied by code review at each of the 9 call sites
-/// in handler.rs — not by calling all 9 endpoints in this test (that would be fixture theater).
-///
 /// @driving_port @real-io @US-14 @AC-14-01
 #[tokio::test]
-#[ignore]
 async fn all_grpc_handlers_return_ratelimit_headers() {
-    // SCAFFOLD: true — DRL-04 DELIVER implements this.
-    // DELIVER steps:
-    //   1. ctx = DrlTestContext::new(100.0).await; insert "proj-headers" with 100.0 tokens
-    //   2. Start distributed gRPC server; build FirestoreClient
-    //   3. let response = client.get_document(get_document_request("proj-headers", "key-h")).await;
-    //   4. Inspect response metadata (trailing) for "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset"
-    //   5. Assert all three present and non-empty
-    //   6. Assert "retry-after-ms" is absent
-    let _ctx = DrlTestContext::new(100.0).await;
-    todo!(
-        "DRL-04 DELIVER: assert x-ratelimit-limit, x-ratelimit-remaining, x-ratelimit-reset present on allowed response; retry-after-ms absent"
-    )
+    let ctx = DrlTestContext::new(100.0).await;
+    let (addr, server) = start_distributed_grpc_server(&ctx).await;
+    let (api_key, _customer, _pool) = provision_with_doc(&ctx, server.admin_addr, "proj-headers").await;
+    let ctx = ctx.with_grpc_addr(addr);
+    let mut client = FirestoreClient::new(ctx.grpc_channel());
+
+    let resp = client
+        .get_document(get_document_request("proj-headers", &api_key))
+        .await
+        .expect("allowed request for an existing document must succeed");
+
+    assert_eq!(header(&resp, "x-ratelimit-limit"), Some(100.0));
+    assert!(header(&resp, "x-ratelimit-remaining").is_some(), "x-ratelimit-remaining missing");
+    assert!(header(&resp, "x-ratelimit-reset").is_some(), "x-ratelimit-reset missing");
+    assert!(
+        resp.metadata().get("retry-after-ms").is_none(),
+        "retry-after-ms must be absent on an allowed response"
+    );
 }
 
 // ─── AC-14-02: remaining decrements per request ──────────────────────────────
 
-/// x-ratelimit-remaining decrements by 1.0 for each allowed request.
+/// x-ratelimit-remaining decrements by 1 for each allowed request.
 ///
 /// AC-14-02
 ///
-/// Journey (chained — Given reuses "proj-headers" with tokens at capacity):
-///   Given: project "proj-decrement" with 5.0 tokens
-///   When:  client sends 3 sequential GetDocument requests
-///   Then:  x-ratelimit-remaining on request 1 ≈ 4.0
-///   And:   x-ratelimit-remaining on request 2 ≈ 3.0
-///   And:   x-ratelimit-remaining on request 3 ≈ 2.0
-///   And:   each successive response has a strictly lower remaining value
-///
-/// NOTE: Approximate comparison (within ±0.5) to tolerate time-based token refill during test.
-///
 /// @driving_port @real-io @US-14 @AC-14-02
 #[tokio::test]
-#[ignore]
 async fn ratelimit_remaining_decrements_per_request() {
-    // SCAFFOLD: true — DRL-04 DELIVER implements this.
-    // DELIVER steps:
-    //   1. ctx = DrlTestContext::new(10.0).await; insert "proj-decrement" with 5.0 tokens
-    //   2. Start distributed gRPC server
-    //   3. Send request 1; parse x-ratelimit-remaining from trailing metadata → remaining_1
-    //   4. Send request 2; parse → remaining_2; assert remaining_2 < remaining_1
-    //   5. Send request 3; parse → remaining_3; assert remaining_3 < remaining_2
-    //   6. assert remaining_1 ≈ 4.0 (within ±0.5)
-    let _ctx = DrlTestContext::new(10.0).await;
-    todo!(
-        "DRL-04 DELIVER: assert x-ratelimit-remaining decrements strictly per request"
-    )
+    let ctx = DrlTestContext::new(5.0).await;
+    let (addr, server) = start_distributed_grpc_server(&ctx).await;
+    let (api_key, _customer, _pool) =
+        provision_with_doc(&ctx, server.admin_addr, "proj-decrement").await;
+    let ctx = ctx.with_grpc_addr(addr);
+    let mut client = FirestoreClient::new(ctx.grpc_channel());
+    // Pay the one-time Argon2id cost, then reset the bucket to a known level.
+    warm_credential_cache_and_reset_bucket(&ctx, &mut client, "proj-decrement", &api_key, 5.0).await;
+
+    let mut remaining = Vec::new();
+    for _ in 0..3 {
+        let resp = client
+            .get_document(get_document_request("proj-decrement", &api_key))
+            .await
+            .expect("allowed request must succeed");
+        remaining.push(header(&resp, "x-ratelimit-remaining").expect("remaining header"));
+    }
+
+    assert_eq!(remaining, vec![4.0, 3.0, 2.0], "remaining is floored tokens after each deduction");
 }
 
 // ─── AC-14-03: rejected response includes retry-after-ms ─────────────────────
 
-/// RESOURCE_EXHAUSTED response includes retry-after-ms header; allowed response does not.
+/// RESOURCE_EXHAUSTED response includes a positive retry-after-ms header.
 ///
 /// AC-14-03
 ///
-/// Journey (chained — builds on exhausted bucket scenario from b12):
-///   Given: project "proj-retry" with 0.0 tokens (bucket exhausted)
-///   When:  client sends GetDocument request
-///   Then:  gRPC status is RESOURCE_EXHAUSTED
-///   And:   Status trailing metadata contains "retry-after-ms" with a positive integer value
-///   And:   "retry-after-ms" value indicates milliseconds until ≥1 token is available
-///          (expected: approximately 1000 / rate_limit_rps milliseconds)
-///
 /// @driving_port @real-io @US-14 @AC-14-03
 #[tokio::test]
-#[ignore]
 async fn rate_limited_response_includes_retry_after_ms() {
-    // SCAFFOLD: true — DRL-04 DELIVER implements this.
-    // DELIVER steps:
-    //   1. ctx = DrlTestContext::new(10.0).await; insert "proj-retry" with 0.0 tokens
-    //   2. Start distributed gRPC server
-    //   3. let result = client.get_document(get_document_request("proj-retry", "key-rt")).await;
-    //   4. assert result.is_err() — status is Err(Status)
-    //   5. let status = result.unwrap_err();
-    //   6. assert_eq!(status.code(), tonic::Code::ResourceExhausted);
-    //   7. let metadata = status.metadata();
-    //   8. let retry_ms_str = metadata.get("retry-after-ms").expect("retry-after-ms header absent");
-    //   9. let retry_ms: u64 = retry_ms_str.to_str().unwrap().parse().unwrap();
-    //   10. assert!(retry_ms > 0, "retry-after-ms must be positive");
-    //   11. assert!(retry_ms <= 2000, "retry-after-ms should not exceed 2 seconds for 10 RPS bucket");
-    let _ctx = DrlTestContext::new(10.0).await;
-    todo!(
-        "DRL-04 DELIVER: assert RESOURCE_EXHAUSTED response includes retry-after-ms header with positive value"
-    )
+    let ctx = DrlTestContext::new(10.0).await;
+    ctx.insert_project_with_bucket("proj-retry", "key-rt", 0.0).await;
+    let (addr, _server) = start_distributed_grpc_server(&ctx).await;
+    let ctx = ctx.with_grpc_addr(addr);
+    let mut client = FirestoreClient::new(ctx.grpc_channel());
+    // Server start takes >0.1s, enough for a 0-token bucket at 10 rps to refill;
+    // re-pin it to empty right before the request.
+    warm_credential_cache_and_reset_bucket(&ctx, &mut client, "proj-retry", "key-rt", 0.0).await;
+
+    let result = client
+        .get_document(get_document_request("proj-retry", "key-rt"))
+        .await;
+
+    assert_eq!(classify_grpc_status(&result), "resource_exhausted");
+    let status = result.unwrap_err();
+    let retry_ms: u64 = status
+        .metadata()
+        .get("retry-after-ms")
+        .expect("retry-after-ms header absent")
+        .to_str()
+        .expect("ascii header")
+        .parse()
+        .expect("integer retry-after-ms");
+    assert!(retry_ms > 0, "retry-after-ms must be positive");
+    assert!(retry_ms <= 2000, "retry-after-ms {retry_ms} should not exceed 2s for a 10 rps bucket");
 }

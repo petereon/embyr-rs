@@ -1,88 +1,93 @@
 // @driving_port @real-io @US-OBS-04
 #![allow(unused_imports)]
-//! US-OBS-04 — embyr_rate_limit_requests_total{project_id, outcome} counters per rate-limit decision.
+//! US-OBS-04 — embyr_rate_limit_requests_total{project_id, outcome} counter.
 //!
 //! Acceptance criteria verified here:
-//!   AC-OBS-04-01: embyr_rate_limit_requests_total{project_id, outcome} incremented on every
-//!                 RateLimiter::check() return (Ok → "allowed", Err → "rejected").
-//!   AC-OBS-04-02: project_id label matches the project_id argument passed to check().
-//!   AC-OBS-04-04: Counters appear in /metrics only after the first request involving a rate-limit
-//!                 check (zero-valued labels are not pre-emitted).
+//!   AC-OBS-04-01: every rate-limit decision increments the counter with outcome allowed|rejected.
+//!   AC-OBS-04-02: the `project_id` label isolates projects from each other.
 //!
-//! Driving port: gRPC :8080 (tonic FirestoreClient → GetDocument) then Admin :9090
-//!               (reqwest → GET /metrics to observe per-project counters).
-//! Assertion level: real Postgres container (testcontainers-rs) + in-process servers.
+//! Label cardinality note (ADR-069): the `project_id` label is the real id only
+//! once the limiter already knows the project (second call onward); the first
+//! call for a never-seen id is labelled `unconfirmed`. Each test therefore
+//! sends several calls per project.
 //!
-//! All tests are #[ignore] — OBS-01 and OBS-02 walking skeleton must be green first.
+//! Driving port: gRPC :8080 (tonic GetDocument) then Admin :9090 (GET /metrics).
+//! The in-process limiter is sized to 2 tokens via `EMBYR_RATE_LIMIT_RPS` so a
+//! burst of calls is rejected. The recorder is process-global and tests share
+//! it, hence unique project ids per test and `>=` / `== 0` assertions only.
 //!
-//! Implementation notes for DELIVER (OBS-04):
-//!   - Counter at Ok(_) path in RateLimiter::check(): outcome = "allowed".
-//!   - Counter at Err(_) path in RateLimiter::check(): outcome = "rejected".
-//!   - project_id.to_owned() required for metrics macro label (cannot use &str directly in 0.23).
-//!   - `embyr_rate_limit_pg_timeout_total` counter (no labels) alongside existing tracing::warn!.
-//!   - HIGH CARDINALITY (D-OBS-7): one time series per project per outcome; acceptable ≤10k projects.
+//! Implemented 2026-11-13 (formerly `todo!()` scaffolds, `#[ignore]`d).
 
 #[path = "../common/mod.rs"]
 mod common;
-use common::ObsTestContext;
+use common::{metric_value, ObsTestContext};
 
-// ─── AC-OBS-04-01 / AC-OBS-04-02: Allowed request counter ───────────────────
+const RPS: u32 = 2;
+const COUNTER: &str = "embyr_rate_limit_requests_total";
 
-/// Allowed request within rate limit increments the "allowed" outcome counter for the correct project.
-///
-/// AC-OBS-04-01, AC-OBS-04-02
-///
-/// Journey:
-///   Given: embyr running with projects "obs-proj-fintech" (bucket full) and "obs-proj-beta"
-///   When:  Firebase SDK sends GetDocument for "obs-proj-fintech" within rate limit
-///   Then:  GET /metrics shows embyr_rate_limit_requests_total{project_id="obs-proj-fintech",outcome="allowed"}
-///          incremented by 1
-///   And:   embyr_rate_limit_requests_total{project_id="obs-proj-beta",outcome="allowed"} unchanged
+/// Unauthenticated calls are enough: the limiter runs before authentication.
+async fn burst(ctx: &ObsTestContext, project: &str, n: usize) {
+    for _ in 0..n {
+        ctx.make_grpc_call(project).await;
+    }
+}
+
+// ─── AC-OBS-04-01: Allowed request counter ───────────────────────────────────
+
+/// Calls within capacity increment the `allowed` outcome for the project.
 ///
 /// @driving_port @real-io @US-OBS-04 @happy
 #[tokio::test]
-#[ignore]
 async fn allowed_request_increments_rate_limit_allowed_total() {
-    todo!()
+    let ctx = ObsTestContext::start_with_rate_limit(RPS).await;
+
+    burst(&ctx, "obs-allowed-proj", 2).await;
+    let body = ctx.get_metrics().await;
+
+    assert!(
+        metric_value(&body, COUNTER, &[("project_id", "obs-allowed-proj"), ("outcome", "allowed")]) >= 1.0,
+        "expected an allowed sample for obs-allowed-proj; body:\n{body}"
+    );
 }
 
 // ─── AC-OBS-04-01: Rejected request counter ──────────────────────────────────
 
-/// Rate-limited request increments the "rejected" outcome counter and RESOURCE_EXHAUSTED is returned.
-///
-/// AC-OBS-04-01
-///
-/// Journey (chained — Given reuses running server, project "obs-proj-fintech" with exhausted bucket):
-///   Given: embyr running with project "obs-proj-fintech" and token bucket at 0.0
-///   When:  Firebase SDK sends GetDocument for "obs-proj-fintech"
-///   Then:  GET /metrics shows embyr_rate_limit_requests_total{project_id="obs-proj-fintech",outcome="rejected"}
-///          incremented by 1
-///   And:   gRPC response status is RESOURCE_EXHAUSTED
+/// Calls beyond capacity increment the `rejected` outcome for the project.
 ///
 /// @driving_port @real-io @US-OBS-04 @error
 #[tokio::test]
-#[ignore]
 async fn rejected_request_increments_rate_limit_rejected_total() {
-    todo!()
+    let ctx = ObsTestContext::start_with_rate_limit(RPS).await;
+
+    burst(&ctx, "obs-rejected-proj", 6).await;
+    let body = ctx.get_metrics().await;
+
+    assert!(
+        metric_value(&body, COUNTER, &[("project_id", "obs-rejected-proj"), ("outcome", "rejected")]) >= 1.0,
+        "expected a rejected sample for obs-rejected-proj; body:\n{body}"
+    );
 }
 
 // ─── AC-OBS-04-02: Label isolation per project ───────────────────────────────
 
-/// Rate-limit counters are labeled by project_id — one project's counter does not affect another's.
-///
-/// AC-OBS-04-02
-///
-/// Journey (chained — Given reuses running server with both projects active):
-///   Given: embyr running with "obs-proj-fintech" (exhausted bucket) and "obs-proj-beta" (full bucket)
-///   When:  one rejected request for "obs-proj-fintech" and one allowed request for "obs-proj-beta"
-///   Then:  embyr_rate_limit_requests_total{project_id="obs-proj-fintech",outcome="rejected"} ≥ 1
-///   And:   embyr_rate_limit_requests_total{project_id="obs-proj-fintech",outcome="allowed"} = 0
-///   And:   embyr_rate_limit_requests_total{project_id="obs-proj-beta",outcome="allowed"} ≥ 1
-///   And:   embyr_rate_limit_requests_total{project_id="obs-proj-beta",outcome="rejected"} = 0
+/// One project exhausting its bucket does not produce `rejected` samples for another.
 ///
 /// @driving_port @real-io @US-OBS-04 @happy
 #[tokio::test]
-#[ignore]
 async fn rate_limit_metrics_labeled_by_project_id() {
-    todo!()
+    let ctx = ObsTestContext::start_with_rate_limit(RPS).await;
+
+    burst(&ctx, "obs-label-noisy", 6).await;
+    burst(&ctx, "obs-label-quiet", 2).await;
+    let body = ctx.get_metrics().await;
+
+    assert!(
+        metric_value(&body, COUNTER, &[("project_id", "obs-label-noisy"), ("outcome", "rejected")]) >= 1.0,
+        "noisy project must have rejected samples; body:\n{body}"
+    );
+    assert_eq!(
+        metric_value(&body, COUNTER, &[("project_id", "obs-label-quiet"), ("outcome", "rejected")]),
+        0.0,
+        "quiet project must have no rejected samples; body:\n{body}"
+    );
 }

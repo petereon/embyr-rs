@@ -35,8 +35,7 @@
 //! pre-existing reason) regardless of what garbage value is set — exit
 //! code is never the expected `1`, and stderr never names the pool var.
 //!
-//! All tests except the first are `#[ignore]` — DELIVER unskips one at a
-//! time. The first (`non_numeric_tenant_max_connections_fails_startup`) is
+//! All tests run in CI (the rest were un-ignored 2026-11-13). The first (`non_numeric_tenant_max_connections_fails_startup`) is
 //! representative and left enabled as this file's own regression anchor,
 //! following `pr06`/`pr07`'s own precedent of a non-walking-skeleton file
 //! still needing ONE enabled anchor test (this feature's true walking
@@ -83,28 +82,24 @@ async fn non_numeric_tenant_max_connections_fails_startup() {
 
 /// @error @AC-PSL-05
 #[tokio::test]
-#[ignore]
 async fn non_numeric_system_max_connections_fails_startup() {
     assert_invalid_pool_var_fails_startup("EMBYR_SYSTEM_DB_MAX_CONNECTIONS", "not_a_number").await;
 }
 
 /// @error @AC-PSL-05
 #[tokio::test]
-#[ignore]
 async fn non_numeric_tenant_acquire_timeout_fails_startup() {
     assert_invalid_pool_var_fails_startup("EMBYR_TENANT_DB_ACQUIRE_TIMEOUT_SECS", "not_a_number").await;
 }
 
 /// @error @AC-PSL-05
 #[tokio::test]
-#[ignore]
 async fn non_numeric_listener_max_connections_fails_startup() {
     assert_invalid_pool_var_fails_startup("EMBYR_LISTENER_DB_MAX_CONNECTIONS", "not_a_number").await;
 }
 
 /// @error @AC-PSL-05
 #[tokio::test]
-#[ignore]
 async fn non_numeric_listener_acquire_timeout_fails_startup() {
     assert_invalid_pool_var_fails_startup("EMBYR_LISTENER_DB_ACQUIRE_TIMEOUT_SECS", "not_a_number").await;
 }
@@ -115,14 +110,12 @@ async fn non_numeric_listener_acquire_timeout_fails_startup() {
 ///
 /// @error @boundary @AC-PSL-05
 #[tokio::test]
-#[ignore]
 async fn zero_tenant_max_connections_fails_startup() {
     assert_invalid_pool_var_fails_startup("EMBYR_TENANT_DB_MAX_CONNECTIONS", "0").await;
 }
 
 /// @error @boundary @AC-PSL-05
 #[tokio::test]
-#[ignore]
 async fn zero_listener_acquire_timeout_fails_startup() {
     assert_invalid_pool_var_fails_startup("EMBYR_LISTENER_DB_ACQUIRE_TIMEOUT_SECS", "0").await;
 }

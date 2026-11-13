@@ -404,7 +404,6 @@ async fn rest_grpc_web_listener_terminates_tls_when_configured() {
 ///
 /// @error @US-01 @AC-TLS-05
 #[tokio::test]
-#[ignore]
 async fn exits_nonzero_when_only_cert_path_is_set() {
     let mut server = ServerProcess::start_env_only(&[
         (
@@ -441,7 +440,6 @@ async fn exits_nonzero_when_only_cert_path_is_set() {
 /// only covers cert-path-only, leaving the `(None, Some(_))` match arm in
 /// `ServerConfig::from_env` unexercised.
 #[tokio::test]
-#[ignore]
 async fn exits_nonzero_when_only_key_path_is_set() {
     let mut server = ServerProcess::start_env_only(&[
         (
@@ -487,7 +485,6 @@ async fn exits_nonzero_when_only_key_path_is_set() {
 ///
 /// @error @US-01 @AC-TLS-06
 #[tokio::test]
-#[ignore]
 async fn exits_nonzero_when_key_file_does_not_exist() {
     let (cert_pem, _key_pem) = generate_self_signed_test_cert();
     let mut cert_file = tempfile::NamedTempFile::new().expect("create temp cert file");
@@ -548,7 +545,6 @@ async fn exits_nonzero_when_key_file_does_not_exist() {
 ///
 /// @error @US-01 @AC-TLS-07
 #[tokio::test]
-#[ignore]
 async fn exits_nonzero_when_cert_content_is_not_valid_pem() {
     let (_cert_pem, key_pem) = generate_self_signed_test_cert();
 

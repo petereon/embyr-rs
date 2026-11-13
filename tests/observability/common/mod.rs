@@ -81,6 +81,8 @@ pub struct ObsTestContext {
     pub http_client: reqwest::Client,
     /// gRPC server address — used by make_grpc_call().
     grpc_addr: std::net::SocketAddr,
+    /// REST/gRPC-Web data port address — used by get_rest_status().
+    rest_addr: std::net::SocketAddr,
     /// DSN for the test Postgres container — passed in provision_project() requests.
     db_url: String,
     /// Postgres container — kept alive for the duration of the test.
@@ -124,6 +126,7 @@ impl ObsTestContext {
         let admin_key = "test-admin-key-secret".to_string();
         let admin_base_url = format!("http://127.0.0.1:{}", server.admin_addr.port());
         let grpc_addr = server.grpc_addr;
+        let rest_addr = server.rest_addr;
 
         let http_client = reqwest::Client::builder()
             .build()
@@ -134,10 +137,33 @@ impl ObsTestContext {
             admin_key,
             http_client,
             grpc_addr,
+            rest_addr,
             db_url,
             _container: container,
             _server: server,
         }
+    }
+
+    /// Like `start()`, but the in-process rate limiter gets capacity/refill
+    /// `rps` (via `EMBYR_RATE_LIMIT_RPS`, read by the test-server constructor).
+    /// Every caller in a test binary must pass the same value: the env var is
+    /// process-global and tests in one binary run in parallel threads.
+    pub async fn start_with_rate_limit(rps: u32) -> Self {
+        std::env::set_var("EMBYR_RATE_LIMIT_RPS", rps.to_string());
+        Self::start().await
+    }
+
+    /// Plain HTTP GET `path` on the REST data port (:8081 equivalent).
+    /// Returns `(status, body)`.
+    pub async fn get_rest(&self, path: &str) -> (u16, String) {
+        let resp = self
+            .http_client
+            .get(format!("http://{}{}", self.rest_addr, path))
+            .send()
+            .await
+            .expect("GET on REST port failed");
+        let status = resp.status().as_u16();
+        (status, resp.text().await.expect("REST body read failed"))
     }
 
     /// GET /metrics with operator Bearer auth. Returns response body as String.
@@ -263,4 +289,15 @@ impl ObsTestContext {
         }
         None
     }
+}
+
+/// Numeric value of the first Prometheus data line for `metric` whose labels
+/// include every `(key, value)` pair (order-independent). `0.0` if absent.
+pub fn metric_value(body: &str, metric: &str, labels: &[(&str, &str)]) -> f64 {
+    let prefix = format!("{metric}{{");
+    body.lines()
+        .filter(|l| !l.starts_with('#') && l.starts_with(&prefix))
+        .filter(|l| labels.iter().all(|(k, v)| l.contains(&format!("{k}=\"{v}\""))))
+        .find_map(|l| l.rsplit(' ').next()?.parse::<f64>().ok())
+        .unwrap_or(0.0)
 }

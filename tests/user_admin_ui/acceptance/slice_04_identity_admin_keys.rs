@@ -2,7 +2,8 @@
 //! Slice 04 — Identity (Members) + Admin API Keys acceptance scenarios.
 //! Stories: US-009 (Members), US-010 (Service Accounts + Admin Keys)
 //!
-//! All tests are #[ignore] (RED). Enable one at a time in DELIVER.
+//! All tests are enabled (un-ignored 2026-11-13) except any carrying an explicit
+//! `#[ignore = "..."]` reason string.
 //! Includes the sole-Owner invariant (AC-009-06) as a named invariant test.
 
 use embyr_admin_ui::model::{
@@ -94,7 +95,6 @@ fn remove_viewer_member() {
 
 /// AC-009-06: Attempting to remove the sole Owner is rejected — model unchanged.
 #[test]
-#[ignore = "RED — implement sole-Owner protection in RemoveMember"]
 fn removing_sole_owner_is_rejected() {
     // AC-009-06
     let mut m = AppModel::default();
@@ -122,7 +122,6 @@ fn removing_sole_owner_is_rejected() {
 
 /// AC-009-06: Sole Owner cannot be demoted via SetMemberRole.
 #[test]
-#[ignore = "RED — implement sole-Owner protection in SetMemberRole"]
 fn demoting_sole_owner_is_rejected() {
     // AC-009-06
     let mut m = AppModel::default();
@@ -150,7 +149,6 @@ fn demoting_sole_owner_is_rejected() {
 
 /// Sad: RemoveMember with non-existent uid is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement RemoveMember no-op guard"]
 fn remove_member_phantom_uid_is_noop() {
     let mut m = make_model_with_db();
     let count_before = m.members.len();
@@ -167,7 +165,6 @@ fn remove_member_phantom_uid_is_noop() {
 
 /// AC-010-02: ServiceAccountCreated appends the new service account.
 #[test]
-#[ignore = "RED — implement update(_, Msg::ServiceAccountCreated)"]
 fn create_service_account_appends_to_model() {
     // AC-010-02
     let mut m = make_model_with_db();
@@ -195,7 +192,7 @@ fn create_service_account_appends_to_model() {
 
 /// AC-010-03: DeleteServiceAccount removes the SA and its associated admin keys.
 #[test]
-#[ignore = "RED — implement update(_, Msg::DeleteServiceAccount) with cascade"]
+#[ignore = "REAL GAP: update(Msg::DeleteServiceAccount) does not cascade-remove the SA admin keys (AC-010-03) — see docs/product/ignored-test-triage-2026-11-13.md"]
 fn delete_service_account_cascades_admin_keys() {
     // AC-010-03
     let mut m = make_model_with_db();
@@ -239,7 +236,6 @@ fn delete_service_account_cascades_admin_keys() {
 
 /// AC-010-05: AdminKeyCreated appends the key with prefix.
 #[test]
-#[ignore = "RED — implement update(_, Msg::AdminKeyCreated)"]
 fn create_admin_key_appends_with_prefix() {
     // AC-010-05
     let mut m = make_model_with_db();
@@ -262,7 +258,6 @@ fn create_admin_key_appends_with_prefix() {
 
 /// AC-010-06: RevokeAdminKey removes the key immediately.
 #[test]
-#[ignore = "RED — implement update(_, Msg::RevokeAdminKey)"]
 fn revoke_admin_key_removes_from_model() {
     // AC-010-06
     let mut m = make_model_with_db();
@@ -287,7 +282,6 @@ fn revoke_admin_key_removes_from_model() {
 
 /// Sad: RevokeAdminKey with non-existent key_id is a no-op (no panic).
 #[test]
-#[ignore = "RED — implement RevokeAdminKey no-op guard"]
 fn revoke_admin_key_phantom_is_noop() {
     let mut m = make_model_with_db();
     let phantom = KeyId(Uuid::new_v4());

@@ -4,14 +4,18 @@
 //!
 //! Acceptance criteria verified here:
 //!   AC-12-01: When token bucket is empty, gRPC returns RESOURCE_EXHAUSTED.
-//!   AC-12-02: Concurrent requests from multiple nodes each decrement the shared token count atomically.
-//!   AC-12-03: Token bucket refills at the configured RPS rate after 1 second.
+//!   AC-12-02: Rate limit enforced exactly at the configured capacity (covered by
+//!             `b19_fail_open_on_pg_error::pg_healthy_rate_limiting_behaves_unchanged`:
+//!             capacity allowed, then RESOURCE_EXHAUSTED — the former scaffold here
+//!             was deleted 2026-11-13 as a duplicate).
+//!   AC-12-03: Each allowed request decrements the shared Postgres token count.
+//!   AC-12-04: Token bucket refills at the configured RPS rate after 1 second.
 //!
 //! Driving port: gRPC :8080 (tonic FirestoreClient → GetDocument).
 //! Assertion level: real Postgres container (testcontainers-rs) + in-process gRPC server.
 //!
 //! Walking skeleton: `distributed_rate_limit_rejects_when_bucket_exhausted`
-//!   — NOT #[ignore]; RED via todo!(); first test to implement in DRL-02.
+//!   — the first test implemented in DRL-02.
 //!
 //! Implementation note for DELIVER (DRL-02):
 //!   - `start_distributed_grpc_server(system_db, capacity)` must be implemented in embyr_server::lib.
@@ -23,7 +27,7 @@
 mod common;
 use common::{
     classify_grpc_status, get_document_request, start_distributed_grpc_server, universe,
-    DrlTestContext,
+    warm_credential_cache_and_reset_bucket, DrlTestContext,
 };
 use embyr_proto::firestore::firestore_client::FirestoreClient;
 use std::collections::HashMap;
@@ -49,64 +53,46 @@ async fn distributed_rate_limit_rejects_when_bucket_exhausted() {
     let (addr, _server) = start_distributed_grpc_server(&ctx).await;
     let ctx = ctx.with_grpc_addr(addr);
     let mut client = FirestoreClient::new(ctx.grpc_channel());
+    // Pre-pay the cold-start cost: siblings share this binary, and a cold first
+    // request can exceed the limiter's 20ms PG timeout (fail-open -> Internal).
+    warm_credential_cache_and_reset_bucket(&ctx, &mut client, "proj-ws", "key-ws", 0.0).await;
     let result = client.get_document(get_document_request("proj-ws", "key-ws")).await;
     assert_eq!(classify_grpc_status(&result), "resource_exhausted");
 }
 
-// ─── AC-12-02: Postgres atomic UPDATE enforces limit at configured RPS ────────
-
-/// Rate limit is enforced exactly at the configured RPS threshold.
-///
-/// AC-12-02
-///
-/// Journey (chained — Given reuses context from walking skeleton):
-///   Given: project "proj-rps" with token bucket at 3.0 tokens (rate_limit_rps=3.0)
-///   When:  client sends 3 sequential GetDocument requests (each consumes 1 token)
-///   Then:  first 3 requests are allowed (status: not RESOURCE_EXHAUSTED)
-///   And:   4th request is rejected with RESOURCE_EXHAUSTED
-///   And:   rate_buckets.tokens approaches 0.0 after the 3rd allowed request
-///
-/// @driving_port @real-io @US-12 @AC-12-02
-#[tokio::test]
-#[ignore]
-async fn rate_limit_enforced_at_configured_rps() {
-    // SCAFFOLD: true — DRL-02 DELIVER implements this.
-    // DELIVER steps:
-    //   1. ctx = DrlTestContext::new(3.0).await; (capacity=3, rate tight enough to exhaust in 3 requests)
-    //   2. ctx.insert_project_with_bucket("proj-rps", "key-rps", 3.0).await;
-    //   3. start distributed server with capacity=3.0
-    //   4. Fire 3 requests → all allowed; 4th request → RESOURCE_EXHAUSTED
-    //   5. assert_state_delta: RATE_BUCKET_TOKENS approaches "0.0"
-    todo!(
-        "DRL-02 DELIVER: assert exactly `capacity` requests allowed before RESOURCE_EXHAUSTED"
-    )
-}
-
 // ─── AC-12-03: atomic UPDATE is the shared enforcement point ──────────────────
 
-/// Token count decrements atomically for each allowed request.
+/// Token count in Postgres decrements by ~1.0 for each allowed request.
 ///
 /// AC-12-03
 ///
-/// Journey (chained — Given reuses "proj-rps" with bucket initialized at capacity):
-///   Given: project "proj-atomic" with token bucket at 5.0 tokens
+/// Journey:
+///   Given: project "proj-atomic" with token bucket at 5.0 tokens (refill 5/s)
 ///   When:  3 requests are sent sequentially
-///   Then:  rate_buckets.tokens decrements by approximately 1.0 per request
-///   And:   no two requests observe the same token count post-deduction
+///   Then:  rate_buckets.tokens is ~4, ~3, ~2 after each (tolerance for refill)
 ///
 /// @driving_port @real-io @US-12 @AC-12-03
 #[tokio::test]
-#[ignore]
 async fn rate_bucket_tokens_decrease_atomically() {
-    // SCAFFOLD: true — DRL-02 DELIVER implements this.
-    // DELIVER steps:
-    //   1. ctx = DrlTestContext::new(10.0).await; insert "proj-atomic" with 5.0 tokens
-    //   2. Send 3 GetDocument requests sequentially
-    //   3. After each request, query rate_buckets.tokens via ctx.query_rate_bucket("proj-atomic")
-    //   4. Assert tokens decrease by ~1.0 each step (within tolerance for time-based refill)
-    todo!(
-        "DRL-02 DELIVER: assert rate_buckets.tokens decrements atomically per request"
-    )
+    let ctx = DrlTestContext::new(5.0).await;
+    ctx.insert_project_with_bucket("proj-atomic", "key-atomic", 5.0).await;
+    let (addr, _server) = start_distributed_grpc_server(&ctx).await;
+    let ctx = ctx.with_grpc_addr(addr);
+    let mut client = FirestoreClient::new(ctx.grpc_channel());
+    // Pay the one-time Argon2id cost first so refill drift between requests is negligible.
+    warm_credential_cache_and_reset_bucket(&ctx, &mut client, "proj-atomic", "key-atomic", 5.0).await;
+
+    for (i, expected) in [4.0_f64, 3.0, 2.0].into_iter().enumerate() {
+        let result = client
+            .get_document(get_document_request("proj-atomic", "key-atomic"))
+            .await;
+        assert_ne!(classify_grpc_status(&result), "resource_exhausted", "request {i} must be allowed");
+        let (tokens, _) = ctx.query_rate_bucket("proj-atomic").await.expect("bucket row");
+        assert!(
+            (expected - 0.2..=expected + 0.5).contains(&tokens),
+            "after request {i} expected ~{expected} tokens, got {tokens}"
+        );
+    }
 }
 
 // ─── AC-12-04: tokens refill after 1 second ──────────────────────────────────
@@ -115,26 +101,36 @@ async fn rate_bucket_tokens_decrease_atomically() {
 ///
 /// AC-12-04
 ///
-/// Journey (chained):
-///   Given: project "proj-refill" with token bucket exhausted (0.0 tokens)
-///   When:  client waits 1 second (sufficient for rate_limit_rps tokens to accrue)
-///   And:   client sends a GetDocument request
-///   Then:  the request is allowed (status: "ok" or "not_found")
-///   And:   rate_buckets.tokens is approximately rate_limit_rps - 1.0
+/// Journey:
+///   Given: project "proj-refill" with an exhausted bucket (0.0 tokens), 10 rps
+///   When:  a request is sent immediately -> RESOURCE_EXHAUSTED
+///   And:   the client waits 1.1 seconds, then sends another request
+///   Then:  the second request is allowed and tokens ~= rps - 1.0
 ///
 /// @driving_port @real-io @US-12 @AC-12-04
 #[tokio::test]
-#[ignore]
 async fn tokens_refill_after_one_second() {
-    // SCAFFOLD: true — DRL-02 DELIVER implements this.
-    // DELIVER steps:
-    //   1. ctx = DrlTestContext::new(10.0).await; insert "proj-refill" with 0.0 tokens
-    //   2. Verify first request → RESOURCE_EXHAUSTED (no tokens)
-    //   3. tokio::time::sleep(Duration::from_secs(1)).await
-    //   4. Send GetDocument → should be allowed (token refilled)
-    //   5. assert classify_grpc_status != "resource_exhausted"
-    //   6. Assert rate_buckets.tokens approximately == rate_limit_rps - 1.0 (within ±0.5 for timing jitter)
-    todo!(
-        "DRL-02 DELIVER: assert token bucket refills after 1 second (rate = EMBYR_RATE_LIMIT_RPS)"
-    )
+    let ctx = DrlTestContext::new(10.0).await;
+    ctx.insert_project_with_bucket("proj-refill", "key-refill", 10.0).await;
+    let (addr, _server) = start_distributed_grpc_server(&ctx).await;
+    let ctx = ctx.with_grpc_addr(addr);
+    let mut client = FirestoreClient::new(ctx.grpc_channel());
+    warm_credential_cache_and_reset_bucket(&ctx, &mut client, "proj-refill", "key-refill", 0.0).await;
+
+    let first = client
+        .get_document(get_document_request("proj-refill", "key-refill"))
+        .await;
+    assert_eq!(classify_grpc_status(&first), "resource_exhausted");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let second = client
+        .get_document(get_document_request("proj-refill", "key-refill"))
+        .await;
+    assert_ne!(classify_grpc_status(&second), "resource_exhausted", "bucket must have refilled");
+    let (tokens, _) = ctx.query_rate_bucket("proj-refill").await.expect("bucket row");
+    assert!(
+        (8.0..=9.6).contains(&tokens),
+        "expected ~9.0 tokens (10 rps refilled, capped at capacity, minus 1), got {tokens}"
+    );
 }

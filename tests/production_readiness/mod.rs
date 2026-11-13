@@ -9,7 +9,8 @@
 //!
 //! Walking skeleton: `pr01_config_from_env::server_starts_with_all_required_env_vars_set`
 //!   — the ONLY test NOT marked #[ignore]. Proves the full startup path end-to-end.
-//!   All other tests are #[ignore] — DELIVER unskips them one at a time.
+//!   Other tests were unskipped 2026-11-13, except pr02 (Docker image
+//!   build/inspect — see `docs/product/ignored-test-triage-2026-11-13.md`).
 //!
 //! Implementation order:
 //!   1. pr01 — US-PR-01: env-var config + main() startup (D-PR-1 through D-PR-6)

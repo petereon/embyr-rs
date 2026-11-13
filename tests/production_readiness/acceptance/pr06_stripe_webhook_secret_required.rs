@@ -22,8 +22,8 @@
 //! Driving port: `embyr-server` binary subprocess via ENV/STDOUT/STDERR, and
 //!   a real HTTP POST to `/admin/v1/webhooks/stripe` on the admin port.
 //!
-//! Both tests are #[ignore] (subprocess-based error/boundary scenarios),
-//! mirroring `pr05_tls_support.rs`'s own AC-TLS-05/06/07 convention.
+//! Subprocess-based error/boundary scenarios; formerly #[ignore], un-ignored
+//! 2026-11-13 (all pass in CI).
 //!
 //! Scaffold state: NONE created by this DISTILL pass. `ServerConfig::from_env()`
 //!   does not yet validate STRIPE_WEBHOOK_SIGNING_SECRET (config.rs Decision 1),
@@ -61,7 +61,6 @@ use crate::common::{start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY
 ///
 /// @error @boundary @US-01 @AC-WHS-01
 #[tokio::test]
-#[ignore]
 async fn webhook_route_not_reachable_when_stripe_fully_unconfigured() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -128,7 +127,6 @@ async fn webhook_route_not_reachable_when_stripe_fully_unconfigured() {
 ///
 /// @error @US-01 @AC-WHS-02
 #[tokio::test]
-#[ignore]
 async fn exits_nonzero_when_stripe_secret_key_set_without_webhook_signing_secret() {
     let mut server = ServerProcess::start_env_only(&[
         (
@@ -180,7 +178,6 @@ async fn exits_nonzero_when_stripe_secret_key_set_without_webhook_signing_secret
 ///
 /// @error @US-01 @AC-WHS-02
 #[tokio::test]
-#[ignore]
 async fn exits_nonzero_when_stripe_webhook_signing_secret_is_empty_string() {
     let mut server = ServerProcess::start_env_only(&[
         (
@@ -222,7 +219,6 @@ async fn exits_nonzero_when_stripe_webhook_signing_secret_is_empty_string() {
 ///
 /// @error @boundary @US-01 @AC-WHS-03
 #[tokio::test]
-#[ignore]
 async fn webhook_route_is_reachable_when_stripe_correctly_configured() {
     let (_pg, db_url) = start_postgres_container().await;
 

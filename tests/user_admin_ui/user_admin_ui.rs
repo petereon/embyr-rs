@@ -2,7 +2,7 @@
 //! Integration test binary entry point — user-admin-ui acceptance tests.
 //!
 //! Registers all TEA state scenario modules and per-slice scenario modules.
-//! All tests carry `#[ignore]` (RED) — DELIVER enables them one at a time.
+//! Tests were originally `#[ignore]`d RED; passing ones un-ignored 2026-11-13.
 //!
 //! Registered in `crates/embyr-admin-ui/Cargo.toml` as:
 //!   [[test]]

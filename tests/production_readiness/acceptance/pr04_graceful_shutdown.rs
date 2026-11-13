@@ -9,7 +9,7 @@
 //! Driving port: embyr-server subprocess + tonic gRPC client for the in-flight
 //!               request scenario.
 //!
-//! All tests are #[ignore] — run explicitly via `--ignored` (real-io suite).
+//! All tests run in CI (un-ignored 2026-11-13; subprocess-based real-io suite).
 
 use std::time::Duration;
 
@@ -38,7 +38,6 @@ use crate::common::{start_postgres_container, ServerProcess, TEST_ENCRYPTION_KEY
 ///
 /// @real-io @US-PR-01 @AC-PR-04-01
 #[tokio::test]
-#[ignore]
 async fn sigterm_causes_graceful_shutdown() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -98,7 +97,6 @@ async fn sigterm_causes_graceful_shutdown() {
 ///
 /// @real-io @US-PR-01 @AC-PR-04-02
 #[tokio::test]
-#[ignore]
 async fn in_flight_request_completes_before_shutdown() {
     let (_pg, db_url) = start_postgres_container().await;
 
@@ -297,7 +295,6 @@ async fn in_flight_request_completes_before_shutdown() {
 ///
 /// @real-io @US-PR-01 @AC-PR-04-03
 #[tokio::test]
-#[ignore]
 async fn sigterm_drains_within_30s() {
     let (_pg, db_url) = start_postgres_container().await;
 
