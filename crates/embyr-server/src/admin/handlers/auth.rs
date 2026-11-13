@@ -9,10 +9,10 @@
 //!   Deletes session row. Sets Max-Age=0 on cookie. Returns 204.
 //!
 //! GET /admin/v1/auth/oidc/callback
-//!   (RED scaffold — implemented in a later step)
+//!   Disabled (audit finding #58) — always 302 /admin/?error=oidc_failed.
 
 use axum::{
-    extract::{ConnectInfo, Json, Query, State},
+    extract::{ConnectInfo, Json, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -123,7 +123,7 @@ fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 /// Read column `$field` from `$row`, returning `internal_err($context, e)`
 /// from the enclosing handler on decode failure. Collapses the repeated
 /// `match row.try_get(...) { Ok(v) => v, Err(e) => return internal_err(...) }`
-/// boilerplate used throughout `signin` and `oidc_callback`.
+/// boilerplate used throughout `signin`.
 macro_rules! try_get_or_err {
     ($row:expr, $field:literal, $context:literal) => {
         match $row.try_get($field) {
@@ -440,17 +440,7 @@ pub async fn signout(
         .into_response()
 }
 
-// ── OIDC callback types ───────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-pub struct OidcCallbackQuery {
-    pub id_token: Option<String>,
-    pub state: Option<String>,
-    pub code: Option<String>,
-    pub error: Option<String>,
-}
-
-// ── OIDC callback helpers ─────────────────────────────────────────────────────
+// ── OIDC callback ─────────────────────────────────────────────────────────────
 
 fn oidc_failed_redirect() -> Response {
     let mut headers = HeaderMap::new();
@@ -463,214 +453,15 @@ fn oidc_failed_redirect() -> Response {
 
 /// GET /admin/v1/auth/oidc/callback
 ///
-/// Validates OIDC id_token (issuer, audience, expiry, JWKS RS256 signature).
-/// On success: creates session row, sets embyr_session cookie, redirects to /admin/.
-///
-/// AC-B06-05:
-///   - valid id_token → 302 /admin/ + embyr_session cookie
-///   - invalid JWKS signature → 302 /admin/?error=oidc_failed (or 401)
-///   - unknown issuer → 401
-///   - missing state → 401
-pub async fn oidc_callback(
-    State(state): State<UserAdminState>,
-    Query(query): Query<OidcCallbackQuery>,
-) -> Response {
-    use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
-
-    let pool = state.system_db.pool();
-
-    // Step 1: IdP-level error (e.g. user denied consent).
-    if query.error.is_some() {
-        return oidc_failed_redirect();
-    }
-
-    // Step 2: id_token must be present.
-    let id_token = match query.id_token {
-        Some(t) => t,
-        None => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-
-    // Step 3: CSRF state must be present (V1: presence-only check).
-    match query.state.as_deref() {
-        None => return StatusCode::UNAUTHORIZED.into_response(),
-        Some("") => {
-            tracing::warn!("oidc_callback: empty state parameter — CSRF nonce check skipped (V1)");
-        }
-        Some(_) => {}
-    }
-
-    // Step 4: Decode JWT payload without signature to extract claims.
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let payload_bytes = match URL_SAFE_NO_PAD.decode(parts[1]) {
-        Ok(b) => b,
-        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-    let claims: serde_json::Value = match serde_json::from_slice(&payload_bytes) {
-        Ok(v) => v,
-        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-
-    // Step 5: Require `iss` claim.
-    let issuer = match claims.get("iss").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-
-    // Step 6: Look up matching enabled OIDC provider by issuer.
-    let provider_row = match sqlx::query(
-        "SELECT account_id, client_id FROM oidc_providers \
-         WHERE issuer = $1 AND enabled = true LIMIT 1",
-    )
-    .bind(&issuer)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(r)) => r,
-        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
-        Err(e) => return internal_err("oidc_callback: DB lookup provider", e),
-    };
-
-    let account_id: Uuid =
-        try_get_or_err!(provider_row, "account_id", "oidc_callback: read account_id");
-    let client_id: String =
-        try_get_or_err!(provider_row, "client_id", "oidc_callback: read client_id");
-
-    // Step 8: Verify token not expired.
-    let exp = claims.get("exp").and_then(|v| v.as_i64()).unwrap_or(0);
-    if exp > 0 && exp < chrono::Utc::now().timestamp() {
-        return oidc_failed_redirect();
-    }
-
-    // Step 9: Verify audience matches provider client_id.
-    let aud_matches = match claims.get("aud") {
-        Some(serde_json::Value::String(s)) => s.as_str() == client_id.as_str(),
-        Some(serde_json::Value::Array(arr)) => {
-            arr.iter().any(|v| v.as_str() == Some(client_id.as_str()))
-        }
-        _ => false,
-    };
-    if !aud_matches {
-        return oidc_failed_redirect();
-    }
-
-    // Step 10: Parse JWT header for key ID.
-    let jwt_header = match decode_header(&id_token) {
-        Ok(h) => h,
-        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-    let kid = jwt_header.kid.unwrap_or_default();
-
-    // Step 11: Fetch JWKS from issuer discovery endpoint.
-    let jwks_url = format!("{}/.well-known/jwks.json", issuer);
-    let jwks: JwkSet = match reqwest::get(&jwks_url).await {
-        Ok(resp) => match resp.json::<JwkSet>().await {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!("oidc_callback: JWKS JSON parse error: {e}");
-                return oidc_failed_redirect();
-            }
-        },
-        Err(e) => {
-            tracing::warn!("oidc_callback: JWKS fetch error: {e}");
-            return oidc_failed_redirect();
-        }
-    };
-
-    // Step 12: Find matching JWK by kid (fall back to first key).
-    let jwk = if !kid.is_empty() {
-        jwks.keys
-            .iter()
-            .find(|k| k.common.key_id.as_deref() == Some(kid.as_str()))
-            .or_else(|| jwks.keys.first())
-    } else {
-        jwks.keys.first()
-    };
-    let jwk = match jwk {
-        Some(k) => k,
-        None => {
-            tracing::warn!("oidc_callback: no matching JWK found for kid={kid:?}");
-            return oidc_failed_redirect();
-        }
-    };
-
-    // Step 13: Verify RS256 signature via jsonwebtoken.
-    let decoding_key = match DecodingKey::from_jwk(jwk) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::warn!("oidc_callback: DecodingKey::from_jwk failed: {e}");
-            return oidc_failed_redirect();
-        }
-    };
-    let mut validation = Validation::new(Algorithm::RS256);
-    validation.validate_exp = false; // validated manually above
-    validation.required_spec_claims = std::collections::HashSet::new();
-    validation.set_audience(&[client_id.as_str()]);
-    if decode::<serde_json::Value>(&id_token, &decoding_key, &validation).is_err() {
-        return oidc_failed_redirect();
-    }
-
-    // Step 14: CSRF state accepted (V1: presence-only; full nonce verification deferred).
-
-    // Step 15: Resolve a user in the account to create a session for.
-    // Look up the account owner; fall back to any member.
-    let user_row = match sqlx::query(
-        "SELECT user_id FROM account_members \
-         WHERE account_id = $1 AND role = 'owner' LIMIT 1",
-    )
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            match sqlx::query(
-                "SELECT user_id FROM account_members WHERE account_id = $1 LIMIT 1",
-            )
-            .bind(account_id)
-            .fetch_optional(pool)
-            .await
-            {
-                Ok(Some(r)) => r,
-                Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
-                Err(e) => return internal_err("oidc_callback: no account members", e),
-            }
-        }
-        Err(e) => return internal_err("oidc_callback: DB lookup user", e),
-    };
-
-    let user_id: Uuid = try_get_or_err!(user_row, "user_id", "oidc_callback: read user_id");
-
-    // Generate 32-byte random session token (same pattern as signin).
-    let mut token_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut token_bytes);
-    let token = URL_SAFE_NO_PAD.encode(token_bytes);
-    let token_hash = blake3::hash(token.as_bytes()).as_bytes().to_vec();
-
-    if let Err(e) = sqlx::query(
-        "INSERT INTO sessions (user_id, account_id, token_hash, expires_at) \
-         VALUES ($1, $2, $3, now() + interval '24 hours')",
-    )
-    .bind(user_id)
-    .bind(account_id)
-    .bind(&token_hash)
-    .execute(pool)
-    .await
-    {
-        return internal_err("oidc_callback: insert session", e);
-    }
-
-    // Build 302 redirect with embyr_session cookie (same attributes as signin).
-    let cookie = build_session_cookie(&token);
-    let cookie_value = match HeaderValue::from_str(&cookie) {
-        Ok(v) => v,
-        Err(e) => return internal_err("oidc_callback: build cookie header", e),
-    };
-
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(header::LOCATION, HeaderValue::from_static("/admin/"));
-    resp_headers.insert(header::SET_COOKIE, cookie_value);
-    (StatusCode::FOUND, resp_headers).into_response()
+/// DISABLED (audit finding #58). The previous implementation validated the
+/// id_token but then ignored its identity and minted a session for an
+/// arbitrary member of the provider's account. Until a real
+/// authorization-code + PKCE flow with identity binding ships (future feature
+/// `admin-oidc-sso`), every request is refused with the same
+/// `/admin/?error=oidc_failed` redirect the UI already handles. No session is
+/// ever created. Query parameters (which may carry an id_token) are
+/// deliberately not read or logged.
+pub async fn oidc_callback() -> Response {
+    tracing::warn!("oidc_callback: OIDC sign-in is disabled (audit finding #58); refusing");
+    oidc_failed_redirect()
 }

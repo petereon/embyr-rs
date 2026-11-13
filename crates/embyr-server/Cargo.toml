@@ -162,6 +162,10 @@ path = "../../tests/admin_api_v2/acceptance/b05_members.rs"
 name = "admin_api_v2_b06_oidc_billing"
 path = "../../tests/admin_api_v2/acceptance/b06_oidc_billing.rs"
 
+[[test]]
+name = "admin_api_v2_security_58_60"
+path = "../../tests/admin_api_v2/acceptance/security_58_60.rs"
+
 # card-payments-backend acceptance tests (one file per slice, mirroring
 # admin-api-v2's bNN registration convention). Release grouping:
 #   Release 1 (Subscription & Payment Lifecycle): cpb01-cpb04

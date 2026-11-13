@@ -278,15 +278,17 @@ async fn owner_deletes_oidc_provider_and_existing_sessions_remain_valid() {
 // AC-B06-05: OIDC callback — valid id_token grants session cookie
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// OIDC callback with a valid id_token from a configured provider:
-/// 302 redirect to /admin/; Set-Cookie: embyr_session set.
+/// OIDC callback with a valid id_token from a configured provider.
+/// Originally AC-B06-05 (302 /admin/ + session cookie). Superseded by audit
+/// finding #58: the callback is disabled until `admin-oidc-sso` ships, so it
+/// must redirect to /admin/?error=oidc_failed with NO session cookie.
 ///
 /// Uses a local mock JWKS endpoint via axum test server.
 ///
 /// AC-B06-05
 // @US-B06 @AC-B06-05 @real-io @adapter-integration
 #[tokio::test]
-async fn oidc_callback_with_valid_id_token_grants_session() {
+async fn oidc_callback_with_valid_id_token_is_refused_while_disabled() {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -382,6 +384,11 @@ async fn oidc_callback_with_valid_id_token_grants_session() {
     let id_token = encode(&header, &claims, &encoding_key).expect("encode JWT");
 
     // ── 5. Call the OIDC callback ─────────────────────────────────────────────
+    let sessions_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(&ctx.pool)
+        .await
+        .expect("count sessions");
+
     // Use redirect(false) so reqwest does not auto-follow the 302.
     let no_redirect_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -400,22 +407,23 @@ async fn oidc_callback_with_valid_id_token_grants_session() {
         .expect("OIDC callback request failed");
 
     // ── 6. Assertions ─────────────────────────────────────────────────────────
+    // Audit finding #58: the callback is disabled — even a correctly signed
+    // id_token must be refused and must never yield a session.
     assert_eq!(
         resp.status().as_u16(),
         302,
-        "AC-B06-05: valid id_token must return 302 redirect; got status {}",
+        "#58: disabled OIDC callback must redirect; got status {}",
         resp.status().as_u16()
     );
 
     let location = resp
         .headers()
         .get("location")
-        .or_else(|| resp.headers().get("Location"))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(
-        location, "/admin/",
-        "AC-B06-05: redirect must go to /admin/"
+        location, "/admin/?error=oidc_failed",
+        "#58: disabled OIDC callback must redirect to the sign-in failure URL"
     );
 
     let cookie_header = resp
@@ -424,13 +432,18 @@ async fn oidc_callback_with_valid_id_token_grants_session() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(
-        cookie_header.contains("embyr_session="),
-        "AC-B06-05: Set-Cookie must contain embyr_session; got: {}",
+        !cookie_header.contains("embyr_session="),
+        "#58: disabled OIDC callback must not set a session cookie; got: {}",
         cookie_header
     );
-    assert!(
-        cookie_header.contains("HttpOnly"),
-        "AC-B06-05: cookie must be HttpOnly"
+
+    let sessions_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(&ctx.pool)
+        .await
+        .expect("count sessions");
+    assert_eq!(
+        sessions_after, sessions_before,
+        "#58: OIDC callback must not create a session row"
     );
 }
 
