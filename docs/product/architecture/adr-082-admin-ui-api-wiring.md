@@ -5,6 +5,11 @@
 Accepted. **Supersedes ADR-007** (mock-first data layer). Amends ADR-006 (the `update` signature and the async boundary).
 Consistent with ADR-005 (Leptos CSR, served under `/admin/`), ADR-009/010 (auth sub-routers, session context).
 
+**Related (revision 2):** server capabilities the console needs are decided separately — ADR-083 (connection secrets: single server-held
+store, DSN edit and backend-mode switch) and ADR-084 (hourly metrics rollup). Decisions below are unchanged by them; screens that depend on
+them are wired after those features land and hidden until then. SSO, account bootstrap/invitations and account deletion are feature-level
+designs under `docs/feature/` without a separate ADR.
+
 ## Context
 
 `embyr-admin-ui` runs entirely on `data::mock`; `embyr-server` exposes a real admin API on `:9090` but serves no UI.
