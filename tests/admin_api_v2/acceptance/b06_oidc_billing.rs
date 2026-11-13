@@ -462,8 +462,11 @@ async fn oidc_callback_with_invalid_signature_redirects_with_oidc_failed() {
     // Tampered token: signature won't verify against the real JWKS.
     let tampered_token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.INVALIDSIGNATURE";
 
-    let resp = ctx
-        .client
+    let resp = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build no-redirect client")
+
         .get(ctx.url(&format!(
             "/admin/v1/auth/oidc/callback?code=fakeauthcode&state=csrf-nonce&id_token={}",
             tampered_token
@@ -505,8 +508,11 @@ async fn oidc_callback_with_unknown_issuer_returns_401() {
     // No OIDC providers configured for this account.
     // Callback claiming issuer not in oidc_providers must be rejected.
 
-    let resp = ctx
-        .client
+    let resp = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("build no-redirect client")
+
         .get(ctx.url(
             "/admin/v1/auth/oidc/callback?code=fakeauthcode&state=csrf-nonce",
         ))
