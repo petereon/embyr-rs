@@ -157,6 +157,9 @@ async fn rate_limited_response_includes_retry_after_ms() {
     let (addr, _server) = start_distributed_grpc_server(&ctx).await;
     let ctx = ctx.with_grpc_addr(addr);
     let mut client = FirestoreClient::new(ctx.grpc_channel());
+    // Server start takes >0.1s, enough for a 0-token bucket at 10 rps to refill;
+    // re-pin it to empty right before the request.
+    warm_credential_cache_and_reset_bucket(&ctx, &mut client, "proj-retry", "key-rt", 0.0).await;
 
     let result = client
         .get_document(get_document_request("proj-retry", "key-rt"))
