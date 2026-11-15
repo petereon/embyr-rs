@@ -99,6 +99,10 @@ name = "us_04_query_collection"
 path = "../../tests/acceptance/us_04_query_collection.rs"
 
 [[test]]
+name = "us_04b_subcollection_query_scope"
+path = "../../tests/acceptance/us_04b_subcollection_query_scope.rs"
+
+[[test]]
 name = "us_05_listen_realtime"
 path = "../../tests/acceptance/us_05_listen_realtime.rs"
 

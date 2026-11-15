@@ -78,7 +78,13 @@ pub async fn handle_add_target(
     // StructuredQuery specified.
     let (project_id, collection_id, filter) = match &add_target.target_type {
         Some(TargetType::Query(qt)) => {
-            let collection_id = collection_id_from_query_target(qt).map_err(Status::internal)?;
+            // Scope to the parent's own subcollection (`users/u1` + `posts`
+            // -> `users/u1/posts`), the shape documents are stored and
+            // NOTIFY events are published under.
+            let collection_id = crate::grpc::handler::FirestoreService::collection_path_under_parent(
+                &qt.parent,
+                &collection_id_from_query_target(qt).map_err(Status::internal)?,
+            )?;
             let project_id = project_id_from_parent(&qt.parent).map_err(Status::internal)?;
             let filter = filter_from_query_target(qt).map_err(Status::internal)?;
             (project_id, collection_id, filter)

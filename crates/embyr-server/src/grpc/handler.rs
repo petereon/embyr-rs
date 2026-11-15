@@ -180,6 +180,25 @@ impl FirestoreService {
         Ok((project_id_str, prefix))
     }
 
+    /// Full collection path addressed by a `parent` + `collection_id` pair
+    /// (RunQuery / RunAggregationQuery / Listen / CreateDocument): the
+    /// parent's document-path prefix, if any, joined with `collection_id`.
+    /// This is the same shape `parse_document_path` stores documents under.
+    ///
+    ///   `.../documents`          + `posts` -> `posts`
+    ///   `.../documents/users/u1` + `posts` -> `users/u1/posts`
+    pub(crate) fn collection_path_under_parent(
+        parent: &str,
+        collection_id: &str,
+    ) -> Result<String, Status> {
+        let (_, prefix) = Self::parse_parent_prefix(parent)?;
+        Ok(if prefix.is_empty() {
+            collection_id.to_string()
+        } else {
+            format!("{prefix}/{collection_id}")
+        })
+    }
+
     /// Extract the bearer API key from the `authorization` metadata header.
     fn extract_api_key<T>(request: &Request<T>) -> Result<String, Status> {
         let auth_val = request
@@ -1616,7 +1635,7 @@ impl FirestoreService {
 
         let path = embyr_core::domain::document::DocumentPath {
             project_id,
-            collection_path: req.collection_id.clone(),
+            collection_path: Self::collection_path_under_parent(&req.parent, &req.collection_id)?,
             document_id: document_id.clone(),
         };
 
@@ -3123,13 +3142,23 @@ impl FirestoreService {
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
+        // A single-collection query is scoped to the parent's own
+        // subcollection (`users/u1` + `posts` -> `users/u1/posts`). A
+        // collection-group query keeps the bare id: the group predicate and
+        // `group_access_rules` are both keyed by it.
+        // ponytail: `all_descendants` ignores a non-root parent (still the
+        // whole group) -- add a path-prefix predicate if that is needed.
         let collection = CollectionPath {
             project_id,
-            collection_path: collection_id,
+            collection_path: if all_descendants {
+                collection_id.clone()
+            } else {
+                Self::collection_path_under_parent(&req.parent, &collection_id)?
+            },
         };
 
         let domain_query = StructuredQuery {
-            collection_id: collection.collection_path.clone(),
+            collection_id: collection_id.clone(),
             all_descendants,
             filter,
             order_by,
@@ -3248,7 +3277,9 @@ impl FirestoreService {
         if requires_index
             && !self
                 .index_manager
-                .is_index_ready(&project_id_str, &collection.collection_path)
+                // Keyed by the bare collection id (unchanged): composite
+                // indexes are registered per collection id, not per parent.
+                .is_index_ready(&project_id_str, &collection_id)
                 .await
         {
             // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
@@ -3263,7 +3294,7 @@ impl FirestoreService {
             return Err(Status::failed_precondition(format!(
                 "query requires a composite index on collection '{}' with fields {}; create it \
                  via POST /admin/v1/projects/{{project_id}}/indexes",
-                collection.collection_path, fields_json
+                collection_id, fields_json
             )));
         }
 
@@ -3410,13 +3441,23 @@ impl FirestoreService {
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
+        // A single-collection query is scoped to the parent's own
+        // subcollection (`users/u1` + `posts` -> `users/u1/posts`). A
+        // collection-group query keeps the bare id: the group predicate and
+        // `group_access_rules` are both keyed by it.
+        // ponytail: `all_descendants` ignores a non-root parent (still the
+        // whole group) -- add a path-prefix predicate if that is needed.
         let collection = CollectionPath {
             project_id,
-            collection_path: collection_id,
+            collection_path: if all_descendants {
+                collection_id.clone()
+            } else {
+                Self::collection_path_under_parent(&req.parent, &collection_id)?
+            },
         };
 
         let domain_query = StructuredQuery {
-            collection_id: collection.collection_path.clone(),
+            collection_id: collection_id.clone(),
             all_descendants,
             filter,
             order_by: vec![],
@@ -4318,6 +4359,29 @@ mod client_identity_extension_tests {
             .metadata_mut()
             .insert("authorization", "Bearer some-api-key".parse().unwrap());
         assert_eq!(FirestoreService::extract_client_identity_token(&request), None);
+    }
+}
+
+#[cfg(test)]
+mod collection_path_under_parent_tests {
+    use super::FirestoreService;
+
+    #[test]
+    fn joins_parent_document_prefix_with_collection_id() {
+        let root = "projects/p1/databases/(default)/documents";
+        for (parent, expected) in [
+            (root.to_string(), "posts"),
+            (format!("{root}/"), "posts"),
+            (format!("{root}/users/u1"), "users/u1/posts"),
+            (format!("{root}/a/b/c/d"), "a/b/c/d/posts"),
+        ] {
+            assert_eq!(
+                FirestoreService::collection_path_under_parent(&parent, "posts").unwrap(),
+                expected,
+                "parent: {parent}"
+            );
+        }
+        assert!(FirestoreService::collection_path_under_parent("projects/p1", "posts").is_err());
     }
 }
 
