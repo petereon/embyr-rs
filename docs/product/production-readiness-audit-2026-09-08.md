@@ -118,6 +118,18 @@ Each was re-verified against the code by the orchestrator before being listed.
 
 Note for `admin-oidc-sso`: the removed callback fetched the JWKS from a URL built from the token's own `iss` claim before checking it. The replacement must resolve the provider from stored configuration first and only then fetch keys.
 
+## Follow-Up Scan — 2026-11-13 (gaps found by the ignored-test triage)
+
+Found by triaging the 118 `#[ignore]`d tests (PR #16, `docs/product/ignored-test-triage-2026-11-13.md`).
+Each is a test that was written against intended behaviour and fails against the real code.
+
+| # | Domain | Finding | Location | Severity | Status |
+|---|---|---|---|---|---|
+| 68 | Correctness | **Live subscriptions (Listen) skip the composite-index requirement check** that RunQuery enforces, so a query needing a composite index is served by Listen but rejected by RunQuery. | Listen handler in `embyr-server` (see triage doc for test name) | **Low–Medium** | **OPEN** |
+| 69 | Operability | **`/metrics` emits no `# HELP` lines** (inferred from the code; the test was not seen failing against a live server). Prometheus still scrapes it. | `crates/embyr-admin` / metrics exporter | **Low** | **OPEN** |
+| 70 | Operability | **Docker image is ~150 MB against a documented 100 MB limit.** Either shrink the image or change the documented limit. | `Dockerfile` | **Low** | **OPEN** |
+| 71 | Correctness | **Admin UI "delete service account" leaves that account's admin keys in place**, contrary to its acceptance criterion. Server-side behaviour may be the intended one, so decide which side is wrong. | `embyr-admin-ui` / admin API service-account delete | **Low** | **OPEN — decision needed** |
+
 ## Notes
 
 - This scan is a fresh pass, independent of `known-gaps.md` (which is fully closed — all 8 items resolved 2026-09-06 through 2026-09-08). No overlap between the two lists.
