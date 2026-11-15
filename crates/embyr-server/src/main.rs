@@ -263,6 +263,14 @@ async fn main() {
     let env_nonempty = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let (smtp_url, email_from) = (env_nonempty("EMBYR_SMTP_URL"), env_nonempty("EMBYR_EMAIL_FROM"));
     if smtp_url.is_none() && email_from.is_none() {
+        // EMBYR_REQUIRE_SMTP=true: refuse to start rather than silently drop
+        // every invite / password-reset email.
+        if env_nonempty("EMBYR_REQUIRE_SMTP").is_some_and(|v| v.eq_ignore_ascii_case("true")) {
+            eprintln!(
+                "Error: EMBYR_REQUIRE_SMTP=true but EMBYR_SMTP_URL and EMBYR_EMAIL_FROM are not set"
+            );
+            std::process::exit(1);
+        }
         tracing::warn!(
             "EMBYR_SMTP_URL is not set: member invites and password-reset emails will NOT be delivered"
         );
@@ -444,13 +452,18 @@ async fn main() {
     }
 
     // ── Step 14: drain and exit ───────────────────────────────────────────
+    // Readiness first: `/healthz` answers 503 from here on, so a load
+    // balancer stops routing to this instance while it drains.
+    embyr_server::grpc::healthz::mark_draining();
     let _ = shutdown_tx.send(());
-    tracing::info!("shutdown signal received, draining...");
-    // Wait for the server task's own graceful shutdown: it stops accepting
-    // new connections and waits for genuinely in-flight requests on
-    // already-open connections (e.g. a long-lived gRPC Listen stream) to
-    // complete naturally, rather than exiting after a fixed delay
-    // regardless of open connections (D-PR-5 / AC-PR-04-02).
-    let _ = server_task.await;
+    let grace = std::time::Duration::from_secs(cfg.shutdown_grace_secs);
+    tracing::info!(grace_secs = cfg.shutdown_grace_secs, "shutdown signal received, draining...");
+    // The server task stops accepting on all three listeners and waits for
+    // in-flight requests and open streams. A long-lived gRPC Listen stream
+    // never ends on its own, so the wait is bounded: past the deadline we
+    // return and process exit drops whatever is still open.
+    if tokio::time::timeout(grace, server_task).await.is_err() {
+        tracing::warn!("drain deadline reached, dropping remaining connections");
+    }
     tracing::info!("embyr-server stopped");
 }

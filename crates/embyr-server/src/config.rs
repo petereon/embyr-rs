@@ -162,6 +162,11 @@ pub struct ServerConfig {
     /// unset) = no origin is allowed, matching today's pre-CORS-layer
     /// behavior exactly (fails closed is the deliberate baseline).
     pub cors_allowed_origins: Vec<String>,
+    /// `EMBYR_SHUTDOWN_GRACE_SECS` — after SIGTERM, how long open requests
+    /// and streams on all three listeners may keep draining before the
+    /// process exits and drops them. Default 25 (under Docker/K8s' usual
+    /// 30s SIGKILL window).
+    pub shutdown_grace_secs: u64,
 }
 
 /// Validated TLS material for firestore-tls-support: one cert/key pair
@@ -397,6 +402,10 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30);
+        let shutdown_grace_secs = std::env::var("EMBYR_SHUTDOWN_GRACE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(25);
         let transaction_sweep_interval_secs = std::env::var("EMBYR_TRANSACTION_SWEEP_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -463,6 +472,7 @@ impl ServerConfig {
             listener_db_max_connections,
             listener_db_acquire_timeout_secs,
             cors_allowed_origins,
+            shutdown_grace_secs,
         })
     }
 }

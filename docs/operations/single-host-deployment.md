@@ -22,22 +22,20 @@ and a real (non-container) Postgres for the System DB.
   manual, run-once-per-host setup, matching the "not automated" honesty convention already
   used in `docs/operations/runbook.md` and `docs/operations/backup-disaster-recovery.md`.
 
-## Open item: where does the image come from
+## Where the image comes from
 
-As of this writing, findings #42/#43 (CI never pushes `embyr-server`/`embyr-agent` images to
-any registry — `docker build` only, then discarded) are still **Not started**. There is no
-`ghcr.io`/ECR/Docker Hub location to pull from yet. Until that lands, build the image
-yourself on (or for) the target host, following the same procedure
-`docs/operations/release-process.md`'s Rollback Procedure already documents:
+CI publishes both images to GitHub Container Registry (findings #42/#43, closed) — see
+`docs/operations/release-process.md` → Container Registry for the tag scheme. Pull an
+immutable tag; never deploy `:master`:
 
 ```bash
-git checkout vX.Y.Z   # tag from `git tag -l` / CHANGELOG.md, per release-process.md
-docker build -t embyr-server:vX.Y.Z .
+docker pull ghcr.io/petereon/embyr-server:sha-<short sha>   # any master build
+docker pull ghcr.io/petereon/embyr-server:vX.Y.Z            # a tagged release
 ```
 
-Once #42/#43 close, replace the local `docker build` step below with `docker pull
-<registry-TBD>/embyr-server:vX.Y.Z` — the rest of this document (systemd unit, proxy config,
-port bindings) does not change.
+The packages are private until a repo admin makes them public; until then run
+`docker login ghcr.io` with a PAT that has `read:packages` first. Building locally
+(`git checkout <sha> && docker build -t embyr-server:local .`) remains a fallback.
 
 ## 1. Environment file
 
@@ -86,7 +84,7 @@ ExecStart=/usr/bin/docker run --rm --name embyr-server \
   -p 8080:8080 \
   -p 8081:8081 \
   -p 127.0.0.1:9090:9090 \
-  embyr-server:vX.Y.Z
+  ghcr.io/petereon/embyr-server:sha-<short sha>
 ExecStop=/usr/bin/docker stop -t 30 embyr-server
 Restart=on-failure
 RestartSec=5
@@ -214,10 +212,9 @@ curl -s http://127.0.0.1:9090/healthz              # admin port only reachable l
 
 - [`secrets-manager-setup.md`](./secrets-manager-setup.md) — sourcing `EMBYR_ADMIN_KEY`/
   `EMBYR_ENCRYPTION_KEY` from AWS/GCP instead of the plaintext env file above.
-- [`release-process.md`](./release-process.md) — version/tag convention referenced by the
-  `docker build -t embyr-server:vX.Y.Z` step above, and the rollback procedure this document
-  extends with concrete restart mechanics (`systemctl restart embyr-server` after rebuilding
-  the older tag).
+- [`release-process.md`](./release-process.md) — image tag scheme referenced above, and the
+  rollback procedure this document extends with concrete restart mechanics (point the unit
+  at the previous `:sha-` image, `systemctl daemon-reload && systemctl restart embyr-server`).
 - [`backup-disaster-recovery.md`](./backup-disaster-recovery.md) — System DB backup
   requirements for the Postgres instance `DATABASE_URL` points at.
 - [`runbook.md`](./runbook.md) — incident triage once the service is running (pool exhaustion,

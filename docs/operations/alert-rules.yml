@@ -121,3 +121,73 @@ groups:
             {{ $labels.method }} p99 latency has exceeded 2s (AC-05c SLA
             threshold, the same boundary the histogram's own bucket
             configuration is aligned to) for 10 minutes.
+
+      # --- Service down / not scraped ---------------------------------------
+      # None of the alerts above can fire when the process is gone: a dead
+      # target exports nothing, so every `embyr_*` expression just returns no
+      # data. These use Prometheus's own `up` series instead.
+      # ASSUMPTION: the scrape job is named `embyr-server` — change the
+      # `job=` matcher below to whatever your prometheus.yml calls it.
+      - alert: EmbyrTargetDown
+        expr: up{job="embyr-server"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "embyr-server {{ $labels.instance }} is not answering /metrics scrapes"
+          description: >-
+            Prometheus has failed to scrape {{ $labels.instance }} for 1
+            minute: the process is down, :9090 is unreachable, or the scrape's
+            admin bearer token is wrong. See
+            docs/operations/runbook.md#incident-service-down-or-not-scraped.
+
+      # `up == 0` needs a target to exist. If the target vanished from service
+      # discovery / the scrape config, or the scrape works but the server's own
+      # metrics are missing, there is no series at all — `absent()` catches it.
+      - alert: EmbyrMetricsAbsent
+        expr: >-
+          absent(up{job="embyr-server"})
+          or absent(embyr_pg_pool_idle{pool="system"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No embyr-server metrics are reaching Prometheus"
+          description: >-
+            Either no `embyr-server` scrape target exists at all, or the
+            always-exported embyr_pg_pool_idle{pool="system"} gauge has been
+            missing for 5 minutes. Every other embyr alert is blind while this
+            fires. See
+            docs/operations/runbook.md#incident-service-down-or-not-scraped.
+
+      # --- Restart loop -------------------------------------------------------
+      # embyr-server exports no process_start_time_seconds, so restarts are
+      # derived from `up` flipping. A crash loop that restarts faster than the
+      # scrape interval can slip between scrapes — also watch the supervisor's
+      # own restart counter (systemd NRestarts / container restart count).
+      - alert: EmbyrRestartLoop
+        expr: changes(up{job="embyr-server"}[15m]) > 3
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "embyr-server {{ $labels.instance }} is flapping (likely crash/restart loop)"
+          description: >-
+            `up` changed state {{ $value }} times in 15 minutes. See
+            docs/operations/runbook.md#incident-restart-loop.
+
+      # --- Readiness failing --------------------------------------------------
+      # NOT ENABLED: embyr-server exports no metric for its own /healthz status
+      # (see the note on EmbyrSystemDbPoolExhausted above). If you run
+      # blackbox_exporter against http://<host>:8081/healthz, uncomment this.
+      # /healthz also answers 503 {"status":"draining"} for up to
+      # EMBYR_SHUTDOWN_GRACE_SECS during a normal shutdown — hence `for: 2m`.
+      # - alert: EmbyrReadinessFailing
+      #   expr: probe_success{job="embyr-healthz"} == 0
+      #   for: 2m
+      #   labels:
+      #     severity: critical
+      #   annotations:
+      #     summary: "embyr-server /healthz is failing on {{ $labels.instance }}"
+      #     description: >-
+      #       See docs/operations/runbook.md#incident-readiness-failing.

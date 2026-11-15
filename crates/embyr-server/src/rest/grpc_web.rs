@@ -128,31 +128,43 @@ impl Service<Request<Incoming>> for HybridService {
 /// Every accepted connection runs a content-type dispatcher:
 /// - `application/grpc-web*` → tonic gRPC-Web service (layer preserved)
 /// - everything else → axum (BrowserChannel, healthz)
-pub fn spawn_hybrid_server(
+pub(crate) fn spawn_hybrid_server(
     listener: tokio::net::TcpListener,
     grpc_service: FirestoreService,
     axum_app: axum::Router,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    mut drain: crate::Drain,
 ) -> tokio::task::JoinHandle<()> {
     let hybrid = HybridService::new(grpc_service, axum_app);
     tokio::spawn(async move {
         loop {
-            let (stream, _peer) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(_) => break,
+            let (stream, _peer) = tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                },
+                _ = drain.stopped() => break,
             };
             let svc = hybrid.clone();
             let tls_acceptor = tls_acceptor.clone();
+            let mut drain = drain.clone();
             tokio::spawn(async move {
                 let io = match crate::adapters::tls::accept_maybe_tls(stream, tls_acceptor.as_ref()).await {
                     Ok(io) => TokioIo::new(io),
                     Err(_) => return, // handshake failed — drop connection, never fall back plaintext
                 };
                 let svc = TowerToHyperService::new(svc);
-                hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-                    .serve_connection_with_upgrades(io, svc)
-                    .await
-                    .ok();
+                let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+                let conn = builder.serve_connection_with_upgrades(io, svc);
+                tokio::pin!(conn);
+                tokio::select! {
+                    _ = conn.as_mut() => {}
+                    _ = drain.stopped() => {
+                        // Finish the in-flight request, close idle keep-alives.
+                        conn.as_mut().graceful_shutdown();
+                        let _ = conn.await;
+                    }
+                }
             });
         }
     })
