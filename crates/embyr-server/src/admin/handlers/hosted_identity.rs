@@ -32,7 +32,8 @@ use serde::{Deserialize, Serialize};
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::state::UserAdminState;
 use embyr_core::admin::account::Role;
-use embyr_core::auth::{argon2, ecies};
+use crate::adapters::argon2_blocking as argon2;
+use embyr_core::auth::ecies;
 
 /// Body for POST .../hosted_identity/enable. `api_key` is the project's own
 /// current, raw API key (Alex already possesses it) — required to derive
@@ -112,6 +113,7 @@ pub async fn enable_hosted_identity(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let verified = argon2::verify_api_key(body.api_key.as_bytes(), &auth_row.api_key_hash_current)
+        .await
         .map_err(|e| {
             tracing::error!("enable_hosted_identity argon2 verify error: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
