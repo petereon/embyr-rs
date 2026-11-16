@@ -97,12 +97,14 @@ pub async fn run_cycle(system_db: &Arc<SystemDb>, grace_days: i64) {
         "UPDATE projects \
          SET ecies_encrypted_dsn = NULL, \
              backend_pg_dsn_enc = NULL, \
-             agent_tls_bundle_enc = NULL \
+             agent_tls_bundle_enc = NULL, \
+             agent_tls_bundle_srv_enc = NULL \
          WHERE status = 'deleted' \
            AND deleted_at < $1 \
            AND (ecies_encrypted_dsn IS NOT NULL \
                 OR backend_pg_dsn_enc IS NOT NULL \
-                OR agent_tls_bundle_enc IS NOT NULL)",
+                OR agent_tls_bundle_enc IS NOT NULL \
+                OR agent_tls_bundle_srv_enc IS NOT NULL)",
     )
     .bind(cutoff)
     .execute(system_db.pool())

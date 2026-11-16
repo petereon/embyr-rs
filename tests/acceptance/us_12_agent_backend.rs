@@ -1771,3 +1771,168 @@ async fn agent_mode_unreachable_agent_produces_backend_unavailable_error() {
         err
     );
 }
+
+// ---------------------------------------------------------------------------
+// dsn-single-store (ADR-083): agent TLS bundle lives in the server-key store.
+// AC-DSS-02, AC-DSS-04, AC-DSS-10 (direct_pg -> agent direction).
+// ---------------------------------------------------------------------------
+
+#[path = "../dsn_single_store/common/mod.rs"]
+mod dsn_common;
+
+/// Mock agent (real mTLS) + its backing Postgres; the container must outlive the test.
+async fn agent_fixture() -> (
+    MtlsCerts,
+    Arc<Mutex<Vec<String>>>,
+    u16,
+    testcontainers_modules::testcontainers::ContainerAsync<Postgres>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    use testcontainers_modules::testcontainers::ImageExt;
+    install_ring_provider();
+    let certs = generate_mtls_cert_set();
+    let agent_pg = Postgres::default().with_tag("15-alpine").start().await.expect("start agent postgres");
+    let port = agent_pg.get_host_port_ipv4(5432).await.expect("agent pg port");
+    let pool = PgPool::connect(&format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres"))
+        .await
+        .expect("agent pool");
+    let (calls, _docs, mock_port, shutdown) = start_mock_agent_server(&certs, pool).await;
+    (certs, calls, mock_port, agent_pg, shutdown)
+}
+
+/// GetDocument over real gRPC; true iff the request reached the agent (auth + bundle decrypt + mTLS
+/// connect all worked). The mock answers NotFound for unknown docs, which is irrelevant here.
+async fn request_reaches_agent(
+    env: &TestEnv,
+    calls: &Arc<Mutex<Vec<String>>>,
+    project_id: &str,
+    api_key: &str,
+) -> bool {
+    use embyr_proto::firestore::{firestore_client::FirestoreClient, GetDocumentRequest};
+    let channel = tonic::transport::Channel::from_shared(format!("http://{}", env.server.grpc_addr))
+        .unwrap()
+        .connect()
+        .await
+        .expect("grpc connect");
+    let mut req = tonic::Request::new(GetDocumentRequest {
+        name: format!("projects/{project_id}/databases/(default)/documents/notes/x"),
+        ..Default::default()
+    });
+    req.metadata_mut().insert("authorization", format!("bearer {api_key}").parse().unwrap());
+    let before = calls.lock().unwrap().iter().filter(|c| *c == "get_document").count();
+    let _ = FirestoreClient::new(channel).get_document(req).await;
+    calls.lock().unwrap().iter().filter(|c| *c == "get_document").count() > before
+}
+
+fn bundle_json(certs: &MtlsCerts) -> String {
+    serde_json::json!({
+        "ca_pem": String::from_utf8_lossy(&certs.ca_pem),
+        "client_cert_pem": String::from_utf8_lossy(&certs.client_cert_pem),
+        "client_key_pem": String::from_utf8_lossy(&certs.client_key_pem),
+    })
+    .to_string()
+}
+
+/// AC-DSS-02: agent provision stores the bundle only in agent_tls_bundle_srv_enc (server key) and
+/// requests with the returned API key are served.
+#[tokio::test]
+async fn provision_agent_stores_bundle_only_in_server_store_and_is_served() {
+    let env = setup_test_env().await;
+    let (certs, calls, port, _pg, _stop) = agent_fixture().await;
+    let api_key = provision_agent_project(&env, "dss-agent-1", &certs, &format!("127.0.0.1:{port}")).await;
+
+    let (legacy, srv): (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
+        "SELECT agent_tls_bundle_enc, agent_tls_bundle_srv_enc FROM projects WHERE id = 'dss-agent-1'",
+    )
+    .fetch_one(env.system_db.pool())
+    .await
+    .unwrap();
+    assert!(legacy.is_none(), "legacy ECIES bundle column must not be written");
+    let stored: serde_json::Value =
+        serde_json::from_str(&dsn_common::keys().decrypt(&srv.expect("server-store bundle")).unwrap()).unwrap();
+    assert_eq!(stored["ca_pem"].as_str().unwrap().as_bytes(), certs.ca_pem.as_slice());
+
+    assert!(request_reaches_agent(&env, &calls, "dss-agent-1", &api_key).await);
+}
+
+/// AC-DSS-04: legacy agent row (bundle only in the ECIES column) is served, then converted: the
+/// server-store column ends up holding the same bundle.
+#[tokio::test]
+async fn legacy_agent_row_converts_bundle_on_first_request() {
+    let env = setup_test_env().await;
+    let (certs, calls, port, _pg, _stop) = agent_fixture().await;
+    let api_key = provision_agent_project(&env, "dss-agent-2", &certs, &format!("127.0.0.1:{port}")).await;
+    let bundle = bundle_json(&certs);
+    sqlx::query(
+        "UPDATE projects SET agent_tls_bundle_srv_enc = NULL, agent_tls_bundle_enc = $1 WHERE id = 'dss-agent-2'",
+    )
+    .bind(dsn_common::ecies_of(&api_key, &bundle))
+    .execute(env.system_db.pool())
+    .await
+    .unwrap();
+
+    assert!(request_reaches_agent(&env, &calls, "dss-agent-2", &api_key).await);
+
+    let pool = env.system_db.pool().clone();
+    assert!(
+        dsn_common::wait_for(|| {
+            let pool = pool.clone();
+            let bundle = bundle.clone();
+            async move {
+                dsn_common::column_bytes(&pool, "dss-agent-2", "agent_tls_bundle_srv_enc")
+                    .await
+                    .and_then(|c| dsn_common::keys().decrypt(&c))
+                    .as_deref()
+                    == Some(bundle.as_str())
+            }
+        })
+        .await,
+        "server-store bundle must equal the legacy bundle after the first authenticated request"
+    );
+}
+
+/// AC-DSS-10 (direct_pg -> agent): PUT probes the agent, stores the bundle under the server key,
+/// NULLs the DSN secrets, and the next request is routed to the agent.
+#[tokio::test]
+async fn put_connection_switches_direct_pg_project_to_agent() {
+    let env = setup_test_env().await;
+    let (certs, calls, port, _pg, _stop) = agent_fixture().await;
+    let pool = env.system_db.pool();
+    let account = dsn_common::new_account(pool).await;
+    let cookie = dsn_common::seed_session(pool, account, "Owner").await;
+    dsn_common::insert_owned_project(pool, account, "dss-switch", "k-switch", "active").await;
+    sqlx::query("UPDATE projects SET backend_pg_dsn_enc = $1, ecies_encrypted_dsn = $2 WHERE id = 'dss-switch'")
+        .bind(dsn_common::keys().encrypt("postgres://old@10.0.0.1/db"))
+        .bind(dsn_common::ecies_of("k-switch", "postgres://old@10.0.0.1/db"))
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let resp = reqwest::Client::new()
+        .put(format!("http://{}/admin/v1/projects/dss-switch/connection", env.server.admin_addr))
+        .header("Cookie", &cookie)
+        .json(&serde_json::json!({
+            "backend_mode": "agent",
+            "agent_endpoint": format!("127.0.0.1:{port}"),
+            "agent_ca_pem": String::from_utf8_lossy(&certs.ca_pem),
+            "agent_client_cert_pem": String::from_utf8_lossy(&certs.client_cert_pem),
+            "agent_client_key_pem": String::from_utf8_lossy(&certs.client_key_pem),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let (mode, endpoint): (String, Option<String>) =
+        sqlx::query_as("SELECT backend_mode, backend_agent_endpoint FROM projects WHERE id = 'dss-switch'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!((mode.as_str(), endpoint), ("agent", Some(format!("127.0.0.1:{port}"))));
+    for col in ["backend_pg_dsn_enc", "ecies_encrypted_dsn", "agent_tls_bundle_enc"] {
+        assert_eq!(dsn_common::column_bytes(pool, "dss-switch", col).await, None, "{col}");
+    }
+    let stored = dsn_common::column_bytes(pool, "dss-switch", "agent_tls_bundle_srv_enc").await.unwrap();
+    assert_eq!(dsn_common::keys().decrypt(&stored).as_deref(), Some(bundle_json(&certs).as_str()));
+    assert!(request_reaches_agent(&env, &calls, "dss-switch", "k-switch").await);
+}

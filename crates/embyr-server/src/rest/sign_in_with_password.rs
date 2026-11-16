@@ -98,6 +98,7 @@ pub async fn sign_in_with_password(
         &api_key,
         state.tenant_db_max_connections,
         state.tenant_db_acquire_timeout,
+        &state.server_keys,
     )
     .await
     {

@@ -250,6 +250,9 @@ struct TestComponents {
 
 /// Bind three ephemeral TCP listeners and allocate shared service components.
 async fn alloc_test_components(system_db: &Arc<SystemDb>) -> TestComponents {
+    // Test servers provision Testcontainers DSNs (loopback, no TLS): lift the DSN host/TLS policy
+    // (audit #65 / X10) for the process, same as docker-compose does for dev.
+    std::env::set_var("EMBYR_ALLOW_PRIVATE_DSN_HOSTS", "true");
     // Install Prometheus recorder before any listener opens (AC-OBS-01-05).
     // OnceLock ensures install_recorder() is called at most once across all
     // test server constructors that share the same process.
@@ -403,6 +406,7 @@ pub fn spawn_all_servers(
         email_sender,
         tenant_db_max_connections: service.tenant_db_max_connections,
         tenant_db_acquire_timeout: service.tenant_db_acquire_timeout,
+        server_keys: service.server_keys,
     };
     let oauth_provider_state = rest::sign_in_with_idp::OAuthProviderState {
         system_db: std::sync::Arc::clone(&service.system_db),
@@ -669,6 +673,7 @@ pub async fn start_test_server_with_keepalive(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -728,6 +733,7 @@ pub async fn start_test_server_with_cors_origins(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     // healthz-dependency-checks (ADR-078): /livez on the admin port too, so
@@ -806,6 +812,7 @@ pub async fn start_test_server_with_email_sender(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -869,6 +876,7 @@ pub async fn start_test_server_with_oauth(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -927,6 +935,7 @@ pub async fn start_test_server_with_aws_fetcher(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -985,6 +994,7 @@ pub async fn start_test_server_with_gcp_fetcher(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     let admin_app = admin::router::build_with_gcp(
@@ -1048,6 +1058,7 @@ pub async fn start_test_server_with_distributed_rate_limit(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -1114,6 +1125,7 @@ pub async fn start_test_server_with_rate_limit(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     let admin_app = admin::router::build_with_aws(
@@ -1175,6 +1187,7 @@ pub async fn start_test_server_with_tls(
         tenant_db_acquire_timeout: std::time::Duration::from_secs(5),
         listener_db_max_connections: 2,
         listener_db_acquire_timeout: std::time::Duration::from_secs(5),
+        server_keys: adapters::connection_secrets::ServerKeys { current: [0u8; 32], previous: None },
     };
 
     // healthz-dependency-checks (ADR-078): clone BEFORE `system_db` moves by

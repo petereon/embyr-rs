@@ -72,6 +72,7 @@ ed25519-dalek = { workspace = true }
 # parses REAL operator-provided PEM cert/key files in PRODUCTION code, not
 # just test fixtures (mirrors ed25519-dalek's own documented promotion above).
 rustls-pemfile.workspace = true
+x509-parser.workspace = true
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls", "hostname"] }
 
 [[test]]
@@ -170,6 +171,26 @@ path = "../../tests/admin_api_v2/acceptance/b06_oidc_billing.rs"
 [[test]]
 name = "admin_api_v2_security_58_60"
 path = "../../tests/admin_api_v2/acceptance/security_58_60.rs"
+
+[[test]]
+name = "dsn_single_store_ds01_request_path"
+path = "../../tests/dsn_single_store/acceptance/ds01_request_path.rs"
+
+[[test]]
+name = "dsn_single_store_ds02_unconverted_gauge"
+path = "../../tests/dsn_single_store/acceptance/ds02_unconverted_gauge.rs"
+
+[[test]]
+name = "dsn_single_store_ds03_provision_and_purge"
+path = "../../tests/dsn_single_store/acceptance/ds03_provision_and_purge.rs"
+
+[[test]]
+name = "dsn_single_store_ds04_connection_endpoints"
+path = "../../tests/dsn_single_store/acceptance/ds04_connection_endpoints.rs"
+
+[[test]]
+name = "dsn_single_store_ds05_dsn_policy"
+path = "../../tests/dsn_single_store/acceptance/ds05_dsn_policy.rs"
 
 [[test]]
 name = "admin_api_v2_account_bootstrap_invitations"

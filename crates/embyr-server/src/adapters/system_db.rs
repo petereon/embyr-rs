@@ -214,6 +214,10 @@ pub struct ProjectAuthRow {
     pub backend_agent_endpoint: Option<String>,
     /// For agent-mode projects: ECIES-encrypted JSON TLS bundle (ca_pem, client_cert_pem, client_key_pem).
     pub agent_tls_bundle_enc: Option<Vec<u8>>,
+    /// ADR-083: server-key (AES-256-GCM) DSN; read before/alongside the legacy ECIES column.
+    pub backend_pg_dsn_enc: Option<Vec<u8>>,
+    /// ADR-083: server-key (AES-256-GCM) agent TLS bundle JSON.
+    pub agent_tls_bundle_srv_enc: Option<Vec<u8>>,
     /// For aws_secret-mode projects: the ARN of the AWS Secrets Manager secret.
     pub backend_secret_arn: Option<String>,
     /// For gcp_secret-mode projects: the GCP Secret Manager resource name.
@@ -275,7 +279,7 @@ impl SystemDb {
             "SELECT id, status, backend_mode, api_key_hash_current, \
              api_key_hash_previous, ecies_encrypted_dsn, \
              backend_agent_endpoint, agent_tls_bundle_enc, backend_secret_arn, \
-             backend_secret_gcp \
+             backend_secret_gcp, backend_pg_dsn_enc, agent_tls_bundle_srv_enc \
              FROM projects WHERE id = $1",
         )
         .bind(project_id)
@@ -318,7 +322,25 @@ impl SystemDb {
             backend_secret_gcp: r
                 .try_get::<Option<String>, _>("backend_secret_gcp")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            backend_pg_dsn_enc: r
+                .try_get::<Option<Vec<u8>>, _>("backend_pg_dsn_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            agent_tls_bundle_srv_enc: r
+                .try_get::<Option<Vec<u8>>, _>("agent_tls_bundle_srv_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
         }))
+    }
+
+    /// ADR-083 / AC-DSS-15: non-deleted `direct_pg`/`agent` projects still lacking a server-store secret.
+    pub async fn count_unconverted_connection_secrets(&self) -> Result<i64, CoreError> {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM projects WHERE status <> 'deleted' AND \
+             ((backend_mode = 'direct_pg' AND backend_pg_dsn_enc IS NULL) \
+              OR (backend_mode = 'agent' AND agent_tls_bundle_srv_enc IS NULL))",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
     }
 
     /// Expose the raw pool for adapters that share the system DB connection.

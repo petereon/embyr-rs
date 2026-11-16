@@ -225,7 +225,16 @@ async fn main() {
         tenant_db_acquire_timeout: std::time::Duration::from_secs(cfg.tenant_db_acquire_timeout_secs as u64),
         listener_db_max_connections: cfg.listener_db_max_connections,
         listener_db_acquire_timeout: std::time::Duration::from_secs(cfg.listener_db_acquire_timeout_secs as u64),
+        server_keys: embyr_server::adapters::connection_secrets::ServerKeys {
+            current: cfg.encryption_key,
+            previous: cfg.encryption_key_previous,
+        },
     };
+    if embyr_server::adapters::dsn_policy::allow_private() {
+        tracing::warn!(
+            "EMBYR_ALLOW_PRIVATE_DSN_HOSTS=true: customer DSNs may target private/loopback hosts without TLS (dev only)"
+        );
+    }
 
     // ── Step 10: build admin router + healthz on admin port ───────────────
     // The admin router (port 9090) does not include /healthz by default;

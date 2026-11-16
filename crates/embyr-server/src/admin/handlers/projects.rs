@@ -6,19 +6,15 @@
 //! patch_project (PATCH /admin/v1/projects/:id):
 //!   Session auth, Owner or Admin.
 //!   Partial update: name, backend_pg_dsn, logging_enabled, log_retention_days, status.
-//!   backend_pg_dsn → AES-256-GCM encrypt before storage. Evict credential cache.
+//!   backend_pg_dsn is no longer patchable (422): use PUT /projects/:id/connection (ADR-083).
 //!   status 'deleted' not patchable (422).
 
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
-};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
-use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
@@ -109,15 +105,37 @@ pub struct PatchProjectBody {
 /// - `status = "active"` while the account is on a billing hold
 ///   (`past_due` / `free_cap_exceeded`) → 409.
 /// - Account isolation: project must belong to `session.account_id`; otherwise 403.
-/// - `backend_pg_dsn` is AES-256-GCM encrypted before being written to
-///   `backend_pg_dsn_enc`; the plaintext DSN is never persisted.
-/// - Credential cache is evicted after a DSN or status change.
+/// - `backend_pg_dsn` → 422 (ADR-083: use PUT /projects/:id/connection).
+/// - Credential cache is evicted after a status change.
 /// - Absent patch fields are preserved via COALESCE.
 pub async fn patch_project(
     Path(project_id): Path<String>,
     State(state): State<UserAdminState>,
     session: SessionContext,
     Json(body): Json<PatchProjectBody>,
+) -> Response {
+    // ADR-083: one write path for connection secrets. Role first so a Viewer still gets 403.
+    if session.role >= Role::Admin && body.backend_pg_dsn.is_some() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "backend_pg_dsn_not_patchable",
+                "use": "PUT /admin/v1/projects/:project_id/connection",
+            })),
+        )
+            .into_response();
+    }
+    match patch_project_inner(project_id, state, session, body).await {
+        Ok(detail) => detail.into_response(),
+        Err(code) => code.into_response(),
+    }
+}
+
+async fn patch_project_inner(
+    project_id: String,
+    state: UserAdminState,
+    session: SessionContext,
+    body: PatchProjectBody,
 ) -> Result<Json<GetProjectDetail>, StatusCode> {
     // ── Guard: Owner or Admin only (audit finding #59) ────────────────────────
     if session.role < Role::Admin {
@@ -183,25 +201,6 @@ pub async fn patch_project(
         }
     }
 
-    // ── Encrypt DSN if provided ───────────────────────────────────────────────
-    // When backend_pg_dsn is absent (None), dsn_enc = None → COALESCE preserves
-    // the existing backend_pg_dsn_enc column value (even if it is NULL).
-    let dsn_enc: Option<Vec<u8>> = if let Some(ref dsn) = body.backend_pg_dsn {
-        let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-        let cipher = Aes256Gcm::new_from_slice(&state.encryption_key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let nonce = Nonce::from_slice(&nonce_bytes);
-        let ct = cipher
-            .encrypt(nonce, dsn.as_bytes())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let mut enc: Vec<u8> = nonce_bytes.to_vec();
-        enc.extend_from_slice(&ct);
-        Some(enc)
-    } else {
-        None
-    };
-
     // ── UPDATE with COALESCE — only touches columns present in the body ───────
     let row = sqlx::query(
         "UPDATE projects \
@@ -210,7 +209,6 @@ pub async fn patch_project(
            status              = COALESCE($3, status), \
            logging_enabled     = COALESCE($4, logging_enabled), \
            log_retention_days  = COALESCE($5, log_retention_days), \
-           backend_pg_dsn_enc  = COALESCE($6, backend_pg_dsn_enc), \
            updated_at          = now() \
          WHERE id = $1 \
          RETURNING id, name, status, backend_mode, logging_enabled, \
@@ -221,7 +219,6 @@ pub async fn patch_project(
     .bind(&body.status)
     .bind(body.logging_enabled)
     .bind(body.log_retention_days)
-    .bind(&dsn_enc)
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -231,7 +228,7 @@ pub async fn patch_project(
 
     // ── Evict credential cache: it holds both the DSN and the project status,
     // so a stale entry would keep serving a just-suspended project (#59) ─────
-    if body.backend_pg_dsn.is_some() || body.status.is_some() {
+    if body.status.is_some() {
         state.credential_cache.evict_project(&project_id).await;
     }
 

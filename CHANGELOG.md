@@ -7,6 +7,14 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- Customer connection secrets now live in one server-key-encrypted store (ADR-083): migration
+  0039 adds `agent_tls_bundle_srv_enc`; legacy ECIES rows convert lazily on their next
+  authenticated request. New `GET`/`PUT /admin/v1/projects/:id/connection` (probe before save,
+  mode switch); metrics `embyr_projects_unconverted_connection_secrets` and
+  `embyr_dsn_convert_divergent_total`.
+- Customer DSNs submitted to provision / `PUT /connection` must require TLS and must not resolve
+  to loopback, link-local, private or unspecified addresses (audit #65, X10); dev/test escape
+  hatch `EMBYR_ALLOW_PRIVATE_DSN_HOSTS=true` (set in `docker-compose.yml`).
 - SMTP delivery of member invites and password resets (`EMBYR_SMTP_URL` + `EMBYR_EMAIL_FROM`);
   `EMBYR_REQUIRE_SMTP=true` refuses startup when SMTP is unset.
 - Bounded graceful shutdown: on SIGTERM `/healthz` turns 503, all three listeners stop
@@ -22,6 +30,8 @@ All notable changes to embyr-server are documented here. Format follows
   (finding #25); panic guards at SQL-building call sites (finding #26).
 
 ### Changed
+- `PATCH /admin/v1/projects/:id` no longer accepts `backend_pg_dsn` (422): use
+  `PUT /admin/v1/projects/:id/connection`. Provision no longer writes the ECIES columns.
 - `:vX.Y.Z` images are no longer overwritten by `master` merges; rollback is redeploying a
   previous immutable image instead of rebuilding from a git tag.
 - Concurrent Argon2id hashing is bounded; vulnerable dependencies bumped.

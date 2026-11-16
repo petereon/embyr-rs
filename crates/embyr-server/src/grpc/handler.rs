@@ -10,7 +10,7 @@ use prost_types::Timestamp;
 use tonic::{Request, Response, Status};
 
 use embyr_core::{
-    auth::{argon2, blake3, ecies},
+    auth::{argon2, blake3},
     domain::{
         document::{CollectionPath, DocumentPath, FirestoreDocument},
         field_value::FieldValue,
@@ -53,6 +53,7 @@ use crate::{
     adapters::{
         agent_backend::AgentBackendAdapter,
         aws_secret_fetcher::AwsSecretFetcher,
+        connection_secrets::{read_secret, spawn_conversion, Secret},
         credential_cache::{CachedEntry, CredentialCache, SharedBackendAdapter},
         gcp_secret_fetcher::GcpSecretFetcher,
         index_manager::IndexManager,
@@ -102,6 +103,8 @@ pub struct FirestoreService {
     /// pool-sizing-and-limits (ADR-079): per-tenant realtime-listener pool
     /// acquire timeout, sourced from `EMBYR_LISTENER_DB_ACQUIRE_TIMEOUT_SECS`.
     pub listener_db_acquire_timeout: std::time::Duration,
+    /// ADR-083: server key (`EMBYR_ENCRYPTION_KEY`, current/previous) for the connection-secret store.
+    pub server_keys: crate::adapters::connection_secrets::ServerKeys,
 }
 
 impl FirestoreService {
@@ -390,13 +393,13 @@ impl FirestoreService {
             let endpoint = row
                 .backend_agent_endpoint
                 .ok_or_else(|| Status::internal("agent project missing backend_agent_endpoint"))?;
-            let encrypted_bundle = row
-                .agent_tls_bundle_enc
-                .ok_or_else(|| Status::internal("agent project missing agent_tls_bundle_enc"))?;
-            let bundle_bytes = ecies::decrypt(api_key.as_bytes(), &encrypted_bundle)
-                .map_err(|e| Status::internal(e.to_string()))?;
-            let bundle_str = String::from_utf8(bundle_bytes)
-                .map_err(|_| Status::internal("TLS bundle is not valid UTF-8"))?;
+            let (bundle_str, bundle_conversion) = read_secret(
+                &self.server_keys,
+                api_key,
+                row.agent_tls_bundle_srv_enc.as_deref(),
+                row.agent_tls_bundle_enc.as_deref(),
+            )
+            .ok_or_else(|| Status::internal("agent project missing TLS bundle"))?;
             let bundle: serde_json::Value = serde_json::from_str(&bundle_str)
                 .map_err(|e| Status::internal(format!("TLS bundle JSON parse error: {e}")))?;
             let ca_pem = bundle["ca_pem"]
@@ -419,17 +422,26 @@ impl FirestoreService {
                 AgentBackendAdapter::new(&endpoint, &ca_pem, &client_cert_pem, &client_key_pem)
                     .await
                     .map_err(|e| sanitize_backend_error(e, "authenticate: agent backend connect"))?;
+            spawn_conversion(
+                self.system_db.pool().clone(),
+                project_id_str.to_string(),
+                Secret::AgentBundle,
+                bundle_conversion,
+                row.agent_tls_bundle_srv_enc.clone(),
+                bundle_str,
+                self.server_keys,
+            );
             let shared: SharedBackendAdapter = Arc::new(adapter);
             (shared, String::new())
         } else {
-            // Direct-PG mode: decrypt DSN via ECIES and create PostgresBackendAdapter.
-            let encrypted_dsn = row
-                .ecies_encrypted_dsn
-                .ok_or_else(|| Status::internal("project has no stored DSN"))?;
-            let dsn_bytes = ecies::decrypt(api_key.as_bytes(), &encrypted_dsn)
-                .map_err(|e| Status::internal(e.to_string()))?;
-            let dsn = String::from_utf8(dsn_bytes)
-                .map_err(|_| Status::internal("DSN is not valid UTF-8"))?;
+            // Direct-PG mode (ADR-083): server-key store, legacy ECIES fallback, lazy conversion.
+            let (dsn, dsn_conversion) = read_secret(
+                &self.server_keys,
+                api_key,
+                row.backend_pg_dsn_enc.as_deref(),
+                row.ecies_encrypted_dsn.as_deref(),
+            )
+            .ok_or_else(|| Status::internal("project has no stored DSN"))?;
 
             let adapter = PostgresBackendAdapter::with_pool_config(
                 &dsn,
@@ -438,6 +450,15 @@ impl FirestoreService {
             )
                 .await
                 .map_err(|e| sanitize_backend_error(e, "authenticate: direct_pg backend connect"))?;
+            spawn_conversion(
+                self.system_db.pool().clone(),
+                project_id_str.to_string(),
+                Secret::Dsn,
+                dsn_conversion,
+                row.backend_pg_dsn_enc.clone(),
+                dsn.clone(),
+                self.server_keys,
+            );
             let shared: SharedBackendAdapter = Arc::new(adapter);
             (shared, dsn)
         };

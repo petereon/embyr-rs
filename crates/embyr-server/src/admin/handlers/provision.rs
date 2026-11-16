@@ -5,7 +5,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use embyr_core::{
-    auth::{argon2, ecies},
+    auth::argon2,
     domain::{project::ProjectId, schema_readiness::SchemaReadiness},
 };
 use rand_core::{OsRng, RngCore};
@@ -14,6 +14,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::adapters::{
     aws_secret_fetcher::AwsSecretError,
+    dsn_policy::{check_dsn, DsnRejection},
     gcp_secret_fetcher::GcpSecretError,
     postgres_backend::PostgresBackendAdapter,
 };
@@ -88,7 +89,7 @@ fn err_with_detail(
 /// distinguishing "reachable but not ready" from the pre-existing generic
 /// `backend_unavailable` connectivity-failure classification (AC-02-02,
 /// AC-02-03, AC-02-04).
-fn not_ready_migrate_failure(
+pub(crate) fn not_ready_migrate_failure(
     readiness: &SchemaReadiness,
     migrate_err: &str,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -124,7 +125,13 @@ fn not_ready_migrate_failure(
 /// Uses a 2-connection pool with a 5-second acquire timeout.
 /// Returns `backend_unavailable` (400) if the connection or the liveness
 /// query fails. The returned pool should be used immediately for migrations.
-async fn probe_customer_db(dsn: &str) -> ApiResult<sqlx::PgPool> {
+pub(crate) async fn probe_customer_db(dsn: &str) -> ApiResult<sqlx::PgPool> {
+    // Single choke point for every operator/admin-supplied DSN (provision, PUT /connection):
+    // SSRF host policy + TLS requirement (audit #65 / X10).
+    check_dsn(dsn).await.map_err(|rejection| match rejection {
+        DsnRejection::Unresolvable => err(StatusCode::BAD_REQUEST, "backend_unavailable"),
+        other => err_with_detail(StatusCode::BAD_REQUEST, "invalid_dsn", other.detail().to_string()),
+    })?;
     let customer_pool = PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(std::time::Duration::from_secs(5))
@@ -329,16 +336,14 @@ pub async fn provision(
             .filter(|s| !s.is_empty())
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, "agent_client_key_pem_required"))?;
 
-        // Encrypt TLS bundle as JSON with ECIES using api_key bytes as seed.
+        // ADR-083: TLS bundle JSON encrypted under the server key (agent_tls_bundle_srv_enc).
         let tls_bundle = serde_json::json!({
             "ca_pem": ca_pem,
             "client_cert_pem": client_cert_pem,
             "client_key_pem": client_key_pem,
         })
         .to_string();
-        let pubkey = ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_bundle = ecies::encrypt(&pubkey, tls_bundle.as_bytes())
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        let encrypted_bundle = state.server_keys.encrypt(&tls_bundle);
 
         // Wrap projects INSERT + rate_buckets INSERT in a transaction.
         let mut tx = state.system_db.pool().begin().await.map_err(|e| {
@@ -349,7 +354,7 @@ pub async fn provision(
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, \
-              backend_agent_endpoint, agent_tls_bundle_enc) \
+              backend_agent_endpoint, agent_tls_bundle_srv_enc) \
              VALUES ($1, 'active', 'agent', $2, $3, $4)",
         )
         .bind(&req.project_id)
@@ -389,10 +394,8 @@ pub async fn provision(
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         let is_ready = matches!(readiness, SchemaReadiness::Ready { .. });
 
-        // ECIES encrypt DSN using api_key bytes as the seed
-        let pubkey = ecies::derive_public_key(api_key.as_bytes());
-        let encrypted_dsn = ecies::encrypt(&pubkey, dsn.as_bytes())
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        // ADR-083: DSN encrypted under the server key; the API key is only hashed.
+        let encrypted_dsn = state.server_keys.encrypt(dsn);
 
         // Wrap projects INSERT + rate_buckets INSERT in a transaction.
         let mut tx = state.system_db.pool().begin().await.map_err(|e| {
@@ -402,7 +405,7 @@ pub async fn provision(
 
         sqlx::query(
             "INSERT INTO projects \
-             (id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
+             (id, status, backend_mode, api_key_hash_current, backend_pg_dsn_enc) \
              VALUES ($1, 'active', $2, $3, $4)",
         )
         .bind(&req.project_id)
