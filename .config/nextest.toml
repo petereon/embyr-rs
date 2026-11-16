@@ -1,4 +1,4 @@
-# cargo-nextest config. CI runs `cargo nextest run --profile ci --partition count:N/6`
+# cargo-nextest config. CI runs `cargo nextest run --profile ci --partition count:N/10`
 # (see .github/workflows/ci.yml); local `cargo test` is unaffected.
 
 [profile.ci]

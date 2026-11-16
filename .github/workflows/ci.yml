@@ -39,21 +39,21 @@ jobs:
             echo "docs-only change: test shards skipped"
           fi
 
-  # ─── test-shard: the workspace suite, split across SHARDS parallel runners ────
+  # ─── test-shard: the workspace suite, split across 10 parallel runners ────
   # `cargo test --workspace` ran ~250 test binaries strictly one after another (~43 min of the
   # old ~48 min step; compiling is ~5 min). cargo-nextest partitions the individual tests
   # across shards, and `fail-fast = false` (see .config/nextest.toml) reports EVERY failing test
   # in one run instead of stopping at the first failing binary. Each shard has its own Postgres
   # service and its own testcontainers, so shards cannot interfere with each other.
   test-shard:
-    name: Test shard ${{ matrix.shard }}/6
+    name: Test shard ${{ matrix.shard }}/10
     needs: [changes]
     if: ${{ needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     services:
       postgres:
@@ -149,26 +149,39 @@ jobs:
       # Each test runs in its own process (so per-binary `#[serial]` / global-state assumptions
       # only ever had to hold within one test). `-j 2` per shard keeps the load per runner close
       # to what the old serial run had: these tests are timing-sensitive under load.
-      - name: Run workspace tests (shard ${{ matrix.shard }}/6)
-        run: cargo nextest run --workspace --profile ci --partition count:${{ matrix.shard }}/6
+      - name: Run workspace tests (shard ${{ matrix.shard }}/10)
+        run: cargo nextest run --workspace --profile ci --partition count:${{ matrix.shard }}/10
 
-      # nextest does not run doctests; run them once, on shard 1.
-      - name: Doctests
-        if: matrix.shard == 1
-        run: cargo test --workspace --doc
+  # ─── doctests: nextest does not run them; their own job so they don't lengthen a shard ──
+  doctests:
+    name: Doctests
+    needs: [changes]
+    if: ${{ needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --doc
 
   # ─── test: the single required "Test" check, green iff every shard is green ────────────
   test:
     name: Test
     runs-on: ubuntu-latest
-    needs: [changes, test-shard]
+    needs: [changes, test-shard, doctests]
     if: ${{ always() }}
     steps:
       - name: All shards passed (or were skipped for a docs-only change)
         run: |
-          echo "code changed: ${{ needs.changes.outputs.code }}; shards: ${{ needs.test-shard.result }}"
+          echo "code changed: ${{ needs.changes.outputs.code }}; shards: ${{ needs.test-shard.result }}; doctests: ${{ needs.doctests.result }}"
           if [ "${{ needs.changes.outputs.code }}" = "false" ]; then exit 0; fi
-          [ "${{ needs.test-shard.result }}" = "success" ]
+          [ "${{ needs.test-shard.result }}" = "success" ] && [ "${{ needs.doctests.result }}" = "success" ]
 
   # ─── lint: clippy -D warnings ──────────────────────────────────────────────
   # cargo-deny check moved to its own workflow (cargo-deny.yml) — see that
