@@ -441,16 +441,28 @@ async fn limit_query_snapshot_is_ordered_and_window_follows_changes() {
         Ev::Left { doc: "scores/s20".into(), removed_from: vec![1] }
     );
 
-    // A document that would not make the window changes nothing visible:
-    // the next event is the one caused by the following write.
-    env.create("scores", "s05", score(5)).await;
+    // A document that would not make the window changes nothing visible; the
+    // events seen next are the ones caused by the following delete. NOTIFY
+    // delivery is asynchronous, so the s15 notification may be handled before
+    // or after the delete committed: s30 leaves as DocumentDelete (delete seen
+    // first) or DocumentRemove (window recomputed after it), and in either
+    // order s20 is pulled back in. Compare as a set of normalized events.
+    // (Two-digit scores on purpose: storage orders field values as text.)
+    env.create("scores", "s15", score(15)).await;
     env.delete("scores", "s30").await;
-    assert_eq!(
-        next_event(&mut stream).await,
-        Ev::Deleted { doc: "scores/s30".into(), removed_from: vec![1] }
-    );
-    // Deleting 30 pulls 20 back into the window.
-    assert_eq!(next_event(&mut stream).await, changed("scores/s20", 1));
+    let mut next_two = vec![next_event(&mut stream).await, next_event(&mut stream).await]
+        .into_iter()
+        .map(|ev| match ev {
+            Ev::Deleted { doc, removed_from } | Ev::Left { doc, removed_from } => {
+                format!("gone {doc} {removed_from:?}")
+            }
+            other => format!("{other:?}"),
+        })
+        .collect::<Vec<_>>();
+    next_two.sort();
+    let mut expected = vec![format!("{:?}", changed("scores/s20", 1)), "gone scores/s30 [1]".to_string()];
+    expected.sort();
+    assert_eq!(next_two, expected);
 }
 
 /// An offset window shifts when a document ahead of it is deleted, even though
