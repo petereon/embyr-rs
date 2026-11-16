@@ -450,12 +450,12 @@ async fn session_cookie_rejected_on_operator_only_route() {
 
     let session_cookie = sign_in_and_get_cookie(&ctx).await;
 
-    // POST /admin/v1/projects (operator provision route — requires Bearer EMBYR_ADMIN_KEY)
+    // POST /admin/v1/projects/:id/suspend (operator-only route — requires Bearer EMBYR_ADMIN_KEY;
+    // POST /projects itself is dual-auth since session-project-create-delete)
     let resp = ctx
         .client
-        .post(ctx.url("/admin/v1/projects"))
+        .post(ctx.url("/admin/v1/projects/test-proj/suspend"))
         .header("Cookie", &session_cookie)
-        .json(&serde_json::json!({"project_id": "test-proj", "backend_mode": "direct_pg"}))
         .send()
         .await
         .expect("request failed");
