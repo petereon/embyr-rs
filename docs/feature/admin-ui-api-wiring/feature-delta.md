@@ -78,9 +78,9 @@ All paths are under `/admin/v1`. "→" = response fields used. Result `Msg`s in 
 | DB detail: Suspend / Activate | `PATCH /projects/:id` | `status: "suspended" \| "active"` → detail | *`PatchDb(id, Suspended(b))`* |
 | Overview: logging toggle, retention; Logs: Enable | `PATCH /projects/:id` | `logging_enabled, log_retention_days` → detail | *`PatchDb(id, LoggingEnabled(..))`* |
 | DB detail: Delete | `DELETE /projects/:id` (extended) | → 200 | *`DeleteDatabase`* + navigate to Databases |
-| Keys tab: open | `GET /projects/:id/sdk_keys?active=true` | → `[id, name, prefix, created_at]` | **`SetSdkKeys(DbId, Vec<SdkKey>)`** |
-| Keys tab: create | `POST /projects/:id/sdk_keys` | `name` (1–64) → `id, name, key, prefix, created_at` | *`SdkKeyCreated`* + **`SecretRevealed`** |
-| Keys tab: revoke | `DELETE /projects/:id/sdk_keys/:key_id` | → 204 | *`RevokeSdkKey`* |
+| Keys tab: open (superseded by `api-key-rotation`: `GET /projects/:id` returns `api_key_rotated_at`, `api_key_previous_expires_at`) | `GET /projects/:id/sdk_keys?active=true` | → `[id, name, prefix, created_at]` | **`SetSdkKeys(DbId, Vec<SdkKey>)`** |
+| Keys tab: rotate (superseded; was create) | `POST /projects/:id/api_key/rotate` | `name` (1–64) → `id, name, key, prefix, created_at` | *`SdkKeyCreated`* + **`SecretRevealed`** |
+| Keys tab: revoke now (superseded) | `POST /projects/:id/api_key/revoke` | → 204 | *`RevokeSdkKey`* |
 | Logs tab: open / filter / Load more | `GET /projects/:id/query_logs?op=&after=` | → `total, entries[id, op, collection_path?, latency_ms?, status, error_code?, created_at]` | **`SetQueryLogs{db, page, append}`** → `query_logs` map |
 | Identities: open | `GET /members` | → `[id, email, display_name?, role, auth_method, mfa_enabled, joined_at?]` | **`SetMembers`**; `pending = auth_method == "pending"` |
 | Members: invite | `POST /members/invite` | `email, role` → 202 `invitation_id, email, role, expires_at` (+ `invite_token` after account-bootstrap-and-invitations) | *`MemberInvited`* (pending) + copy-link reveal |
@@ -304,7 +304,7 @@ Walking skeleton = slices 01–04. Each slice is one TDD step; test target names
 | 06 | Dashboard + Overview on real metrics: latency tiles, hourly series, summary call; drop region; delete `display_stats`. **Needs `hourly-metrics-rollup`** (a count-only variant of this slice may ship earlier, with latency/charts hidden) | AC-AUW-15, 23, 30 (G-16..22) | UI: `views/dashboard.rs`, `views/db_detail/{mod,overview}.rs`, `data.rs`, `components/topbar.rs`, CSS `:hover` |
 | 07 | DB settings: detail load, logging, retention, suspend/activate (relies on the #59 server fix); Connections tab shows mode only | AC-AUW-19, 27, 23 | UI: `views/db_detail/{overview,connections,mod}.rs` |
 | 07b | Connections: masked summary, edit DSN / agent config, switch mode, probe errors. **Needs `dsn-single-store` slice 3** | AC-AUW-29 (G-23..25) | UI: `views/db_detail/connections.rs`, `api.rs`, `model.rs` |
-| 08 | SDK keys: list, create with reveal, revoke; copy database id | AC-AUW-15, 19, 20 | UI: `views/db_detail/keys.rs`, `api.rs` |
+| 08 | **Re-scoped by `api-key-rotation`:** the SDK-key routes are removed; Keys tab = project API key panel (rotate / revoke with reveal-once, last-rotated), needs `api-key-rotation` slice 4; copy database id | AC-AUW-15, 19, 20 | UI: `views/db_detail/keys.rs`, `api.rs` |
 | 09 | Query logs: list, op filter, load more | AC-AUW-15, 23 (G-31..35) | UI: `views/db_detail/logs.rs`, `model.rs`, `api.rs` |
 | 10 | Members: list, invite (token link reveal once the feature lands), role, remove, pending rules | AC-AUW-15, 19, 21, 22 | UI: `views/identities.rs`, `api.rs` |
 | 11 | Service accounts + admin keys | AC-AUW-15, 19, 20 | UI: `views/identities.rs`, `views/api_keys.rs`, `api.rs` |
