@@ -16,6 +16,7 @@ use crate::adapters::{
 use super::handlers::account::delete_account;
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
 use super::handlers::auth::{oidc_callback, session_info, signin, signout};
+use super::handlers::password_reset::{confirm_password_reset, request_password_reset};
 use super::handlers::invitations::{
     accept_invitation, confirm_invitation, create_account, revoke_invitation,
 };
@@ -198,6 +199,11 @@ pub fn build_admin_router(
         aws_secret_fetcher,
         gcp_secret_fetcher,
         signin_rate_limiter,
+        // admin-password-reset: slow-refill, in-process limiters (per-instance;
+        // `rpe:<email>` keys exceed the VARCHAR(45) of the Postgres-backed table).
+        // ponytail: per-instance counts; share via Postgres if multi-instance abuse matters.
+        reset_ip_limiter: SigninRateLimiter::new(10.0, 1.0 / 60.0),
+        reset_email_limiter: SigninRateLimiter::new(3.0, 1.0 / 1200.0),
         api_key_rotation_window_secs,
     };
 
@@ -243,6 +249,8 @@ pub fn build_admin_router(
         .route("/admin/v1/auth/oidc/callback", get(oidc_callback))
         .route("/admin/v1/auth/invitations/accept", post(accept_invitation))
         .route("/admin/v1/auth/invitations/confirm", post(confirm_invitation))
+        .route("/admin/v1/auth/password_reset/request", post(request_password_reset))
+        .route("/admin/v1/auth/password_reset/confirm", post(confirm_password_reset))
         .with_state(user_state.clone());
 
     // Account bootstrap: operator Bearer auth, but the handler needs the

@@ -36,7 +36,7 @@ use crate::admin::state::UserAdminState;
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-fn message(status: StatusCode, text: &str) -> Response {
+pub(super) fn message(status: StatusCode, text: &str) -> Response {
     (status, Json(serde_json::json!({ "message": text }))).into_response()
 }
 
@@ -45,7 +45,7 @@ fn invalid_invitation() -> Response {
     message(StatusCode::NOT_FOUND, "Invalid or expired invitation")
 }
 
-fn internal(context: &str, e: impl std::fmt::Display) -> Response {
+pub(super) fn internal(context: &str, e: impl std::fmt::Display) -> Response {
     tracing::error!("invitations: {context}: {e}");
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
@@ -69,13 +69,17 @@ where
 /// AC-ABI-15: per-source-IP limit before any Argon2 / DB work. Shares the
 /// signin limiter under a distinct `i:` key prefix (keeps within the
 /// `signin_rate_limits.source_key` VARCHAR(45) bound for IPv6).
-async fn throttle(
+pub(super) async fn throttle(
     state: &UserAdminState,
     peer: SocketAddr,
     headers: &HeaderMap,
 ) -> Option<Response> {
     let key = format!("i:{}", state.signin_rate_limiter.source_ip(peer, headers));
     let retry_after_ms = state.signin_rate_limiter.check(&key).await.err()?;
+    Some(too_many_attempts(retry_after_ms))
+}
+
+pub(super) fn too_many_attempts(retry_after_ms: u64) -> Response {
     let mut response = message(
         StatusCode::TOO_MANY_REQUESTS,
         "Too many attempts — try again later",
@@ -83,7 +87,7 @@ async fn throttle(
     if let Ok(v) = HeaderValue::from_str(&retry_after_ms.to_string()) {
         response.headers_mut().insert("retry-after-ms", v);
     }
-    Some(response)
+    response
 }
 
 pub(super) struct IssuedInvitation {

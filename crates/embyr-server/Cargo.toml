@@ -213,6 +213,10 @@ name = "admin_api_v2_account_deletion_purge"
 path = "../../tests/admin_api_v2/acceptance/account_deletion_purge.rs"
 
 [[test]]
+name = "admin_api_v2_admin_password_reset"
+path = "../../tests/admin_api_v2/acceptance/admin_password_reset.rs"
+
+[[test]]
 name = "admin_api_v2_akr03_sdk_keys_removed"
 path = "../../tests/admin_api_v2/acceptance/akr03_sdk_keys_removed.rs"
 

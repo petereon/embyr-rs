@@ -89,6 +89,10 @@ pub struct UserAdminState {
     /// `POST /admin/v1/auth/signin` — checked as the first statement in
     /// `signin()`, before any DB call.
     pub signin_rate_limiter: Arc<SigninRateLimiter>,
+    /// admin-password-reset: `rp:<ip>` / `rpe:<email>` throttles for the public
+    /// reset-request endpoint (burst 10 / +1 per min; burst 3 / +1 per 20 min).
+    pub reset_ip_limiter: Arc<SigninRateLimiter>,
+    pub reset_email_limiter: Arc<SigninRateLimiter>,
     /// `EMBYR_API_KEY_ROTATION_WINDOW_SECS` (ADR-085): how long a rotated-out project API key
     /// keeps authenticating.
     pub api_key_rotation_window_secs: u32,

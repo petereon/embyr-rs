@@ -25,6 +25,7 @@ pub mod metrics;
 // OAuth Client ID.
 pub mod oauth_providers;
 pub mod oidc_providers;
+pub mod password_reset;
 pub mod projects;
 pub mod prometheus_metrics;
 pub mod provision;

@@ -65,6 +65,26 @@ use embyr_server::{
     middleware::signin_rate_limit::SigninRateLimiter,
 };
 
+// ─── Recording email sender ───────────────────────────────────────────────────
+
+/// Driven-port double: remembers every message instead of delivering it.
+#[derive(Default)]
+pub struct RecordingEmailSender {
+    pub sent: std::sync::Mutex<Vec<embyr_core::admin::email::EmailMessage>>,
+}
+
+impl embyr_core::admin::email::IEmailSender for RecordingEmailSender {
+    fn send(
+        &self,
+        message: embyr_core::admin::email::EmailMessage,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), embyr_core::admin::email::EmailError>> + Send + '_>,
+    > {
+        self.sent.lock().unwrap().push(message);
+        Box::pin(async { Ok(()) })
+    }
+}
+
 // ─── Test server ─────────────────────────────────────────────────────────────
 
 /// Ephemeral test context: Postgres container + seeded data + admin HTTP server.
@@ -106,6 +126,8 @@ pub struct AdminTestContext {
     pub admin_totp_secret_b32: String,
     /// UUID of the seeded Admin user (string form).
     pub admin_id: String,
+    /// Every email the server tried to send (password-reset links etc.).
+    pub emails: Arc<RecordingEmailSender>,
 }
 
 /// Generate a valid TOTP code for a given base64url(no-pad)-encoded raw secret
@@ -355,7 +377,8 @@ impl AdminTestContext {
 
         // ── 11. Build admin router and start Axum server ──────────────────────
         let credential_cache = Arc::new(CredentialCache::new(1024));
-        let email_sender = Arc::new(NoopEmailSender);
+        let emails = Arc::new(RecordingEmailSender::default());
+        let email_sender = emails.clone();
 
         // ── Seed projects ─────────────────────────────────────────────────────────
 
@@ -474,6 +497,7 @@ impl AdminTestContext {
             admin_password,
             admin_totp_secret_b32,
             admin_id: admin_user_id.to_string(),
+            emails,
         }
     }
 

@@ -143,6 +143,42 @@ ever encrypted for that project**, not just future ones.
    does not mitigate this scenario — it hardens against key-substitution
    attacks in the DH exchange, not against the API key itself leaking.
 
+## Support: admin user lost their TOTP device
+
+Email password reset (`POST /admin/v1/auth/password_reset/{request,confirm}`) still
+needs a TOTP or recovery code, so it does **not** help here. If the user still has an
+unused recovery code they can sign in or reset with it. Otherwise recovery is
+operator-assisted. **There is no operator endpoint for TOTP re-enrolment (known gap)**;
+the procedure re-runs the invitation flow, which enrols a fresh authenticator.
+
+1. Verify the user's identity out of band (the admin console cannot do this for you).
+2. In `psql -v email=user@example.com "$DATABASE_URL"` (system DB), one transaction:
+   ```sql
+   BEGIN;
+   CREATE TEMP TABLE gone AS SELECT u.id, u.account_id, m.role
+     FROM users u JOIN account_members m ON m.user_id = u.id WHERE lower(u.email) = lower(:'email');
+   DELETE FROM sessions WHERE user_id IN (SELECT id FROM gone);
+   DELETE FROM mfa_recovery_codes WHERE user_id IN (SELECT id FROM gone);
+   UPDATE admin_api_keys SET revoked_at = now() WHERE member_id IN (SELECT id FROM gone) AND revoked_at IS NULL;
+   UPDATE admin_api_keys SET member_id = NULL WHERE member_id IN (SELECT id FROM gone);
+   DELETE FROM account_members WHERE user_id IN (SELECT id FROM gone);
+   DELETE FROM users WHERE id IN (SELECT id FROM gone);   -- password_reset_tokens cascade
+   SELECT * FROM gone;   -- note account_id and role; abort with ROLLBACK if empty or unexpected
+   COMMIT;
+   ```
+3. Issue a fresh invitation for the same account and role. If another Owner/Admin
+   remains, they invite the user from the console. If the user was the only Owner, mint
+   one yourself (needs `b3sum` and `openssl`):
+   ```sh
+   TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')      # 43 chars
+   HASH=$(printf '%s' "$TOKEN" | b3sum --no-names)
+   psql "$DATABASE_URL" -c "INSERT INTO invitations (account_id, email, role, expires_at, token_hash)
+     VALUES ('<account_id>', '<email>', '<role>', now() + interval '7 days', decode('$HASH','hex'))"
+   ```
+   Give the user `<console>/admin/?invite=$TOKEN` over a trusted channel. They choose a
+   new password, enrol a new authenticator and receive new recovery codes.
+4. Their projects and data are tied to the account, not the user, and are unaffected.
+
 ## Incident: service down or not scraped
 
 **Detect:** `EmbyrTargetDown` (`up{job="embyr-server"} == 0` for 1m) or `EmbyrMetricsAbsent`

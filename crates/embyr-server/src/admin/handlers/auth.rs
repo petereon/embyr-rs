@@ -188,23 +188,7 @@ pub(crate) async fn verify_credentials(
     totp_code: Option<&str>,
     recovery_code: Option<&str>,
 ) -> Result<(), Response> {
-    let pool = state.system_db.pool();
-    let user_id = user.id;
-
-    // ── 2. Lockout check ──────────────────────────────────────────────────────
-    // AC-5: fourth attempt after 3 consecutive TOTP failures returns 429.
-    if let Some(until) = user.locked_until {
-        if until > chrono::Utc::now() {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                axum::Json(ErrorBody {
-                    message: "Too many failed attempts — account locked for 15 minutes"
-                        .to_string(),
-                }),
-            )
-                .into_response());
-        }
-    }
+    check_lockout(user)?;
 
     // ── 3. Argon2id password verification ────────────────────────────────────
     // AC-3: wrong password → identical 401 shape to unknown email (oracle protection).
@@ -219,6 +203,38 @@ pub(crate) async fn verify_credentials(
         Ok(false) => return Err(invalid_credentials()),
         Err(e) => return Err(internal_err("verify password hash", e)),
     }
+
+    verify_second_factor(state, user, totp_code, recovery_code).await
+}
+
+/// ── 2. Lockout check ─────────────────────────────────────────────────────────
+/// AC-5: fourth attempt after 3 consecutive TOTP failures returns 429.
+// `Response` is the handler's error type everywhere; same allowance as invitations.rs.
+#[allow(clippy::result_large_err)]
+pub(crate) fn check_lockout(user: &UserSecrets) -> Result<(), Response> {
+    match user.locked_until {
+        Some(until) if until > chrono::Utc::now() => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(ErrorBody {
+                message: "Too many failed attempts — account locked for 15 minutes".to_string(),
+            }),
+        )
+            .into_response()),
+        _ => Ok(()),
+    }
+}
+
+/// Signin steps 4-5 — TOTP / recovery code with attempt counting and counter
+/// reset on success. Shared with password reset, where it is the only proof
+/// of identity beyond the emailed token (the caller runs `check_lockout` first).
+pub(crate) async fn verify_second_factor(
+    state: &UserAdminState,
+    user: &UserSecrets,
+    totp_code: Option<&str>,
+    recovery_code: Option<&str>,
+) -> Result<(), Response> {
+    let pool = state.system_db.pool();
+    let user_id = user.id;
 
     // ── 4. TOTP / recovery-code check ────────────────────────────────────────
     if let Some(recovery_code) = recovery_code {
