@@ -1,5 +1,8 @@
 pub mod access_rules;
+pub mod account;
 pub mod admin_keys;
+// ADR-085: POST /projects/:id/api_key/{rotate,revoke}.
+pub mod api_key;
 // anonymous-sessions (US-01, ADR-043): admin enablement action.
 pub mod anonymous_identity;
 pub mod auth;

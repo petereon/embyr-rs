@@ -169,7 +169,8 @@ async fn main() {
     // admin-signin-hardening (ADR-076): per-source-IP token bucket gating
     // POST /admin/v1/auth/signin. capacity=150 tokens, refill=10/minute.
     let signin_rate_limiter =
-        SigninRateLimiter::with_pg(150.0, 10.0 / 60.0, system_db.pool().clone());
+        SigninRateLimiter::with_pg(150.0, 10.0 / 60.0, system_db.pool().clone())
+            .with_trusted_proxy_hops(cfg.trusted_proxy_hops);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -342,6 +343,7 @@ async fn main() {
         webhook_signing_secret,
         Arc::clone(&cap_status_cache),
         Arc::clone(&signin_rate_limiter),
+        cfg.api_key_rotation_window_secs,
     )
     .merge(healthz_app);
 
