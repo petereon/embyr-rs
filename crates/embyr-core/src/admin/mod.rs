@@ -10,7 +10,6 @@ pub mod email;
 pub mod invitation;
 pub mod query_log;
 pub mod rbac;
-pub mod sdk_key;
 pub mod session;
 
 pub use account::{AccountId, AccountMember, Role, User, UserId};

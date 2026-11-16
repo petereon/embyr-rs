@@ -240,7 +240,7 @@ async fn count_aggregation_on_subcollection_counts_only_that_parents_documents()
         .result
         .expect("response must carry an AggregationResult");
 
-    let count = result.aggregate_fields.get("field_0").and_then(|v| v.value_type.clone());
+    let count = result.aggregate_fields.get("field_1").and_then(|v| v.value_type.clone());
     assert_eq!(count, Some(ValueType::IntegerValue(2)));
 }
 

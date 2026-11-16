@@ -27,7 +27,6 @@ pub mod projects;
 pub mod prometheus_metrics;
 pub mod provision;
 pub mod query_logs;
-pub mod sdk_keys;
 pub mod service_accounts;
 pub(crate) mod shared;
 pub mod webhooks_stripe;

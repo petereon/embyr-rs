@@ -153,10 +153,6 @@ name = "admin_api_v2_b02_project_list"
 path = "../../tests/admin_api_v2/acceptance/b02_project_list.rs"
 
 [[test]]
-name = "admin_api_v2_b03_sdk_keys"
-path = "../../tests/admin_api_v2/acceptance/b03_sdk_keys.rs"
-
-[[test]]
 name = "admin_api_v2_b04_project_patch"
 path = "../../tests/admin_api_v2/acceptance/b04_project_patch.rs"
 
@@ -171,6 +167,10 @@ path = "../../tests/admin_api_v2/acceptance/b06_oidc_billing.rs"
 [[test]]
 name = "admin_api_v2_security_58_60"
 path = "../../tests/admin_api_v2/acceptance/security_58_60.rs"
+
+[[test]]
+name = "admin_api_v2_x8_trusted_proxy_hops"
+path = "../../tests/admin_api_v2/acceptance/x8_trusted_proxy_hops.rs"
 
 [[test]]
 name = "dsn_single_store_ds01_request_path"
@@ -203,6 +203,10 @@ path = "../../tests/admin_api_v2/acceptance/account_deletion.rs"
 [[test]]
 name = "admin_api_v2_account_deletion_purge"
 path = "../../tests/admin_api_v2/acceptance/account_deletion_purge.rs"
+
+[[test]]
+name = "admin_api_v2_akr03_sdk_keys_removed"
+path = "../../tests/admin_api_v2/acceptance/akr03_sdk_keys_removed.rs"
 
 # card-payments-backend acceptance tests (one file per slice, mirroring
 # admin-api-v2's bNN registration convention). Release grouping:
@@ -273,6 +277,10 @@ path = "../../tests/distributed_rate_limiting/acceptance/b19_fail_open_on_pg_err
 [[test]]
 name = "drl_b20_rate_limit_after_authentication"
 path = "../../tests/distributed_rate_limiting/acceptance/b20_rate_limit_after_authentication.rs"
+
+[[test]]
+name = "akr01_two_hash_verify"
+path = "../../tests/api_key_rotation/acceptance/akr01_two_hash_verify.rs"
 
 # production-readiness acceptance tests
 [[test]]
@@ -379,6 +387,10 @@ path = "../../tests/client_auth_hosted_identity/acceptance/hi03_maria_signs_in.r
 [[test]]
 name = "client_auth_hosted_identity_hi04_maria_resets_password"
 path = "../../tests/client_auth_hosted_identity/acceptance/hi04_maria_resets_password.rs"
+
+[[test]]
+name = "client_auth_hosted_identity_hi05_per_account_throttles"
+path = "../../tests/client_auth_hosted_identity/acceptance/hi05_per_account_throttles.rs"
 
 # oauth-providers acceptance tests (Slice 01, ADR-037).
 [[test]]
@@ -714,6 +726,11 @@ path = "../../tests/aggregation_queries/acceptance/sum_aggregation.rs"
 [[test]]
 name = "aggregation_queries_avg_aggregation"
 path = "../../tests/aggregation_queries/acceptance/avg_aggregation.rs"
+
+# go-live P4 — several aggregations per request + Count.up_to.
+[[test]]
+name = "aggregation_queries_multi_aggregation"
+path = "../../tests/aggregation_queries/acceptance/multi_aggregation.rs"
 
 # batch-get-documents acceptance tests (Slice 01, LAST/ONLY slice, US-01,
 # ADR-042).

@@ -80,34 +80,18 @@ fn reactivate_database_restores_active_status() {
 // US-003 / AC-003-05: Delete database with cascade.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// AC-003-05: Delete database removes it from list and cascades to SDK keys.
+/// AC-003-05: Delete database removes it from list.
 #[test]
-fn delete_database_removes_it_and_cascades_sdk_keys() {
+fn delete_database_removes_it_from_list() {
     // AC-003-05
-    use embyr_admin_ui::model::{KeyId, SdkKey};
-
     let mut m = make_model_with_db();
     let db_id = m.databases[0].id.clone();
-
-    // Plant a SDK key for the database.
-    let key = SdkKey {
-        id: KeyId(Uuid::new_v4()),
-        db_id: db_id.clone(),
-        name: "existing-key".to_string(),
-        prefix: "embyr_sd".to_string(),
-        created_at: None,
-    };
-    m.sdk_keys.insert(db_id.clone(), vec![key]);
 
     update(&mut m, Msg::DeleteDatabase(db_id.clone()));
 
     assert!(
         !m.databases.iter().any(|d| d.id == db_id),
         "AC-003-05: deleted database must be removed from model.databases"
-    );
-    assert!(
-        m.sdk_keys.get(&db_id).map(|v| v.is_empty()).unwrap_or(true),
-        "AC-003-05: SDK keys for deleted database must be cascaded-removed"
     );
 }
 

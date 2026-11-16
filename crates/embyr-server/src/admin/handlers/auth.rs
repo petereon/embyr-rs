@@ -345,6 +345,7 @@ pub(crate) async fn verify_credentials(
 pub async fn signin(
     State(state): State<UserAdminState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<SigninRequest>,
 ) -> Response {
     let pool = state.system_db.pool();
@@ -353,8 +354,9 @@ pub async fn signin(
     // First statement — before the Step 1 DB lookup — so a throttled request
     // never reaches Argon2id or the DB. Keyed by peer.ip() only (not the
     // full SocketAddr: ephemeral source port varies per TCP connection from
-    // the same client).
-    let source_key = peer.ip().to_string();
+    // the same client). Behind a load balancer, `source_ip` resolves the real
+    // client from X-Forwarded-For when EMBYR_TRUSTED_PROXY_HOPS > 0.
+    let source_key = state.signin_rate_limiter.source_ip(peer, &headers).to_string();
     if let Err(retry_after_ms) = state.signin_rate_limiter.check(&source_key).await {
         return signin_throttled(retry_after_ms);
     }

@@ -200,19 +200,19 @@ async fn aggregation_count_sum_avg_for_a_collection_group_return_correct_values(
         .run_aggregation_query(&collection, &count_aggregation("reviews", None), None)
         .await
         .expect("Count aggregation should succeed");
-    assert_eq!(count, embyr_core::domain::query::AggregateValue::Count(3), "AC-CGI-03: Count");
+    assert_eq!(count, vec![embyr_core::domain::query::AggregateValue::Count(3)], "AC-CGI-03: Count");
 
     let sum = adapter
         .run_aggregation_query(&collection, &sum_aggregation("reviews", "rating"), None)
         .await
         .expect("Sum aggregation should succeed");
-    assert_eq!(sum, embyr_core::domain::query::AggregateValue::Sum(12.0), "AC-CGI-03: Sum");
+    assert_eq!(sum, vec![embyr_core::domain::query::AggregateValue::Sum(12.0)], "AC-CGI-03: Sum");
 
     let avg = adapter
         .run_aggregation_query(&collection, &avg_aggregation("reviews", "rating"), None)
         .await
         .expect("Avg aggregation should succeed");
-    assert_eq!(avg, embyr_core::domain::query::AggregateValue::Avg(Some(4.0)), "AC-CGI-03: Avg");
+    assert_eq!(avg, vec![embyr_core::domain::query::AggregateValue::Avg(Some(4.0))], "AC-CGI-03: Avg");
 }
 
 /// AC-CGI-04 (regression guard) — this feature touches ONLY the

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-085](adr-085-api-key-rotation.md). The `sdk_keys` routes and handler were removed (api-key-rotation slice 3); the `sdk_api_keys` table is retained until a contract migration.
 
 ## Context
 

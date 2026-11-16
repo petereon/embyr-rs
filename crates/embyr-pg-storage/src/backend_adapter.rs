@@ -1059,162 +1059,57 @@ impl BackendAdapter for PostgresBackendAdapter {
         collection: &CollectionPath,
         query: &AggregationQuery,
         _transaction_id: Option<&TransactionId>,
-    ) -> Result<AggregateValue, CoreError> {
-        match &query.aggregation {
-            AggregationKind::Count => {
-                use sqlx::{QueryBuilder, Row};
-                use crate::encoding::query::{append_filter, push_all_descendants_predicate};
+    ) -> Result<Vec<AggregateValue>, CoreError> {
+        use crate::encoding::query::{
+            aggregation_select_list, append_filter, push_all_descendants_predicate,
+        };
+        use sqlx::{QueryBuilder, Row};
 
-                // WHERE-clause construction copied byte-for-byte from
-                // `run_query` above (ADR-040 § 2) — only the SELECT clause
-                // differs; ORDER BY/LIMIT/OFFSET/cursor logic is omitted
-                // entirely (not meaningful for aggregation).
-                let mut qb: QueryBuilder<sqlx::Postgres> =
-                    QueryBuilder::new("SELECT COUNT(*) FROM documents WHERE project_id = ");
-                qb.push_bind(collection.project_id.as_str());
-                if query.query.all_descendants {
-                    let schema_available = matches!(
-                        self.schema_capability(DEFAULT_SCHEMA_CAPABILITY_TTL).await,
-                        SchemaCapability::Available
-                    );
-                    qb.push(" AND ");
-                    push_all_descendants_predicate(&mut qb, &collection.collection_path, schema_available);
-                } else {
-                    qb.push(" AND collection_path = ");
-                    qb.push_bind(&collection.collection_path);
-                }
-                qb.push(" AND NOT deleted");
-
-                if let Some(filter) = &query.query.filter {
-                    qb.push(" AND ");
-                    append_filter(&mut qb, filter);
-                }
-
-                let row = qb
-                    .build()
-                    .fetch_one(&self.pool)
-                    .await
-                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-                let count: i64 = row
-                    .try_get(0)
-                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-
-                Ok(AggregateValue::Count(count))
-            }
-            AggregationKind::Sum(field_path) => {
-                use crate::encoding::query::{append_filter, push_all_descendants_predicate};
-                use sqlx::{QueryBuilder, Row};
-
-                // WHERE-clause construction copied byte-for-byte from
-                // `run_query`/COUNT above (ADR-040 § 2) — only the SELECT
-                // clause differs. `field_path` is already validated by
-                // `handle_run_aggregation_query` (^[a-zA-Z_][a-zA-Z0-9_.]*$,
-                // ADR-040 § 1) before reaching this adapter — interpolated
-                // into the JSON-path expression the same way
-                // `append_field_filter` interpolates a validated field path;
-                // the type-tag check (`'t' IN ('I','D')`) plus `COALESCE`
-                // are what make AC-01-12/AC-01-13 true by construction.
-                //
-                // field-path-defense-in-depth (finding #26): see
-                // `append_field_filter`'s own identical guard comment.
-                if let Err(e) = validate_field_path(field_path) {
-                    panic!("invalid field path reached SQL builder: {e}");
-                }
-                let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
-                    "SELECT COALESCE(SUM(CASE WHEN fields->'{fp}'->>'t' IN ('I','D') \
-                     THEN (fields->'{fp}'->>'v')::float8 ELSE NULL END), 0) \
-                     FROM documents WHERE project_id = ",
-                    fp = field_path
-                ));
-                qb.push_bind(collection.project_id.as_str());
-                if query.query.all_descendants {
-                    let schema_available = matches!(
-                        self.schema_capability(DEFAULT_SCHEMA_CAPABILITY_TTL).await,
-                        SchemaCapability::Available
-                    );
-                    qb.push(" AND ");
-                    push_all_descendants_predicate(&mut qb, &collection.collection_path, schema_available);
-                } else {
-                    qb.push(" AND collection_path = ");
-                    qb.push_bind(&collection.collection_path);
-                }
-                qb.push(" AND NOT deleted");
-
-                if let Some(filter) = &query.query.filter {
-                    qb.push(" AND ");
-                    append_filter(&mut qb, filter);
-                }
-
-                let row = qb
-                    .build()
-                    .fetch_one(&self.pool)
-                    .await
-                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-                let sum: f64 = row
-                    .try_get(0)
-                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-
-                Ok(AggregateValue::Sum(sum))
-            }
-            AggregationKind::Avg(field_path) => {
-                use crate::encoding::query::{append_filter, push_all_descendants_predicate};
-                use sqlx::{QueryBuilder, Row};
-
-                // WHERE-clause construction copied byte-for-byte from
-                // `run_query`/COUNT/SUM above (ADR-040 § 2) — only the
-                // SELECT clause differs. `field_path` is already validated
-                // by `handle_run_aggregation_query`
-                // (^[a-zA-Z_][a-zA-Z0-9_.]*$, ADR-040 § 1) before reaching
-                // this adapter. Bare `AVG(...)` — deliberately no
-                // `COALESCE`, unlike SUM's own: Postgres's native `AVG()`
-                // already excludes NULL inputs from both numerator and
-                // denominator and returns SQL NULL over a zero/all-excluded
-                // result set, which is exactly AC-01-19's required
-                // null-vs-zero distinction, delivered by the primitive
-                // itself.
-                //
-                // field-path-defense-in-depth (finding #26): see
-                // `append_field_filter`'s own identical guard comment.
-                if let Err(e) = validate_field_path(field_path) {
-                    panic!("invalid field path reached SQL builder: {e}");
-                }
-                let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
-                    "SELECT AVG(CASE WHEN fields->'{fp}'->>'t' IN ('I','D') \
-                     THEN (fields->'{fp}'->>'v')::float8 ELSE NULL END) \
-                     FROM documents WHERE project_id = ",
-                    fp = field_path
-                ));
-                qb.push_bind(collection.project_id.as_str());
-                if query.query.all_descendants {
-                    let schema_available = matches!(
-                        self.schema_capability(DEFAULT_SCHEMA_CAPABILITY_TTL).await,
-                        SchemaCapability::Available
-                    );
-                    qb.push(" AND ");
-                    push_all_descendants_predicate(&mut qb, &collection.collection_path, schema_available);
-                } else {
-                    qb.push(" AND collection_path = ");
-                    qb.push_bind(&collection.collection_path);
-                }
-                qb.push(" AND NOT deleted");
-
-                if let Some(filter) = &query.query.filter {
-                    qb.push(" AND ");
-                    append_filter(&mut qb, filter);
-                }
-
-                let row = qb
-                    .build()
-                    .fetch_one(&self.pool)
-                    .await
-                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-                let avg: Option<f64> = row
-                    .try_get(0)
-                    .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-
-                Ok(AggregateValue::Avg(avg))
-            }
+        // ONE statement computes every aggregation over the filtered set.
+        // WHERE-clause construction copied from `run_query` (ADR-040 § 2) —
+        // only the SELECT list differs; ORDER BY/LIMIT/OFFSET/cursor logic
+        // is not meaningful for aggregation. Field paths are validated by
+        // `handle_run_aggregation_query` (ADR-040 § 1) and re-guarded (panic)
+        // inside `aggregation_select_list`, before any await.
+        let select_list = aggregation_select_list(&query.aggregations);
+        let mut qb: QueryBuilder<sqlx::Postgres> =
+            QueryBuilder::new(format!("SELECT {select_list} FROM documents WHERE project_id = "));
+        qb.push_bind(collection.project_id.as_str());
+        if query.query.all_descendants {
+            let schema_available = matches!(
+                self.schema_capability(DEFAULT_SCHEMA_CAPABILITY_TTL).await,
+                SchemaCapability::Available
+            );
+            qb.push(" AND ");
+            push_all_descendants_predicate(&mut qb, &collection.collection_path, schema_available);
+        } else {
+            qb.push(" AND collection_path = ");
+            qb.push_bind(&collection.collection_path);
         }
+        qb.push(" AND NOT deleted");
+
+        if let Some(filter) = &query.query.filter {
+            qb.push(" AND ");
+            append_filter(&mut qb, filter);
+        }
+
+        let row = qb
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        let unavailable = |e: sqlx::Error| CoreError::BackendUnavailable(e.to_string());
+        query
+            .aggregations
+            .iter()
+            .enumerate()
+            .map(|(i, a)| match a.kind {
+                AggregationKind::Count(_) => row.try_get(i).map(AggregateValue::Count),
+                AggregationKind::Sum(_) => row.try_get(i).map(AggregateValue::Sum),
+                AggregationKind::Avg(_) => row.try_get(i).map(AggregateValue::Avg),
+            })
+            .collect::<Result<_, _>>()
+            .map_err(unavailable)
     }
 
     /// firestore-list-rpcs (Slice 01/02, ADR-051 § Decision 2): distinct
@@ -1740,7 +1635,7 @@ mod field_path_guard_tests {
     use embyr_core::domain::{
         document::CollectionPath,
         project::ProjectId,
-        query::{AggregationKind, AggregationQuery, Cursor, OrderBy, OrderDirection, StructuredQuery},
+        query::{Aggregation, AggregationKind, AggregationQuery, Cursor, OrderBy, OrderDirection, StructuredQuery},
     };
 
     const MALICIOUS_FIELD_PATH: &str = "x'); DROP TABLE documents; --";
@@ -1805,8 +1700,10 @@ mod field_path_guard_tests {
     async fn run_aggregation_query_sum_panics_on_unvalidated_malicious_field_path() {
         let query = AggregationQuery {
             query: StructuredQuery { order_by: vec![], ..base_query() },
-            aggregation: AggregationKind::Sum(MALICIOUS_FIELD_PATH.to_string()),
-            alias: "total".to_string(),
+            aggregations: vec![Aggregation {
+                alias: "total".to_string(),
+                kind: AggregationKind::Sum(MALICIOUS_FIELD_PATH.to_string()),
+            }],
         };
         let _ = adapter().run_aggregation_query(&collection(), &query, None).await;
     }
@@ -1818,8 +1715,10 @@ mod field_path_guard_tests {
     async fn run_aggregation_query_avg_panics_on_unvalidated_malicious_field_path() {
         let query = AggregationQuery {
             query: StructuredQuery { order_by: vec![], ..base_query() },
-            aggregation: AggregationKind::Avg(MALICIOUS_FIELD_PATH.to_string()),
-            alias: "avg".to_string(),
+            aggregations: vec![Aggregation {
+                alias: "avg".to_string(),
+                kind: AggregationKind::Avg(MALICIOUS_FIELD_PATH.to_string()),
+            }],
         };
         let _ = adapter().run_aggregation_query(&collection(), &query, None).await;
     }
