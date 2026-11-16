@@ -3,4 +3,5 @@
 /// Step 05-03: resume token encoding/decoding for delta delivery.
 pub mod listen_handler;
 pub mod listen_registry;
+pub mod listen_session;
 pub mod resume_token;

@@ -293,6 +293,37 @@ impl StripeGateway {
         })
     }
 
+    /// Cancel `subscription_id` immediately (account deletion). Idempotent:
+    /// an already-cancelled (or already-gone) subscription is a success, so a
+    /// retry after a partial failure converges. Any other Stripe failure is an
+    /// error and the caller must not write local state.
+    pub async fn cancel_subscription(&self, subscription_id: &str) -> Result<(), StripeError> {
+        let cancelled = stripe_billing::subscription::CancelSubscription::new(
+            subscription_id.to_string(),
+        )
+        .send(&self.client)
+        .await;
+        let err = match cancelled {
+            Ok(_) | Err(stripe::StripeError::Stripe(_, 404)) => return Ok(()),
+            Err(e) => e,
+        };
+        // Stripe's wording for "already cancelled" has varied across API
+        // versions: confirm by reading the subscription before giving up.
+        if matches!(err, stripe::StripeError::Stripe(..)) {
+            if let Ok(sub) = stripe_billing::subscription::RetrieveSubscription::new(
+                subscription_id.to_string(),
+            )
+            .send(&self.client)
+            .await
+            {
+                if sub.status.as_str() == "canceled" {
+                    return Ok(());
+                }
+            }
+        }
+        Err(map_stripe_error(err))
+    }
+
     /// Push one usage record for `dimension` ("reads"/"writes"/"deletes"),
     /// attached to `stripe_customer_id` (feature-delta.md: "usage records
     /// attach to the Stripe customer", not a subscription item — every

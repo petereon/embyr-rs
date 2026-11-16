@@ -212,7 +212,8 @@ async fn patch_project_inner(
            updated_at          = now() \
          WHERE id = $1 \
          RETURNING id, name, status, backend_mode, logging_enabled, \
-                   log_retention_days, created_at",
+                   log_retention_days, created_at, api_key_rotated_at, \
+                   api_key_previous_expires_at",
     )
     .bind(&project_id)
     .bind(&body.name)
@@ -244,5 +245,7 @@ async fn patch_project_inner(
         created_at: row
             .try_get("created_at")
             .unwrap_or_else(|_| chrono::Utc::now()),
+        api_key_rotated_at: row.try_get("api_key_rotated_at").unwrap_or(None),
+        api_key_previous_expires_at: row.try_get("api_key_previous_expires_at").unwrap_or(None),
     }))
 }

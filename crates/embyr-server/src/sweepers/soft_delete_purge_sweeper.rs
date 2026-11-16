@@ -28,6 +28,17 @@ use super::advisory_lock_key;
 /// actual lock key, mirroring `TransactionSweeper::LOCK_KEY_NAME`.
 pub const LOCK_KEY_NAME: &str = "embyr_soft_delete_purge";
 
+/// `EMBYR_ACCOUNT_DELETE_GRACE_DAYS` — account-deletion grace window, default 7
+/// days (168h). Read from the environment where needed (handler + sweeper) so
+/// no composition-root signature has to change; invalid values fall back to 7.
+pub fn account_delete_grace_days() -> i64 {
+    std::env::var("EMBYR_ACCOUNT_DELETE_GRACE_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|d| *d >= 0)
+        .unwrap_or(7)
+}
+
 /// Whether this instance should run the purge cycle: only when
 /// `pg_try_advisory_lock` genuinely returned `true` — `Some(false)` (lock
 /// held by another instance) and `None` (the probe query itself failed) both
@@ -69,6 +80,7 @@ pub fn spawn(
             }
 
             run_cycle(&system_db, grace_days).await;
+            run_account_cycle(&system_db, account_delete_grace_days()).await;
 
             let _: Option<bool> = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
                 .bind(lock_key)
@@ -128,6 +140,66 @@ pub async fn run_cycle(system_db: &Arc<SystemDb>, grace_days: i64) {
             super::record_sweeper_error("soft_delete_purge_sweeper");
         }
     }
+}
+
+/// Dependent-row deletes for one soft-deleted account, in FK order. `$1` =
+/// account id. The `accounts` row itself survives as a tombstone (projects keep
+/// an FK to it): its name is blanked, which is also the "already purged" marker.
+const ACCOUNT_PURGE_STEPS: [&str; 10] = [
+    "DELETE FROM sessions WHERE account_id = $1",
+    "DELETE FROM admin_api_keys WHERE account_id = $1",
+    "DELETE FROM service_accounts WHERE account_id = $1",
+    "DELETE FROM invitations WHERE account_id = $1",
+    "DELETE FROM oidc_providers WHERE account_id = $1",
+    "DELETE FROM subscriptions WHERE account_id = $1",
+    "DELETE FROM mfa_recovery_codes WHERE user_id IN (SELECT id FROM users WHERE account_id = $1)",
+    "DELETE FROM account_members WHERE account_id = $1",
+    "DELETE FROM users WHERE account_id = $1",
+    "UPDATE accounts SET name = '' WHERE id = $1",
+];
+
+/// Account-deletion purge cycle: every account soft-deleted more than
+/// `grace_days` ago and not yet tombstoned (`name <> ''`) has its dependent
+/// rows removed in one transaction. Idempotent; a failed account is retried
+/// next cycle. `pub` for the same testable-driving-port reason as `run_cycle`.
+pub async fn run_account_cycle(system_db: &Arc<SystemDb>, grace_days: i64) {
+    let cutoff = embyr_core::admin::account_deletion::purge_cutoff(chrono::Utc::now(), grace_days);
+
+    let due: Vec<uuid::Uuid> = match sqlx::query_scalar(
+        "SELECT id FROM accounts WHERE deleted_at < $1 AND name <> ''",
+    )
+    .bind(cutoff)
+    .fetch_all(system_db.pool())
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(error = %e, "SoftDeletePurgeSweeper: account purge query failed");
+            super::record_sweeper_error("soft_delete_purge_sweeper");
+            return;
+        }
+    };
+
+    for account_id in due {
+        match purge_account(system_db, account_id).await {
+            Ok(()) => {
+                metrics::counter!("embyr_account_purge_sweeper_purged_total").increment(1);
+                tracing::info!(%account_id, "SoftDeletePurgeSweeper: purged deleted account");
+            }
+            Err(e) => {
+                tracing::warn!(%account_id, error = %e, "SoftDeletePurgeSweeper: account purge failed");
+                super::record_sweeper_error("soft_delete_purge_sweeper");
+            }
+        }
+    }
+}
+
+async fn purge_account(system_db: &SystemDb, account_id: uuid::Uuid) -> Result<(), sqlx::Error> {
+    let mut tx = system_db.pool().begin().await?;
+    for stmt in ACCOUNT_PURGE_STEPS {
+        sqlx::query(stmt).bind(account_id).execute(&mut *tx).await?;
+    }
+    tx.commit().await
 }
 
 #[cfg(test)]

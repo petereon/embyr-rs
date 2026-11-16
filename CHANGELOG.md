@@ -12,6 +12,12 @@ All notable changes to embyr-server are documented here. Format follows
   authenticated request. New `GET`/`PUT /admin/v1/projects/:id/connection` (probe before save,
   mode switch); metrics `embyr_projects_unconverted_connection_secrets` and
   `embyr_dsn_convert_divergent_total`.
+- Project API key rotation and revocation (ADR-085, slice 4): `POST /admin/v1/projects/:id/api_key/rotate`
+  (old key keeps working for `EMBYR_API_KEY_ROTATION_WINDOW_SECS`, default 24 h) and `.../revoke` (old key
+  dead at once), Owner/Admin, new key returned once. Refused with 409 while connection secrets are
+  unconverted. Other replicas may serve a cached old key for up to 60 s longer; open Listen streams are not
+  closed; a legacy hosted-identity signing key is regenerated (end-user tokens, 1 h, stop verifying).
+  `GET /admin/v1/projects/:id` adds `api_key_rotated_at` / `api_key_previous_expires_at`.
 - Customer DSNs submitted to provision / `PUT /connection` must require TLS and must not resolve
   to loopback, link-local, private or unspecified addresses (audit #65, X10); dev/test escape
   hatch `EMBYR_ALLOW_PRIVATE_DSN_HOSTS=true` (set in `docker-compose.yml`).

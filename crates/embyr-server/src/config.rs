@@ -172,6 +172,9 @@ pub struct ServerConfig {
     /// process exits and drops them. Default 25 (under Docker/K8s' usual
     /// 30s SIGKILL window).
     pub shutdown_grace_secs: u64,
+    /// `EMBYR_API_KEY_ROTATION_WINDOW_SECS` — how long the previous project API key keeps
+    /// authenticating after a rotate (ADR-085). Default 24 h; valid `1..=2592000` (30 d).
+    pub api_key_rotation_window_secs: u32,
     /// `EMBYR_TRUSTED_PROXY_HOPS` — number of trusted reverse proxies in front
     /// of :9090. 0 (default, unset or unparseable) = admin sign-in/invitation
     /// throttles key on the TCP peer IP; N>0 = key on the Nth-from-right
@@ -242,6 +245,9 @@ pub enum ConfigError {
     /// An entry in `EMBYR_CORS_ALLOWED_ORIGINS` cannot be parsed as an HTTP
     /// header value (e.g. contains a raw newline) — cors-origin-policy.
     InvalidCorsOrigin { value: String },
+    /// `EMBYR_API_KEY_ROTATION_WINDOW_SECS` is present but not an integer in
+    /// `1..=MAX_ROTATION_WINDOW_SECS` (api-key-rotation, ADR-085).
+    InvalidRotationWindow { value: String },
 }
 
 impl fmt::Display for ConfigError {
@@ -301,6 +307,13 @@ impl fmt::Display for ConfigError {
                 write!(
                     f,
                     "invalid EMBYR_CORS_ALLOWED_ORIGINS entry: '{value}' is not a valid HTTP header value"
+                )
+            }
+            ConfigError::InvalidRotationWindow { value } => {
+                write!(
+                    f,
+                    "invalid value for EMBYR_API_KEY_ROTATION_WINDOW_SECS: '{value}' \
+                     (must be an integer 1-{MAX_ROTATION_WINDOW_SECS})"
                 )
             }
         }
@@ -460,6 +473,8 @@ impl ServerConfig {
                 .map_err(|_| ConfigError::InvalidCorsOrigin { value: origin.clone() })?;
         }
 
+        let api_key_rotation_window_secs = parse_rotation_window_secs()?;
+
         Ok(ServerConfig {
             db_url: db_url_opt.unwrap(),
             admin_key,
@@ -490,6 +505,7 @@ impl ServerConfig {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             shutdown_grace_secs,
+            api_key_rotation_window_secs,
             trusted_proxy_hops,
         })
     }
@@ -926,6 +942,25 @@ fn parse_positive_u32(name: &str, default: u32) -> Result<u32, ConfigError> {
     }
 }
 
+/// Longest allowed previous-key window (30 days), `EMBYR_API_KEY_ROTATION_WINDOW_SECS`.
+pub const MAX_ROTATION_WINDOW_SECS: u32 = 2_592_000;
+/// Default previous-key window (24 hours).
+pub const DEFAULT_ROTATION_WINDOW_SECS: u32 = 86_400;
+
+/// Parse `EMBYR_API_KEY_ROTATION_WINDOW_SECS` (ADR-085): default 24 h, valid `1..=30 d`, anything
+/// else is an error naming the variable — never a silent fallback.
+fn parse_rotation_window_secs() -> Result<u32, ConfigError> {
+    rotation_window_from(std::env::var("EMBYR_API_KEY_ROTATION_WINDOW_SECS").ok())
+}
+
+fn rotation_window_from(raw: Option<String>) -> Result<u32, ConfigError> {
+    let Some(v) = raw else { return Ok(DEFAULT_ROTATION_WINDOW_SECS) };
+    v.parse::<u32>()
+        .ok()
+        .filter(|n| (1..=MAX_ROTATION_WINDOW_SECS).contains(n))
+        .ok_or(ConfigError::InvalidRotationWindow { value: v })
+}
+
 /// Parse `EMBYR_RATE_LIMIT_RPS`. Returns 1000.0 when the variable is absent.
 fn parse_rate_limit_rps() -> Result<f64, ConfigError> {
     match std::env::var("EMBYR_RATE_LIMIT_RPS") {
@@ -1037,6 +1072,19 @@ mod tests {
         assert!(result.is_ok());
         let v = result.unwrap();
         assert!(v > 0.0 && v.is_finite());
+    }
+
+    /// AC-AKR-18 (parsing half): unset -> 86400; 0, negative, non-numeric, > 30 d -> error naming the variable.
+    #[test]
+    fn rotation_window_defaults_and_rejects_out_of_range() {
+        assert_eq!(rotation_window_from(None).unwrap(), 86_400);
+        for ok in ["1", "3600", "2592000"] {
+            assert_eq!(rotation_window_from(Some(ok.into())).unwrap().to_string(), ok);
+        }
+        for bad in ["0", "-5", "abc", "", "2592001"] {
+            let err = rotation_window_from(Some(bad.into())).unwrap_err();
+            assert!(err.to_string().contains("EMBYR_API_KEY_ROTATION_WINDOW_SECS"), "{bad}: {err}");
+        }
     }
 
     #[test]
