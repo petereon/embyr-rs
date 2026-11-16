@@ -180,6 +180,25 @@ impl FirestoreService {
         Ok((project_id_str, prefix))
     }
 
+    /// Full collection path addressed by a `parent` + `collection_id` pair
+    /// (RunQuery / RunAggregationQuery / Listen / CreateDocument): the
+    /// parent's document-path prefix, if any, joined with `collection_id`.
+    /// This is the same shape `parse_document_path` stores documents under.
+    ///
+    ///   `.../documents`          + `posts` -> `posts`
+    ///   `.../documents/users/u1` + `posts` -> `users/u1/posts`
+    pub(crate) fn collection_path_under_parent(
+        parent: &str,
+        collection_id: &str,
+    ) -> Result<String, Status> {
+        let (_, prefix) = Self::parse_parent_prefix(parent)?;
+        Ok(if prefix.is_empty() {
+            collection_id.to_string()
+        } else {
+            format!("{prefix}/{collection_id}")
+        })
+    }
+
     /// Extract the bearer API key from the `authorization` metadata header.
     fn extract_api_key<T>(request: &Request<T>) -> Result<String, Status> {
         let auth_val = request
@@ -857,16 +876,7 @@ impl FirestoreService {
             // -prefix (project-wide catch-all, AC-17-237) case renders to
             // `""`, which `parse_path_segments` would reject as "empty match
             // path" — special-cased to the empty prefix directly.
-            let prefix_segments = if candidate.collection_path_pattern.is_empty() {
-                Vec::new()
-            } else {
-                embyr_core::access_control::rules_file::parse_path_segments(
-                    &candidate.collection_path_pattern,
-                )
-                .map_err(|e| {
-                    Status::internal(format!("stored recursive pattern failed to re-parse: {e:?}"))
-                })?
-            };
+            let prefix_segments = Self::recursive_prefix_segments(&candidate)?;
             let Some((bindings, _remainder)) = embyr_core::access_control::path_routing::bind_recursive_prefix(
                 &prefix_segments,
                 &concrete_full_path,
@@ -889,6 +899,159 @@ impl FirestoreService {
         }
 
         Ok(best.map(|(row, bindings, _)| (row, bindings)))
+    }
+
+    /// A stored recursive-wildcard row's own fixed prefix, as segments.
+    fn recursive_prefix_segments(
+        row: &crate::adapters::system_db::AccessRulePatternRow,
+    ) -> Result<Vec<embyr_core::access_control::rules_file::PathSegment>, Status> {
+        if row.collection_path_pattern.is_empty() {
+            return Ok(Vec::new());
+        }
+        embyr_core::access_control::rules_file::parse_path_segments(&row.collection_path_pattern)
+            .map_err(|e| Status::internal(format!("stored recursive pattern failed to re-parse: {e:?}")))
+    }
+
+    /// Collection-level form of `resolve_access_rule_pattern`, for reads with
+    /// no single concrete document (ListDocuments, RunQuery,
+    /// RunAggregationQuery): every stored pattern that could govern SOME
+    /// document directly inside `collection_path`. Called only after the
+    /// caller's own exact-match lookup missed. A fixed-depth (4b) match
+    /// governs every document in the collection and always wins, so it is
+    /// returned alone; otherwise every recursive-wildcard pattern whose
+    /// prefix is compatible with `collection_path/<any document id>` — a
+    /// SUPERSET of what any one document resolves to (a less specific
+    /// catch-all shadowed by a more specific one is still returned), so a
+    /// caller requiring ALL of them to admit fails closed, never open.
+    async fn resolve_collection_read_patterns(
+        system_db: &SystemDb,
+        project_id: &str,
+        collection_path: &str,
+    ) -> Result<Vec<crate::adapters::system_db::AccessRulePatternRow>, Status> {
+        if let Some((row, _)) =
+            Self::resolve_access_rule_pattern(system_db, project_id, collection_path, None).await?
+        {
+            return Ok(vec![row]);
+        }
+
+        let mut any_document =
+            embyr_core::access_control::rules_file::parse_path_segments(collection_path).map_err(
+                |e| Status::internal(format!("failed to parse the request's own ancestor path: {e:?}")),
+            )?;
+        // A wildcard in the document-id position: "any document here".
+        any_document.push(embyr_core::access_control::rules_file::PathSegment::Wildcard(String::new()));
+
+        let candidates = system_db
+            .list_recursive_access_rule_patterns_up_to(project_id, any_document.len() as i16)
+            .await
+            .map_err(|e| {
+                sanitize_backend_error(
+                    e,
+                    "resolve_collection_read_patterns: list_recursive_access_rule_patterns_up_to",
+                )
+            })?;
+        let mut governing = Vec::new();
+        for candidate in candidates {
+            let prefix_segments = Self::recursive_prefix_segments(&candidate)?;
+            if embyr_core::access_control::path_routing::bind_recursive_prefix(&prefix_segments, &any_document)
+                .is_some()
+            {
+                governing.push(candidate);
+            }
+        }
+        Ok(governing)
+    }
+
+    /// Query-path pattern gate (closes ADR-063's OQ-PM-07 for RunQuery /
+    /// RunAggregationQuery), called when the exact-match lookup missed.
+    /// Follows ADR-031's own design for exact-match rules: every governing
+    /// pattern's read condition must statically admit the query via the SAME
+    /// `check_query_compliance`, before any row is read. A condition that
+    /// function cannot decide (anything referencing a path variable, `||`,
+    /// cross-document reads, ...) rejects the query — fail CLOSED.
+    async fn check_pattern_query_compliance(
+        system_db: &SystemDb,
+        project_id: &str,
+        collection_path: &str,
+        filter: Option<&QueryFilter>,
+        verified_identity: Option<&embyr_core::client_identity::VerifiedEndUserIdentity>,
+    ) -> Result<(), Status> {
+        let auth_ctx = verified_identity.map(|v| embyr_core::access_control::AuthContext {
+            uid: v.end_user_id.clone(),
+            claims: v.claims.clone(),
+        });
+        for row in Self::resolve_collection_read_patterns(system_db, project_id, collection_path).await? {
+            let Some(read_condition_source) = row.read_condition else {
+                continue;
+            };
+            let condition = embyr_core::access_control::parse_condition(&read_condition_source)
+                .map_err(|e| {
+                    Status::internal(format!("stored access rule pattern failed to re-parse: {e:?}"))
+                })?;
+            match embyr_core::access_control::check_query_compliance(&condition, filter, auth_ctx.as_ref()) {
+                embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
+                outcome => return Err(query_compliance_rejection(&outcome)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Per-document READ decision under pattern rules, for callers whose own
+    /// exact-match lookup missed (BatchGetDocuments, ListDocuments). The
+    /// same resolve -> cross-document fetch -> `evaluate()` sequence
+    /// `handle_get_document`'s own pattern arm runs. `true` = allowed
+    /// (including "no pattern governs this document" and "the matched
+    /// pattern has no read condition" — both unrestricted, as there).
+    async fn pattern_read_allows(
+        system_db: &SystemDb,
+        adapter: &SharedBackendAdapter,
+        project_id: &str,
+        path: &DocumentPath,
+        auth_ctx: Option<&embyr_core::access_control::AuthContext>,
+        resource_fields: &std::collections::BTreeMap<String, FieldValue>,
+    ) -> Result<bool, Status> {
+        let Some((pattern_row, ancestor_bindings)) = Self::resolve_access_rule_pattern(
+            system_db,
+            project_id,
+            &path.collection_path,
+            Some(path.document_id.as_str()),
+        )
+        .await?
+        else {
+            return Ok(true);
+        };
+        let Some(read_condition_source) = pattern_row.read_condition else {
+            return Ok(true);
+        };
+        let condition = embyr_core::access_control::parse_condition(&read_condition_source)
+            .map_err(|e| {
+                Status::internal(format!("stored access rule pattern failed to re-parse: {e:?}"))
+            })?;
+        let cross_doc_paths = embyr_core::access_control::discover_cross_document_paths(
+            &condition,
+            auth_ctx,
+            Some(path.document_id.as_str()),
+            &ancestor_bindings,
+        );
+        let cross_document_reads =
+            Self::fetch_cross_document_reads(adapter, &path.project_id, &cross_doc_paths).await?;
+        let now = chrono::Utc::now();
+        let now_field = FieldValue::Timestamp(now.timestamp(), now.timestamp_subsec_nanos() as i32);
+        Ok(matches!(
+            embyr_core::access_control::evaluate(
+                &condition,
+                &embyr_core::access_control::EvalContext {
+                    auth: auth_ctx,
+                    resource_fields,
+                    request_resource_fields: &std::collections::BTreeMap::new(),
+                    path_variable_value: Some(path.document_id.as_str()),
+                    ancestor_path_variable_values: &ancestor_bindings,
+                    request_time: Some(&now_field),
+                    cross_document_reads: &cross_document_reads,
+                },
+            ),
+            embyr_core::access_control::EvaluationOutcome::Allow
+        ))
     }
 
     /// Evaluate one write's write-path security rule, shared by
@@ -921,11 +1084,30 @@ impl FirestoreService {
             .await
             .map_err(|e| sanitize_backend_error(e, "evaluate_write_rule: get_write_access_rule"))?;
 
-        let Some(write_rule_row) = write_rule_row else {
-            return Ok(());
+        // No EXACT-MATCH write rule: fall back to the SAME pattern routing
+        // (fixed-depth, then recursive-wildcard) the unary Create/Update/
+        // Delete handlers use — Commit/BatchWrite/Write were pattern-blind.
+        let (condition_source, ancestor_bindings) = match write_rule_row {
+            Some(row) => (row.condition_source, std::collections::BTreeMap::new()),
+            None => match Self::resolve_access_rule_pattern(
+                system_db,
+                project_id_str,
+                &path.collection_path,
+                Some(path.document_id.as_str()),
+            )
+            .await?
+            {
+                Some((
+                    crate::adapters::system_db::AccessRulePatternRow {
+                        write_condition: Some(source), ..
+                    },
+                    bindings,
+                )) => (source, bindings),
+                _ => return Ok(()),
+            },
         };
 
-        let condition = embyr_core::access_control::parse_condition(&write_rule_row.condition_source)
+        let condition = embyr_core::access_control::parse_condition(&condition_source)
             .map_err(|e| Status::internal(format!("stored write rule failed to re-parse: {e:?}")))?;
         let auth_ctx = verified_identity.map(|v| embyr_core::access_control::AuthContext {
             uid: v.end_user_id.clone(),
@@ -957,7 +1139,7 @@ impl FirestoreService {
                 resource_fields,
                 request_resource_fields: request_fields,
                 path_variable_value: Some(path.document_id.as_str()),
-                ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                ancestor_path_variable_values: &ancestor_bindings,
                 request_time: Some(&now_field),
                 cross_document_reads: &std::collections::BTreeMap::new(),
             },
@@ -1616,7 +1798,7 @@ impl FirestoreService {
 
         let path = embyr_core::domain::document::DocumentPath {
             project_id,
-            collection_path: req.collection_id.clone(),
+            collection_path: Self::collection_path_under_parent(&req.parent, &req.collection_id)?,
             document_id: document_id.clone(),
         };
 
@@ -2375,9 +2557,37 @@ impl FirestoreService {
             };
 
             match rule_row {
-                // No rule defined — unrestricted, mirrors GetDocument's own
-                // no-rule short-circuit.
-                None => all_docs.extend(docs),
+                // No EXACT-MATCH rule: pattern fallback, mirroring
+                // GetDocument. One collection-level check first, so a
+                // collection no pattern can reach stays unrestricted at zero
+                // per-document cost.
+                // ponytail: 2 system-DB lookups per document in a
+                // pattern-governed collection; cache the candidate rows per
+                // collection if listing large governed collections gets slow.
+                None => {
+                    let governed = !Self::resolve_collection_read_patterns(
+                        &self.system_db,
+                        &project_id_str,
+                        collection_path,
+                    )
+                    .await?
+                    .is_empty();
+                    for doc in docs {
+                        if !governed
+                            || Self::pattern_read_allows(
+                                &self.system_db,
+                                &adapter,
+                                &project_id_str,
+                                &doc.path,
+                                auth_ctx.as_ref(),
+                                &doc.fields,
+                            )
+                            .await?
+                        {
+                            all_docs.push(doc);
+                        }
+                    }
+                }
                 Some(rule_row) => {
                     let condition =
                         embyr_core::access_control::parse_condition(&rule_row.condition_source)
@@ -2639,12 +2849,28 @@ impl FirestoreService {
                 .map_err(core_error_to_status)?;
 
             let response_item = match rule_row {
-                // No rule defined — unrestricted, mirrors GetDocument's own
-                // no-rule short-circuit (AC-01-04).
-                None => match doc_opt {
-                    None => build_missing(doc_name),
-                    Some(doc) => build_found(doc),
-                },
+                // No EXACT-MATCH rule: pattern fallback, mirroring
+                // GetDocument (same per-document lookup cost it already
+                // pays). A pattern `Deny` is a per-document `missing`, like
+                // an exact-match `Deny` below. No governing pattern ->
+                // unrestricted (AC-01-04).
+                None => {
+                    let empty_fields: std::collections::BTreeMap<String, FieldValue> =
+                        std::collections::BTreeMap::new();
+                    let allowed = Self::pattern_read_allows(
+                        &self.system_db,
+                        &adapter,
+                        &project_id_str,
+                        &path,
+                        auth_ctx.as_ref(),
+                        doc_opt.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields),
+                    )
+                    .await?;
+                    match doc_opt {
+                        Some(doc) if allowed => build_found(doc),
+                        _ => build_missing(doc_name),
+                    }
+                }
                 Some(rule_row) => {
                     let condition = embyr_core::access_control::parse_condition(&rule_row.condition_source)
                         .map_err(|e| {
@@ -2785,6 +3011,18 @@ impl FirestoreService {
             &req.writes,
         )
         .await?;
+
+        // A one-shot Commit (empty `transaction`) is what every Firestore SDK
+        // sends for setDoc/updateDoc/deleteDoc/batch: apply the writes
+        // atomically in a transaction opened just for this call.
+        let txn_id = if txn_id.0.is_empty() {
+            adapter
+                .begin_transaction(&project_id, TransactionOptions::ReadWrite)
+                .await
+                .map_err(core_error_to_status)?
+        } else {
+            txn_id
+        };
 
         let write_results = adapter
             .commit_transaction(&project_id, &txn_id, domain_writes)
@@ -3123,13 +3361,23 @@ impl FirestoreService {
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
+        // A single-collection query is scoped to the parent's own
+        // subcollection (`users/u1` + `posts` -> `users/u1/posts`). A
+        // collection-group query keeps the bare id: the group predicate and
+        // `group_access_rules` are both keyed by it.
+        // ponytail: `all_descendants` ignores a non-root parent (still the
+        // whole group) -- add a path-prefix predicate if that is needed.
         let collection = CollectionPath {
             project_id,
-            collection_path: collection_id,
+            collection_path: if all_descendants {
+                collection_id.clone()
+            } else {
+                Self::collection_path_under_parent(&req.parent, &collection_id)?
+            },
         };
 
         let domain_query = StructuredQuery {
-            collection_id: collection.collection_path.clone(),
+            collection_id: collection_id.clone(),
             all_descendants,
             filter,
             order_by,
@@ -3239,6 +3487,16 @@ impl FirestoreService {
                     embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
                     outcome => return Err(query_compliance_rejection(&outcome)),
                 }
+            } else {
+                // No EXACT-MATCH rule: pattern rules gate the query too.
+                Self::check_pattern_query_compliance(
+                    &self.system_db,
+                    &project_id_str,
+                    &collection.collection_path,
+                    domain_query.filter.as_ref(),
+                    verified_identity.as_ref(),
+                )
+                .await?;
             }
         }
 
@@ -3248,7 +3506,9 @@ impl FirestoreService {
         if requires_index
             && !self
                 .index_manager
-                .is_index_ready(&project_id_str, &collection.collection_path)
+                // Keyed by the bare collection id (unchanged): composite
+                // indexes are registered per collection id, not per parent.
+                .is_index_ready(&project_id_str, &collection_id)
                 .await
         {
             // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
@@ -3263,7 +3523,7 @@ impl FirestoreService {
             return Err(Status::failed_precondition(format!(
                 "query requires a composite index on collection '{}' with fields {}; create it \
                  via POST /admin/v1/projects/{{project_id}}/indexes",
-                collection.collection_path, fields_json
+                collection_id, fields_json
             )));
         }
 
@@ -3410,13 +3670,23 @@ impl FirestoreService {
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
+        // A single-collection query is scoped to the parent's own
+        // subcollection (`users/u1` + `posts` -> `users/u1/posts`). A
+        // collection-group query keeps the bare id: the group predicate and
+        // `group_access_rules` are both keyed by it.
+        // ponytail: `all_descendants` ignores a non-root parent (still the
+        // whole group) -- add a path-prefix predicate if that is needed.
         let collection = CollectionPath {
             project_id,
-            collection_path: collection_id,
+            collection_path: if all_descendants {
+                collection_id.clone()
+            } else {
+                Self::collection_path_under_parent(&req.parent, &collection_id)?
+            },
         };
 
         let domain_query = StructuredQuery {
-            collection_id: collection.collection_path.clone(),
+            collection_id: collection_id.clone(),
             all_descendants,
             filter,
             order_by: vec![],
@@ -3495,6 +3765,16 @@ impl FirestoreService {
                     embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
                     outcome => return Err(query_compliance_rejection(&outcome)),
                 }
+            } else {
+                // No EXACT-MATCH rule: pattern rules gate the query too.
+                Self::check_pattern_query_compliance(
+                    &self.system_db,
+                    &project_id_str,
+                    &collection.collection_path,
+                    domain_query.filter.as_ref(),
+                    verified_identity.as_ref(),
+                )
+                .await?;
             }
         }
 
@@ -4318,6 +4598,29 @@ mod client_identity_extension_tests {
             .metadata_mut()
             .insert("authorization", "Bearer some-api-key".parse().unwrap());
         assert_eq!(FirestoreService::extract_client_identity_token(&request), None);
+    }
+}
+
+#[cfg(test)]
+mod collection_path_under_parent_tests {
+    use super::FirestoreService;
+
+    #[test]
+    fn joins_parent_document_prefix_with_collection_id() {
+        let root = "projects/p1/databases/(default)/documents";
+        for (parent, expected) in [
+            (root.to_string(), "posts"),
+            (format!("{root}/"), "posts"),
+            (format!("{root}/users/u1"), "users/u1/posts"),
+            (format!("{root}/a/b/c/d"), "a/b/c/d/posts"),
+        ] {
+            assert_eq!(
+                FirestoreService::collection_path_under_parent(&parent, "posts").unwrap(),
+                expected,
+                "parent: {parent}"
+            );
+        }
+        assert!(FirestoreService::collection_path_under_parent("projects/p1", "posts").is_err());
     }
 }
 

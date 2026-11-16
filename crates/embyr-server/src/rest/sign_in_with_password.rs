@@ -33,8 +33,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use crate::adapters::argon2_blocking as argon2;
 use embyr_core::{
-    auth::{argon2, ecies},
+    auth::ecies,
     client_identity,
 };
 use serde::{Deserialize, Serialize};
@@ -161,7 +162,7 @@ pub async fn sign_in_with_password(
     let (end_user_id, password_hash) = row;
 
     // AC-18-11: wrong password -> identical rejection to unknown email above.
-    match argon2::verify_password(password.as_bytes(), &password_hash) {
+    match argon2::verify_password(password.as_bytes(), &password_hash).await {
         Ok(true) => {}
         Ok(false) => return invalid_credentials(),
         Err(e) => {
