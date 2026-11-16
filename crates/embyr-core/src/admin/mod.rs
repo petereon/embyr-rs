@@ -8,6 +8,7 @@ pub mod account_deletion;
 pub mod billing;
 pub mod email;
 pub mod invitation;
+pub mod password_reset;
 pub mod query_log;
 pub mod rbac;
 pub mod session;
