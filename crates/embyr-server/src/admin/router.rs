@@ -186,6 +186,8 @@ pub fn build_admin_router(
     });
 
     let user_state = UserAdminState {
+        server_keys: operator_state.server_keys,
+        rate_limit_capacity,
         system_db,
         encryption_key,
         encryption_key_previous,
@@ -204,8 +206,6 @@ pub fn build_admin_router(
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by
     // operator Bearer middleware (ADR-016 D-OBS-4).
     let operator_router = Router::new()
-        .route("/admin/v1/projects", post(provision))
-        .route("/admin/v1/projects/:project_id", delete(delete_project))
         .route(
             "/admin/v1/projects/:project_id/suspend",
             post(suspend_project),
@@ -229,7 +229,13 @@ pub fn build_admin_router(
     // Dual-auth sub-router: GET /projects/:id.
     // Accepts session cookie (account-scoped) OR operator Bearer EMBYR_ADMIN_KEY (unscoped).
     let dual_auth_router = Router::<UserAdminState>::new()
-        .route("/admin/v1/projects/:project_id", get(get_project))
+        // Create/delete a database: Owner/Admin (create) / Owner (delete) of the caller's
+        // account via session, or the operator Bearer key (unscoped). Roles gated in-handler.
+        .route("/admin/v1/projects", post(provision))
+        .route(
+            "/admin/v1/projects/:project_id",
+            get(get_project).delete(delete_project),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
             dual_auth_middleware,

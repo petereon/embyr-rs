@@ -23,6 +23,7 @@ use embyr_core::admin::account::Role;
 
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::handlers::get_project::GetProjectDetail;
+use crate::admin::handlers::shared::account_on_billing_hold;
 use crate::admin::state::UserAdminState;
 
 /// Minimal project summary returned by GET /admin/v1/projects.
@@ -185,17 +186,7 @@ async fn patch_project_inner(
     // and are lifted only by the billing paths (webhook payment_succeeded,
     // plan upgrade). While the account is in either state, refuse reactivation.
     if body.status.as_deref() == Some("active") && existing_status == "suspended" {
-        let billing_hold: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM subscriptions \
-             WHERE account_id = $1 AND status IN ('past_due', 'free_cap_exceeded'))",
-        )
-        .bind(session.account_id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("patch_project billing-hold check DB error: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        let billing_hold = account_on_billing_hold(pool, session.account_id).await?;
         if billing_hold {
             return Err(StatusCode::CONFLICT);
         }

@@ -1319,3 +1319,8 @@ path = "../../tests/admin_ui_wiring/session.rs"
 [[test]]
 name = "protocol_correctness_pc01_cursors_index_code_and_document_limits"
 path = "../../tests/protocol_correctness/acceptance/pc01_cursors_index_code_and_document_limits.rs"
+
+# admin-ui-api-wiring slice 05: session-authed database create/delete (dual-auth).
+[[test]]
+name = "admin_ui_wiring_session_project_create_delete"
+path = "../../tests/admin_ui_wiring/session_project_create_delete.rs"

@@ -38,3 +38,23 @@ pub(crate) async fn verify_project_ownership(
 
     Ok(())
 }
+
+/// True while the account's subscription is on a billing hold
+/// (`past_due` after a final payment failure, or `free_cap_exceeded`).
+/// Shared by `patch_project` (reactivation) and project creation.
+pub(crate) async fn account_on_billing_hold(
+    pool: &sqlx::PgPool,
+    account_id: Uuid,
+) -> Result<bool, StatusCode> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM subscriptions \
+         WHERE account_id = $1 AND status IN ('past_due', 'free_cap_exceeded'))",
+    )
+    .bind(account_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("account_on_billing_hold DB error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}

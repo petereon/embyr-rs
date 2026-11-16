@@ -7,7 +7,11 @@ use axum::{
 
 use crate::adapters::credential_cache::CredentialCache;
 use crate::adapters::system_db::SystemDb;
-use crate::admin::state::OperatorState;
+use embyr_core::admin::account::Role;
+
+use crate::admin::extractors::dual_auth_principal::AuthPrincipal;
+use crate::admin::handlers::shared::verify_project_ownership;
+use crate::admin::state::{OperatorState, UserAdminState};
 
 /// Dependencies for lifecycle-status transitions invoked outside the HTTP
 /// router — used by `CapUsageRefresher` (ADR-020) to call
@@ -162,26 +166,50 @@ pub async fn suspend_account_projects(
     Ok(suspended_count)
 }
 
-pub async fn delete_project(
-    Path(project_id): Path<String>,
-    State(state): State<OperatorState>,
+/// Shared soft-delete core: status `deleted` + `deleted_at` (purged by the sweeper after the
+/// grace window) and credential-cache eviction so the project's keys stop authenticating.
+async fn soft_delete_project(
+    project_id: &str,
+    system_db: &SystemDb,
+    credential_cache: &CredentialCache,
 ) -> StatusCode {
-    // Auth is enforced by operator_auth_middleware applied at the router layer.
-
     let result = sqlx::query(
         "UPDATE projects SET status = 'deleted', deleted_at = now(), updated_at = now() \
          WHERE id = $1 AND status != 'deleted'",
     )
-    .bind(&project_id)
-    .execute(state.system_db.pool())
+    .bind(project_id)
+    .execute(system_db.pool())
     .await;
 
     match result {
         Ok(r) if r.rows_affected() > 0 => {
-            state.credential_cache.evict_project(&project_id).await;
+            credential_cache.evict_project(project_id).await;
             StatusCode::OK
         }
         Ok(_) => StatusCode::NOT_FOUND,
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+/// DELETE /admin/v1/projects/:project_id -- dual-auth (operator Bearer OR session cookie).
+///
+/// Operator: any project (unchanged). Session: Owner only (Admin/Viewer 403), and the project
+/// must belong to the caller's account (`verify_project_ownership`: 404 unknown/deleted,
+/// 403 other account).
+pub async fn delete_project(
+    Path(project_id): Path<String>,
+    State(state): State<UserAdminState>,
+    principal: AuthPrincipal,
+) -> StatusCode {
+    if let AuthPrincipal::User { account_id, role, .. } = principal {
+        if role < Role::Owner {
+            return StatusCode::FORBIDDEN;
+        }
+        if let Err(code) =
+            verify_project_ownership(state.system_db.pool(), &project_id, account_id).await
+        {
+            return code;
+        }
+    }
+    soft_delete_project(&project_id, &state.system_db, &state.credential_cache).await
 }
