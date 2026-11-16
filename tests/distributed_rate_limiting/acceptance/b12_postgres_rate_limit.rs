@@ -102,16 +102,18 @@ async fn rate_bucket_tokens_decrease_atomically() {
 /// AC-12-04
 ///
 /// Journey:
-///   Given: project "proj-refill" with an exhausted bucket (0.0 tokens), 10 rps
+///   Given: project "proj-refill" with an exhausted bucket (0.0 tokens), 2 rps
 ///   When:  a request is sent immediately -> RESOURCE_EXHAUSTED
 ///   And:   the client waits 1.1 seconds, then sends another request
-///   Then:  the second request is allowed and tokens ~= rps - 1.0
+///   Then:  the second request is allowed and tokens ~= 1.0
 ///
 /// @driving_port @real-io @US-12 @AC-12-04
 #[tokio::test]
 async fn tokens_refill_after_one_second() {
-    let ctx = DrlTestContext::new(10.0).await;
-    ctx.insert_project_with_bucket("proj-refill", "key-refill", 10.0).await;
+    // 2 rps (not 10): an empty bucket then needs 500ms to earn a token, so a
+    // slow CI round-trip can't refill it before the "exhausted" assertion.
+    let ctx = DrlTestContext::new(2.0).await;
+    ctx.insert_project_with_bucket("proj-refill", "key-refill", 2.0).await;
     let (addr, _server) = start_distributed_grpc_server(&ctx).await;
     let ctx = ctx.with_grpc_addr(addr);
     let mut client = FirestoreClient::new(ctx.grpc_channel());
@@ -130,7 +132,7 @@ async fn tokens_refill_after_one_second() {
     assert_ne!(classify_grpc_status(&second), "resource_exhausted", "bucket must have refilled");
     let (tokens, _) = ctx.query_rate_bucket("proj-refill").await.expect("bucket row");
     assert!(
-        (8.0..=9.6).contains(&tokens),
-        "expected ~9.0 tokens (10 rps refilled, capped at capacity, minus 1), got {tokens}"
+        (0.5..=1.6).contains(&tokens),
+        "expected ~1.0 tokens (2 rps refilled, capped at capacity, minus 1), got {tokens}"
     );
 }
