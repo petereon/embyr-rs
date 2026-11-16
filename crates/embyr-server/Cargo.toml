@@ -987,6 +987,13 @@ path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw06_simul
 name = "security_rules_cel_recursive_wildcards_rw07_commit_batch_get_list_and_query_parity"
 path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw07_commit_batch_get_list_and_query_parity.rs"
 
+# Go-live blockers X9 + X12: ListCollectionIds is gated by the parent
+# document's read rule; RunQuery/RunAggregationQuery evaluate the verified
+# identity's claims.
+[[test]]
+name = "security_rules_cel_recursive_wildcards_rw08_list_collection_ids_rules_and_query_claims"
+path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw08_list_collection_ids_rules_and_query_claims.rs"
+
 # security-rules-cel-expression-grammar (Slice 01, US-01, Release 1 Walking
 # Skeleton, ADR-065) — numeric literals + relational comparison operators,
 # real GetDocument enforcement proof. AC-CEG-01 through AC-CEG-05.
