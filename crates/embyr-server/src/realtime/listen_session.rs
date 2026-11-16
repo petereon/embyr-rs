@@ -329,7 +329,8 @@ impl Ctx<'_> {
         if project_id_from_parent(&qt.parent).map_err(Status::internal)? != self.project_id {
             return Err(Status::invalid_argument("target parent belongs to a different project"));
         }
-        let filter = filter_from_query_target(qt).map_err(Status::internal)?;
+        // A malformed filter is the client's error, not an internal one.
+        let filter = filter_from_query_target(qt).map_err(Status::invalid_argument)?;
         let Some(QueryType::StructuredQuery(sq)) = &qt.query_type else {
             return Err(Status::internal("QueryTarget has no query_type"));
         };

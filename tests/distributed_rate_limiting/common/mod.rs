@@ -517,10 +517,15 @@ pub async fn start_distributed_grpc_server(
 ) -> (std::net::SocketAddr, embyr_server::TestServer) {
     let system_db = Arc::clone(&ctx.system_db);
     let pg_pool = system_db.pool().clone();
-    let server = embyr_server::start_test_server_with_distributed_rate_limit(
+    // Generous Postgres budget: these tests assert rejection/decrement through the shared
+    // bucket, and the production 60ms budget trips the in-process fallback on a loaded CI
+    // runner (request then passes the limiter and fails later with Internal). The fallback
+    // itself is covered by b19, which uses `start_distributed_grpc_server_with_pool`.
+    let server = embyr_server::start_test_server_with_distributed_rate_limit_and_pg_timeout(
         system_db,
         ctx.rate_limit_rps,
         pg_pool,
+        Some(5_000),
     )
     .await;
     let addr = server.grpc_addr;
