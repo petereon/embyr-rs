@@ -357,7 +357,7 @@ impl FirestoreService {
                 .ok_or_else(|| Status::internal("agent project missing backend_agent_endpoint"))?;
             let (bundle_str, bundle_conversion) = read_secret(
                 &self.server_keys,
-                &api_key,
+                api_key,
                 row.agent_tls_bundle_srv_enc.as_deref(),
                 row.agent_tls_bundle_enc.as_deref(),
             )
@@ -399,7 +399,7 @@ impl FirestoreService {
             // Direct-PG mode (ADR-083): server-key store, legacy ECIES fallback, lazy conversion.
             let (dsn, dsn_conversion) = read_secret(
                 &self.server_keys,
-                &api_key,
+                api_key,
                 row.backend_pg_dsn_enc.as_deref(),
                 row.ecies_encrypted_dsn.as_deref(),
             )
