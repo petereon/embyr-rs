@@ -4,6 +4,7 @@
 //! No IO imports allowed — enforced by deny.toml.
 
 pub mod account;
+pub mod account_deletion;
 pub mod billing;
 pub mod email;
 pub mod invitation;
