@@ -26,11 +26,13 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use embyr_core::admin::account::{AccountId, AccountMember, Role, UserId};
-use embyr_core::admin::email::EmailMessage;
+use embyr_core::admin::invitation::{parse_role, validate_invite, InviteError};
 use embyr_core::admin::rbac::{check_rbac, RbacAction, RbacError};
 
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::state::UserAdminState;
+
+use super::invitations::{issue_invitation, send_invite_email, IssueError};
 
 // ── Request / response types ──────────────────────────────────────────────────
 
@@ -64,6 +66,8 @@ pub struct InvitationResponse {
     pub email: String,
     pub role: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Shown once; only its BLAKE3 hash is stored.
+    pub invite_token: String,
 }
 
 /// Body for PATCH /admin/v1/members/:member_id/role.
@@ -79,26 +83,6 @@ struct ErrorBody {
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
-
-fn parse_role(s: &str) -> Option<Role> {
-    match s {
-        "Owner" => Some(Role::Owner),
-        "Admin" => Some(Role::Admin),
-        "Viewer" => Some(Role::Viewer),
-        _ => None,
-    }
-}
-
-/// Minimal plausibility check for an invitee address: 1..=254 chars, exactly
-/// one `@` with a non-empty local part and domain, no whitespace/control chars.
-/// ponytail: not RFC 5322; real proof of ownership is the invitation email.
-fn is_plausible_email(s: &str) -> bool {
-    if s.is_empty() || s.len() > 254 || s.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return false;
-    }
-    matches!(s.split_once('@'), Some((local, domain))
-        if !local.is_empty() && !domain.is_empty() && !domain.contains('@'))
-}
 
 /// Load all `account_members` rows for `account_id` and build the domain type
 /// required by `check_rbac`.
@@ -186,7 +170,8 @@ pub async fn list_members(
     let inv_rows = sqlx::query(
         "SELECT id::text AS id, email, role, expires_at \
          FROM invitations \
-         WHERE account_id = $1 AND accepted_at IS NULL AND expires_at > now() \
+         WHERE account_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL \
+         AND expires_at > now() \
          ORDER BY created_at ASC",
     )
     .bind(session.account_id)
@@ -218,8 +203,8 @@ pub async fn list_members(
 /// Owner or Admin only (Viewer → 403).
 /// `role` must be Owner|Admin|Viewer and `email` plausible (else 422);
 /// `role` may not exceed the inviter's own role (Admin inviting Owner → 403).
-/// Inserts an invitations row with a 7-day expiry, then calls IEmailSender::send
-/// fire-and-forget (V1 uses NoopEmailSender; errors are ignored).
+/// Issues a 7-day invitation (token returned once, hash stored), emails the
+/// accept link fire-and-forget. Email already a user / open invitation → 409.
 /// Returns 202 + InvitationResponse.
 pub async fn invite_member(
     State(state): State<UserAdminState>,
@@ -231,63 +216,42 @@ pub async fn invite_member(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Body validation before any DB access (audit finding #60).
-    let invited_role = parse_role(&body.role).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    if !is_plausible_email(&body.email) {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
-    // No escalation: an Admin may not invite an Owner.
-    if invited_role > session.role {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    // Body validation before any DB access (audit finding #60); no escalation.
+    validate_invite(&body.email, &body.role, session.role).map_err(|e| match e {
+        InviteError::RoleExceedsInviter => StatusCode::FORBIDDEN,
+        InviteError::InvalidRole | InviteError::InvalidEmail => StatusCode::UNPROCESSABLE_ENTITY,
+    })?;
 
-    let pool = state.system_db.pool();
-
-    // Insert invitation row (7-day expiry).
-    let row = sqlx::query(
-        "INSERT INTO invitations (account_id, email, role, expires_at) \
-         VALUES ($1, $2, $3, now() + interval '7 days') \
-         RETURNING id::text AS id, expires_at",
-    )
-    .bind(session.account_id)
-    .bind(&body.email)
-    .bind(&body.role)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("invite_member: INSERT error: {e}");
+    let mut tx = state.system_db.pool().begin().await.map_err(|e| {
+        tracing::error!("invite_member: begin: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    // Service-account keys carry the nil user id, which has no users row.
+    let invited_by = Some(session.user_id).filter(|id| !id.is_nil());
+    let issued = issue_invitation(&mut tx, session.account_id, &body.email, &body.role, invited_by)
+        .await
+        .map_err(|e| match e {
+            IssueError::EmailTaken => StatusCode::CONFLICT,
+            IssueError::Db(e) => {
+                tracing::error!("invite_member: issue: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
+    tx.commit().await.map_err(|e| {
+        tracing::error!("invite_member: commit: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let invitation_id: String = row
-        .try_get("id")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let expires_at: chrono::DateTime<chrono::Utc> = row
-        .try_get("expires_at")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Fire-and-forget: V1 NoopEmailSender drops the message; errors are ignored.
-    let _ = state
-        .email_sender
-        .send(EmailMessage {
-            to: body.email.clone(),
-            subject: format!("You've been invited to join as {}", body.role),
-            body_text: format!(
-                "You have been invited to join the account with role '{}'. \
-                 This invitation expires at {}.",
-                body.role, expires_at
-            ),
-            body_html: None,
-        })
-        .await;
+    send_invite_email(&state, &body.email, &body.role, &issued).await;
 
     Ok((
         StatusCode::ACCEPTED,
         Json(InvitationResponse {
-            invitation_id,
+            invitation_id: issued.id.to_string(),
             email: body.email,
             role: body.role,
-            expires_at,
+            expires_at: issued.expires_at,
+            invite_token: issued.token,
         }),
     ))
 }
@@ -469,18 +433,4 @@ pub async fn remove_member(
     }
 
     StatusCode::NO_CONTENT.into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_plausible_email;
-
-    #[test]
-    fn is_plausible_email_accepts_and_rejects() {
-        assert!(is_plausible_email("a@b.co"));
-        for bad in ["", "ab.co", "@b.co", "a@", "a@b@c", "a b@c.co", "a@b.co\n"] {
-            assert!(!is_plausible_email(bad), "{bad:?}");
-        }
-        assert!(!is_plausible_email(&format!("{}@b.co", "a".repeat(250))));
-    }
 }

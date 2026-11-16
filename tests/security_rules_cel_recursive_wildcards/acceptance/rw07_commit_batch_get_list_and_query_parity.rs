@@ -26,9 +26,18 @@ use common::{
 };
 use ed25519_dalek::SigningKey;
 use embyr_proto::firestore::{
-    batch_get_documents_response::Result as BatchResult, firestore_client::FirestoreClient,
-    run_query_request::QueryType, structured_query::CollectionSelector, BatchGetDocumentsRequest,
-    ListDocumentsRequest, RunQueryRequest, StructuredQuery,
+    batch_get_documents_response::Result as BatchResult,
+    firestore_client::FirestoreClient,
+    run_aggregation_query_request::QueryType as AggregationQueryType,
+    run_query_request::QueryType,
+    structured_aggregation_query::{
+        aggregation::{Count, Operator as AggregationOperator},
+        Aggregation, QueryType as StructuredAggQueryType,
+    },
+    structured_query::CollectionSelector,
+    value::ValueType,
+    BatchGetDocumentsRequest, ListDocumentsRequest, RunAggregationQueryRequest, RunQueryRequest,
+    StructuredAggregationQuery, StructuredQuery,
 };
 use rand_core::OsRng;
 use tokio_stream::StreamExt;
@@ -38,6 +47,11 @@ use tokio_stream::StreamExt;
 /// `request.auth != null` — a shape RunQuery's own static compliance check
 /// (ADR-031) can decide. `teams/{teamId}/notes` uses a shape it can NOT
 /// decide, for the fail-closed scenario.
+///
+/// `users/{uid}/posts` (fixed-depth) and `vaults/{uid}/{path=**}` (recursive)
+/// are owner rules over an ANCESTOR path variable, which the queried
+/// collection path fixes. `users/{uid}/drafts` conditions on the document-id
+/// wildcard, which it does not.
 const RULES_FILE: &str = r#"
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -50,6 +64,15 @@ service cloud.firestore {
     match /teams/{teamId}/notes/{noteId} {
       allow read, write: if request.auth.uid != "";
     }
+    match /users/{uid}/posts/{postId} {
+      allow read, write: if request.auth.uid == uid;
+    }
+    match /vaults/{uid}/{path=**} {
+      allow read, write: if request.auth.uid == uid;
+    }
+    match /users/{uid}/drafts/{draftId} {
+      allow read, write: if request.auth.uid == draftId;
+    }
   }
 }
 "#;
@@ -58,6 +81,12 @@ service cloud.firestore {
 const GOVERNED_COLLECTIONS: [&str; 2] = ["journal_entries", "photos"];
 
 async fn setup(project_id: &str) -> (SecurityRulesFullContext, String) {
+    let (ctx, marias_token, _) = setup_two_users(project_id).await;
+    (ctx, marias_token)
+}
+
+/// `setup`, plus a second signed-in user (Dana).
+async fn setup_two_users(project_id: &str) -> (SecurityRulesFullContext, String, String) {
     let ctx = SecurityRulesFullContext::new(project_id).await;
     let signing_key = SigningKey::generate(&mut OsRng);
     ctx.seed_client_identity_credential(&signing_key.verifying_key().to_bytes())
@@ -73,9 +102,10 @@ async fn setup(project_id: &str) -> (SecurityRulesFullContext, String) {
         .expect("import request failed");
     assert_eq!(resp.status().as_u16(), 200, "setup: rules-file import must succeed");
 
-    let marias_token =
-        mint_client_identity_token(&signing_key, "maria-santos", &ctx.project_id, now_unix() + 3600);
-    (ctx, marias_token)
+    let token_for =
+        |uid| mint_client_identity_token(&signing_key, uid, &ctx.project_id, now_unix() + 3600);
+    let (marias_token, danas_token) = (token_for("maria-santos"), token_for("dana-kim"));
+    (ctx, marias_token, danas_token)
 }
 
 fn resource_name(project_id: &str, collection_path: &str, document_id: &str) -> String {
@@ -213,6 +243,89 @@ async fn run_query_names(
         }
     }
     Ok(names)
+}
+
+/// A single-collection query the way an SDK sends it: the parent DOCUMENT
+/// (`users/maria-santos`) plus the bare collection id (`posts`).
+fn subcollection_query(collection_id: &str) -> StructuredQuery {
+    StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: collection_id.to_string(),
+            all_descendants: false,
+        }],
+        ..Default::default()
+    }
+}
+
+fn document_parent(ctx: &SecurityRulesFullContext, parent_document: &str) -> String {
+    format!(
+        "projects/{}/databases/(default)/documents/{parent_document}",
+        ctx.project_id
+    )
+}
+
+/// Names of the documents a real, unfiltered `RunQuery` on
+/// `<parent_document>/<collection_id>` returned.
+async fn subcollection_query_names(
+    ctx: &SecurityRulesFullContext,
+    parent_document: &str,
+    collection_id: &str,
+    token: Option<&str>,
+) -> Result<Vec<String>, tonic::Status> {
+    let request = authorize(
+        ctx,
+        RunQueryRequest {
+            parent: document_parent(ctx, parent_document),
+            query_type: Some(QueryType::StructuredQuery(subcollection_query(collection_id))),
+            ..Default::default()
+        },
+        token,
+    );
+    let mut stream = client(ctx).await.run_query(request).await?.into_inner();
+    let mut names = Vec::new();
+    while let Some(item) = stream.next().await {
+        if let Some(document) = item?.document {
+            names.push(document.name);
+        }
+    }
+    Ok(names)
+}
+
+/// The COUNT a real `RunAggregationQuery` on `<parent_document>/<collection_id>`
+/// returned.
+async fn subcollection_count(
+    ctx: &SecurityRulesFullContext,
+    parent_document: &str,
+    collection_id: &str,
+    token: Option<&str>,
+) -> Result<Option<ValueType>, tonic::Status> {
+    let request = authorize(
+        ctx,
+        RunAggregationQueryRequest {
+            parent: document_parent(ctx, parent_document),
+            query_type: Some(AggregationQueryType::StructuredAggregationQuery(
+                StructuredAggregationQuery {
+                    query_type: Some(StructuredAggQueryType::StructuredQuery(subcollection_query(
+                        collection_id,
+                    ))),
+                    aggregations: vec![Aggregation {
+                        operator: Some(AggregationOperator::Count(Count { up_to: None })),
+                        alias: String::new(),
+                    }],
+                },
+            )),
+            ..Default::default()
+        },
+        token,
+    );
+    let mut stream = client(ctx).await.run_aggregation_query(request).await?.into_inner();
+    let result = stream
+        .next()
+        .await
+        .expect("one RunAggregationQueryResponse")?
+        .result
+        .expect("response must carry an AggregationResult");
+    Ok(result.aggregate_fields.get("field_0").and_then(|v| v.value_type.clone()))
 }
 
 /// Journey:
@@ -359,4 +472,100 @@ async fn run_query_fails_closed_when_the_governing_pattern_is_not_statically_dec
         "rejection must name the reason: {}",
         err.message()
     );
+}
+
+/// Journey:
+///   Given: owner rules `request.auth.uid == uid` on `users/{uid}/posts`
+///          (wildcard pattern) and `vaults/{uid}/{path=**}` (recursive
+///          catch-all), and Maria's document in her own subcollection of each
+///   When:  Maria, then Dana, then an anonymous caller run a query and a
+///          COUNT on MARIA'S subcollection
+///   Then:  the collection path itself fixes `uid = "maria-santos"`, so the
+///          rule is decided before any row is read: Maria gets her document
+///          and a count of 1; Dana and the anonymous caller are rejected
+///
+/// @driving_port @real-io
+#[tokio::test]
+async fn owner_rule_on_an_ancestor_path_variable_admits_only_the_owners_query_and_count() {
+    let (ctx, marias_token, danas_token) = setup_two_users("trailmark-prod-rw07-owner").await;
+
+    for (root, collection) in [("users", "posts"), ("vaults", "items")] {
+        let marias_parent = format!("{root}/maria-santos");
+        let resource =
+            resource_name(&ctx.project_id, &format!("{marias_parent}/{collection}"), "doc-1");
+        set_doc(&ctx, &resource, Some(&marias_token))
+            .await
+            .expect("setup: Maria's Commit into her own subcollection must succeed");
+
+        assert_eq!(
+            subcollection_query_names(&ctx, &marias_parent, collection, Some(&marias_token))
+                .await
+                .unwrap_or_else(|e| panic!("{root}: the owner's RunQuery must be admitted: {e:?}")),
+            vec![resource.clone()],
+            "{root}: the owner's RunQuery must return her document"
+        );
+        assert_eq!(
+            subcollection_count(&ctx, &marias_parent, collection, Some(&marias_token))
+                .await
+                .unwrap_or_else(|e| panic!("{root}: the owner's COUNT must be admitted: {e:?}")),
+            Some(ValueType::IntegerValue(1)),
+            "{root}: the owner's COUNT must count her document"
+        );
+
+        for (who, token) in [("another user", Some(danas_token.as_str())), ("anonymous", None)] {
+            let err = subcollection_query_names(&ctx, &marias_parent, collection, token)
+                .await
+                .expect_err("only the owner may query her subcollection");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied, "{root}/{who} RunQuery: {err:?}");
+
+            let err = subcollection_count(&ctx, &marias_parent, collection, token)
+                .await
+                .expect_err("only the owner may count her subcollection");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied, "{root}/{who} COUNT: {err:?}");
+        }
+    }
+}
+
+/// Journey:
+///   Given: `users/{uid}/drafts/{draftId}` allows `request.auth.uid ==
+///          draftId`, and `vaults/{uid}/{path=**}` allows `request.auth.uid
+///          == uid` — both allow Maria's per-document read of her own
+///          document
+///   When:  Maria queries `users/maria-santos/drafts`, and the root `vaults`
+///          collection (where `{uid}` IS the document id)
+///   Then:  the wildcard the condition reads differs per returned document,
+///          so the collection path cannot fix it: both queries still fail
+///          CLOSED with `UNSUPPORTED_RULE_SHAPE`
+///
+/// @error @driving_port @real-io
+#[tokio::test]
+async fn run_query_still_fails_closed_when_the_condition_reads_the_document_id_wildcard() {
+    let (ctx, marias_token) = setup("trailmark-prod-rw07-doc-id").await;
+
+    for (parent_document, collection) in [("users/maria-santos", "drafts"), ("", "vaults")] {
+        let collection_path = format!("{parent_document}/{collection}");
+        let resource = resource_name(
+            &ctx.project_id,
+            collection_path.trim_start_matches('/'),
+            "maria-santos",
+        );
+        set_doc(&ctx, &resource, Some(&marias_token))
+            .await
+            .expect("setup: Maria's Commit must succeed");
+        assert_eq!(
+            batch_get_found(&ctx, &resource, Some(&marias_token)).await,
+            vec![resource.clone()],
+            "{collection}: setup: Maria's per-document read is allowed by the same rule"
+        );
+
+        let err = subcollection_query_names(&ctx, parent_document, collection, Some(&marias_token))
+            .await
+            .expect_err("a condition on the document-id wildcard must reject the query");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{collection}: got {err:?}");
+        assert!(
+            err.message().contains("UNSUPPORTED_RULE_SHAPE"),
+            "{collection}: rejection must name the reason: {}",
+            err.message()
+        );
+    }
 }

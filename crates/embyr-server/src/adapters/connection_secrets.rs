@@ -16,6 +16,7 @@ pub struct ServerKeys {
 impl ServerKeys {
     pub fn encrypt(&self, plaintext: &str) -> Vec<u8> {
         encrypt(&self.current, plaintext.as_bytes())
+            .expect("AES-GCM encrypt of in-memory plaintext cannot fail")
     }
 
     pub fn decrypt(&self, ciphertext: &[u8]) -> Option<String> {
