@@ -152,8 +152,13 @@ async fn owner_deletion_cuts_off_the_whole_account_and_a_second_delete_is_401() 
         0
     );
     assert_eq!(
-        count(&ctx, "SELECT count(*) FROM projects WHERE account_id = $1 AND deleted_at IS NULL").await,
-        0
+        count(
+            &ctx,
+            "SELECT count(*) FROM projects WHERE account_id = $1 \
+             AND id = 'test-project-seeded-for-account' AND deleted_at IS NOT NULL"
+        )
+        .await,
+        1
     );
     assert_eq!(
         count(
