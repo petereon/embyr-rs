@@ -1039,10 +1039,26 @@ pub async fn start_test_server_with_distributed_rate_limit(
     capacity: f64,
     pg_pool: sqlx::PgPool,
 ) -> TestServer {
+    start_test_server_with_distributed_rate_limit_and_pg_timeout(system_db, capacity, pg_pool, None)
+        .await
+}
+
+/// Same as [`start_test_server_with_distributed_rate_limit`] with an explicit Postgres budget for
+/// the limiter (`None` = production default). Tests that assert rejection/decrement through the
+/// shared bucket use a generous value so a loaded CI runner can't trip the in-process fallback.
+pub async fn start_test_server_with_distributed_rate_limit_and_pg_timeout(
+    system_db: Arc<SystemDb>,
+    capacity: f64,
+    pg_pool: sqlx::PgPool,
+    pg_timeout_ms: Option<u64>,
+) -> TestServer {
     let c = alloc_test_components(&system_db).await;
     let listen_registry_ret = Arc::clone(&c.listen_registry);
 
-    let rate_limiter = RateLimiter::with_pg(capacity, capacity, pg_pool);
+    let rate_limiter = match pg_timeout_ms {
+        Some(ms) => RateLimiter::with_pg_timeout(capacity, capacity, pg_pool, ms),
+        None => RateLimiter::with_pg(capacity, capacity, pg_pool),
+    };
     let rate_limiter_ret = Arc::clone(&rate_limiter);
 
     let service = FirestoreService {
