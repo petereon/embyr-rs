@@ -108,7 +108,9 @@ async-stripe-core = { version = "1.0.0-rc.8", default-features = false, features
 # subscription required) is the only typed mechanism that fits — also matches
 # feature-delta.md's own framing ("usage records attach to the Stripe
 # customer").
-async-stripe-billing = { version = "1.0.0-rc.8", features = ["subscription", "billing_meter", "billing_meter_event"] }
+async-stripe-billing = { version = "1.0.0-rc.8", features = ["subscription", "billing_meter", "billing_meter_event", "billing_portal_session"] }
+# Hosted Checkout (stripe-checkout-portal): `checkout_session` typed builders.
+async-stripe-checkout = { version = "1.0.0-rc.8", default-features = false, features = ["checkout_session"] }
 async-stripe-webhook = "1.0.0-rc.8"
 
 # Testing (dev-only)

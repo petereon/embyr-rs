@@ -277,3 +277,124 @@ pub async fn post_subscription(
         cap_status: None,
     }))
 }
+
+// ---------------------------------------------------------------------------
+// Hosted Stripe pages (stripe-checkout-portal) — card data never touches us.
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /admin/v1/billing/checkout_session`.
+#[derive(Debug, Deserialize)]
+pub struct CheckoutSessionRequest {
+    pub plan: String,
+}
+
+/// Response body for the checkout/portal session endpoints.
+#[derive(Debug, Serialize)]
+pub struct SessionUrlResponse {
+    pub url: String,
+}
+
+/// `POST /admin/v1/billing/checkout_session` — Owner only. Creates (or
+/// reuses) the account's Stripe Customer, then a hosted Checkout Session for
+/// the target paid plan. 403 non-Owner, 422 unknown/Free plan, 503 when
+/// `EMBYR_PUBLIC_BASE_URL` is unset, 409 when the account already has an
+/// active paid Stripe subscription (use the portal), 502 on Stripe failure.
+/// The subscription state itself arrives via the `customer.subscription.created`
+/// webhook (`webhooks_stripe::sync_subscription_created`).
+pub async fn post_checkout_session(
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+    Json(body): Json<CheckoutSessionRequest>,
+) -> Result<Json<SessionUrlResponse>, StatusCode> {
+    if session.role < Role::Owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let plan = SubscriptionPlan::parse(&body.plan)
+        .filter(|p| *p != SubscriptionPlan::Free)
+        .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    if state.stripe_gateway.public_base_url().is_none() {
+        tracing::warn!("post_checkout_session: EMBYR_PUBLIC_BASE_URL is not configured");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let pool = state.system_db.pool();
+    let existing_customer_id: Option<String> =
+        sqlx::query_scalar("SELECT stripe_customer_id FROM accounts WHERE id = $1")
+            .bind(session.account_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("post_checkout_session: failed to read accounts row: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+    let customer_id = match existing_customer_id {
+        Some(id) => {
+            let already_paid: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM subscriptions WHERE account_id = $1 \
+                 AND plan = 'pro' AND status IN ('active', 'past_due') \
+                 AND stripe_subscription_id IS NOT NULL)",
+            )
+            .bind(session.account_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("post_checkout_session: failed to read subscriptions row: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            if already_paid {
+                return Err(StatusCode::CONFLICT);
+            }
+            id
+        }
+        None => provision_new_customer(&state, pool, session.account_id).await?,
+    };
+
+    let url = state
+        .stripe_gateway
+        .create_checkout_session(&customer_id, session.account_id, plan)
+        .await
+        .map_err(|e| {
+            tracing::error!("post_checkout_session: stripe checkout session failed: {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
+    Ok(Json(SessionUrlResponse { url }))
+}
+
+/// `POST /admin/v1/billing/portal_session` — Owner only. Hosted Billing
+/// Portal for the account's Stripe Customer (payment method, invoices,
+/// cancel). 403 non-Owner, 503 when `EMBYR_PUBLIC_BASE_URL` is unset, 409
+/// when the account has no Stripe Customer yet, 502 on Stripe failure.
+pub async fn post_portal_session(
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+) -> Result<Json<SessionUrlResponse>, StatusCode> {
+    if session.role < Role::Owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if state.stripe_gateway.public_base_url().is_none() {
+        tracing::warn!("post_portal_session: EMBYR_PUBLIC_BASE_URL is not configured");
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let customer_id: Option<String> =
+        sqlx::query_scalar("SELECT stripe_customer_id FROM accounts WHERE id = $1")
+            .bind(session.account_id)
+            .fetch_one(state.system_db.pool())
+            .await
+            .map_err(|e| {
+                tracing::error!("post_portal_session: failed to read accounts row: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    let customer_id = customer_id.ok_or(StatusCode::CONFLICT)?;
+
+    let url = state
+        .stripe_gateway
+        .create_portal_session(&customer_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("post_portal_session: stripe portal session failed: {e}");
+            StatusCode::BAD_GATEWAY
+        })?;
+    Ok(Json(SessionUrlResponse { url }))
+}

@@ -236,6 +236,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stripe-checkout"
+version = "1.0.0-rc.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6630dbba85de2b1000a005b4e6f205b09e0cfdbd72fd0ee2676e55938bc731a8"
+dependencies = [
+ "async-stripe-client-core",
+ "async-stripe-shared",
+ "async-stripe-types",
+ "miniserde",
+ "serde",
+ "smol_str",
+ "tracing",
+]
+
+[[package]]
 name = "async-stripe-client-core"
 version = "1.0.0-rc.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1862,6 +1877,7 @@ dependencies = [
  "argon2",
  "async-stripe",
  "async-stripe-billing",
+ "async-stripe-checkout",
  "async-stripe-core",
  "async-stripe-webhook",
  "async-trait",
@@ -2575,7 +2591,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -3910,7 +3926,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3948,7 +3964,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -6305,7 +6321,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

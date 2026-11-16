@@ -21,7 +21,9 @@ use super::handlers::invitations::{
 };
 use super::handlers::billing::get_billing;
 use super::handlers::billing_metering::run_metering;
-use super::handlers::billing_subscription::{get_subscription, post_subscription};
+use super::handlers::billing_subscription::{
+    get_subscription, post_checkout_session, post_portal_session, post_subscription,
+};
 use super::handlers::oidc_providers::{
     create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
 };
@@ -459,6 +461,9 @@ pub fn build_admin_router(
             "/admin/v1/billing/subscription",
             get(get_subscription).post(post_subscription),
         )
+        // Hosted Stripe Checkout / Billing Portal (stripe-checkout-portal).
+        .route("/admin/v1/billing/checkout_session", post(post_checkout_session))
+        .route("/admin/v1/billing/portal_session", post(post_portal_session))
         .route_layer(axum::middleware::from_fn_with_state(
             user_state.clone(),
             session_auth_middleware,

@@ -18,6 +18,13 @@ use embyr_core::admin::billing::SubscriptionStatus;
 /// Dispatches a verified Stripe webhook event (already authenticated by
 /// `stripe_signature_middleware`, which stashes the `WebhookEvent` in
 /// request extensions) by `event.type`:
+///   - `customer.subscription.created` — a hosted Checkout completed: link the
+///     new Stripe subscription to the account owning the Stripe customer
+///     (`accounts.stripe_customer_id`, persisted before Checkout started) and
+///     seed plan/status/current_period_end, so later `.updated`/`.deleted`/
+///     `invoice.*` events (matched by `stripe_subscription_id`) find the row
+///     (stripe-checkout-portal). Idempotent via the same
+///     `processed_webhook_events` gate as every other type.
 ///   - `customer.subscription.updated` — sync the local `subscriptions` row's
 ///     status/current_period_end (and plan, when the payload's Subscription
 ///     item price is recognized) (AC-203-04).
@@ -80,6 +87,7 @@ pub async fn stripe_webhook_handler(
     .increment(1);
 
     match event.event_type.as_str() {
+        "customer.subscription.created" => sync_subscription_created(&state, &event).await,
         "customer.subscription.updated" => sync_subscription_updated(pool, &event).await,
         "customer.subscription.deleted" => sync_subscription_deleted(pool, &event).await,
         "invoice.payment_failed" => handle_invoice_payment_failed(&state, &event).await,
@@ -208,6 +216,108 @@ async fn resolve_account_id(
         .unwrap_or(None)
 }
 
+/// Stripe subscription status -> local `subscriptions.status` (CHECK-constrained
+/// to four values). `None` = not yet a settled state (`incomplete`, ...): link
+/// the subscription but leave plan/status untouched until a later event.
+fn local_status_for_stripe_status(stripe_status: &str) -> Option<SubscriptionStatus> {
+    match stripe_status {
+        "active" | "trialing" => Some(SubscriptionStatus::Active),
+        "past_due" | "unpaid" => Some(SubscriptionStatus::PastDue),
+        "canceled" | "incomplete_expired" => Some(SubscriptionStatus::Canceled),
+        _ => None,
+    }
+}
+
+/// `customer.subscription.created` (emitted when hosted Checkout completes):
+/// link subscription -> account via the Stripe customer id and seed state. An
+/// unknown customer is a safe 200 no-op (forward-compatible, mirrors
+/// AC-203-06). Upgrading out of `free_cap_exceeded` reactivates the account's
+/// suspended projects, exactly like `post_subscription` (AC-202-04).
+async fn sync_subscription_created(state: &WebhookState, event: &WebhookEvent) -> StatusCode {
+    let pool = state.system_db.pool();
+    let object = &event.payload["data"]["object"];
+    let (Some(stripe_subscription_id), Some(stripe_customer_id)) =
+        (object["id"].as_str(), object["customer"].as_str())
+    else {
+        tracing::error!(
+            "stripe_webhook_handler: subscription.created payload missing data.object.id/customer"
+        );
+        return StatusCode::OK;
+    };
+    let account_id: Option<uuid::Uuid> =
+        match sqlx::query_scalar("SELECT id FROM accounts WHERE stripe_customer_id = $1")
+            .bind(stripe_customer_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!("stripe_webhook_handler: failed to resolve account: {e}");
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+        };
+    let Some(account_id) = account_id else {
+        return StatusCode::OK;
+    };
+
+    let status = object["status"]
+        .as_str()
+        .and_then(local_status_for_stripe_status);
+    let plan = status.and_then(|_| {
+        subscription_item_price_id(object).and_then(|price_id| {
+            (price_id == PRO_PLAN_STRIPE_PRICE_ID)
+                .then_some(embyr_core::admin::billing::SubscriptionPlan::Pro.as_str())
+        })
+    });
+    // Newer Stripe API versions move the period onto the subscription item.
+    let current_period_end = object["current_period_end"]
+        .as_i64()
+        .or_else(|| object["items"]["data"][0]["current_period_end"].as_i64())
+        .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0));
+
+    let previous_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM subscriptions WHERE account_id = $1")
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+
+    // Upsert: the Free row is normally seeded at customer provisioning, but
+    // never lose the link if it is somehow absent.
+    let result = sqlx::query(
+        "INSERT INTO subscriptions (account_id, plan, status, stripe_subscription_id, \
+         current_period_end) VALUES ($1, COALESCE($2, 'free'), COALESCE($3, 'active'), $4, $5) \
+         ON CONFLICT (account_id) DO UPDATE SET \
+         stripe_subscription_id = EXCLUDED.stripe_subscription_id, \
+         plan = COALESCE($2, subscriptions.plan), status = COALESCE($3, subscriptions.status), \
+         current_period_end = COALESCE($5, subscriptions.current_period_end), updated_at = now()",
+    )
+    .bind(account_id)
+    .bind(plan)
+    .bind(status.map(|s| s.as_str()))
+    .bind(stripe_subscription_id)
+    .bind(current_period_end)
+    .execute(pool)
+    .await;
+    if let Err(e) = result {
+        tracing::error!("stripe_webhook_handler: failed to link new subscription: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
+    if previous_status.as_deref() == Some(SubscriptionStatus::FreeCapExceeded.as_str())
+        && status == Some(SubscriptionStatus::Active)
+    {
+        let deps = LifecycleDeps {
+            system_db: state.system_db.clone(),
+            credential_cache: state.credential_cache.clone(),
+        };
+        if let Err(status) = lifecycle::activate_account_projects(account_id, &deps).await {
+            return status;
+        }
+    }
+    StatusCode::OK
+}
+
 /// AC-203-04: sync status/current_period_end (always present on this event
 /// type) and, when derivable, plan — matched by `stripe_subscription_id`.
 async fn sync_subscription_updated(pool: &sqlx::PgPool, event: &WebhookEvent) -> StatusCode {
@@ -291,6 +401,7 @@ const OTHER_EVENT_TYPE_LABEL: &str = "other";
 
 fn bounded_event_type_label(event_type: &str) -> &'static str {
     match event_type {
+        "customer.subscription.created" => "customer.subscription.created",
         "customer.subscription.updated" => "customer.subscription.updated",
         "customer.subscription.deleted" => "customer.subscription.deleted",
         "invoice.payment_failed" => "invoice.payment_failed",
@@ -316,6 +427,7 @@ mod tests {
     #[test]
     fn bounded_event_type_label_passes_through_known_handled_types() {
         for known in [
+            "customer.subscription.created",
             "customer.subscription.updated",
             "customer.subscription.deleted",
             "invoice.payment_failed",
@@ -336,6 +448,22 @@ mod tests {
             &"x".repeat(10_000), // pathological length
         ] {
             assert_eq!(bounded_event_type_label(garbage), OTHER_EVENT_TYPE_LABEL);
+        }
+    }
+
+    #[test]
+    fn stripe_status_maps_to_local_status_or_none_when_unsettled() {
+        for (stripe, local) in [
+            ("active", Some(SubscriptionStatus::Active)),
+            ("trialing", Some(SubscriptionStatus::Active)),
+            ("past_due", Some(SubscriptionStatus::PastDue)),
+            ("unpaid", Some(SubscriptionStatus::PastDue)),
+            ("canceled", Some(SubscriptionStatus::Canceled)),
+            ("incomplete_expired", Some(SubscriptionStatus::Canceled)),
+            ("incomplete", None),
+            ("", None),
+        ] {
+            assert_eq!(local_status_for_stripe_status(stripe), local, "{stripe}");
         }
     }
 }

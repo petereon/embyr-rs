@@ -61,6 +61,7 @@ metrics-exporter-prometheus.workspace = true
 async-stripe.workspace = true
 async-stripe-core.workspace = true
 async-stripe-billing.workspace = true
+async-stripe-checkout.workspace = true
 async-stripe-webhook.workspace = true
 # client-auth-hosted-identity (Slice 01, ADR-036 Decision 2): promoted from
 # dev-dependencies -- enable_hosted_identity generates a REAL Ed25519
@@ -240,6 +241,10 @@ path = "../../tests/card_payments_backend/acceptance/cpb06_cumulative_cap_check.
 [[test]]
 name = "card_payments_backend_cpb07_cap_exceeded_suspension"
 path = "../../tests/card_payments_backend/acceptance/cpb07_cap_exceeded_suspension.rs"
+
+[[test]]
+name = "card_payments_backend_cpb08_checkout_portal_sessions"
+path = "../../tests/card_payments_backend/acceptance/cpb08_checkout_portal_sessions.rs"
 
 # distributed-rate-limiting acceptance tests
 [[test]]
