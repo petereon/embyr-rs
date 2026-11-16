@@ -435,7 +435,10 @@ pub fn spawn_all_servers(
             axum::routing::post(accounts_bridge_dispatch),
         )
         .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&service.rate_limiter),
+            (
+                Arc::clone(&service.rate_limiter),
+                Arc::clone(&service.credential_cache),
+            ),
             middleware::rate_limit::rest_rate_limit_middleware,
         ))
         .with_state(accounts_bridge_state);

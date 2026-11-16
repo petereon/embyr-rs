@@ -10,7 +10,8 @@
 //!   AC-PDA-01: charset-invalid project_id -> zero DB round trips.
 //!   AC-PDA-02: known, provisioned project_id -> unaffected (regression).
 //!   AC-PDA-03: eventual rejection contract (Status/message) unchanged.
-//!   AC-PDA-05: well-formed-but-unprovisioned project_id -> residual NOT closed.
+//!   AC-PDA-05: well-formed-but-unprovisioned project_id -> residual now CLOSED
+//!              by finding X4 (limiter runs only after authentication).
 //!   AC-PDA-06: sustained garbage flood -> zero measurable DB activity.
 //!   (Example 4, pre-existing): empty project_id -> already zero round trips.
 //!
@@ -259,21 +260,21 @@ async fn garbage_project_id_get_document_returns_same_invalid_argument_status_as
 
 // ─── AC-PDA-05: well-formed-but-unprovisioned residual is NOT closed ───────
 
-/// A syntactically valid but never-provisioned project_id still invokes
-/// `RateLimiter::check()`'s full 3-round-trip `check_pg` path — this is
-/// Investigation 3's accepted residual (OQ-PDA-02), NOT built by this
-/// feature. This test protects against DELIVER accidentally
-/// over-implementing a closure of this residual.
+/// A syntactically valid but never-provisioned project_id no longer reaches
+/// `RateLimiter::check()` at all.
 ///
-/// AC-PDA-05
+/// AC-PDA-05 — EXPECTATION INVERTED by security finding X4 (was: "still
+/// invokes check() exactly once", the accepted residual OQ-PDA-02). The
+/// limiter now runs only after `authenticate()` succeeds
+/// (`authenticate_and_rate_limit`), and an unprovisioned project can never
+/// authenticate, so the residual this test used to pin open is closed as a
+/// side effect: such a request costs one project-row read instead of
+/// `check_pg`'s three round trips. Kept (not deleted) as the regression
+/// guard for that ordering.
 ///
-/// Already true both before AND after this fix — the guard added by this
-/// feature is a pure charset check and cannot distinguish "well-formed and
-/// real" from "well-formed and never provisioned".
-///
-/// @driving_port @real-io @US-01 @AC-PDA-05
+/// @driving_port @real-io @US-01 @AC-PDA-05 @X4
 #[tokio::test]
-async fn well_formed_but_unprovisioned_project_id_still_invokes_rate_limiter_check() {
+async fn well_formed_but_unprovisioned_project_id_never_invokes_rate_limiter_check() {
     let ctx = DrlTestContext::new(10.0).await;
     let (addr, server) = start_distributed_grpc_server(&ctx).await;
     let mut client = FirestoreClient::new(
@@ -292,11 +293,9 @@ async fn well_formed_but_unprovisioned_project_id_still_invokes_rate_limiter_che
 
     let after = unconfirmed_allowed_total(&admin_client, server.admin_addr).await;
     assert_eq!(
-        after,
-        before + 1.0,
-        "AC-PDA-05: a well-formed-but-unprovisioned project_id must still invoke \
-         RateLimiter::check() exactly once — this residual is deliberately NOT \
-         closed by this feature (before={before}, after={after})"
+        after, before,
+        "AC-PDA-05/X4: a well-formed-but-unprovisioned project_id cannot authenticate, \
+         so it must never invoke RateLimiter::check() (before={before}, after={after})"
     );
 }
 
