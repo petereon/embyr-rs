@@ -151,6 +151,51 @@ async fn marias_valid_signin_returns_a_token_and_her_subsequent_getdoc_call_succ
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AC-AKR-13 (first half): a NEW-shape row (seed only under the server key)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Journey:
+///   Given: a project whose signing-key row holds the seed ONLY in
+///          `private_key_srv_enc` (legacy ECIES column NULL)
+///   When:  Maria signs up and signs in
+///   Then:  both mint tokens that verify against the row's public key for
+///          this project — the legacy column was never needed
+///
+/// AC-AKR-13
+///
+/// @driving_port @real-io @AC-AKR-13
+#[tokio::test]
+async fn signup_and_signin_mint_verifiable_tokens_from_a_server_key_only_row() {
+    use embyr_core::client_identity::{verify_client_identity_token, ClientIdentityCredential};
+
+    let ctx = HostedIdentityFullContext::new("trailmark-prod-hi03-srvkey").await;
+    let public_key = ctx.enable_hosted_identity_server_key().await;
+    let credential = ClientIdentityCredential {
+        public_key_current: public_key,
+        public_key_previous: None,
+    };
+
+    let (signup_status, signup_body) =
+        sign_up(&ctx, "maria@trailmark.example", "correct-horse-battery").await;
+    assert_eq!(signup_status, 201, "signup on a server-key-only row must succeed");
+    let (signin_status, signin_body) = sign_in(
+        &ctx,
+        Some(&ctx.api_key),
+        "maria@trailmark.example",
+        "correct-horse-battery",
+    )
+    .await;
+    assert_eq!(signin_status, 200, "signin on a server-key-only row must succeed");
+
+    for body in [&signup_body, &signin_body] {
+        let token = body["idToken"].as_str().expect("idToken");
+        let identity = verify_client_identity_token(Some(token), &ctx.project_id, &credential)
+            .expect("AC-AKR-13: token must verify under the row's public key");
+        assert_eq!(identity.end_user_id, body["localId"].as_str().unwrap());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AC-18-11: wrong password AND unknown email are byte-identical rejections
 // ─────────────────────────────────────────────────────────────────────────────
 

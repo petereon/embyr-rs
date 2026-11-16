@@ -214,6 +214,9 @@ async fn a_query_against_a_still_building_index_is_rejected_exactly_as_before() 
     fields.insert("category".to_string(), string_value("electronics"));
     fields.insert("score".to_string(), integer_value(5));
     seed_document_via_grpc(&mut client, &ctx.project_id, &ctx.api_key, "products", "prod-1", fields).await;
+    // Enough rows that the concurrent build outlasts the query below; with a
+    // single document it finishes in milliseconds and the gate sees 'ready'.
+    seed_bulk_products(&ctx.cust_pool, &ctx.project_id, 3000).await;
 
     let create_body: serde_json::Value = reqwest::Client::new()
         .post(ctx.admin_url(&format!("/admin/v1/projects/{}/indexes", ctx.project_id)))

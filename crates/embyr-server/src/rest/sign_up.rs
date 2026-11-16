@@ -46,15 +46,13 @@ use axum::{
     Json,
 };
 use crate::adapters::argon2_blocking as argon2;
-use embyr_core::{
-    auth::ecies,
-    client_identity, hosted_identity,
-};
+use embyr_core::{client_identity, hosted_identity};
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::{
     aws_secret_fetcher::AwsSecretFetcher,
     credential_cache::CredentialCache,
+    encryption::decrypt_hosted_signing_seed,
     gcp_secret_fetcher::GcpSecretFetcher,
     project_auth::{resolve_customer_db_adapter, ProjectAuthError},
     system_db::SystemDb,
@@ -77,6 +75,10 @@ pub struct HostedIdentityState {
     pub credential_cache: Arc<CredentialCache>,
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+    /// api-key-rotation slice 2 (ADR-085): server key (+ rotation-window
+    /// previous) that decrypts `hosted_identity_signing_keys.private_key_srv_enc`.
+    pub encryption_key: [u8; 32],
+    pub encryption_key_previous: Option<[u8; 32]>,
     /// Slice 04: reset-request's own driven port for "if this account
     /// exists, a reset was sent" (ADR-036, ADR-011). V1: `NoopEmailSender`.
     pub email_sender: Arc<dyn embyr_core::admin::email::IEmailSender + Send + Sync>,
@@ -245,10 +247,16 @@ pub async fn sign_up(
 
     // Decrypt the project's embyr-owned signing key seed — System DB via
     // SystemDb, NOT the Customer DB adapter (ADR-036 Decision 2/7).
-    let seed_bytes = match ecies::decrypt(api_key.as_bytes(), &hosted_key_row.private_key_enc) {
+    let seed_bytes = match decrypt_hosted_signing_seed(
+        &state.encryption_key,
+        state.encryption_key_previous.as_ref(),
+        &api_key,
+        hosted_key_row.private_key_srv_enc.as_deref(),
+        hosted_key_row.private_key_enc.as_deref(),
+    ) {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!("sign_up: ecies decrypt signing key failed: {e}");
+            tracing::error!("sign_up: decrypt signing key failed: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
