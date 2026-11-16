@@ -325,7 +325,7 @@ async fn subcollection_count(
         .expect("one RunAggregationQueryResponse")?
         .result
         .expect("response must carry an AggregationResult");
-    Ok(result.aggregate_fields.get("field_0").and_then(|v| v.value_type.clone()))
+    Ok(result.aggregate_fields.get("field_1").and_then(|v| v.value_type.clone()))
 }
 
 /// Journey:

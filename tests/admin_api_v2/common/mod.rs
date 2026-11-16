@@ -30,8 +30,6 @@ pub mod universe {
     pub const ACCOUNT_LOCKED: &str = "auth.account_locked";
     pub const SESSION_ROW_EXPIRES: &str = "db.sessions.expires_at";
     pub const PROJECT_LIST_COUNT: &str = "response.projects.len";
-    pub const SDK_KEY_PLAINTEXT_IN_RESPONSE: &str = "response.sdk_key.key_present";
-    pub const SDK_KEY_HASH_IN_DB: &str = "db.sdk_api_keys.key_hash_stored";
     pub const MEMBER_COUNT: &str = "response.members.len";
     pub const INVITATION_ROW_CREATED: &str = "db.invitations.row_exists";
     pub const EMAIL_SENT_COUNT: &str = "fake_email_sender.sent_count";
@@ -137,6 +135,17 @@ impl AdminTestContext {
     ///   3. Seeding one account + user (Argon2id hash) + TOTP secret (AES-256-GCM) + recovery code.
     ///   4. Starting the Axum admin router on an ephemeral port.
     pub async fn new() -> Self {
+        // admin-signin-hardening (ADR-076): in-process only (mirrors
+        // build_with_secret_fetchers's own test-safety precedent) — no
+        // acceptance test run under a shared testcontainers Postgres
+        // instance can pollute another test's throttle counters via a
+        // shared table row.
+        Self::with_signin_limiter(SigninRateLimiter::new(150.0, 10.0 / 60.0)).await
+    }
+
+    /// Same as `new()` with a caller-supplied sign-in limiter (e.g. a tiny
+    /// burst + `with_trusted_proxy_hops`, to observe throttle keying).
+    pub async fn with_signin_limiter(signin_limiter: Arc<SigninRateLimiter>) -> Self {
         // ── 1. Start Postgres container ───────────────────────────────────────
         let container = Postgres::default()
             .with_tag("15-alpine")
@@ -401,12 +410,7 @@ impl AdminTestContext {
             // fresh, unshared cache is sufficient (card-payments-backend
             // ADR-020, step 03-01 signature addition).
             Arc::new(CapStatusCache::new()),
-            // admin-signin-hardening (ADR-076): in-process only (mirrors
-            // build_with_secret_fetchers's own test-safety precedent) — no
-            // acceptance test run under a shared testcontainers Postgres
-            // instance can pollute another test's throttle counters via a
-            // shared table row.
-            SigninRateLimiter::new(150.0, 10.0 / 60.0),
+            signin_limiter,
             86_400,
         );
 

@@ -75,7 +75,6 @@ use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::prometheus_metrics::get_prometheus_metrics;
 use super::handlers::provision::provision;
 use super::handlers::query_logs::list_query_logs;
-use super::handlers::sdk_keys::{create_sdk_key, list_sdk_keys, revoke_sdk_key};
 use super::handlers::service_accounts::{
     create_service_account, delete_service_account, list_service_accounts,
 };
@@ -266,17 +265,9 @@ pub fn build_admin_router(
         // api-key-rotation (ADR-085): Owner/Admin, gated in-handler.
         .route("/admin/v1/projects/:project_id/api_key/rotate", post(rotate_api_key))
         .route("/admin/v1/projects/:project_id/api_key/revoke", post(revoke_api_key))
-        .route(
-            "/admin/v1/projects/:project_id/sdk_keys",
-            get(list_sdk_keys).post(create_sdk_key),
-        )
-        .route(
-            "/admin/v1/projects/:project_id/sdk_keys/:key_id",
-            delete(revoke_sdk_key),
-        )
         // client-auth (US-01/US-03/US-04, ADR-025): credential lifecycle.
         // Owner/Admin gate for register/rotate enforced inside the handlers
-        // (mirrors sdk_keys.rs's own in-handler role check); verify (debug
+        // (in-handler role check); verify (debug
         // check) is any role, also gated in-handler.
         .route(
             "/admin/v1/projects/:project_id/client_identity_credential",

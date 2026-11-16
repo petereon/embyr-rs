@@ -170,6 +170,11 @@ pub struct ServerConfig {
     /// `EMBYR_API_KEY_ROTATION_WINDOW_SECS` — how long the previous project API key keeps
     /// authenticating after a rotate (ADR-085). Default 24 h; valid `1..=2592000` (30 d).
     pub api_key_rotation_window_secs: u32,
+    /// `EMBYR_TRUSTED_PROXY_HOPS` — number of trusted reverse proxies in front
+    /// of :9090. 0 (default, unset or unparseable) = admin sign-in/invitation
+    /// throttles key on the TCP peer IP; N>0 = key on the Nth-from-right
+    /// `X-Forwarded-For` entry.
+    pub trusted_proxy_hops: usize,
 }
 
 /// Validated TLS material for firestore-tls-support: one cert/key pair
@@ -419,6 +424,10 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(25);
+        let trusted_proxy_hops = std::env::var("EMBYR_TRUSTED_PROXY_HOPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
         let transaction_sweep_interval_secs = std::env::var("EMBYR_TRANSACTION_SWEEP_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -489,6 +498,7 @@ impl ServerConfig {
             cors_allowed_origins,
             shutdown_grace_secs,
             api_key_rotation_window_secs,
+            trusted_proxy_hops,
         })
     }
 }
