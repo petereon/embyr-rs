@@ -17,7 +17,7 @@ use proptest::prelude::*;
 
 use embyr_admin_ui::model::{
     AppModel, Database, DbId, DbStatus, KeyId, Member, OidcId, Role,
-    ServiceAccountId, SdkKey, Toast, ToastId, UserId,
+    ProjectApiKeyInfo, ServiceAccountId, Toast, ToastId, UserId,
 };
 use embyr_admin_ui::msg::Msg;
 use embyr_admin_ui::update::update;
@@ -118,14 +118,14 @@ proptest! {
 }
 
 proptest! {
-    /// AC-003-05: DeleteDatabase removes the database and its SDK keys (cascade).
+    /// AC-003-05: DeleteDatabase removes the database and its API key metadata.
     #[test]
-    fn delete_database_removes_db_and_sdk_keys(db in arb_database()) {
+    fn delete_database_removes_db_and_api_key_info(db in arb_database()) {
         let mut m = AppModel::default();
         m.authed = true;
         let db_id = db.id.clone();
         m.databases.push(db.clone());
-        m.sdk_keys.insert(db_id.clone(), vec![]);
+        m.api_key_info.insert(db_id.clone(), ProjectApiKeyInfo::default());
 
         update(&mut m, Msg::DeleteDatabase(db_id.clone()));
 
@@ -134,8 +134,8 @@ proptest! {
             "DeleteDatabase must remove the database from model.databases"
         );
         prop_assert!(
-            !m.sdk_keys.contains_key(&db_id),
-            "DeleteDatabase must cascade-remove SDK keys for that database"
+            !m.api_key_info.contains_key(&db_id),
+            "DeleteDatabase must drop API key metadata for that database"
         );
     }
 }
@@ -259,96 +259,25 @@ fn patch_db_missing_id_is_noop() {
     assert_eq!(m.databases.len(), db_count_before, "PatchDb with missing id must be a no-op");
 }
 
-// ── US-006: SDK Keys ──────────────────────────────────────────────────────
+// ── US-006: Project API key (read-only) ───────────────────────────────────
 
 proptest! {
-    /// AC-006-01 / AC-006-02: SdkKeyCreated appends the key to sdk_keys[db_id].
+    /// ApiKeyInfoLoaded stores the metadata under the database id; unknown db is a no-op.
     #[test]
-    fn sdk_key_created_appends_key(db in arb_database()) {
+    fn api_key_info_loaded_stored_only_for_known_db(db in arb_database()) {
         let mut m = AppModel::default();
         m.authed = true;
         let db_id = db.id.clone();
         m.databases.push(db);
-        m.sdk_keys.insert(db_id.clone(), vec![]);
+        let info = ProjectApiKeyInfo { rotated_at: None, previous_expires_at: None };
 
-        let key = SdkKey {
-            id: KeyId(uuid::Uuid::new_v4()),
-            db_id: db_id.clone(),
-            name: "prod-key".to_string(),
-            prefix: "embyr_sd".to_string(),
-            created_at: None,
-        };
+        update(&mut m, Msg::ApiKeyInfoLoaded(db_id.clone(), info.clone()));
+        prop_assert_eq!(m.api_key_info.get(&db_id), Some(&info));
 
-        update(&mut m, Msg::SdkKeyCreated { db_id: db_id.clone(), key: key.clone() });
-
-        let keys = m.sdk_keys.get(&db_id).expect("sdk_keys entry must exist");
-        prop_assert_eq!(keys.len(), 1, "SdkKeyCreated must append to sdk_keys[db_id]");
+        let phantom = DbId(uuid::Uuid::new_v4().to_string());
+        update(&mut m, Msg::ApiKeyInfoLoaded(phantom.clone(), info));
+        prop_assert!(!m.api_key_info.contains_key(&phantom));
     }
-}
-
-proptest! {
-    /// AC-006-04: RevokeSdkKey removes the key from sdk_keys[db_id].
-    #[test]
-    fn revoke_sdk_key_removes_key(db in arb_database(), key_id in arb_key_id()) {
-        let mut m = AppModel::default();
-        m.authed = true;
-        let db_id = db.id.clone();
-        m.databases.push(db);
-
-        let key = SdkKey {
-            id: key_id.clone(),
-            db_id: db_id.clone(),
-            name: "old-key".to_string(),
-            prefix: "embyr_sd".to_string(),
-            created_at: None,
-        };
-        m.sdk_keys.insert(db_id.clone(), vec![key]);
-
-        update(&mut m, Msg::RevokeSdkKey(db_id.clone(), key_id.clone()));
-
-        let keys = m.sdk_keys.get(&db_id).expect("sdk_keys entry must exist");
-        prop_assert!(
-            !keys.iter().any(|k| k.id == key_id),
-            "RevokeSdkKey must remove the key from sdk_keys[db_id]"
-        );
-    }
-}
-
-/// Sad: RevokeSdkKey with non-existent key_id is a no-op (no panic).
-#[test]
-fn revoke_sdk_key_missing_key_is_noop() {
-    let mut m = make_model_with_db();
-    let db_id = m.databases[0].id.clone();
-    m.sdk_keys.insert(db_id.clone(), vec![]);
-    let phantom_key_id = KeyId(uuid::Uuid::new_v4());
-
-    update(&mut m, Msg::RevokeSdkKey(db_id.clone(), phantom_key_id));
-
-    // No panic and sdk_keys still empty.
-    assert_eq!(m.sdk_keys[&db_id].len(), 0, "no-op: key list unchanged");
-}
-
-/// Sad: SdkKeyCreated with non-existent db_id is a no-op (no panic, no entry created).
-#[test]
-fn sdk_key_created_unknown_db_is_noop() {
-    let mut m = make_model_with_db();
-    let known_db_keys_before = m.sdk_keys.len();
-
-    let phantom_db_id = DbId(uuid::Uuid::new_v4().to_string());
-    let key = SdkKey {
-        id: KeyId(uuid::Uuid::new_v4()),
-        db_id: phantom_db_id.clone(),
-        name: "ghost-key".to_string(),
-        prefix: "embyr_sd".to_string(),
-        created_at: None,
-    };
-
-    update(&mut m, Msg::SdkKeyCreated { db_id: phantom_db_id, key });
-
-    assert_eq!(
-        m.sdk_keys.len(), known_db_keys_before,
-        "SdkKeyCreated with unknown db must not create a new sdk_keys entry"
-    );
 }
 
 // ── US-009: Members ────────────────────────────────────────────────────────

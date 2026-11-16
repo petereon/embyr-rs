@@ -202,13 +202,14 @@ pub struct Member {
     pub last_login: Option<DateTime<Utc>>,
 }
 
+/// Read-only rotation metadata of a project's API key. Holds timestamps only,
+/// never a key or a hash (ADR-085).
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SdkKey {
-    pub id: KeyId,
-    pub db_id: DbId,
-    pub name: String,
-    pub prefix: String,
-    pub created_at: Option<DateTime<Utc>>,
+pub struct ProjectApiKeyInfo {
+    /// `None` = never rotated.
+    pub rotated_at: Option<DateTime<Utc>>,
+    /// `None` = no previous key is still accepted.
+    pub previous_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -400,8 +401,8 @@ pub struct AppModel {
     pub databases: Vec<Database>,
     /// Members (including pending invitations).
     pub members: Vec<Member>,
-    /// SDK keys keyed by database id.
-    pub sdk_keys: HashMap<DbId, Vec<SdkKey>>,
+    /// Project API key rotation metadata keyed by database id.
+    pub api_key_info: HashMap<DbId, ProjectApiKeyInfo>,
     /// Service accounts.
     pub service_accounts: Vec<ServiceAccount>,
     /// Account-level admin API keys.
@@ -449,7 +450,7 @@ impl AppModel {
             authed: false,
             databases: mock::databases(),
             members: mock::members(),
-            sdk_keys: std::collections::HashMap::new(),
+            api_key_info: std::collections::HashMap::new(),
             service_accounts: mock::service_accounts(),
             admin_keys: mock::admin_keys(),
             oidc_providers: mock::oidc_providers(),

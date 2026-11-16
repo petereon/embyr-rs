@@ -74,7 +74,7 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
         }
         Msg::DeleteDatabase(db_id) => {
             model.databases.retain(|db| db.id != db_id);
-            model.sdk_keys.remove(&db_id);
+            model.api_key_info.remove(&db_id);
         }
         Msg::SetDbStatus(db_id, status) => {
             if let Some(db) = model.databases.iter_mut().find(|db| db.id == db_id) {
@@ -125,16 +125,11 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
             }
         }
 
-        // ── US-006: SDK Keys ───────────────────────────────────────────────
-        Msg::SdkKeyCreated { db_id, key } => {
-            // Only append if the database exists; unknown db_id is a no-op.
+        // ── US-006: Project API key (read-only until rotation lands) ───────
+        Msg::ApiKeyInfoLoaded(db_id, info) => {
+            // Unknown db_id is a no-op.
             if model.databases.iter().any(|d| d.id == db_id) {
-                model.sdk_keys.entry(db_id).or_default().push(key);
-            }
-        }
-        Msg::RevokeSdkKey(db_id, key_id) => {
-            if let Some(keys) = model.sdk_keys.get_mut(&db_id) {
-                keys.retain(|k| k.id != key_id);
+                model.api_key_info.insert(db_id, info);
             }
         }
 

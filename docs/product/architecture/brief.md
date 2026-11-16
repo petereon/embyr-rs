@@ -1952,6 +1952,8 @@ This predicate is explicit in the handler body — not hidden in middleware. Cod
 
 #### SDK Key → RotateAuthKey Path
 
+> **Removed** (ADR-085, api-key-rotation slice 3): the `sdk_keys` routes no longer exist and answer 404. Kept below as history; the project key is rotated via `.../api_key/rotate` (slice 4).
+
 ```
 POST /admin/v1/projects/:id/sdk_keys
         │
@@ -2100,7 +2102,7 @@ C4Component
         Component(sessionCtxExtractor, "SessionContextExtractor", "embyr-server::admin::extractors::session_context", "FromRequestParts impl. Reads cookie or admin_api_key Bearer. Queries sessions or admin_api_keys table. Returns SessionContext { user_id, account_id, role }.")
 
         Component(authHandlers, "Auth Handlers", "embyr-server::admin::handlers::auth", "signin: validate email+password+TOTP, create session row, set HTTP-only cookie. signout: clear cookie, expire session. oidc_callback: validate id_token, create session, redirect.")
-        Component(projectHandlers, "Project Handlers", "embyr-server::admin::handlers::projects + sdk_keys + metrics + query_logs", "list_projects (account-scoped), patch_project, list/create/revoke sdk_keys, get_metrics, list_query_logs. SDK key creation calls new_sdk_key_material on blocking thread.")
+        Component(projectHandlers, "Project Handlers", "embyr-server::admin::handlers::projects + sdk_keys + metrics + query_logs", "list_projects (account-scoped), patch_project, list/create/revoke sdk_keys (removed, ADR-085), get_metrics, list_query_logs. SDK key creation calls new_sdk_key_material on blocking thread.")
         Component(memberHandlers, "Member/SA/Key Handlers", "embyr-server::admin::handlers::members + service_accounts + admin_keys", "Member CRUD, service account CRUD, admin API key CRUD. All call check_rbac before write ops.")
         Component(oidcBillingHandlers, "OIDC + Billing Handlers", "embyr-server::admin::handlers::oidc_providers + billing", "OIDC provider CRUD (Owner only): AES-GCM encrypts client_secret. Billing: aggregate daily_project_metrics by account + time range.")
         Component(operatorHandlers, "Operator Handlers", "embyr-server::admin::handlers::provision + lifecycle + get_project", "Existing 5 operator routes. provision.rs uses OperatorState. get_project.rs reads AuthPrincipal extension to apply account scoping for User, or return unscoped for Operator.")

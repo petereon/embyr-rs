@@ -208,6 +208,8 @@ pub struct ProjectAuthRow {
     pub status: String,
     pub backend_mode: String,
     pub api_key_hash_current: String,
+    /// The previous hash only while it may still authenticate: `get_project_for_auth`
+    /// nulls it in SQL once `api_key_previous_expires_at` has passed (or is NULL).
     pub api_key_hash_previous: Option<String>,
     pub ecies_encrypted_dsn: Option<Vec<u8>>,
     /// For agent-mode projects: the gRPC endpoint (host:port) of the agent.
@@ -277,7 +279,8 @@ impl SystemDb {
     ) -> Result<Option<ProjectAuthRow>, CoreError> {
         let row_opt = sqlx::query(
             "SELECT id, status, backend_mode, api_key_hash_current, \
-             api_key_hash_previous, ecies_encrypted_dsn, \
+             CASE WHEN api_key_previous_expires_at > now() THEN api_key_hash_previous END \
+                 AS api_key_hash_previous, ecies_encrypted_dsn, \
              backend_agent_endpoint, agent_tls_bundle_enc, backend_secret_arn, \
              backend_secret_gcp, backend_pg_dsn_enc, agent_tls_bundle_srv_enc \
              FROM projects WHERE id = $1",

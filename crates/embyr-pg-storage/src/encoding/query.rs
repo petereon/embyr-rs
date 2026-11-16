@@ -1,7 +1,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use embyr_core::domain::{
     field_value::FieldValue,
-    query::{validate_field_path, FilterOp, FieldFilter, OrderBy, OrderDirection, QueryFilter},
+    query::{
+        validate_field_path, Aggregation, AggregationKind, FilterOp, FieldFilter, OrderBy, OrderDirection,
+        QueryFilter,
+    },
 };
 use sqlx::{Postgres, QueryBuilder};
 
@@ -430,6 +433,39 @@ pub fn is_probe_stale(checked_at: std::time::Instant, ttl: std::time::Duration) 
     checked_at.elapsed() >= ttl
 }
 
+/// SELECT list computing every aggregation in ONE statement, one column per
+/// entry (same order): `Count` -> `COUNT(*)` (capped via `LEAST` for
+/// `up_to`), `Sum` -> `COALESCE(SUM(..),0)::float8`, `Avg` -> `AVG(..)`
+/// (SQL NULL over no numeric inputs). Only I/D-tagged values are aggregated;
+/// non-numeric values are ignored.
+///
+/// ponytail: `up_to` caps the result, not the scan; add a LIMIT sub-select
+/// for the sole-COUNT case if scan cost matters.
+///
+/// Field paths are interpolated into SQL text, so (finding #26 guard, same
+/// as `append_field_filter`) an unvalidated path panics here.
+pub fn aggregation_select_list(aggregations: &[Aggregation]) -> String {
+    let numeric = |fp: &str| {
+        if let Err(e) = validate_field_path(fp) {
+            panic!("invalid field path reached SQL builder: {e}");
+        }
+        format!(
+            "CASE WHEN fields->'{fp}'->>'t' IN ('I','D') \
+             THEN (fields->'{fp}'->>'v')::float8 ELSE NULL END"
+        )
+    };
+    aggregations
+        .iter()
+        .map(|a| match &a.kind {
+            AggregationKind::Count(None) => "COUNT(*)".to_string(),
+            AggregationKind::Count(Some(n)) => format!("LEAST(COUNT(*), {n}::bigint)"),
+            AggregationKind::Sum(fp) => format!("COALESCE(SUM({}), 0)::float8", numeric(fp)),
+            AggregationKind::Avg(fp) => format!("AVG({})", numeric(fp)),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     //! firestore-query-filter-operator-support (Slices 01-04) — pure, IO
@@ -818,5 +854,37 @@ mod tests {
     #[should_panic(expected = "invalid field path")]
     fn order_by_expr_bigint_panics_on_unvalidated_malicious_field_path() {
         order_by_expr_bigint("x'); DROP TABLE documents; --", "ASC");
+    }
+
+    fn agg(alias: &str, kind: AggregationKind) -> Aggregation {
+        Aggregation { alias: alias.to_string(), kind }
+    }
+
+    /// Several aggregations share one SELECT list: one column each, in
+    /// request order; `up_to` caps only its own COUNT; SUM is COALESCEd to 0
+    /// while AVG is not (NULL over an empty set); numeric ops only read I/D.
+    #[test]
+    fn aggregation_select_list_has_one_ordered_column_per_aggregation() {
+        let sql = aggregation_select_list(&[
+            agg("a", AggregationKind::Avg("score".into())),
+            agg("b", AggregationKind::Count(None)),
+            agg("c", AggregationKind::Count(Some(5))),
+            agg("d", AggregationKind::Sum("score".into())),
+        ]);
+        let pos = |needle: &str| sql.find(needle).unwrap_or_else(|| panic!("{needle} missing in: {sql}"));
+        let (avg, count, capped, sum) = (
+            pos("AVG(CASE WHEN fields->'score'->>'t' IN ('I','D')"),
+            pos(", COUNT(*), "),
+            pos("LEAST(COUNT(*), 5::bigint)"),
+            pos("COALESCE(SUM(CASE WHEN"),
+        );
+        assert!(avg < count && count < capped && capped < sum, "order wrong: {sql}");
+        assert!(!sql[..count].contains("COALESCE"), "AVG must stay NULL over no inputs: {sql}");
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid field path")]
+    fn aggregation_select_list_panics_on_unvalidated_malicious_field_path() {
+        aggregation_select_list(&[agg("x", AggregationKind::Sum("x'); DROP TABLE documents; --".into()))]);
     }
 }

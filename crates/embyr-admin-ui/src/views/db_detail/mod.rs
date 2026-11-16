@@ -66,9 +66,6 @@ pub fn DbDetailView() -> impl IntoView {
                     let db_id        = db.id.clone();
                     let db_id_sus    = db.id.clone();
                     let is_active    = db.status == DbStatus::Active;
-                    let sdk_key_count = model.with(|m| {
-                        m.sdk_keys.get(&db.id).map(|v| v.len()).unwrap_or(0)
-                    });
 
                     let (status_cls, status_txt) = match db.status {
                         DbStatus::Active    => ("badge badge-green",   "Active"),
@@ -210,9 +207,9 @@ pub fn DbDetailView() -> impl IntoView {
                             // ── Tab bar ───────────────────────────────────────────
                             <div class="tabs" style="margin-bottom:20px">
                                 {[
-                                    (DbTab::Overview,     "overview",    "Overview",    None),
+                                    (DbTab::Overview,     "overview",    "Overview",    None::<usize>),
                                     (DbTab::Connections,  "connection",  "Connections", None),
-                                    (DbTab::Keys,         "key",         "API Keys",    Some(sdk_key_count)),
+                                    (DbTab::Keys,         "key",         "API Keys",    None),
                                     (DbTab::Logs,         "log",         "Query Logs",  None),
                                 ].into_iter().map(|(tab, icon, label, count)| {
                                     let tab_cmp = tab.clone();
