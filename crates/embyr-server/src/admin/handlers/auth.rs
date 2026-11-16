@@ -8,6 +8,10 @@
 //! POST /admin/v1/auth/signout
 //!   Deletes session row. Sets Max-Age=0 on cookie. Returns 204.
 //!
+//! GET /admin/v1/auth/session
+//!   Session-authed. Returns who the cookie belongs to so the SPA can restore its
+//!   signed-in shell after a reload (admin-ui-api-wiring, AC-AUW-24).
+//!
 //! GET /admin/v1/auth/oidc/callback
 //!   Disabled (audit finding #58) — always 302 /admin/?error=oidc_failed.
 
@@ -25,6 +29,7 @@ use totp_rs::{Algorithm as TotpAlgorithm, TOTP};
 use uuid::Uuid;
 
 use crate::adapters::encryption::{decrypt_with_rotation, RotationDecryptError};
+use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::state::UserAdminState;
 
 /// Session cookie lifetime in seconds (24 hours).
@@ -438,6 +443,59 @@ pub async fn signout(
         )],
     )
         .into_response()
+}
+
+// ── Session probe ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct SessionInfo {
+    account_id: String,
+    account_name: String,
+    user_id: String,
+    email: String,
+    display_name: String,
+    role: String,
+}
+
+/// GET /admin/v1/auth/session
+///
+/// 401 when the caller has no user identity (a service-account Bearer key has
+/// `user_id = nil`): the console is for people.
+pub async fn session_info(
+    State(state): State<UserAdminState>,
+    session: SessionContext,
+) -> Result<Json<SessionInfo>, StatusCode> {
+    let row = sqlx::query(
+        "SELECT u.email, u.display_name, a.name AS account_name, am.role \
+         FROM users u \
+         JOIN accounts a ON a.id = u.account_id \
+         JOIN account_members am ON am.user_id = u.id AND am.account_id = u.account_id \
+         WHERE u.id = $1 AND u.account_id = $2",
+    )
+    .bind(session.user_id)
+    .bind(session.account_id)
+    .fetch_optional(state.system_db.pool())
+    .await
+    .map_err(|e| {
+        tracing::error!("session_info DB error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let read = |col: &str| {
+        row.try_get::<String, _>(col).map_err(|e| {
+            tracing::error!("session_info: read {col}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+    };
+    Ok(Json(SessionInfo {
+        account_id: session.account_id.to_string(),
+        account_name: read("account_name")?,
+        user_id: session.user_id.to_string(),
+        email: read("email")?,
+        display_name: read("display_name")?,
+        role: read("role")?,
+    }))
 }
 
 // ── OIDC callback ─────────────────────────────────────────────────────────────

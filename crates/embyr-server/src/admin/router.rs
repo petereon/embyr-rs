@@ -14,7 +14,7 @@ use crate::adapters::{
 };
 
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
-use super::handlers::auth::{oidc_callback, signin, signout};
+use super::handlers::auth::{oidc_callback, session_info, signin, signout};
 use super::handlers::invitations::{
     accept_invitation, confirm_invitation, create_account, revoke_invitation,
 };
@@ -253,6 +253,7 @@ pub fn build_admin_router(
     // Session sub-router: session_auth_middleware guards all routes added in steps 01-04+.
     // Routes MUST be added BEFORE route_layer so the middleware applies to them.
     let session_router = Router::<UserAdminState>::new()
+        .route("/admin/v1/auth/session", get(session_info))
         .route("/admin/v1/projects", get(list_projects))
         .route("/admin/v1/projects/:project_id", patch(patch_project))
         .route(
