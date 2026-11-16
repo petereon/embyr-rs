@@ -45,6 +45,8 @@ pub struct OperatorState {
     /// 02-01) to push nightly usage records. Same shared instance as
     /// `UserAdminState`/`WebhookState`.
     pub stripe_gateway: Arc<StripeGateway>,
+    /// ADR-083: provision writes connection secrets encrypted under the server key.
+    pub server_keys: crate::adapters::connection_secrets::ServerKeys,
 }
 
 /// State for session-auth user-admin routes.

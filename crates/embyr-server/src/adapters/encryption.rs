@@ -64,3 +64,18 @@ fn try_decrypt(key: &[u8; 32], nonce_bytes: &[u8], encrypted: &[u8]) -> Option<V
     let nonce = Nonce::from_slice(nonce_bytes);
     cipher.decrypt(nonce, encrypted).ok()
 }
+
+/// AES-256-GCM encrypt `plaintext` under `key`; output is `nonce(12) || ciphertext+tag`
+/// (the format [`decrypt_with_rotation`] expects).
+pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {
+    use rand_core::{OsRng, RngCore};
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let cipher = Aes256Gcm::new_from_slice(key).expect("32-byte key is always valid");
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+        .expect("AES-GCM encrypt of in-memory plaintext cannot fail");
+    let mut out = nonce_bytes.to_vec();
+    out.extend_from_slice(&ct);
+    out
+}

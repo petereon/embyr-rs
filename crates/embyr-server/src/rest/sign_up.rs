@@ -85,6 +85,8 @@ pub struct HostedIdentityState {
     pub tenant_db_max_connections: u32,
     /// pool-sizing-and-limits (ADR-079): same as above, for `acquire_timeout`.
     pub tenant_db_acquire_timeout: std::time::Duration,
+    /// ADR-083: server key for the connection-secret store (read path + lazy conversion).
+    pub server_keys: crate::adapters::connection_secrets::ServerKeys,
 }
 
 #[derive(Deserialize)]
@@ -165,6 +167,7 @@ pub async fn sign_up(
         &api_key,
         state.tenant_db_max_connections,
         state.tenant_db_acquire_timeout,
+        &state.server_keys,
     )
     .await
     {

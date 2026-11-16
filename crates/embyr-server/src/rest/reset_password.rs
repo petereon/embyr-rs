@@ -131,6 +131,7 @@ pub async fn send_oob_code(
         &api_key,
         state.tenant_db_max_connections,
         state.tenant_db_acquire_timeout,
+        &state.server_keys,
     )
     .await
     {
@@ -250,6 +251,7 @@ pub async fn reset_password(
         &api_key,
         state.tenant_db_max_connections,
         state.tenant_db_acquire_timeout,
+        &state.server_keys,
     )
     .await
     {
