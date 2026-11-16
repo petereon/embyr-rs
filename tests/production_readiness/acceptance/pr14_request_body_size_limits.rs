@@ -148,11 +148,20 @@ async fn request_body_ceilings_enforced_on_every_listener_surface() {
     let under_field_len = GRPC_CEILING_BYTES.saturating_sub(overhead + 1024);
     let under_req = create_document_request(project_id, &api_key, "under-ceiling", under_field_len);
     let under_result = grpc_client.create_document(under_req).await;
-    assert!(
-        under_result.is_ok(),
-        "a document just under the 10 MiB gRPC ceiling must be accepted, got: {:?}",
-        under_result.err()
-    );
+    // The 10 MiB transport ceiling must let this message through to the
+    // handler. Since the 1 MiB document-size rule (P7) exists, the handler
+    // then rejects the document itself with INVALID_ARGUMENT ("document
+    // size ... exceeds"); what must NOT happen is the transport rejecting it
+    // (OUT_OF_RANGE) — that would mean the ceiling is below 10 MiB.
+    match &under_result {
+        Ok(_) => {}
+        Err(status) => assert!(
+            status.code() == tonic::Code::InvalidArgument
+                && status.message().contains("document size"),
+            "a request just under the 10 MiB gRPC ceiling must reach the handler (accepted, or \
+             rejected only by the document-size rule), got: {status:?}"
+        ),
+    }
 
     let over_field_len = GRPC_CEILING_BYTES.saturating_sub(overhead) + 1024;
     let over_req = create_document_request(project_id, &api_key, "over-ceiling", over_field_len);

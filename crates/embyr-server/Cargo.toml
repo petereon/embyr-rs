@@ -1290,3 +1290,9 @@ path = "../../tests/admin_ui_wiring/static_ui.rs"
 [[test]]
 name = "admin_ui_wiring_session"
 path = "../../tests/admin_ui_wiring/session.rs"
+
+# protocol-correctness (go-live review P6/P7/P8): cursor/filter never silently
+# dropped, composite-index gate code, document size/nesting limits.
+[[test]]
+name = "protocol_correctness_pc01_cursors_index_code_and_document_limits"
+path = "../../tests/protocol_correctness/acceptance/pc01_cursors_index_code_and_document_limits.rs"
