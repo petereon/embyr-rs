@@ -56,6 +56,8 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
         .is_some_and(|c| c == "23505")
 }
 
+// `Response` is the handler's error type everywhere; same allowance as client_identity.rs.
+#[allow(clippy::result_large_err)]
 fn col<T>(row: &PgRow, name: &str) -> Result<T, Response>
 where
     T: for<'r> sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>,
