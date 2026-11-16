@@ -2993,6 +2993,18 @@ impl FirestoreService {
         )
         .await?;
 
+        // A one-shot Commit (empty `transaction`) is what every Firestore SDK
+        // sends for setDoc/updateDoc/deleteDoc/batch: apply the writes
+        // atomically in a transaction opened just for this call.
+        let txn_id = if txn_id.0.is_empty() {
+            adapter
+                .begin_transaction(&project_id, TransactionOptions::ReadWrite)
+                .await
+                .map_err(core_error_to_status)?
+        } else {
+            txn_id
+        };
+
         let write_results = adapter
             .commit_transaction(&project_id, &txn_id, domain_writes)
             .await
