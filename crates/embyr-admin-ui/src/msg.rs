@@ -27,6 +27,12 @@ pub enum Msg {
     ApiFailed { call: CallKind, error: ApiError },
     /// `GET /auth/session` succeeded: the shell can be shown.
     SessionEstablished(CurrentUser),
+    /// Switch the signed-out screen (sign in / forgot password / reset password).
+    ShowAuth(crate::model::AuthScreen),
+    /// Reset request was accepted (202): tell the user to check their email.
+    PasswordResetRequested,
+    /// Password reset confirmed: back to sign-in with a notice.
+    PasswordResetDone,
     /// Server confirmed sign-out; reset the whole model to its empty default.
     SignOut,
 

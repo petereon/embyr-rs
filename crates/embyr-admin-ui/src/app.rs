@@ -9,10 +9,11 @@ mod inner {
         decode, decode_network_failure, to_request, HttpRequest, HttpResponse, Method,
     };
     use crate::components::ToastStack;
-    use crate::model::AppModel;
+    use crate::api::reset_token_from_query;
+    use crate::model::{AppModel, AuthScreen};
     use crate::msg::{Effect, Msg};
     use crate::update::update as tea_update;
-    use crate::views::{AuthView, ShellView};
+    use crate::views::{AuthView, ForgotPasswordView, ResetPasswordView, ShellView};
     use leptos::prelude::*;
     use leptos::task::spawn_local;
     use wasm_bindgen::{JsCast, JsValue};
@@ -81,6 +82,21 @@ mod inner {
         Unreachable,
         Shell,
         SignIn,
+        Forgot,
+        Reset,
+    }
+
+    /// Read the emailed `?reset=<token>` and, if present, replace the URL with the bare path right
+    /// away so the token cannot linger in the address bar, history, or a later Referer.
+    fn take_reset_token() -> Option<String> {
+        let window = web_sys::window()?;
+        let location = window.location();
+        let token = reset_token_from_query(&location.search().ok()?)?;
+        let path = location.pathname().unwrap_or_else(|_| "/".into());
+        if let Ok(history) = window.history() {
+            let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&path));
+        }
+        Some(token)
     }
 
     /// Root application component.
@@ -95,6 +111,10 @@ mod inner {
 
         provide_context(model);
         provide_context(dispatcher);
+        let reset_token = RwSignal::new(take_reset_token());
+        if reset_token.get_untracked().is_some() {
+            dispatch(model, Msg::ShowAuth(AuthScreen::ResetPassword));
+        }
         dispatch(model, Msg::Boot);
 
         let screen = Memo::new(move |_| {
@@ -106,9 +126,19 @@ mod inner {
                 } else if m.authed {
                     Screen::Shell
                 } else {
-                    Screen::SignIn
+                    match m.auth_screen {
+                        AuthScreen::SignIn => Screen::SignIn,
+                        AuthScreen::ForgotPassword => Screen::Forgot,
+                        AuthScreen::ResetPassword => Screen::Reset,
+                    }
                 }
             })
+        });
+        // The token is single-use: forget it as soon as the reset screen is left.
+        leptos::prelude::Effect::new(move |_| {
+            if screen.get() != Screen::Reset {
+                reset_token.set(None);
+            }
         });
 
         view! {
@@ -129,6 +159,8 @@ mod inner {
                 .into_any(),
                 Screen::Shell => view! { <ShellView /> }.into_any(),
                 Screen::SignIn => view! { <AuthView /> }.into_any(),
+                Screen::Forgot => view! { <ForgotPasswordView /> }.into_any(),
+                Screen::Reset => view! { <ResetPasswordView token=reset_token /> }.into_any(),
             }}
         }
     }

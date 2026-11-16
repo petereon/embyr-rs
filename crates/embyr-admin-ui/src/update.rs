@@ -11,12 +11,14 @@ use uuid::Uuid;
 
 use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
-    AppModel, Database, DbPatch, DbStatus, Member, MetricsWindow, Role, Section, Toast, ToastId, ToastLevel,
+    AppModel, AuthScreen, Database, DbPatch, DbStatus, Member, MetricsWindow, Role, Section, Toast, ToastId, ToastLevel,
 };
 use crate::msg::{Effect, Msg};
 
 const SESSION_EXPIRED: &str = "Session expired - please sign in again";
 const ACCOUNT_LOCKED: &str = "Account locked - try again in 15 minutes";
+const RESET_LINK_SENT: &str = "If that address belongs to an account, a reset link is on its way. It expires in 1 hour.";
+const PASSWORD_UPDATED: &str = "Password updated. Sign in with your new password.";
 /// G-11: the session cookie is `Secure`, so a plain-HTTP non-localhost origin silently drops it.
 const COOKIE_REJECTED: &str =
     "Signed in, but the browser did not keep the session. The console needs HTTPS or localhost.";
@@ -35,9 +37,16 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
             effects.extend(begin(model, ApiCall::LoadSession));
         }
         Msg::Request(call) => {
-            if let ApiCall::SignIn { .. } = call {
-                model.sign_in_error = None;
-                model.account_locked = false;
+            match call {
+                ApiCall::SignIn { .. } => {
+                    model.sign_in_error = None;
+                    model.account_locked = false;
+                }
+                ApiCall::RequestPasswordReset { .. } | ApiCall::ConfirmPasswordReset { .. } => {
+                    model.reset_error = None;
+                    model.auth_notice = None;
+                }
+                _ => {}
             }
             effects.extend(begin(model, call));
         }
@@ -56,6 +65,16 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
                 model.nav.section = Section::Dashboard;
             }
             effects.extend(section_loads(model));
+        }
+        Msg::ShowAuth(screen) => {
+            model.auth_screen = screen;
+            model.reset_error = None;
+            model.auth_notice = None;
+        }
+        Msg::PasswordResetRequested => model.auth_notice = Some(RESET_LINK_SENT.into()),
+        Msg::PasswordResetDone => {
+            model.auth_screen = AuthScreen::SignIn;
+            model.auth_notice = Some(PASSWORD_UPDATED.into());
         }
         Msg::SignOut => {
             *model = AppModel::default();
@@ -311,6 +330,7 @@ fn api_failed(model: &mut AppModel, call: CallKind, error: ApiError) {
             model.sign_in_error = Some(if unauthorized { COOKIE_REJECTED.into() } else { error.to_string() });
         }
         CallKind::SignIn => sign_in_failed(model, error),
+        CallKind::ResetRequest | CallKind::ResetConfirm => reset_failed(model, error),
         _ if unauthorized => {
             *model = AppModel::default();
             model.sign_in_error = Some(SESSION_EXPIRED.into());
@@ -328,6 +348,17 @@ fn sign_in_failed(model: &mut AppModel, error: ApiError) {
             model.account_locked = true;
             ACCOUNT_LOCKED.into()
         }
+        other => other.to_string(),
+    });
+}
+
+/// A wrong second factor is a 401 here, not an expired session: stay on the form and show the message.
+fn reset_failed(model: &mut AppModel, error: ApiError) {
+    model.reset_error = Some(match error {
+        ApiError::Throttled { retry_after_ms: Some(ms) } => {
+            format!("Too many attempts, retry in {} s", ms.div_ceil(1000))
+        }
+        ApiError::Throttled { retry_after_ms: None } => ACCOUNT_LOCKED.into(),
         other => other.to_string(),
     });
 }

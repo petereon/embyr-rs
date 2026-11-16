@@ -17,6 +17,8 @@ use crate::msg::Msg;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CallKind {
     SignIn,
+    ResetRequest,
+    ResetConfirm,
     Session,
     SignOut,
     Projects,
@@ -57,6 +59,10 @@ impl ConnectionConfig {
 #[derive(Clone, PartialEq, Eq)]
 pub enum ApiCall {
     SignIn { email: String, password: String, code: SignInCode },
+    /// `POST /auth/password_reset/request`: always answered 202, known email or not.
+    RequestPasswordReset { email: String },
+    /// `POST /auth/password_reset/confirm`: emailed token + new password + second factor.
+    ConfirmPasswordReset { token: String, new_password: String, code: SignInCode },
     LoadSession,
     SignOut,
     LoadProjects,
@@ -75,6 +81,8 @@ impl ApiCall {
     pub fn kind(&self) -> CallKind {
         match self {
             ApiCall::SignIn { .. } => CallKind::SignIn,
+            ApiCall::RequestPasswordReset { .. } => CallKind::ResetRequest,
+            ApiCall::ConfirmPasswordReset { .. } => CallKind::ResetConfirm,
             ApiCall::LoadSession => CallKind::Session,
             ApiCall::SignOut => CallKind::SignOut,
             ApiCall::LoadProjects => CallKind::Projects,
@@ -105,6 +113,15 @@ impl std::fmt::Debug for ApiCall {
                 .debug_struct("SignIn")
                 .field("email", email)
                 .field("password", &"<redacted>")
+                .field("code", &"<redacted>")
+                .finish(),
+            ApiCall::RequestPasswordReset { email } => {
+                f.debug_struct("RequestPasswordReset").field("email", email).finish()
+            }
+            ApiCall::ConfirmPasswordReset { .. } => f
+                .debug_struct("ConfirmPasswordReset")
+                .field("token", &"<redacted>")
+                .field("new_password", &"<redacted>")
                 .field("code", &"<redacted>")
                 .finish(),
             ApiCall::LoadSession => f.write_str("LoadSession"),
@@ -196,6 +213,19 @@ pub fn to_request(call: &ApiCall) -> HttpRequest {
             }
             HttpRequest { method: Method::Post, path: "/admin/v1/auth/signin".into(), body: Some(body) }
         }
+        ApiCall::RequestPasswordReset { email } => HttpRequest {
+            method: Method::Post,
+            path: "/admin/v1/auth/password_reset/request".into(),
+            body: Some(serde_json::json!({ "email": email })),
+        },
+        ApiCall::ConfirmPasswordReset { token, new_password, code } => {
+            let mut body = serde_json::json!({ "token": token, "new_password": new_password });
+            match code {
+                SignInCode::Totp(c) => body["totp_code"] = c.as_str().into(),
+                SignInCode::Recovery(c) => body["recovery_code"] = c.as_str().into(),
+            }
+            HttpRequest { method: Method::Post, path: "/admin/v1/auth/password_reset/confirm".into(), body: Some(body) }
+        }
         ApiCall::LoadSession => get("/admin/v1/auth/session"),
         ApiCall::SignOut => post("/admin/v1/auth/signout".into()),
         ApiCall::LoadProjects => get("/admin/v1/projects"),
@@ -276,6 +306,8 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
         // Signing in only mints the cookie; the session call both proves the cookie was accepted
         // (G-11) and fetches who we are.
         ApiCall::SignIn { .. } => Ok(vec![Msg::Request(ApiCall::LoadSession)]),
+        ApiCall::RequestPasswordReset { .. } => Ok(vec![Msg::PasswordResetRequested]),
+        ApiCall::ConfirmPasswordReset { .. } => Ok(vec![Msg::PasswordResetDone]),
         ApiCall::LoadSession => Ok(vec![Msg::SessionEstablished(parse::<SessionDto>(body)?.try_into()?)]),
         ApiCall::SignOut => Ok(vec![Msg::SignOut]),
         ApiCall::LoadProjects => {
@@ -328,8 +360,27 @@ fn refine(call: &ApiCall, error: ApiError) -> ApiError {
         (ApiCall::SetSuspended { suspended: false, .. }, ApiError::Conflict(_)) => ApiError::Conflict(
             "cannot activate: the account is on a billing hold (past due or free-plan limit reached)".into(),
         ),
+        // The confirm endpoint answers 404 for every bad token and a bare 422 for a short password.
+        (ApiCall::ConfirmPasswordReset { .. }, ApiError::NotFound) => {
+            ApiError::Invalid("This reset link is invalid or has expired. Request a new one.".into())
+        }
+        // 12 = embyr_core::admin::invitation::MIN_PASSWORD_CHARS (this crate does not depend on core).
+        (ApiCall::ConfirmPasswordReset { .. }, ApiError::Invalid(_)) => {
+            ApiError::Invalid("Password must be at least 12 characters".into())
+        }
         _ => error,
     }
+}
+
+/// The `reset` token of a `?reset=<token>` query string, if present and non-empty.
+/// The token is base64url, so no percent-decoding is needed.
+pub fn reset_token_from_query(search: &str) -> Option<String> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("reset="))
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, ApiError> {
