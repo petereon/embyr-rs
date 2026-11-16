@@ -1232,3 +1232,9 @@ ed25519-dalek = { workspace = true }
 # (AC-SBM-03 proof) — see tests/sanitize_backend_error_messages/common/mod.rs.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# protocol-correctness (go-live review P6/P7/P8): cursor/filter never silently
+# dropped, composite-index gate code, document size/nesting limits.
+[[test]]
+name = "protocol_correctness_pc01_cursors_index_code_and_document_limits"
+path = "../../tests/protocol_correctness/acceptance/pc01_cursors_index_code_and_document_limits.rs"

@@ -13,6 +13,7 @@ use embyr_core::{
     auth::{argon2, blake3},
     domain::{
         document::{CollectionPath, DocumentPath, FirestoreDocument},
+        document_limits::validate_document_limits,
         field_value::FieldValue,
         project::CredentialCacheKey,
         query::{
@@ -1383,6 +1384,7 @@ impl FirestoreService {
                 let path = Self::parse_document_path(&doc.name)?;
                 let fields = proto_fields_to_domain(&doc.fields)
                     .ok_or_else(|| Status::invalid_argument("invalid field value in write"))?;
+                validate_document_limits(&path, &fields).map_err(core_error_to_status)?;
                 // firestore-field-transforms (Slice 01, ADR-052 § Decision
                 // 2): `update_transforms` (field 7) — "the transforms to
                 // perform after update" — attached to the SAME `Write`
@@ -1886,6 +1888,7 @@ impl FirestoreService {
             })
             .transpose()?
             .unwrap_or_default();
+        validate_document_limits(&path, &fields).map_err(core_error_to_status)?;
 
         // security-rules-write-path (ADR-030 § Decision — Composition,
         // "Three new call sites, one shared pattern" — Create case, Slice
@@ -2100,6 +2103,7 @@ impl FirestoreService {
 
         let fields = proto_fields_to_domain(&doc.fields)
             .ok_or_else(|| Status::invalid_argument("invalid field value"))?;
+        validate_document_limits(&path, &fields).map_err(core_error_to_status)?;
 
         let precondition = Self::convert_precondition(req.current_document);
 
@@ -3371,37 +3375,11 @@ impl FirestoreService {
         // Translate proto limit → domain
         let limit = sq_proto.limit;
 
-        // Translate proto cursor → domain Cursor
-        let start_at = sq_proto.start_at.as_ref().and_then(|c| {
-            let values: Option<Vec<FieldValue>> = c
-                .values
-                .iter()
-                .map(crate::encoding::firestore_proto::proto_value_to_field_value)
-                .collect();
-            values.map(|vals| Cursor { values: vals, before: c.before })
-        });
-        // firestore-end-cursor-support: mirrors start_at's own translation exactly.
-        let end_at = sq_proto.end_at.as_ref().and_then(|c| {
-            let values: Option<Vec<FieldValue>> = c
-                .values
-                .iter()
-                .map(crate::encoding::firestore_proto::proto_value_to_field_value)
-                .collect();
-            values.map(|vals| Cursor { values: vals, before: c.before })
-        });
-        // finding #44 (timestamp-cursor-pagination): a cursor bound is a
-        // range comparison under the hood (`push_scalar_comparison` in
-        // embyr-pg-storage) — same non-orderable-type rejection
-        // `translate_filter` already applies to range-operator filters
-        // above, applied here so a malformed cursor value gets a clean
-        // `invalid_argument` instead of silently reaching the SQL builder's
-        // own defensive panic.
-        if let Some(c) = &start_at {
-            validate_cursor_value_types(&c.values).map_err(Status::invalid_argument)?;
-        }
-        if let Some(c) = &end_at {
-            validate_cursor_value_types(&c.values).map_err(Status::invalid_argument)?;
-        }
+        // Translate proto cursors → domain Cursor. A cursor that cannot be
+        // converted is an error, never a silently dropped bound (which would
+        // run the query unpaginated and return wrong/duplicate pages).
+        let start_at = translate_cursor("start_at", sq_proto.start_at.as_ref())?;
+        let end_at = translate_cursor("end_at", sq_proto.end_at.as_ref())?;
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -3565,9 +3543,11 @@ impl FirestoreService {
             let missing_fields = Self::missing_index_fields(&domain_query);
             let fields_json = serde_json::to_string(&missing_fields)
                 .unwrap_or_else(|_| "[]".to_string());
+            // The leading sentence is Firestore's own wording: SDKs key off
+            // FAILED_PRECONDITION and clients/tools grep for it.
             return Err(Status::failed_precondition(format!(
-                "query requires a composite index on collection '{}' with fields {}; create it \
-                 via POST /admin/v1/projects/{{project_id}}/indexes",
+                "The query requires an index. query requires a composite index on collection \
+                 '{}' with fields {}; create it via POST /admin/v1/projects/{{project_id}}/indexes",
                 collection_id, fields_json
             )));
         }
@@ -3708,6 +3688,14 @@ impl FirestoreService {
             .and_then(translate_filter)
             .transpose()
             .map_err(Status::invalid_argument)?;
+
+        // The aggregation backends count every row matching `filter`; a
+        // cursor bound would be silently ignored and return a wrong count.
+        if sq_proto.start_at.is_some() || sq_proto.end_at.is_some() {
+            return Err(Status::unimplemented(
+                "start_at/end_at cursors are not supported on aggregation queries",
+            ));
+        }
 
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -4347,6 +4335,28 @@ fn validate_cursor_value_types(values: &[FieldValue]) -> Result<(), String> {
     Ok(())
 }
 
+/// Converts a proto cursor to a domain `Cursor`. Any value that fails to
+/// convert, or that is not orderable (finding #44: a cursor bound is a range
+/// comparison in SQL), is `invalid_argument` naming the cursor (`name`) —
+/// never `None`, which would silently run the query without the bound.
+fn translate_cursor(
+    name: &str,
+    cursor: Option<&embyr_proto::firestore::Cursor>,
+) -> Result<Option<Cursor>, Status> {
+    let Some(c) = cursor else { return Ok(None) };
+    let values = c
+        .values
+        .iter()
+        .map(crate::encoding::firestore_proto::proto_value_to_field_value)
+        .collect::<Option<Vec<FieldValue>>>()
+        .ok_or_else(|| {
+            Status::invalid_argument(format!("{name} cursor contains an unsupported or empty value"))
+        })?;
+    validate_cursor_value_types(&values)
+        .map_err(|e| Status::invalid_argument(format!("{name} cursor: {e}")))?;
+    Ok(Some(Cursor { values, before: c.before }))
+}
+
 #[cfg(test)]
 mod cursor_value_type_validation_tests {
     //! finding #44 (timestamp-cursor-pagination): `validate_cursor_value_
@@ -4390,13 +4400,28 @@ pub(crate) fn translate_filter(
 ) -> Option<Result<QueryFilter, String>> {
     match f.filter_type.as_ref()? {
         FilterType::FieldFilter(ff) => {
-            let field_path = ff.field.as_ref()?.field_path.clone();
+            // P6 (go-live review): a malformed field filter is an error, never
+            // `None` — `None` means "no filter" to every caller, so dropping
+            // it silently returned unfiltered (wrong) results.
+            let Some(field) = ff.field.as_ref() else {
+                return Some(Err("field filter is missing its field".to_string()));
+            };
+            let field_path = field.field_path.clone();
             if let Err(e) = validate_field_path(&field_path) {
                 return Some(Err(e.to_string()));
             }
-            let op = translate_field_op(FieldOp::try_from(ff.op).ok()?)?;
-            let value =
-                crate::encoding::firestore_proto::proto_value_to_field_value(ff.value.as_ref()?)?;
+            let Some(op) = FieldOp::try_from(ff.op).ok().and_then(translate_field_op) else {
+                return Some(Err(format!("unsupported field filter operator: {}", ff.op)));
+            };
+            let Some(value) = ff
+                .value
+                .as_ref()
+                .and_then(crate::encoding::firestore_proto::proto_value_to_field_value)
+            else {
+                return Some(Err(format!(
+                    "field filter on '{field_path}' has a missing or unsupported value"
+                )));
+            };
             // firestore-range-operator-value-type-support (Slice 02, US-02,
             // AC-RNG-05/06): a range comparison against an Array or Map
             // value has no real Firestore-accurate ordering to implement
@@ -4480,18 +4505,20 @@ pub(crate) fn translate_filter(
             }
         }
         FilterType::UnaryFilter(uf) => {
-            let field_path = uf
-                .operand_type
-                .as_ref()
-                .map(|op| match op {
-                    embyr_proto::firestore::structured_query::unary_filter::OperandType::Field(
-                        fr,
-                    ) => fr.field_path.clone(),
-                })?;
+            let Some(field_path) = uf.operand_type.as_ref().map(|op| match op {
+                embyr_proto::firestore::structured_query::unary_filter::OperandType::Field(fr) => {
+                    fr.field_path.clone()
+                }
+            }) else {
+                return Some(Err("unary filter is missing its field".to_string()));
+            };
             if let Err(e) = validate_field_path(&field_path) {
                 return Some(Err(e.to_string()));
             }
-            let op = match UnaryOp::try_from(uf.op).ok()? {
+            let Ok(unary_op) = UnaryOp::try_from(uf.op) else {
+                return Some(Err(format!("unsupported unary filter op: {}", uf.op)));
+            };
+            let op = match unary_op {
                 UnaryOp::IsNan => FilterOp::IsNan,
                 UnaryOp::IsNotNan => FilterOp::IsNotNan,
                 // firestore-is-null-filter-support (US-01): the proto's own
@@ -5070,5 +5097,114 @@ mod malformed_filter_shape_tests {
         );
         let result = translate_filter(&f).expect("must produce Some");
         assert!(result.is_ok(), "LessThan with a well-formed Integer value must not be rejected");
+    }
+}
+
+#[cfg(test)]
+mod translate_cursor_tests {
+    //! P6 (go-live review): a cursor whose values fail to convert must be
+    //! `invalid_argument` naming the cursor, never a dropped bound.
+    use super::translate_cursor;
+    use embyr_proto::firestore::{value::ValueType, Cursor, Value};
+
+    fn int(i: i64) -> Value {
+        Value { value_type: Some(ValueType::IntegerValue(i)) }
+    }
+
+    #[test]
+    fn absent_cursor_is_no_cursor() {
+        assert!(translate_cursor("start_at", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn convertible_cursor_keeps_values_and_before_flag() {
+        let c = Cursor { values: vec![int(5)], before: true };
+        let out = translate_cursor("end_at", Some(&c)).unwrap().expect("cursor");
+        assert_eq!(out.values.len(), 1);
+        assert!(out.before);
+    }
+
+    #[test]
+    fn unconvertible_or_unorderable_cursor_is_invalid_argument_naming_the_cursor() {
+        let unset = Value { value_type: None };
+        let geo = Value {
+            value_type: Some(ValueType::GeoPointValue(embyr_proto::firestore::LatLng {
+                latitude: 1.0,
+                longitude: 2.0,
+            })),
+        };
+        let null = Value { value_type: Some(ValueType::NullValue(0)) };
+        for (name, bad) in [("start_at", unset), ("end_at", geo), ("start_at", null)] {
+            let c = Cursor { values: vec![int(1), bad], before: false };
+            let err = translate_cursor(name, Some(&c)).expect_err("must not be dropped");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+            assert!(err.message().contains(name), "got: {}", err.message());
+        }
+    }
+}
+
+#[cfg(test)]
+mod dropped_filter_tests {
+    //! P6 (go-live review): a malformed field/unary filter must surface as
+    //! an error, not `None` ("no filter") — including inside AND/OR.
+    use super::translate_filter;
+    use embyr_proto::firestore::{
+        structured_query::{
+            composite_filter::Operator as CompositeOp, field_filter::Operator as FieldOp,
+            filter::FilterType, CompositeFilter, FieldFilter, FieldReference, Filter,
+        },
+        value::ValueType,
+        Value,
+    };
+
+    fn ff(field: Option<&str>, op: i32, value: Option<Value>) -> Filter {
+        Filter {
+            filter_type: Some(FilterType::FieldFilter(FieldFilter {
+                field: field.map(|f| FieldReference { field_path: f.to_string() }),
+                op,
+                value,
+            })),
+        }
+    }
+
+    fn string_value() -> Value {
+        Value { value_type: Some(ValueType::StringValue("v".into())) }
+    }
+
+    #[test]
+    fn malformed_field_filters_are_errors_not_dropped() {
+        let geo = Value {
+            value_type: Some(ValueType::GeoPointValue(embyr_proto::firestore::LatLng {
+                latitude: 1.0,
+                longitude: 2.0,
+            })),
+        };
+        let cases = [
+            ff(None, FieldOp::Equal as i32, Some(string_value())),
+            ff(Some("a"), FieldOp::Unspecified as i32, Some(string_value())),
+            ff(Some("a"), 9999, Some(string_value())),
+            ff(Some("a"), FieldOp::Equal as i32, None),
+            ff(Some("a"), FieldOp::Equal as i32, Some(Value { value_type: None })),
+            ff(Some("a"), FieldOp::Equal as i32, Some(geo)),
+        ];
+        for f in cases {
+            let result = translate_filter(&f).expect("must not be treated as 'no filter'");
+            assert!(result.is_err(), "malformed filter was accepted: {f:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_sub_filter_inside_and_is_an_error() {
+        let and = Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: vec![
+                    ff(Some("a"), FieldOp::Equal as i32, Some(string_value())),
+                    ff(Some("b"), FieldOp::Equal as i32, None),
+                ],
+            })),
+        };
+        let result = translate_filter(&and).expect("Some");
+        assert!(result.is_err());
     }
 }

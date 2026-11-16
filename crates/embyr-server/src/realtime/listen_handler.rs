@@ -86,7 +86,8 @@ pub async fn handle_add_target(
                 &collection_id_from_query_target(qt).map_err(Status::internal)?,
             )?;
             let project_id = project_id_from_parent(&qt.parent).map_err(Status::internal)?;
-            let filter = filter_from_query_target(qt).map_err(Status::internal)?;
+            // A malformed filter is the client's error, not an internal one.
+            let filter = filter_from_query_target(qt).map_err(Status::invalid_argument)?;
             (project_id, collection_id, filter)
         }
         _ => return Err(Status::invalid_argument("target must have Query target type")),
