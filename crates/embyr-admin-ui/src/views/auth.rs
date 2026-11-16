@@ -3,6 +3,10 @@
 #[cfg(feature = "csr")]
 use crate::components::Icon;
 #[cfg(feature = "csr")]
+use crate::api::{ApiCall, CallKind, SignInCode};
+#[cfg(feature = "csr")]
+use crate::model::AppModel;
+#[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
 use leptos::prelude::*;
@@ -11,9 +15,25 @@ use leptos::prelude::*;
 #[component]
 pub fn AuthView() -> impl IntoView {
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
-    let d1 = dispatch.clone();
-    let d2 = dispatch.clone();
-    let d3 = dispatch.clone();
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+
+    let email = RwSignal::new(String::new());
+    let password = RwSignal::new(String::new());
+    let code = RwSignal::new(String::new());
+    let use_recovery = RwSignal::new(false);
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::SignIn) || m.pending.contains(&CallKind::Session));
+    let error = move || model.with(|m| m.sign_in_error.clone());
+
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let code_value = code.get().trim().to_string();
+        let code = if use_recovery.get() { SignInCode::Recovery(code_value) } else { SignInCode::Totp(code_value) };
+        dispatch.run(Msg::Request(ApiCall::SignIn {
+            email: email.get().trim().to_string(),
+            password: password.get(),
+            code,
+        }));
+    };
 
     view! {
         <div style="display:grid;grid-template-columns:1.05fr 1fr;height:100%;background:var(--bg)">
@@ -67,51 +87,36 @@ pub fn AuthView() -> impl IntoView {
                     <h1 style="font-size:23px;font-weight:620;letter-spacing:-0.02em;margin:0 0 6px">"Sign in"</h1>
                     <p style="color:var(--text-2);font-size:13.5px;margin:0 0 24px">"Welcome back. Continue to your console."</p>
 
-                    // SSO buttons
-                    <div class="col" style="gap:9px;margin-bottom:18px">
-                        <button
-                            class="btn btn-block"
-                            style="height:38px"
-                            on:click=move |_| d1.run(Msg::SignIn)
-                        >
-                            <Icon name="globe" size=16/>
-                            "Continue with Google"
-                        </button>
-                        <button
-                            class="btn btn-block"
-                            style="height:38px"
-                            on:click=move |_| d2.run(Msg::SignIn)
-                        >
-                            <Icon name="github" size=16/>
-                            "Continue with GitHub"
-                        </button>
-                    </div>
-
-                    // OR divider
-                    <div class="row" style="gap:12px;margin:4px 0 18px;color:var(--text-3);font-size:11.5px">
-                        <div class="divider" style="flex:1"/>
-                        "OR"
-                        <div class="divider" style="flex:1"/>
-                    </div>
-
-                    // Email + password
-                    <div class="col" style="gap:14px">
+                    // SSO sign-in is hidden until `admin-oidc-sso` lands (G-13, AC-AUW-28).
+                    <form class="col" style="gap:14px" on:submit=submit>
                         <div class="field">
                             <label class="field-label">"Email"</label>
-                            <input class="input" type="email" name="email" placeholder="you@example.com"/>
+                            <input class="input" type="email" name="email" autocomplete="username"
+                                placeholder="you@example.com" bind:value=email/>
                         </div>
                         <div class="field">
                             <label class="field-label">"Password"</label>
-                            <input class="input" type="password" name="password" placeholder="••••••••"/>
+                            <input class="input" type="password" name="password" autocomplete="current-password"
+                                placeholder="••••••••" bind:value=password/>
                         </div>
-                        <button
-                            class="btn btn-primary btn-block btn-lg"
-                            type="button"
-                            on:click=move |_| d3.run(Msg::SignIn)
-                        >
-                            "Continue"
+                        <div class="field">
+                            <label class="field-label">
+                                {move || if use_recovery.get() { "Recovery code" } else { "Authenticator code" }}
+                            </label>
+                            <input class="input" type="text" name="code" autocomplete="one-time-code"
+                                inputmode=move || if use_recovery.get() { "text" } else { "numeric" }
+                                bind:value=code/>
+                            <button class="btn btn-ghost" type="button" on:click=move |_| use_recovery.update(|v| *v = !*v)>
+                                {move || if use_recovery.get() { "Use authenticator code" } else { "Use a recovery code" }}
+                            </button>
+                        </div>
+                        <Show when=move || error().is_some()>
+                            <span class="field-err" role="alert">{move || error().unwrap_or_default()}</span>
+                        </Show>
+                        <button class="btn btn-primary btn-block btn-lg" type="submit" disabled=busy>
+                            {move || if busy() { "Signing in…" } else { "Continue" }}
                         </button>
-                    </div>
+                    </form>
 
                     <p style="text-align:center;font-size:12.5px;color:var(--text-3);margin-top:18px">
                         "Protected by mandatory MFA"

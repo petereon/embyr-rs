@@ -18,7 +18,7 @@ use uuid::Uuid;
 pub fn make_model_with_db() -> AppModel {
     use embyr_admin_ui::model::{DbBackendMode, Member, UserId};
 
-    let db_id = DbId(Uuid::new_v4());
+    let db_id = DbId(Uuid::new_v4().to_string());
     let db = Database {
         id: db_id.clone(),
         name: "test-db".to_string(),

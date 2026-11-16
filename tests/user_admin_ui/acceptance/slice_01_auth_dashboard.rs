@@ -4,6 +4,7 @@
 //!
 //! All tests are #[ignore] (RED). Enable one at a time in DELIVER.
 //! Layer: in-memory acceptance (layer 2) — direct update() call.
+//! Real sign-in/session/lockout behaviour lives in tests/admin_ui_wiring/ui_auth.rs (ADR-082).
 
 use embyr_admin_ui::model::{AppModel, Database, DbStatus};
 use embyr_admin_ui::msg::Msg;
@@ -12,22 +13,6 @@ use embyr_admin_ui::update::update;
 #[path = "../common/mod.rs"]
 mod common;
 use common::make_model_with_db;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// US-001 / AC-001-02: SignIn sets authed = true (V1 mock flow).
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// AC-001-02, AC-001-08: Mock sign-in with any credentials grants session.
-#[test]
-fn sign_in_with_mock_credentials_sets_authed() {
-    // AC-001-02
-    let mut m = AppModel::default();
-    m.authed = false;
-
-    update(&mut m, Msg::SignIn);
-
-    assert!(m.authed, "AC-001-02: SignIn must set model.authed = true (V1 mock)");
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // US-001 / AC-001-10: SignOut clears session.
@@ -46,27 +31,6 @@ fn sign_out_clears_session() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// US-001 / AC-001-04: TOTP lockout after 3 consecutive failures.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// AC-001-04: Three consecutive TOTP failures lock the account for 15 minutes.
-#[test]
-fn three_totp_failures_lock_account_for_fifteen_minutes() {
-    // AC-001-04
-    let mut m = AppModel::default();
-    m.authed = false;
-
-    update(&mut m, Msg::TotpFailure);
-    update(&mut m, Msg::TotpFailure);
-    assert!(!m.account_locked, "must not lock before 3rd failure");
-
-    update(&mut m, Msg::TotpFailure);
-
-    assert!(m.account_locked, "AC-001-04: account must be locked after 3 TOTP failures");
-    assert!(!m.authed, "AC-001-04: authed must remain false on lockout");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // US-002 / AC-002-01: Dashboard shows card per database.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -82,7 +46,7 @@ fn dashboard_shows_all_databases_after_load() {
 
     let dbs = vec![
         Database {
-            id: DbId(Uuid::new_v4()),
+            id: DbId(Uuid::new_v4().to_string()),
             name: "prod-db".to_string(),
             status: DbStatus::Active,
             backend_mode: DbBackendMode::DirectPg,
@@ -92,7 +56,7 @@ fn dashboard_shows_all_databases_after_load() {
             usage: Default::default(),
         },
         Database {
-            id: DbId(Uuid::new_v4()),
+            id: DbId(Uuid::new_v4().to_string()),
             name: "staging-db".to_string(),
             status: DbStatus::Active,
             backend_mode: DbBackendMode::AgentMode,
@@ -124,7 +88,7 @@ fn dashboard_empty_state_when_no_databases() {
     m.authed = true;
     m.databases = vec![
         Database {
-            id: embyr_admin_ui::model::DbId(uuid::Uuid::new_v4()),
+            id: embyr_admin_ui::model::DbId(uuid::Uuid::new_v4().to_string()),
             name: "to-be-cleared".to_string(),
             status: DbStatus::Active,
             backend_mode: embyr_admin_ui::model::DbBackendMode::DirectPg,
@@ -154,7 +118,7 @@ fn dashboard_suspended_visible_deleted_hidden() {
     m.authed = true;
 
     let suspended = Database {
-        id: DbId(Uuid::new_v4()),
+        id: DbId(Uuid::new_v4().to_string()),
         name: "suspended-db".to_string(),
         status: DbStatus::Suspended,
         backend_mode: DbBackendMode::DirectPg,
@@ -164,7 +128,7 @@ fn dashboard_suspended_visible_deleted_hidden() {
         usage: Default::default(),
     };
     let deleted = Database {
-        id: DbId(Uuid::new_v4()),
+        id: DbId(Uuid::new_v4().to_string()),
         name: "deleted-db".to_string(),
         status: DbStatus::Deleted,
         backend_mode: DbBackendMode::DirectPg,

@@ -52,7 +52,7 @@ fn patch_db_updates_agent_endpoint() {
 fn patch_db_unknown_id_is_noop() {
     let mut m = make_model_with_db();
     let count_before = m.databases.len();
-    let phantom = DbId(Uuid::new_v4());
+    let phantom = DbId(Uuid::new_v4().to_string());
 
     update(&mut m, Msg::PatchDb(phantom, DbPatch::Dsn("postgres://x/y".to_string())));
 
@@ -163,7 +163,7 @@ fn revoke_sdk_key_nonexistent_is_noop() {
 #[test]
 fn create_sdk_key_for_unknown_db_is_noop() {
     let mut m = make_model_with_db();
-    let phantom_db = DbId(Uuid::new_v4());
+    let phantom_db = DbId(Uuid::new_v4().to_string());
     let sdk_map_size_before = m.sdk_keys.len();
 
     let key = SdkKey {

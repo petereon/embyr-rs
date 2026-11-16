@@ -5,7 +5,7 @@ use crate::components::{primitives::Toggle, Icon};
 #[cfg(feature = "csr")]
 use crate::data::{bar_chart_points, display_stats, fmt_num, sparkline_points};
 #[cfg(feature = "csr")]
-use crate::model::{Database, DbBackendMode, DbPatch, LogRetention};
+use crate::model::{Database, DbPatch, LogRetention};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -163,10 +163,7 @@ pub fn DbOverview(db: Database, idx: usize) -> impl IntoView {
                     <div>
                         <div style="font-size:11px;color:var(--text-3);margin-bottom:3px">"Backend mode"</div>
                         <span class="mono" style="font-size:13px">
-                            {match db.backend_mode {
-                                DbBackendMode::DirectPg  => "direct_pg",
-                                DbBackendMode::AgentMode => "agent_mode",
-                            }}
+                            {db.backend_mode.api_value()}
                         </span>
                     </div>
                     <div>

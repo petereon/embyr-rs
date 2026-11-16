@@ -81,7 +81,7 @@ fn log_retention_stored_when_logging_enabled() {
 #[test]
 fn set_log_retention_wrong_db_is_noop() {
     let mut m = make_model_with_db();
-    let phantom = DbId(Uuid::new_v4());
+    let phantom = DbId(Uuid::new_v4().to_string());
 
     update(&mut m, Msg::SetLogRetention(phantom, LogRetention::OneDay));
 
@@ -106,7 +106,7 @@ fn billing_data_source_populated_from_set_databases() {
 
     let dbs = vec![
         Database {
-            id: DbId(Uuid::new_v4()),
+            id: DbId(Uuid::new_v4().to_string()),
             name: "high-traffic".to_string(),
             status: DbStatus::Active,
             backend_mode: DbBackendMode::DirectPg,
@@ -116,7 +116,7 @@ fn billing_data_source_populated_from_set_databases() {
             usage: Default::default(),
         },
         Database {
-            id: DbId(Uuid::new_v4()),
+            id: DbId(Uuid::new_v4().to_string()),
             name: "low-traffic".to_string(),
             status: DbStatus::Active,
             backend_mode: DbBackendMode::AgentMode,

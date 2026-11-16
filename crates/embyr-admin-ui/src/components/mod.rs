@@ -9,6 +9,8 @@ pub mod sidebar;
 #[cfg(feature = "csr")]
 pub mod suspension_banner;
 #[cfg(feature = "csr")]
+pub mod toast_stack;
+#[cfg(feature = "csr")]
 pub mod topbar;
 #[cfg(feature = "csr")]
 pub mod charts;
@@ -21,6 +23,8 @@ pub use primitives::{Badge, Button, Card, Menu};
 pub use sidebar::Sidebar;
 #[cfg(feature = "csr")]
 pub use suspension_banner::SuspensionBanner;
+#[cfg(feature = "csr")]
+pub use toast_stack::ToastStack;
 #[cfg(feature = "csr")]
 pub use topbar::Topbar;
 #[cfg(feature = "csr")]

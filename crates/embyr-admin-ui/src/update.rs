@@ -5,35 +5,58 @@
 //!   - Deterministic: same (model, msg) → same new model state
 //!   - Exhaustive: all Msg variants handled (enforced by compiler)
 
-use crate::model::{AppModel, DbPatch, DbStatus, Member, NavState, Role};
-use crate::msg::Msg;
+use uuid::Uuid;
 
-/// Threshold for TOTP consecutive failures before account lockout.
-const TOTP_LOCKOUT_THRESHOLD: u8 = 3;
+use crate::api::{ApiCall, ApiError, CallKind};
+use crate::model::{
+    AppModel, DbPatch, DbStatus, Member, Role, Section, Toast, ToastId, ToastLevel,
+};
+use crate::msg::{Effect, Msg};
 
-/// Apply `msg` to `model`, mutating in place.
+const SESSION_EXPIRED: &str = "Session expired - please sign in again";
+const ACCOUNT_LOCKED: &str = "Account locked - try again in 15 minutes";
+/// G-11: the session cookie is `Secure`, so a plain-HTTP non-localhost origin silently drops it.
+const COOKIE_REJECTED: &str =
+    "Signed in, but the browser did not keep the session. The console needs HTTPS or localhost.";
+
+/// Apply `msg` to `model`, mutating in place, and return the side effects to run.
 ///
-/// Pure function — no IO, no side effects. All state mutation flows through here.
-pub fn update(model: &mut AppModel, msg: Msg) {
+/// Pure function — no IO, no side effects of its own. All state mutation flows through here;
+/// HTTP is requested as data (`Effect`), never performed.
+pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
+    let mut effects = Vec::new();
     match msg {
-        // ── US-001: Authentication ─────────────────────────────────────────
-        Msg::SignIn => {
+        // ── US-001: Authentication / server calls ──────────────────────────
+        Msg::Boot => {
+            model.booting = true;
+            model.server_unreachable = false;
+            effects.extend(begin(model, ApiCall::LoadSession));
+        }
+        Msg::Request(call) => {
+            if let ApiCall::SignIn { .. } = call {
+                model.sign_in_error = None;
+                model.account_locked = false;
+            }
+            effects.extend(begin(model, call));
+        }
+        Msg::Settled(kind) => {
+            model.pending.remove(&kind);
+        }
+        Msg::ApiFailed { call, error } => api_failed(model, call, error),
+        Msg::SessionEstablished(user) => {
             model.authed = true;
+            model.booting = false;
+            model.server_unreachable = false;
+            model.sign_in_error = None;
+            model.account_locked = false;
+            model.current_user = Some(user);
+            if model.nav.section == Section::Login {
+                model.nav.section = Section::Dashboard;
+            }
+            effects.extend(section_loads(model));
         }
         Msg::SignOut => {
-            model.authed = false;
-            model.nav = NavState::default();
-            model.toasts.clear();
-        }
-        Msg::TotpFailure => {
-            model.totp_failures = model.totp_failures.saturating_add(1);
-            if model.totp_failures >= TOTP_LOCKOUT_THRESHOLD {
-                model.account_locked = true;
-            }
-        }
-        Msg::TotpSuccess => {
-            model.totp_failures = 0;
-            model.account_locked = false;
+            *model = AppModel::default();
         }
 
         // ── US-002: Dashboard ──────────────────────────────────────────────
@@ -188,6 +211,7 @@ pub fn update(model: &mut AppModel, msg: Msg) {
         // ── Navigation ─────────────────────────────────────────────────────────
         Msg::NavigateTo(section) => {
             model.nav.section = section;
+            effects.extend(section_loads(model));
         }
 
         // ── US-101..109: Billing / Payments (card-payments) ─────────────────────
@@ -223,6 +247,62 @@ pub fn update(model: &mut AppModel, msg: Msg) {
             model.upgrade_modal_step = step;
         }
     }
+    effects
+}
+
+/// Mark `call` in flight and request it. A call of the same kind already in flight is not repeated.
+fn begin(model: &mut AppModel, call: ApiCall) -> Option<Effect> {
+    model.pending.insert(call.kind()).then_some(Effect::Http(call))
+}
+
+/// The loads a section needs when it opens.
+fn section_loads(model: &mut AppModel) -> Option<Effect> {
+    match model.nav.section {
+        Section::Dashboard | Section::Databases => begin(model, ApiCall::LoadProjects),
+        _ => None,
+    }
+}
+
+fn api_failed(model: &mut AppModel, call: CallKind, error: ApiError) {
+    let unauthorized = matches!(error, ApiError::Unauthorized(_));
+    match call {
+        CallKind::Session if model.booting && unauthorized => model.booting = false,
+        CallKind::Session if model.booting => {
+            model.booting = false;
+            model.server_unreachable = true;
+        }
+        CallKind::Session if !model.authed => {
+            model.sign_in_error = Some(if unauthorized { COOKIE_REJECTED.into() } else { error.to_string() });
+        }
+        CallKind::SignIn => sign_in_failed(model, error),
+        _ if unauthorized => {
+            *model = AppModel::default();
+            model.sign_in_error = Some(SESSION_EXPIRED.into());
+        }
+        _ => push_error_toast(model, error.to_string()),
+    }
+}
+
+fn sign_in_failed(model: &mut AppModel, error: ApiError) {
+    model.sign_in_error = Some(match error {
+        ApiError::Throttled { retry_after_ms: Some(ms) } => {
+            format!("Too many attempts, retry in {} s", ms.div_ceil(1000))
+        }
+        ApiError::Throttled { retry_after_ms: None } => {
+            model.account_locked = true;
+            ACCOUNT_LOCKED.into()
+        }
+        other => other.to_string(),
+    });
+}
+
+fn push_error_toast(model: &mut AppModel, message: String) {
+    model.toast_seq += 1;
+    model.toasts.push(Toast {
+        id: ToastId(Uuid::from_u128(u128::from(model.toast_seq))),
+        message,
+        level: ToastLevel::Error,
+    });
 }
 
 /// Count the number of members with the Owner role.

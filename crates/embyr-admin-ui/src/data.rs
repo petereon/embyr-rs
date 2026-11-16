@@ -114,7 +114,7 @@ pub mod mock {
     pub fn databases() -> Vec<Database> {
         vec![
             Database {
-                id: DbId(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()),
+                id: DbId("00000000-0000-0000-0000-000000000001".to_string()),
                 name: "production".to_string(),
                 status: DbStatus::Active,
                 backend_mode: DbBackendMode::DirectPg,
@@ -131,7 +131,7 @@ pub mod mock {
                 },
             },
             Database {
-                id: DbId(Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()),
+                id: DbId("00000000-0000-0000-0000-000000000002".to_string()),
                 name: "staging".to_string(),
                 status: DbStatus::Active,
                 backend_mode: DbBackendMode::AgentMode,

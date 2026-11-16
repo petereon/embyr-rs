@@ -6,6 +6,9 @@ target/
 !target/x86_64-unknown-linux-musl/release/
 !target/x86_64-unknown-linux-musl/release/embyr-agent
 
+# Locally built admin SPA — the image builds its own in the `ui` stage
+crates/embyr-admin-ui/dist/
+
 # Version control history
 .git/
 .gitignore
