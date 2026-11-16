@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [master]
+    # A `vX.Y.Z` git tag is what publishes a release image — see the
+    # "Compute image tags" steps and docs/operations/release-process.md.
+    tags: ['v*']
   pull_request:
     branches: [master]
 
@@ -144,22 +147,38 @@ jobs:
       packages: write
 
     env:
-      SHOULD_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      SHOULD_PUSH: ${{ github.event_name == 'push' }} # master or a v* tag (see `on:`)
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
-      # Tag scheme matches docs/operations/release-process.md's vMAJOR.MINOR.PATCH
-      # convention: `:master` (always the latest master build) plus a version-
-      # pinned tag read straight from [workspace.package] version, so a specific
-      # release stays pullable even after `master` has moved on.
-      - name: Extract workspace version
-        id: version
+      # Tag scheme (docs/operations/release-process.md):
+      #   every pushed build  -> `:sha-<short sha>`  (immutable; what you deploy
+      #                          and roll back to)
+      #   master builds       -> `:master`           (moving pointer)
+      #   `vX.Y.Z` git tag    -> `:vX.Y.Z`           (release; only ever pushed
+      #                          from a tag run, and only if the tag matches the
+      #                          Cargo workspace version — so a later master
+      #                          merge can no longer overwrite it)
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/embyr-server
         run: |
           VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          TAGS="$IMAGE:sha-${GITHUB_SHA::7}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+              echo "::error::git tag $GITHUB_REF_NAME does not match Cargo workspace version v$VERSION"
+              exit 1
+            fi
+            TAGS="$TAGS,$IMAGE:v$VERSION"
+          else
+            TAGS="$TAGS,$IMAGE:master"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
         if: env.SHOULD_PUSH == 'true'
@@ -180,9 +199,7 @@ jobs:
         with:
           context: .
           push: ${{ env.SHOULD_PUSH }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/embyr-server:master
-            ghcr.io/${{ github.repository_owner }}/embyr-server:${{ steps.version.outputs.tag }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -199,7 +216,7 @@ jobs:
       packages: write
 
     env:
-      SHOULD_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      SHOULD_PUSH: ${{ github.event_name == 'push' }} # master or a v* tag (see `on:`)
 
     steps:
       - uses: actions/checkout@v4
@@ -250,11 +267,24 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Extract workspace version
-        id: version
+      # Same tag scheme as the `docker` job above.
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/embyr-agent
         run: |
           VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          TAGS="$IMAGE:sha-${GITHUB_SHA::7}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+              echo "::error::git tag $GITHUB_REF_NAME does not match Cargo workspace version v$VERSION"
+              exit 1
+            fi
+            TAGS="$TAGS,$IMAGE:v$VERSION"
+          else
+            TAGS="$TAGS,$IMAGE:master"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
         if: env.SHOULD_PUSH == 'true'
@@ -275,8 +305,6 @@ jobs:
           context: .
           file: crates/embyr-agent/Dockerfile
           push: ${{ env.SHOULD_PUSH }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/embyr-agent:master
-            ghcr.io/${{ github.repository_owner }}/embyr-agent:${{ steps.version.outputs.tag }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha,scope=agent
           cache-to: type=gha,mode=max,scope=agent

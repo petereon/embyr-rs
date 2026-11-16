@@ -36,7 +36,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use embyr_core::{auth::argon2, client_identity};
+use crate::adapters::argon2_blocking as argon2;
+use embyr_core::client_identity;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::{encryption::decrypt_with_rotation, system_db::SystemDb};
@@ -108,7 +109,7 @@ pub async fn sign_in_anonymously(
         }
     };
 
-    let verified = match argon2::verify_api_key(api_key.as_bytes(), &auth_row.api_key_hash_current)
+    let verified = match argon2::verify_api_key(api_key.as_bytes(), &auth_row.api_key_hash_current).await
     {
         Ok(v) => v,
         Err(e) => {

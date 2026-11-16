@@ -14,6 +14,17 @@ pub async fn livez_handler() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status": "ok"})))
 }
 
+/// Process-wide "shutting down" flag: once set, readiness reports 503 so a
+/// load balancer stops routing here while open connections drain. Set only
+/// by `main.rs` on SIGTERM/Ctrl-C — never by in-process test servers, which
+/// share this static.
+static DRAINING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Flip readiness to failing for the rest of this process's life.
+pub fn mark_draining() {
+    DRAINING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Readiness — can this pod usefully serve traffic right now (ADR-078).
 // Doc-comment kept plain (no dependency-adapter type names) so the
 // `livez_handler_body_has_zero_postgres_or_external_calls` structural test's
@@ -27,6 +38,12 @@ pub async fn livez_handler() -> impl IntoResponse {
 // error text (AC-HDC-11, a leak surface ADR-075's tonic-only sweep never
 // covered).
 pub async fn healthz_handler(State(system_db): State<Arc<SystemDb>>) -> impl IntoResponse {
+    if DRAINING.load(std::sync::atomic::Ordering::Relaxed) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"status": "draining"})),
+        );
+    }
     match tokio::time::timeout(Duration::from_secs(3), system_db.probe()).await {
         Ok(Ok(())) => (StatusCode::OK, Json(json!({"status": "ok"}))),
         _ => (

@@ -41,45 +41,65 @@ performs the corresponding version bump — after merge to `master`, a maintaine
 
 ```bash
 git tag vX.Y.Z <merge-sha>
-git push --tags
+git push origin vX.Y.Z
 ```
 
-No CI automation enforces this today (no historical drift to guard against yet, and a
-`push: tags:`-triggered workflow does not exist). Revisit trigger: if a future release ships
-without a matching tag or CHANGELOG entry, add a `release-tag-check` CI job comparing the pushed
-tag against `cargo metadata`'s workspace version.
-
-## Rollback Procedure
-
-1. Identify the last known-good tag from `git tag -l` and `CHANGELOG.md`.
-2. Check out that tag: `git checkout vX.Y.Z`.
-3. Rebuild the Docker image from that exact tagged commit: `docker build -t embyr-server:vX.Y.Z .`.
-4. Deploy the rebuilt image in place of the regressed version.
-5. Read the regressed version's own `CHANGELOG.md` entry to narrow root-cause analysis before
-   re-attempting the release.
+Pushing the tag is what publishes the release: `.github/workflows/ci.yml` runs on `v*` tags,
+**fails if the tag does not equal `v` + `[workspace.package] version`**, and otherwise pushes the
+`:vX.Y.Z` images. Nothing else ever pushes `:vX.Y.Z`, so a release tag is never overwritten by a
+later `master` merge. Never move or re-push an existing git tag — cut a new PATCH instead.
 
 ## Container Registry
 
-Both images are published to [GitHub Container Registry](https://ghcr.io) on every push to
-`master` (never on pull requests, to avoid registry pollution) — see finding #42/#43 in
+Both images are published to [GitHub Container Registry](https://ghcr.io) (never from pull
+requests, to avoid registry pollution) — see finding #42/#43 in
 `docs/product/production-readiness-audit-2026-09-08.md`.
 
 - `ghcr.io/petereon/embyr-server`
 - `ghcr.io/petereon/embyr-agent`
 
-Each push publishes two tags: `:master` (always the latest master build) and a version-pinned
-`:vMAJOR.MINOR.PATCH` tag read from `[workspace.package] version` — matching the git tag
-convention above. Pull a specific release with:
+| Tag | Pushed by | Mutable? | Use for |
+|-----|-----------|----------|---------|
+| `:sha-<7-char commit sha>` | every `master` merge and every `v*` tag run | no — one commit, one tag | **deploying and rolling back** |
+| `:vX.Y.Z` | a `vX.Y.Z` git tag run only | no, as long as git tags are not moved | naming a release |
+| `:master` | every `master` merge | yes — moving pointer | dev/evaluation only, never production |
 
 ```bash
-docker pull ghcr.io/petereon/embyr-server:v0.1.1
-docker pull ghcr.io/petereon/embyr-agent:v0.1.1
+docker pull ghcr.io/petereon/embyr-server:sha-f27ff49
+docker pull ghcr.io/petereon/embyr-server:v0.1.1      # exists only once the v0.1.1 git tag is pushed
 ```
+
+The tag run rebuilds from the tagged commit (same source and Dockerfile as that commit's
+`:sha-` image, layers reused from the build cache); it is not a registry-side retag.
+
+Before each deploy, record the image you are replacing (`docker inspect -f '{{.Config.Image}}'
+embyr-server`, or the tag in the systemd unit) — that is your rollback target.
 
 ghcr.io packages default to **private** on first push regardless of repo visibility — a repo
 admin must set each package's visibility to Public once (Package settings → Change visibility)
 before an external customer can `docker pull` without authenticating. Until that one-time step is
 done, pulling requires `docker login ghcr.io` with a PAT that has `read:packages` on this repo.
+
+## Rollback Procedure
+
+Rollback is **redeploying a previous immutable image** — no checkout, no rebuild.
+
+1. Pick the last known-good image: the `:sha-<short sha>` (or `:vX.Y.Z`) you recorded before the
+   deploy, or look it up — `git log --oneline master` gives the short shas in merge order, and
+   the package page on ghcr.io lists every pushed tag.
+2. Point the deployment at it and restart, e.g. on the single-host setup edit the image tag in
+   `/etc/systemd/system/embyr-server.service`, then
+   `systemctl daemon-reload && systemctl restart embyr-server`.
+3. Confirm: the startup log line (below) shows the expected version and `GET :8081/healthz`
+   returns 200.
+4. Migrations are not rolled back by this procedure. If the regressed release shipped a
+   migration, check that the older binary tolerates the newer schema before rolling back;
+   otherwise follow `backup-disaster-recovery.md`.
+5. Read the regressed version's `CHANGELOG.md` entry to narrow root-cause analysis before
+   re-attempting the release.
+
+Rebuilding from source (`git checkout <sha> && docker build .`) is the fallback only if the
+image is gone from the registry.
 
 ## Runtime Correlation
 
@@ -89,4 +109,6 @@ done, pulling requires `docker login ghcr.io` with a PAT that has `read:packages
 embyr-server v0.1.1 ready grpc=0.0.0.0:8080 rest=0.0.0.0:8081 admin=0.0.0.0:9090
 ```
 
-Match this against `git tag -l` and `CHANGELOG.md` to confirm exactly what is running.
+Match this against `git tag -l` and `CHANGELOG.md` to confirm exactly what is running. The
+version alone does not identify a `master` build between releases — for that, the deployed
+image's `:sha-` tag is authoritative.
