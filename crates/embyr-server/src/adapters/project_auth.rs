@@ -112,14 +112,13 @@ pub async fn resolve_customer_db_adapter(
         return Err(ProjectAuthError::ProjectNotFound);
     }
 
-    let mut verified = argon2::verify_api_key(api_key.as_bytes(), &row.api_key_hash_current)
-        .await
-        .unwrap_or(false);
-    if !verified {
-        if let Some(prev) = row.api_key_hash_previous.as_deref() {
-            verified = argon2::verify_api_key(api_key.as_bytes(), prev).await.unwrap_or(false);
-        }
-    }
+    let verified = argon2::verify_project_key(
+        api_key.as_bytes(),
+        &row.api_key_hash_current,
+        row.api_key_hash_previous.as_deref(),
+    )
+    .await
+    .unwrap_or(false);
     if !verified {
         return Err(ProjectAuthError::InvalidApiKey);
     }
