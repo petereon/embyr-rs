@@ -41,11 +41,15 @@ pub struct ProjectBackendModeRow {
 /// client-auth-hosted-identity (ADR-036 Decision 2): a project's embyr-owned
 /// hosted-identity signing key, as stored in `hosted_identity_signing_keys`
 /// (System DB — structurally disjoint from `client_identity_credentials`,
-/// Resolution 3). `private_key_enc` is ECIES ciphertext, never plaintext.
+/// Resolution 3). Exactly one of the two seed columns is set for a row
+/// (CHECK `hisk_one_seed`): `private_key_srv_enc` (AES-256-GCM under
+/// `EMBYR_ENCRYPTION_KEY`, new rows) or legacy `private_key_enc` (ECIES to
+/// the project's API key). Never plaintext.
 #[derive(Debug, Clone)]
 pub struct HostedIdentitySigningKeyRow {
     pub public_key: Vec<u8>,
-    pub private_key_enc: Vec<u8>,
+    pub private_key_enc: Option<Vec<u8>>,
+    pub private_key_srv_enc: Option<Vec<u8>>,
     pub algorithm: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -566,28 +570,30 @@ impl SystemDb {
     }
 
     /// Enable hosted identity for a project (US-01): stores the
-    /// server-generated, ECIES-encrypted signing key. Idempotent UPSERT
+    /// server-generated signing key, encrypted under the server key
+    /// (`private_key_srv_enc`; ADR-085 — the legacy ECIES column is never
+    /// written for new rows). Idempotent UPSERT
     /// (AC-18-02) — `INSERT ... ON CONFLICT (project_id) DO NOTHING
     /// RETURNING` returns zero rows on conflict; the fallback `SELECT` then
     /// reads back the EXISTING row untouched, so a second enablement call
-    /// returns byte-identical `public_key`/`private_key_enc` — no
-    /// regeneration, no re-encryption.
+    /// returns byte-identical key material — no regeneration, no
+    /// re-encryption.
     pub async fn enable_hosted_identity(
         &self,
         project_id: &str,
         public_key: &[u8; 32],
-        private_key_enc: &[u8],
+        private_key_srv_enc: &[u8],
     ) -> Result<HostedIdentitySigningKeyRow, CoreError> {
         let row_opt = sqlx::query(
             "INSERT INTO hosted_identity_signing_keys \
-             (project_id, public_key, private_key_enc, algorithm) \
+             (project_id, public_key, private_key_srv_enc, algorithm) \
              VALUES ($1, $2, $3, 'EdDSA') \
              ON CONFLICT (project_id) DO NOTHING \
-             RETURNING public_key, private_key_enc, algorithm, created_at",
+             RETURNING public_key, private_key_enc, private_key_srv_enc, algorithm, created_at",
         )
         .bind(project_id)
         .bind(&public_key[..])
-        .bind(private_key_enc)
+        .bind(private_key_srv_enc)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| {
@@ -597,7 +603,7 @@ impl SystemDb {
         let row = match row_opt {
             Some(r) => r,
             None => sqlx::query(
-                "SELECT public_key, private_key_enc, algorithm, created_at \
+                "SELECT public_key, private_key_enc, private_key_srv_enc, algorithm, created_at \
                  FROM hosted_identity_signing_keys WHERE project_id = $1",
             )
             .bind(project_id)
@@ -616,6 +622,9 @@ impl SystemDb {
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
             private_key_enc: row
                 .try_get("private_key_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            private_key_srv_enc: row
+                .try_get("private_key_srv_enc")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
             algorithm: row
                 .try_get("algorithm")
@@ -636,7 +645,7 @@ impl SystemDb {
         project_id: &str,
     ) -> Result<Option<HostedIdentitySigningKeyRow>, CoreError> {
         let row_opt = sqlx::query(
-            "SELECT public_key, private_key_enc, algorithm, created_at \
+            "SELECT public_key, private_key_enc, private_key_srv_enc, algorithm, created_at \
              FROM hosted_identity_signing_keys WHERE project_id = $1",
         )
         .bind(project_id)
@@ -654,6 +663,9 @@ impl SystemDb {
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
             private_key_enc: r
                 .try_get("private_key_enc")
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
+            private_key_srv_enc: r
+                .try_get("private_key_srv_enc")
                 .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?,
             algorithm: r
                 .try_get("algorithm")

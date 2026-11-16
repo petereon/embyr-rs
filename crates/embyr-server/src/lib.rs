@@ -398,6 +398,8 @@ pub fn spawn_all_servers(
         credential_cache: std::sync::Arc::clone(&service.credential_cache),
         aws_secret_fetcher: service.aws_secret_fetcher.clone(),
         gcp_secret_fetcher: service.gcp_secret_fetcher.clone(),
+        encryption_key,
+        encryption_key_previous,
         email_sender,
         tenant_db_max_connections: service.tenant_db_max_connections,
         tenant_db_acquire_timeout: service.tenant_db_acquire_timeout,

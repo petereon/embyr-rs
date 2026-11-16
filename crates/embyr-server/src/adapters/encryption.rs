@@ -77,3 +77,62 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, aes_gcm::Err
     out.extend_from_slice(&ciphertext);
     Ok(out)
 }
+
+/// Hosted-identity signing-seed read order (ADR-085 Decision 5): the
+/// server-key column first (`decrypt_with_rotation`), else the legacy
+/// ECIES-to-API-key column. A present-but-undecryptable server column is an
+/// error, never a silent fall-through to the legacy column.
+pub fn decrypt_hosted_signing_seed(
+    current_key: &[u8; 32],
+    previous_key: Option<&[u8; 32]>,
+    api_key: &str,
+    srv_enc: Option<&[u8]>,
+    legacy_enc: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    if let Some(ct) = srv_enc {
+        return decrypt_with_rotation(current_key, previous_key, ct).map_err(|e| e.to_string());
+    }
+    let ct = legacy_enc.ok_or("signing key row has no seed column set")?;
+    embyr_core::auth::ecies::decrypt(api_key.as_bytes(), ct).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embyr_core::auth::ecies;
+
+    const SEED: [u8; 32] = [7u8; 32];
+    const KEY: [u8; 32] = [1u8; 32];
+    const OLD_KEY: [u8; 32] = [2u8; 32];
+
+    fn legacy(api_key: &str) -> Vec<u8> {
+        ecies::encrypt(&ecies::derive_public_key(api_key.as_bytes()), &SEED).unwrap()
+    }
+
+    #[test]
+    fn hosted_seed_server_column_wins_and_survives_server_key_rotation() {
+        let srv = encrypt(&OLD_KEY, &SEED).unwrap();
+        // Legacy column is garbage: proves it is never consulted when srv is present.
+        let got =
+            decrypt_hosted_signing_seed(&KEY, Some(&OLD_KEY), "k", Some(&srv), Some(&[0u8; 80]));
+        assert_eq!(got.unwrap(), SEED);
+    }
+
+    #[test]
+    fn hosted_seed_legacy_row_falls_back_to_ecies_under_the_request_api_key() {
+        let ct = legacy("k0");
+        assert_eq!(
+            decrypt_hosted_signing_seed(&KEY, None, "k0", None, Some(&ct)).unwrap(),
+            SEED
+        );
+        assert!(decrypt_hosted_signing_seed(&KEY, None, "wrong", None, Some(&ct)).is_err());
+    }
+
+    #[test]
+    fn hosted_seed_undecryptable_server_column_does_not_fall_back_to_legacy() {
+        let srv = encrypt(&OLD_KEY, &SEED).unwrap();
+        let ct = legacy("k0");
+        assert!(decrypt_hosted_signing_seed(&KEY, None, "k0", Some(&srv), Some(&ct)).is_err());
+        assert!(decrypt_hosted_signing_seed(&KEY, None, "k0", None, None).is_err());
+    }
+}
