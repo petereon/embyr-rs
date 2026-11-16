@@ -25,9 +25,9 @@ use crate::admin::handlers::provision::{not_ready_migrate_failure, probe_custome
 use crate::admin::state::UserAdminState;
 use crate::adapters::postgres_backend::PostgresBackendAdapter;
 
-type ApiResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
+pub(crate) type ApiResult<T> = Result<T, (StatusCode, Json<serde_json::Value>)>;
 
-fn err(code: StatusCode, error: &str) -> (StatusCode, Json<serde_json::Value>) {
+pub(crate) fn err(code: StatusCode, error: &str) -> (StatusCode, Json<serde_json::Value>) {
     (code, Json(serde_json::json!({ "error": error })))
 }
 

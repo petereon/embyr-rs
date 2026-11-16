@@ -54,6 +54,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 use common::{
+    warm_credential_cache_and_reset_bucket,
     classify_grpc_status, garbage_project_ids, get_document_request, get_metrics, metric_value,
     start_distributed_grpc_server, DrlTestContext,
 };
@@ -163,6 +164,11 @@ async fn garbage_project_id_flood_never_invokes_rate_limiter_check_while_known_p
 
     // Known, provisioned project's request in the SAME run remains unaffected:
     // tokens still decrement via check_pg's existing Some(remaining) branch.
+    // Pre-pay the cold-start cost (credential cache, PG pool): a cold first
+    // request can exceed the limiter's PG timeout, fail open, and never touch
+    // the Postgres bucket. Also re-pins the bucket right before the read.
+    warm_credential_cache_and_reset_bucket(&ctx, &mut client, "fernbank-analytics", "fernbank-key", 10.0).await;
+
     let (tokens_before, _) = ctx
         .query_rate_bucket("fernbank-analytics")
         .await

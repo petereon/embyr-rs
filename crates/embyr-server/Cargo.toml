@@ -201,6 +201,14 @@ name = "admin_api_v2_account_bootstrap_invitations"
 path = "../../tests/admin_api_v2/acceptance/account_bootstrap_invitations.rs"
 
 [[test]]
+name = "admin_api_v2_account_deletion"
+path = "../../tests/admin_api_v2/acceptance/account_deletion.rs"
+
+[[test]]
+name = "admin_api_v2_account_deletion_purge"
+path = "../../tests/admin_api_v2/acceptance/account_deletion_purge.rs"
+
+[[test]]
 name = "admin_api_v2_akr03_sdk_keys_removed"
 path = "../../tests/admin_api_v2/acceptance/akr03_sdk_keys_removed.rs"
 
@@ -277,6 +285,10 @@ path = "../../tests/distributed_rate_limiting/acceptance/b20_rate_limit_after_au
 [[test]]
 name = "akr01_two_hash_verify"
 path = "../../tests/api_key_rotation/acceptance/akr01_two_hash_verify.rs"
+
+[[test]]
+name = "akr04_rotate_revoke"
+path = "../../tests/api_key_rotation/acceptance/akr04_rotate_revoke.rs"
 
 # production-readiness acceptance tests
 [[test]]
@@ -648,6 +660,17 @@ path = "../../tests/security_rules_realtime/acceptance/regression_baseline_unaff
 [[test]]
 name = "security_rules_realtime_listen_subscription_simulation"
 path = "../../tests/security_rules_realtime/acceptance/listen_subscription_simulation.rs"
+
+# listen-multi-target acceptance tests (go-live finding P2) — multiplexed Listen
+# stream: multiple Query/Documents targets, server-assigned ids, REMOVE,
+# orderBy/limit/offset windows, per-document rules on Documents targets.
+[[test]]
+name = "listen_multi_target_multiplexed_listen"
+path = "../../tests/listen_multi_target/acceptance/lmt_multiplexed_listen.rs"
+
+[[test]]
+name = "listen_multi_target_documents_target_rules"
+path = "../../tests/listen_multi_target/acceptance/lmt_documents_target_rules.rs"
 
 # custom-claims acceptance tests (Slice 02, ADR-034) — boolean-claim rule
 # gates a GetDocument read.
