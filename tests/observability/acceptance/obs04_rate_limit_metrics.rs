@@ -25,10 +25,19 @@ use common::{metric_value, ObsTestContext};
 const RPS: u32 = 2;
 const COUNTER: &str = "embyr_rate_limit_requests_total";
 
-/// Unauthenticated calls are enough: the limiter runs before authentication.
+const API_KEY: &str = "obs04-real-key";
+
+/// Calls must AUTHENTICATE to produce a rate-limit decision: since security
+/// finding X4 the limiter runs only after authentication succeeds (it used to
+/// run before, so these tests sent unauthenticated calls to unprovisioned
+/// project ids). The project is therefore seeded with a real key first, and
+/// one extra call pays the key's one-time Argon2id cost so the `n` measured
+/// calls arrive faster than the 2-token bucket refills.
 async fn burst(ctx: &ObsTestContext, project: &str, n: usize) {
+    ctx.seed_project_with_key(project, API_KEY).await;
+    ctx.make_grpc_call_as(project, API_KEY).await;
     for _ in 0..n {
-        ctx.make_grpc_call(project).await;
+        ctx.make_grpc_call_as(project, API_KEY).await;
     }
 }
 
@@ -78,7 +87,8 @@ async fn rate_limit_metrics_labeled_by_project_id() {
     let ctx = ObsTestContext::start_with_rate_limit(RPS).await;
 
     burst(&ctx, "obs-label-noisy", 6).await;
-    burst(&ctx, "obs-label-quiet", 2).await;
+    // 1, not 2: burst's own warm-up call now spends one of the 2 tokens too.
+    burst(&ctx, "obs-label-quiet", 1).await;
     let body = ctx.get_metrics().await;
 
     assert!(

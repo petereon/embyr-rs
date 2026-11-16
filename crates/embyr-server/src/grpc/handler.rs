@@ -87,8 +87,8 @@ pub struct FirestoreService {
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     /// GCP Secret Manager fetcher — Some for servers configured with gcp_secret support.
     pub gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
-    /// Per-project token bucket rate limiter. Applied before authentication to skip
-    /// Argon2id on requests that would be rate-limited anyway.
+    /// Per-project token bucket rate limiter. Charged only after authentication
+    /// succeeds — see `authenticate_and_rate_limit`.
     pub rate_limiter: Arc<RateLimiter>,
     /// pool-sizing-and-limits (ADR-079): per-tenant customer-document pool
     /// sizing, sourced from `EMBYR_TENANT_DB_MAX_CONNECTIONS`.
@@ -214,6 +214,34 @@ impl FirestoreService {
             .map(|s| s.to_string())
     }
 
+    /// Authenticate, THEN spend one of the project's rate-limit tokens.
+    ///
+    /// The single entry point every RPC handler uses. The bucket is keyed by
+    /// `project_id` alone, so charging it before authentication let anyone
+    /// who merely knew a project id drain it and lock out the project's real
+    /// users; only a request that proved it holds a valid key may spend.
+    ///
+    /// Returns `((adapter, project_status, dsn), rate_info)`.
+    async fn authenticate_and_rate_limit(
+        &self,
+        project_id_str: &str,
+        api_key: &str,
+    ) -> Result<
+        (
+            (SharedBackendAdapter, String, String),
+            embyr_core::rate_limit::RateLimitInfo,
+        ),
+        Status,
+    > {
+        let authenticated = self.authenticate(project_id_str, api_key).await?;
+        let rate_info = self
+            .rate_limiter
+            .check(project_id_str)
+            .await
+            .map_err(|info| Self::rate_limit_rejection(&info))?;
+        Ok((authenticated, rate_info))
+    }
+
     /// Authenticate the request and resolve the backend adapter.
     ///
     /// Checks the credential cache first; on miss performs Argon2id verification
@@ -259,6 +287,16 @@ impl FirestoreService {
         }
         if row.status == "deleted" {
             return Err(Status::not_found("project not found"));
+        }
+
+        // The project's rate-limit bucket is charged only AFTER this function
+        // succeeds (`authenticate_and_rate_limit`), so it no longer bounds
+        // bad-key floods; the cache's per-project failed-authentication
+        // budget does, before any Argon2id cost is paid.
+        if !self.credential_cache.admit_verification(&cache_key).await {
+            return Err(Status::resource_exhausted(
+                "too many failed authentication attempts",
+            ));
         }
 
         // Argon2id verification is CPU-intensive; run on blocking thread pool.
@@ -1293,12 +1331,9 @@ impl FirestoreService {
         let project_id = Self::extract_project_id(&name)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, _dsn) = self.authenticate(&project_id, &api_key).await?;
+        let ((adapter, status, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -1595,12 +1630,9 @@ impl FirestoreService {
         let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -1834,12 +1866,9 @@ impl FirestoreService {
         let project_id_str = path.project_id.as_str().to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -2063,12 +2092,9 @@ impl FirestoreService {
         let project_id_str = path.project_id.as_str().to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -2278,12 +2304,9 @@ impl FirestoreService {
         let (project_id_str, prefix) = Self::parse_parent_prefix(&req.parent)?;
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status_str, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -2468,12 +2491,9 @@ impl FirestoreService {
         let (project_id_str, prefix) = Self::parse_parent_prefix(&req.parent)?;
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status_str, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -2535,12 +2555,9 @@ impl FirestoreService {
             _ => None,
         };
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status_str, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -2706,12 +2723,9 @@ impl FirestoreService {
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -2746,12 +2760,9 @@ impl FirestoreService {
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -2835,12 +2846,9 @@ impl FirestoreService {
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status_str, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -2969,12 +2977,9 @@ impl FirestoreService {
         let project_id_str = Self::extract_project_id(&req.database)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -3017,12 +3022,9 @@ impl FirestoreService {
             _ => None,
         };
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status_str, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -3318,12 +3320,9 @@ impl FirestoreService {
         let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
         let api_key = Self::extract_api_key(&request)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status_str, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status_str, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status_str == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -3559,12 +3558,9 @@ impl FirestoreService {
 
         let project_id = extract_project_id_from_listen_request(&first_msg)?;
 
-        let rate_info = match self.rate_limiter.check(&project_id).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, dsn) = self.authenticate(&project_id, &api_key).await?;
+        let ((adapter, status, dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }
@@ -3701,12 +3697,9 @@ impl FirestoreService {
 
         let project_id_str = Self::extract_project_id(&first_msg.database)?.to_string();
 
-        let rate_info = match self.rate_limiter.check(&project_id_str).await {
-            Ok(info) => info,
-            Err(info) => return Err(Self::rate_limit_rejection(&info)),
-        };
-
-        let (adapter, status, _dsn) = self.authenticate(&project_id_str, &api_key).await?;
+        let ((adapter, status, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
         if status == "suspended" {
             return Err(Status::permission_denied("project is suspended"));
         }

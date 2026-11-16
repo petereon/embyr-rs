@@ -24,7 +24,7 @@ use std::{
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderValue, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -388,6 +388,13 @@ impl RateLimiter {
 // `rate_limiter.check()`, but no REST route did).
 // ---------------------------------------------------------------------------
 
+/// State for `rest_rate_limit_middleware`: the shared limiter plus the cache
+/// whose entries prove a key was already verified.
+pub type RestRateLimitState = (
+    Arc<RateLimiter>,
+    Arc<crate::adapters::credential_cache::CredentialCache>,
+);
+
 /// Axum middleware enforcing the per-project rate limit on REST routes that
 /// carry a `:project_id` path parameter — today, the `accounts:<verb>`
 /// identity-bridge route (`accounts_bridge_dispatch` in `lib.rs`).
@@ -405,8 +412,9 @@ impl RateLimiter {
 /// which reuses the SAME per-RPC `rate_limiter.check()` calls the native
 /// gRPC port already has. Only the plain-HTTP axum routes needed this gate.
 pub async fn rest_rate_limit_middleware(
-    State(rate_limiter): State<Arc<RateLimiter>>,
+    State((rate_limiter, credential_cache)): State<RestRateLimitState>,
     Path(params): Path<HashMap<String, String>>,
+    Query(query): Query<HashMap<String, String>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -440,6 +448,33 @@ pub async fn rest_rate_limit_middleware(
         } else {
             crate::rest::sign_up::invalid_api_key()
         };
+    }
+
+    // Security finding X4: the bucket is keyed by project_id alone, so only a
+    // request that already proved it holds a valid key may spend a token.
+    // This middleware runs before the handler authenticates, so the proof it
+    // can see is the credential cache: a `?key=` that cache holds (inserted
+    // only after a successful Argon2id verification, TTL-bounded) is charged;
+    // anything else is passed through uncharged — the handler authenticates
+    // it (or rejects it) without touching the project's bucket.
+    // ponytail: a key's first request per CREDENTIAL_TTL and key-less
+    // `signInWithCustomToken` are not metered here, so a bad-key flood on
+    // REST is bounded only by the Argon2id gate. Upgrade path: route REST
+    // through the gRPC path's failed-authentication budget
+    // (`CredentialCache::admit_verification`) from `resolve_customer_db_adapter`.
+    let authenticated = match query.get("key").filter(|k| !k.is_empty()) {
+        Some(api_key) => {
+            let cache_key = embyr_core::domain::project::CredentialCacheKey {
+                project_id: embyr_core::domain::project::ProjectId::new(project_id.as_str())
+                    .expect("validated above"),
+                api_key_blake3: embyr_core::auth::blake3::derive_cache_key(api_key.as_bytes()),
+            };
+            credential_cache.get(&cache_key).await.is_some()
+        }
+        None => false,
+    };
+    if !authenticated {
+        return next.run(request).await;
     }
 
     match rate_limiter.check(project_id).await {
