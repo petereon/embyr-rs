@@ -91,7 +91,7 @@ pub struct HostedIdentityState {
     pub tenant_db_acquire_timeout: std::time::Duration,
     /// ADR-083: server key for the connection-secret store (read path + lazy conversion).
     pub server_keys: crate::adapters::connection_secrets::ServerKeys,
-    /// Per-(project, email) throttle for `signInWithPassword` (burst 5, 1 per 12s).
+    /// Per-(project, email) throttle for `signInWithPassword` (burst 5, 1 per 60s: slower than a CI runner takes to run 6 Argon2 verifies).
     // ponytail: in-process only, so the ceiling is per replica. Upgrade = a
     // Postgres bucket via `SigninRateLimiter::with_pg` (ADR-015 shape).
     pub signin_throttle: Arc<SigninRateLimiter>,
