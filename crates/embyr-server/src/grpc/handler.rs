@@ -16,8 +16,9 @@ use embyr_core::{
         field_value::FieldValue,
         project::CredentialCacheKey,
         query::{
-            validate_field_path, AggregateValue, AggregationKind, AggregationQuery, Cursor,
-            FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter, StructuredQuery,
+            resolve_aggregation_aliases, validate_field_path, AggregateValue, Aggregation,
+            AggregationKind, AggregationQuery, Cursor, FieldFilter, FilterOp, OrderBy,
+            OrderDirection, QueryFilter, StructuredQuery,
         },
         transaction::TransactionOptions,
     },
@@ -1121,6 +1122,60 @@ impl FirestoreService {
                     ancestor_path_variable_values: &ancestor_bindings,
                     request_time: Some(&now_field),
                     cross_document_reads: &cross_document_reads,
+                },
+            ),
+            embyr_core::access_control::EvaluationOutcome::Allow
+        ))
+    }
+
+    /// `ListCollectionIds` gate (go-live X9): the parent DOCUMENT is the read
+    /// target, so sub-collection NAMES are only revealed to a caller its read
+    /// rule admits. Same rule sources as `ListDocuments`: the exact-match rule
+    /// for the parent's collection, else `pattern_read_allows` (no rule, or a
+    /// pattern with no read condition, is unrestricted). A missing parent
+    /// document evaluates against empty fields, never distinguishable from a
+    /// denied one by rule outcome. ponytail: one `get_document` per call even
+    /// for ungoverned projects; fetch lazily if that shows up in profiles.
+    async fn parent_read_allows(
+        system_db: &SystemDb,
+        adapter: &SharedBackendAdapter,
+        project_id: &str,
+        parent: &DocumentPath,
+        auth_ctx: Option<&embyr_core::access_control::AuthContext>,
+    ) -> Result<bool, Status> {
+        let rule_row = system_db
+            .get_access_rule(project_id, &parent.collection_path)
+            .await
+            .map_err(|e| sanitize_backend_error(e, "list_collection_ids: get_access_rule"))?;
+        let parent_doc = adapter.get_document(parent, None).await.map_err(core_error_to_status)?;
+        let empty_fields = std::collections::BTreeMap::new();
+        let resource_fields = parent_doc.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+        let Some(rule_row) = rule_row else {
+            return Self::pattern_read_allows(
+                system_db,
+                adapter,
+                project_id,
+                parent,
+                auth_ctx,
+                resource_fields,
+            )
+            .await;
+        };
+        let condition = embyr_core::access_control::parse_condition(&rule_row.condition_source)
+            .map_err(|e| Status::internal(format!("stored access rule failed to re-parse: {e:?}")))?;
+        let now = chrono::Utc::now();
+        let now_field = FieldValue::Timestamp(now.timestamp(), now.timestamp_subsec_nanos() as i32);
+        Ok(matches!(
+            embyr_core::access_control::evaluate(
+                &condition,
+                &embyr_core::access_control::EvalContext {
+                    auth: auth_ctx,
+                    resource_fields,
+                    request_resource_fields: &empty_fields,
+                    path_variable_value: Some(parent.document_id.as_str()),
+                    ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                    request_time: Some(&now_field),
+                    cross_document_reads: &std::collections::BTreeMap::new(),
                 },
             ),
             embyr_core::access_control::EvaluationOutcome::Allow
@@ -2721,10 +2776,9 @@ impl FirestoreService {
     }
 
     /// firestore-list-rpcs (Slice 02, US-02, ADR-051): `ListCollectionIds` —
-    /// same auth/rate-limit/suspension sequence as `handle_list_documents`,
-    /// no per-document access-rule evaluation (this RPC only exposes
-    /// collection NAMES, never document contents, so there is nothing for
-    /// `security-rules-query-path`'s own per-document rule engine to filter).
+    /// same auth/rate-limit/suspension sequence as `handle_list_documents`.
+    /// Collection NAMES leak structure, so a document parent is gated by that
+    /// document's read rule (`parent_read_allows`, go-live X9).
     /// Reuses the shared `list_collection_ids` primitive with the SAME
     /// fetch-one-extra-to-detect-more-pages pagination technique
     /// `handle_list_documents`/`run_query` already use.
@@ -2743,8 +2797,40 @@ impl FirestoreService {
             return Err(Status::permission_denied("project is suspended"));
         }
 
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        // X9: a document parent is gated like a read of that document. The
+        // database root (empty prefix) has no document and no rule target, so
+        // it stays unrestricted as before.
+        // ponytail: root collection names are not rule-filtered; add a
+        // per-collection filter if root names must be hidden too.
+        if let Some((collection_path, document_id)) = prefix.rsplit_once('/') {
+            let parent_doc = DocumentPath {
+                project_id: project_id.clone(),
+                collection_path: collection_path.to_string(),
+                document_id: document_id.to_string(),
+            };
+            let auth_ctx = verified_identity.as_ref().map(|v| embyr_core::access_control::AuthContext {
+                uid: v.end_user_id.clone(),
+                claims: v.claims.clone(),
+            });
+            if !Self::parent_read_allows(
+                &self.system_db,
+                &adapter,
+                &project_id_str,
+                &parent_doc,
+                auth_ctx.as_ref(),
+            )
+            .await?
+            {
+                return Err(Status::permission_denied("access denied by rule"));
+            }
+        }
 
         let page_size = if req.page_size <= 0 { 100i32 } else { req.page_size.min(100) };
         let offset = embyr_core::pagination::decode_page_token(&req.page_token)
@@ -3461,11 +3547,9 @@ impl FirestoreService {
                 .as_ref()
                 .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    // custom-claims (ADR-034): out of THIS slice's scope
-                    // (write-path/RunQuery wiring is US-03/US-05's own job)
-                    // — empty map keeps this call site compiling against
-                    // AuthContext's new field with zero behavior change.
-                    claims: std::collections::BTreeMap::new(),
+                    // Verified claims only: no identity -> no AuthContext ->
+                    // `request.auth.token.<claim>` stays unmatched.
+                    claims: v.claims.clone(),
                 });
 
             // SAME check_query_compliance()/query_compliance_rejection()
@@ -3504,11 +3588,9 @@ impl FirestoreService {
                     .as_ref()
                     .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    // custom-claims (ADR-034): out of THIS slice's scope
-                    // (write-path/RunQuery wiring is US-03/US-05's own job)
-                    // — empty map keeps this call site compiling against
-                    // AuthContext's new field with zero behavior change.
-                    claims: std::collections::BTreeMap::new(),
+                    // Verified claims only: no identity -> no AuthContext ->
+                    // `request.auth.token.<claim>` stays unmatched.
+                    claims: v.claims.clone(),
                 });
 
                 // ADR-031 § OQ-SRQ-03 Resolution: compliance-checking runs
@@ -3631,52 +3713,44 @@ impl FirestoreService {
             None => return Err(Status::invalid_argument("query_type is required")),
         };
 
-        // v1 restriction (ADR-038): exactly one aggregation per request.
-        if saq.aggregations.len() != 1 {
-            return Err(Status::unimplemented(
-                "multiple aggregations per request are not yet supported",
-            ));
-        }
-        let agg_proto = &saq.aggregations[0];
-        let alias = if agg_proto.alias.is_empty() {
-            "field_0".to_string()
-        } else {
-            agg_proto.alias.clone()
-        };
-
-        let aggregation_kind = match &agg_proto.operator {
-            Some(AggregationOperator::Count(c)) => {
-                // v1 restriction (ADR-038): `Count.up_to` is not supported.
-                if c.up_to.is_some() {
-                    return Err(Status::unimplemented(
-                        "count up_to limiting is not yet supported",
-                    ));
+        // 1..=5 aggregations; empty aliases get `field_<n>`, duplicate
+        // explicit aliases are invalid (Firestore semantics).
+        let aliases = resolve_aggregation_aliases(
+            &saq.aggregations.iter().map(|a| a.alias.as_str()).collect::<Vec<_>>(),
+        )
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let mut aggregations = Vec::with_capacity(aliases.len());
+        for (agg_proto, alias) in saq.aggregations.iter().zip(aliases) {
+            let kind = match &agg_proto.operator {
+                Some(AggregationOperator::Count(c)) => match c.up_to {
+                    Some(n) if n <= 0 => {
+                        return Err(Status::invalid_argument("count up_to must be positive"))
+                    }
+                    up_to => AggregationKind::Count(up_to),
+                },
+                Some(AggregationOperator::Sum(s)) => {
+                    let field_path = s
+                        .field
+                        .as_ref()
+                        .map(|f| f.field_path.clone())
+                        .ok_or_else(|| Status::invalid_argument("sum aggregation requires a field"))?;
+                    // ADR-040: validated before reaching the SQL builder.
+                    validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    AggregationKind::Sum(field_path)
                 }
-                AggregationKind::Count
-            }
-            Some(AggregationOperator::Sum(s)) => {
-                let field_path = s
-                    .field
-                    .as_ref()
-                    .map(|f| f.field_path.clone())
-                    .ok_or_else(|| Status::invalid_argument("sum aggregation requires a field"))?;
-                // Field-path validation wired now (ADR-040) so Slices 03/04
-                // don't need to touch this handler again — not exercised by
-                // this slice's own COUNT-only scope.
-                validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
-                AggregationKind::Sum(field_path)
-            }
-            Some(AggregationOperator::Avg(a)) => {
-                let field_path = a
-                    .field
-                    .as_ref()
-                    .map(|f| f.field_path.clone())
-                    .ok_or_else(|| Status::invalid_argument("avg aggregation requires a field"))?;
-                validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
-                AggregationKind::Avg(field_path)
-            }
-            None => return Err(Status::invalid_argument("aggregation operator is required")),
-        };
+                Some(AggregationOperator::Avg(a)) => {
+                    let field_path = a
+                        .field
+                        .as_ref()
+                        .map(|f| f.field_path.clone())
+                        .ok_or_else(|| Status::invalid_argument("avg aggregation requires a field"))?;
+                    validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    AggregationKind::Avg(field_path)
+                }
+                None => return Err(Status::invalid_argument("aggregation operator is required")),
+            };
+            aggregations.push(Aggregation { alias, kind });
+        }
 
         let sq_proto = match &saq.query_type {
             Some(StructuredAggQueryType::StructuredQuery(sq)) => sq,
@@ -3758,7 +3832,7 @@ impl FirestoreService {
                 .as_ref()
                 .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    claims: std::collections::BTreeMap::new(),
+                    claims: v.claims.clone(),
                 });
 
             match embyr_core::access_control::check_query_compliance(
@@ -3788,7 +3862,7 @@ impl FirestoreService {
                     .as_ref()
                     .map(|v| embyr_core::access_control::AuthContext {
                         uid: v.end_user_id.clone(),
-                        claims: std::collections::BTreeMap::new(),
+                        claims: v.claims.clone(),
                     });
 
                 match embyr_core::access_control::check_query_compliance(
@@ -3814,28 +3888,29 @@ impl FirestoreService {
 
         let agg_query = AggregationQuery {
             query: domain_query,
-            aggregation: aggregation_kind,
-            alias: alias.clone(),
+            aggregations,
         };
 
-        let value = adapter
+        let values = adapter
             .run_aggregation_query(&collection, &agg_query, None)
             .await
             .map_err(aggregation_error_to_status)?;
 
-        let value_proto = {
-            use embyr_proto::firestore::value::ValueType;
-            let vt = match value {
-                AggregateValue::Count(n) => ValueType::IntegerValue(n),
-                AggregateValue::Sum(d) => ValueType::DoubleValue(d),
-                AggregateValue::Avg(Some(d)) => ValueType::DoubleValue(d),
-                AggregateValue::Avg(None) => ValueType::NullValue(0),
-            };
-            embyr_proto::firestore::Value { value_type: Some(vt) }
-        };
-
-        let mut aggregate_fields = HashMap::new();
-        aggregate_fields.insert(alias, value_proto);
+        let aggregate_fields: HashMap<_, _> = agg_query
+            .aggregations
+            .into_iter()
+            .zip(values)
+            .map(|(agg, value)| {
+                use embyr_proto::firestore::value::ValueType;
+                let vt = match value {
+                    AggregateValue::Count(n) => ValueType::IntegerValue(n),
+                    AggregateValue::Sum(d) => ValueType::DoubleValue(d),
+                    AggregateValue::Avg(Some(d)) => ValueType::DoubleValue(d),
+                    AggregateValue::Avg(None) => ValueType::NullValue(0),
+                };
+                (agg.alias, embyr_proto::firestore::Value { value_type: Some(vt) })
+            })
+            .collect();
 
         // Response stream carries exactly one message, then closes — no
         // continuation/done-marker message (ADR-038: `RunAggregationQueryResponse`

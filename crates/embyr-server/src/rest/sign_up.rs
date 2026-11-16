@@ -57,6 +57,7 @@ use crate::adapters::{
     project_auth::{resolve_customer_db_adapter, ProjectAuthError},
     system_db::SystemDb,
 };
+use crate::middleware::signin_rate_limit::SigninRateLimiter;
 
 /// Hosted-identity-minted token lifetime (v1: fixed, no configurability —
 /// no story in this feature's locked scope requires it). `pub(crate)`: Slice
@@ -90,6 +91,39 @@ pub struct HostedIdentityState {
     pub tenant_db_acquire_timeout: std::time::Duration,
     /// ADR-083: server key for the connection-secret store (read path + lazy conversion).
     pub server_keys: crate::adapters::connection_secrets::ServerKeys,
+    /// Per-(project, email) throttle for `signInWithPassword` (burst 5, 1 per 12s).
+    // ponytail: in-process only, so the ceiling is per replica. Upgrade = a
+    // Postgres bucket via `SigninRateLimiter::with_pg` (ADR-015 shape).
+    pub signin_throttle: Arc<SigninRateLimiter>,
+    /// Per-(project, email) throttle for `sendOobCode` (burst 3, 1 per hour).
+    // ponytail: in-process only (per replica); no per-IP bucket because the
+    // :8081 listener exposes no peer address to handlers. Upgrade = Postgres
+    // bucket + ConnectInfo on the hybrid server.
+    pub oob_throttle: Arc<SigninRateLimiter>,
+}
+
+/// Throttle key: project + trimmed, lowercased email — so case/whitespace
+/// variants share one bucket, and the key never depends on whether the
+/// account exists.
+pub(crate) fn throttle_key(project_id: &str, email: &str) -> String {
+    format!("{project_id}:{}", email.trim().to_lowercase())
+}
+
+/// 429 in the REST rate-limit shape (`docs/SPEC.md` § Rate Limiting) —
+/// mirrors `rest_rate_limit_middleware`'s rejection body + `retry-after-ms`.
+pub(crate) fn throttled(retry_after_ms: u64) -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "code": 429,
+            "message": "rate limit exceeded: too many attempts for this account",
+            "status": "RESOURCE_EXHAUSTED",
+        }
+    });
+    let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&retry_after_ms.to_string()) {
+        response.headers_mut().insert("retry-after-ms", v);
+    }
+    response
 }
 
 #[derive(Deserialize)]

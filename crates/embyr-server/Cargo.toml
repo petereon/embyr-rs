@@ -170,6 +170,10 @@ name = "admin_api_v2_security_58_60"
 path = "../../tests/admin_api_v2/acceptance/security_58_60.rs"
 
 [[test]]
+name = "admin_api_v2_x8_trusted_proxy_hops"
+path = "../../tests/admin_api_v2/acceptance/x8_trusted_proxy_hops.rs"
+
+[[test]]
 name = "dsn_single_store_ds01_request_path"
 path = "../../tests/dsn_single_store/acceptance/ds01_request_path.rs"
 
@@ -380,6 +384,10 @@ path = "../../tests/client_auth_hosted_identity/acceptance/hi03_maria_signs_in.r
 [[test]]
 name = "client_auth_hosted_identity_hi04_maria_resets_password"
 path = "../../tests/client_auth_hosted_identity/acceptance/hi04_maria_resets_password.rs"
+
+[[test]]
+name = "client_auth_hosted_identity_hi05_per_account_throttles"
+path = "../../tests/client_auth_hosted_identity/acceptance/hi05_per_account_throttles.rs"
 
 # oauth-providers acceptance tests (Slice 01, ADR-037).
 [[test]]
@@ -716,6 +724,11 @@ path = "../../tests/aggregation_queries/acceptance/sum_aggregation.rs"
 name = "aggregation_queries_avg_aggregation"
 path = "../../tests/aggregation_queries/acceptance/avg_aggregation.rs"
 
+# go-live P4 — several aggregations per request + Count.up_to.
+[[test]]
+name = "aggregation_queries_multi_aggregation"
+path = "../../tests/aggregation_queries/acceptance/multi_aggregation.rs"
+
 # batch-get-documents acceptance tests (Slice 01, LAST/ONLY slice, US-01,
 # ADR-042).
 [[test]]
@@ -978,6 +991,13 @@ path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw06_simul
 [[test]]
 name = "security_rules_cel_recursive_wildcards_rw07_commit_batch_get_list_and_query_parity"
 path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw07_commit_batch_get_list_and_query_parity.rs"
+
+# Go-live blockers X9 + X12: ListCollectionIds is gated by the parent
+# document's read rule; RunQuery/RunAggregationQuery evaluate the verified
+# identity's claims.
+[[test]]
+name = "security_rules_cel_recursive_wildcards_rw08_list_collection_ids_rules_and_query_claims"
+path = "../../tests/security_rules_cel_recursive_wildcards/acceptance/rw08_list_collection_ids_rules_and_query_claims.rs"
 
 # security-rules-cel-expression-grammar (Slice 01, US-01, Release 1 Walking
 # Skeleton, ADR-065) — numeric literals + relational comparison operators,

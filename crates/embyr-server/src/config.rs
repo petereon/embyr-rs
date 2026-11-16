@@ -172,6 +172,11 @@ pub struct ServerConfig {
     /// process exits and drops them. Default 25 (under Docker/K8s' usual
     /// 30s SIGKILL window).
     pub shutdown_grace_secs: u64,
+    /// `EMBYR_TRUSTED_PROXY_HOPS` — number of trusted reverse proxies in front
+    /// of :9090. 0 (default, unset or unparseable) = admin sign-in/invitation
+    /// throttles key on the TCP peer IP; N>0 = key on the Nth-from-right
+    /// `X-Forwarded-For` entry.
+    pub trusted_proxy_hops: usize,
 }
 
 /// Validated TLS material for firestore-tls-support: one cert/key pair
@@ -411,6 +416,10 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(25);
+        let trusted_proxy_hops = std::env::var("EMBYR_TRUSTED_PROXY_HOPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
         let transaction_sweep_interval_secs = std::env::var("EMBYR_TRANSACTION_SWEEP_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -481,6 +490,7 @@ impl ServerConfig {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             shutdown_grace_secs,
+            trusted_proxy_hops,
         })
     }
 }

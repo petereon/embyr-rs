@@ -70,7 +70,7 @@ fn equality_filter(field_path: &str, value: &str) -> Filter {
 /// port entry (Pillar 3), mirroring `security_rules_query_path::run_query`'s
 /// own shape (real `FirestoreClient`, real `authorization` + optional
 /// `x-embyr-client-identity` metadata). Returns the parsed COUNT value
-/// (the default `"field_0"` alias — AC-01-... zero-alias synthesis is
+/// (the default `"field_1"` alias — AC-01-... zero-alias synthesis is
 /// exercised implicitly by every caller since none of this slice's own
 /// scenarios set an explicit alias).
 pub async fn run_count_aggregation(
@@ -142,8 +142,8 @@ pub async fn run_count_aggregation(
         .expect("response must carry an AggregationResult");
     let value = result
         .aggregate_fields
-        .get("field_0")
-        .expect("expected default-synthesized alias field_0");
+        .get("field_1")
+        .expect("expected default-synthesized alias field_1");
     match &value.value_type {
         Some(ValueType::IntegerValue(n)) => Ok(*n),
         other => panic!("expected IntegerValue for a COUNT result, got {other:?}"),
@@ -227,12 +227,83 @@ pub async fn run_sum_aggregation(
         .expect("response must carry an AggregationResult");
     let value = result
         .aggregate_fields
-        .get("field_0")
-        .expect("expected default-synthesized alias field_0");
+        .get("field_1")
+        .expect("expected default-synthesized alias field_1");
     match &value.value_type {
         Some(ValueType::DoubleValue(d)) => Ok(*d),
         other => panic!("expected DoubleValue for a SUM result, got {other:?}"),
     }
+}
+
+/// Real gRPC `RunAggregationQuery` call carrying SEVERAL aggregations in one
+/// request (`(alias, operator)` pairs; empty alias = server-assigned).
+/// Returns the raw `aggregate_fields` map, keyed by resolved alias.
+pub async fn run_aggregations(
+    ctx: &SecurityRulesFullContext,
+    collection_id: &str,
+    equality_filters: &[(&str, &str)],
+    aggregations: Vec<(&str, AggregationOperator)>,
+    client_identity_token: Option<&str>,
+) -> Result<std::collections::HashMap<String, Value>, tonic::Status> {
+    let channel = tonic::transport::Endpoint::new(format!("http://{}", ctx.server.grpc_addr))
+        .expect("valid endpoint")
+        .connect()
+        .await
+        .expect("connect to gRPC server");
+    let mut client = FirestoreClient::new(channel);
+
+    let where_filter = match equality_filters {
+        [] => None,
+        [(field, value)] => Some(equality_filter(field, value)),
+        many => Some(Filter {
+            filter_type: Some(FilterType::CompositeFilter(CompositeFilter {
+                op: CompositeOp::And as i32,
+                filters: many.iter().map(|(f, v)| equality_filter(f, v)).collect(),
+            })),
+        }),
+    };
+    let sq = StructuredQuery {
+        from: vec![CollectionSelector {
+            collection_id: collection_id.to_string(),
+            all_descendants: false,
+        }],
+        r#where: where_filter,
+        ..Default::default()
+    };
+    let saq = StructuredAggregationQuery {
+        query_type: Some(StructuredAggQueryType::StructuredQuery(sq)),
+        aggregations: aggregations
+            .into_iter()
+            .map(|(alias, op)| Aggregation { operator: Some(op), alias: alias.to_string() })
+            .collect(),
+    };
+
+    let mut request = tonic::Request::new(RunAggregationQueryRequest {
+        parent: format!("projects/{}/databases/(default)/documents", ctx.project_id),
+        query_type: Some(AggregationQueryType::StructuredAggregationQuery(saq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", ctx.api_key).parse().unwrap(),
+    );
+    if let Some(token) = client_identity_token {
+        request.metadata_mut().insert(
+            "x-embyr-client-identity",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+    }
+
+    let mut stream = client.run_aggregation_query(request).await?.into_inner();
+    use tokio_stream::StreamExt;
+    let response = stream
+        .next()
+        .await
+        .expect("expected exactly one RunAggregationQueryResponse message")?;
+    Ok(response
+        .result
+        .expect("response must carry an AggregationResult")
+        .aggregate_fields)
 }
 
 /// Real gRPC `RunAggregationQuery` call with an AVG aggregation — driving
@@ -316,8 +387,8 @@ pub async fn run_avg_aggregation(
         .expect("response must carry an AggregationResult");
     let value = result
         .aggregate_fields
-        .get("field_0")
-        .expect("expected default-synthesized alias field_0");
+        .get("field_1")
+        .expect("expected default-synthesized alias field_1");
     match &value.value_type {
         Some(ValueType::DoubleValue(d)) => Ok(Some(*d)),
         Some(ValueType::NullValue(_)) => Ok(None),

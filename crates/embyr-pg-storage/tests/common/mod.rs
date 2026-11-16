@@ -30,7 +30,7 @@ use embyr_core::domain::document::{CollectionPath, DocumentPath};
 use embyr_core::domain::field_value::FieldValue;
 use embyr_core::domain::project::ProjectId;
 use embyr_core::domain::query::{
-    AggregationKind, AggregationQuery, FieldFilter, FilterOp, OrderBy, OrderDirection,
+    Aggregation, AggregationKind, AggregationQuery, FieldFilter, FilterOp, OrderBy, OrderDirection,
     QueryFilter, StructuredQuery,
 };
 use embyr_core::storage::backend_adapter::{BackendAdapter, WritePrecondition};
@@ -391,23 +391,20 @@ pub fn verified_equal_true_filter() -> QueryFilter {
 pub fn count_aggregation(collection_id: &str, filter: Option<QueryFilter>) -> AggregationQuery {
     AggregationQuery {
         query: collection_group_query(collection_id, filter),
-        aggregation: AggregationKind::Count,
-        alias: "count".to_string(),
+        aggregations: vec![Aggregation { alias: "count".to_string(), kind: AggregationKind::Count(None) }],
     }
 }
 
 pub fn sum_aggregation(collection_id: &str, field_path: &str) -> AggregationQuery {
     AggregationQuery {
         query: collection_group_query(collection_id, None),
-        aggregation: AggregationKind::Sum(field_path.to_string()),
-        alias: "sum".to_string(),
+        aggregations: vec![Aggregation { alias: "sum".to_string(), kind: AggregationKind::Sum(field_path.to_string()) }],
     }
 }
 
 pub fn avg_aggregation(collection_id: &str, field_path: &str) -> AggregationQuery {
     AggregationQuery {
         query: collection_group_query(collection_id, None),
-        aggregation: AggregationKind::Avg(field_path.to_string()),
-        alias: "avg".to_string(),
+        aggregations: vec![Aggregation { alias: "avg".to_string(), kind: AggregationKind::Avg(field_path.to_string()) }],
     }
 }
