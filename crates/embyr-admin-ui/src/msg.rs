@@ -5,9 +5,9 @@
 
 use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
-    AdminKey, Card, CurrentUser, Database, DbId, DbPatch, Invoice, KeyId, LogRetention, Member, OidcId,
-    OidcProvider, Plan, ProjectApiKeyInfo, Role, ServiceAccount, ServiceAccountId, Subscription, Toast,
-    ToastId, UpgradeModalStep, UserId,
+    AdminKey, Card, Connection, CurrentUser, Database, DbBackendMode, DbId, DbMetrics, DbPatch, Invoice, KeyId,
+    LogRetention, Member, MetricsSummaryRow, OidcId, OidcProvider, Plan, ProjectApiKeyInfo, RevealedSecret, Role,
+    ServiceAccount, ServiceAccountId, Subscription, Toast, ToastId, UpgradeModalStep, UserId,
 };
 
 /// All messages that can be dispatched to the TEA update loop.
@@ -37,6 +37,20 @@ pub enum Msg {
     NavigateToDb(DbId),
     /// Navigate to the "New Database" form.
     NavigateToNewDb,
+    /// `GET /projects/:id` (or a PATCH response): upsert the database's server-side detail.
+    DatabaseLoaded(Database),
+    /// `GET /metrics/summary`: replace the per-database dashboard figures.
+    SetMetricsSummary(Vec<(DbId, MetricsSummaryRow)>),
+    /// `GET /projects/:id/metrics`: replace one database's hourly metrics.
+    SetDbMetrics(DbId, DbMetrics),
+    /// `GET /projects/:id/connection`: replace one database's masked connection.
+    SetConnection(DbId, Connection),
+    /// `PUT /projects/:id/connection` returned 2xx: the database now runs in this mode.
+    ConnectionSaved(DbId, DbBackendMode),
+    /// A one-time secret arrived: show it in the reveal modal.
+    SecretRevealed(RevealedSecret),
+    /// The reveal modal was closed: forget the secret.
+    CloseSecret,
 
     // ── US-003: Database Management ────────────────────────────────────────
     /// Append a newly created database.

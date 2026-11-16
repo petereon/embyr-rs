@@ -5,11 +5,13 @@
 //!   - Deterministic: same (model, msg) → same new model state
 //!   - Exhaustive: all Msg variants handled (enforced by compiler)
 
+use std::collections::HashMap;
+
 use uuid::Uuid;
 
 use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
-    AppModel, DbPatch, DbStatus, Member, Role, Section, Toast, ToastId, ToastLevel,
+    AppModel, Database, DbPatch, DbStatus, Member, MetricsWindow, Role, Section, Toast, ToastId, ToastLevel,
 };
 use crate::msg::{Effect, Msg};
 
@@ -61,12 +63,41 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
 
         // ── US-002: Dashboard ──────────────────────────────────────────────
         Msg::SetDatabases(dbs) => {
+            // The list response has no retention; keep what the detail view already loaded.
+            let retention: HashMap<_, _> = model
+                .databases
+                .iter()
+                .filter_map(|db| db.log_retention.clone().map(|r| (db.id.clone(), r)))
+                .collect();
             model.databases = dbs
                 .into_iter()
-                .filter(|db| db.status != crate::model::DbStatus::Deleted)
+                .filter(|db| db.status != DbStatus::Deleted)
+                .map(|mut db| {
+                    db.log_retention = db.log_retention.or_else(|| retention.get(&db.id).cloned());
+                    db
+                })
                 .collect();
         }
         Msg::NavigateToDb(_) | Msg::NavigateToNewDb => {}
+        Msg::DatabaseLoaded(db) => match model.databases.iter_mut().find(|d| d.id == db.id) {
+            Some(existing) => *existing = Database { usage: existing.usage.clone(), ..db },
+            None => model.databases.push(db),
+        },
+        Msg::SetMetricsSummary(rows) => model.metrics_summary = rows.into_iter().collect(),
+        Msg::SetDbMetrics(id, metrics) => {
+            model.db_metrics.insert(id, metrics);
+        }
+        Msg::SetConnection(id, connection) => {
+            model.connections.insert(id, connection);
+        }
+        Msg::ConnectionSaved(id, mode) => {
+            model.connection_saves += 1;
+            if let Some(db) = model.databases.iter_mut().find(|db| db.id == id) {
+                db.backend_mode = mode;
+            }
+        }
+        Msg::SecretRevealed(secret) => model.revealed_secret = Some(secret),
+        Msg::CloseSecret => model.revealed_secret = None,
 
         // ── US-003: Database Management ────────────────────────────────────
         Msg::DatabaseCreated(db) => {
@@ -206,6 +237,7 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
         // ── Navigation ─────────────────────────────────────────────────────────
         Msg::NavigateTo(section) => {
             model.nav.section = section;
+            model.revealed_secret = None;
             effects.extend(section_loads(model));
         }
 
@@ -245,17 +277,26 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
     effects
 }
 
-/// Mark `call` in flight and request it. A call of the same kind already in flight is not repeated.
+/// Mark `call` in flight and request it. A call of the same kind already in flight is not repeated,
+/// except per-database reads (`ApiCall::repeatable`).
 fn begin(model: &mut AppModel, call: ApiCall) -> Option<Effect> {
-    model.pending.insert(call.kind()).then_some(Effect::Http(call))
+    let first = model.pending.insert(call.kind());
+    (first || call.repeatable()).then_some(Effect::Http(call))
 }
 
 /// The loads a section needs when it opens.
-fn section_loads(model: &mut AppModel) -> Option<Effect> {
-    match model.nav.section {
-        Section::Dashboard | Section::Databases => begin(model, ApiCall::LoadProjects),
-        _ => None,
-    }
+fn section_loads(model: &mut AppModel) -> Vec<Effect> {
+    let calls = match model.nav.section.clone() {
+        Section::Dashboard => vec![ApiCall::LoadProjects, ApiCall::LoadMetricsSummary],
+        Section::Databases => vec![ApiCall::LoadProjects],
+        Section::DbDetail(id) => vec![
+            ApiCall::LoadProject(id.clone()),
+            ApiCall::LoadDbMetrics { id: id.clone(), window: MetricsWindow::default() },
+            ApiCall::LoadConnection(id),
+        ],
+        _ => vec![],
+    };
+    calls.into_iter().filter_map(|call| begin(model, call)).collect()
 }
 
 fn api_failed(model: &mut AppModel, call: CallKind, error: ApiError) {

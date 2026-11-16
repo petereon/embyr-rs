@@ -1,14 +1,16 @@
-//! DashboardView — database counts and one card per real database (`GET /projects`).
+//! DashboardView — KPI row and one card per real database (`GET /projects` + `GET /metrics/summary`).
 //!
-//! Latency, throughput and sparklines return with `hourly-metrics-rollup` (slice 06); until then they
-//! are absent rather than mocked. "New database" returns with slice 05.
+//! Figures are the server's hourly-metrics rollup (ADR-084); a percentile without samples is "—"
+//! (AC-AUW-30). "New database" returns with slice 05.
 
 #[cfg(feature = "csr")]
-use crate::api::{ApiCall, CallKind};
+use crate::api::CallKind;
 #[cfg(feature = "csr")]
 use crate::components::Icon;
 #[cfg(feature = "csr")]
-use crate::model::{AppModel, DbStatus, Section};
+use crate::data::fmt_num;
+#[cfg(feature = "csr")]
+use crate::model::{latency_label, AppModel, DbStatus, Section};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -24,7 +26,15 @@ pub fn DashboardView() -> impl IntoView {
     let db_count = move || model.with(|m| m.databases.len());
     let active_count =
         move || model.with(|m| m.databases.iter().filter(|d| d.status == DbStatus::Active).count());
-    let loading = move || model.with(|m| m.pending.contains(&CallKind::Projects));
+    let loading = move || {
+        model.with(|m| {
+            m.pending.contains(&CallKind::Projects) || m.pending.contains(&CallKind::MetricsSummary)
+        })
+    };
+    let totals = move || model.with(|m| m.summary_totals());
+    let reads = move || totals().map(|t| fmt_num(t.reads_today)).unwrap_or_else(|| "—".into());
+    let writes = move || totals().map(|t| fmt_num(t.writes_today)).unwrap_or_else(|| "—".into());
+    let avg_p95 = move || latency_label(totals().and_then(|t| t.avg_p95_read_ms), false);
     let account_name =
         move || model.with(|m| m.current_user.as_ref().map(|u| u.account_name.clone()).unwrap_or_default());
 
@@ -42,7 +52,7 @@ pub fn DashboardView() -> impl IntoView {
                     <button
                         class="btn btn-ghost btn-sm"
                         disabled=loading
-                        on:click=move |_| dispatch.run(Msg::Request(ApiCall::LoadProjects))
+                        on:click=move |_| dispatch.run(Msg::NavigateTo(Section::Dashboard))
                     >
                         <Icon name="refresh" size=14/>"Refresh"
                     </button>
@@ -50,7 +60,7 @@ pub fn DashboardView() -> impl IntoView {
             </div>
 
             // KPI row
-            <div class="grid" style="grid-template-columns:repeat(2,1fr);margin-bottom:28px">
+            <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:28px">
                 <div class="kpi">
                     <div class="kpi-label"><Icon name="database" size=14/>"Databases"</div>
                     <div class="kpi-value">{db_count}</div>
@@ -58,6 +68,15 @@ pub fn DashboardView() -> impl IntoView {
                 <div class="kpi">
                     <div class="kpi-label"><Icon name="activity" size=14/>"Active"</div>
                     <div class="kpi-value">{active_count}</div>
+                </div>
+                <div class="kpi">
+                    <div class="kpi-label"><Icon name="zap" size=14/>"Reads / writes today"</div>
+                    <div class="kpi-value">{reads}<span class="unit" style="font-size:12px;margin-left:5px">"/ "{writes}</span></div>
+                </div>
+                <div class="kpi">
+                    <div class="kpi-label"><Icon name="gauge" size=14/>"Avg P95 read"</div>
+                    <div class="kpi-value">{avg_p95}<span class="unit">"ms"</span></div>
+                    <div class="kpi-foot">"last 24 h"</div>
                 </div>
             </div>
 
@@ -80,6 +99,17 @@ pub fn DashboardView() -> impl IntoView {
                             .created_at
                             .map(|d| d.format("%Y-%m-%d").to_string())
                             .unwrap_or_else(|| "—".to_string());
+                        let summary_id = db.id.clone();
+                        let figures = move || {
+                            model.with(|m| m.metrics_summary.get(&summary_id).cloned()).map(|row| {
+                                format!(
+                                    "{} reads · {} writes · P95 {} ms",
+                                    fmt_num(row.reads_today),
+                                    fmt_num(row.writes_today),
+                                    latency_label(row.p95_read_ms, false),
+                                )
+                            })
+                        };
                         view! {
                             <button class="card fade-in db-card"
                                 style="text-align:left;padding:16px 18px;display:flex;flex-direction:column;gap:10px;cursor:pointer"
@@ -98,7 +128,10 @@ pub fn DashboardView() -> impl IntoView {
                                     </div>
                                     <span class=status_cls><span class="dot"/>{status_txt}</span>
                                 </div>
-                                <div style="font-size:11.5px;color:var(--text-2)">"Created "{created}</div>
+                                <div style="font-size:12px;color:var(--text-2)">
+                                    {move || figures().unwrap_or_else(|| "—".to_string())}
+                                </div>
+                                <div style="font-size:11.5px;color:var(--text-3)">"Created "{created}</div>
                             </button>
                         }
                     }

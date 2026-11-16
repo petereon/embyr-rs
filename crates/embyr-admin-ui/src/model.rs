@@ -104,6 +104,52 @@ pub enum LogRetention {
     OneDay,
     SevenDays,
     ThirtyDays,
+    /// Any other server-side value (G-27): rendered as "N days", never offered in the selector.
+    Days(u32),
+}
+
+impl LogRetention {
+    pub fn days(&self) -> u32 {
+        match self {
+            LogRetention::OneDay => 1,
+            LogRetention::SevenDays => 7,
+            LogRetention::ThirtyDays => 30,
+            LogRetention::Days(n) => *n,
+        }
+    }
+
+    pub fn from_days(days: u32) -> Self {
+        match days {
+            1 => LogRetention::OneDay,
+            7 => LogRetention::SevenDays,
+            30 => LogRetention::ThirtyDays,
+            n => LogRetention::Days(n),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self.days() {
+            1 => "1 day".to_string(),
+            n => format!("{n} days"),
+        }
+    }
+}
+
+/// Hourly-metrics window (`?window=`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MetricsWindow {
+    #[default]
+    Day,
+    Week,
+}
+
+impl MetricsWindow {
+    pub fn api_value(&self) -> &'static str {
+        match self {
+            MetricsWindow::Day => "24h",
+            MetricsWindow::Week => "7d",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -210,6 +256,120 @@ pub struct ProjectApiKeyInfo {
     pub rotated_at: Option<DateTime<Utc>>,
     /// `None` = no previous key is still accepted.
     pub previous_expires_at: Option<DateTime<Utc>>,
+}
+
+/// One-time plaintext secret shown in the reveal modal. `Debug` redacts it; `update` drops it when
+/// the modal closes, on navigation, sign-out and session expiry (AC-AUW-20).
+#[derive(Clone, PartialEq, Eq)]
+pub struct RevealedSecret {
+    pub db: DbId,
+    pub secret: String,
+}
+
+impl std::fmt::Debug for RevealedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevealedSecret")
+            .field("db", &self.db)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Percentiles of one op class. `None` (server `null`) means no samples: shown as "—", never 0 ms (AC-AUW-30).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LatencyStats {
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub p99_ms: Option<f64>,
+    pub samples: u64,
+    /// A percentile fell in the overflow bucket: reported values are lower bounds.
+    pub saturated: bool,
+}
+
+/// How a percentile is shown: "—" without samples, ">5000" when it is only a lower bound.
+pub fn latency_label(value: Option<f64>, saturated: bool) -> String {
+    match value {
+        None => "—".to_string(),
+        Some(v) if saturated && v >= 5000.0 => ">5000".to_string(),
+        Some(v) if v.fract() == 0.0 => format!("{v:.0}"),
+        Some(v) => format!("{v:.1}"),
+    }
+}
+
+/// One hour of the activity series.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeriesPoint {
+    pub hour: DateTime<Utc>,
+    pub reads: u64,
+    pub writes: u64,
+    pub deletes: u64,
+    pub errors: u64,
+}
+
+/// `GET /projects/:id/metrics` for one database.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DbMetrics {
+    pub window: MetricsWindow,
+    pub reads_today: u64,
+    pub writes_today: u64,
+    pub deletes_today: u64,
+    pub read_latency: LatencyStats,
+    pub write_latency: LatencyStats,
+    pub series: Vec<SeriesPoint>,
+}
+
+/// One entry of `GET /metrics/summary`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MetricsSummaryRow {
+    pub reads_today: u64,
+    pub writes_today: u64,
+    pub deletes_today: u64,
+    pub p95_read_ms: Option<f64>,
+    pub p95_write_ms: Option<f64>,
+}
+
+/// Masked connection view: never credentials (ADR-083).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConnectionSummary {
+    Dsn { host: String, port: u16, database: Option<String>, tls: bool },
+    Agent { endpoint: String, cert_expires_at: Option<DateTime<Utc>> },
+    /// Secret-manager mode: the secret's name/ARN.
+    SecretRef(String),
+    /// The server holds the secret but cannot summarise it (legacy encryption or unreadable).
+    NotReadable,
+}
+
+impl ConnectionSummary {
+    /// One-line, credential-free description for the overview and connections views.
+    pub fn describe(&self) -> String {
+        match self {
+            ConnectionSummary::Dsn { host, port, database, tls } => {
+                let target = format!("{host}:{port}/{}", database.as_deref().unwrap_or(""));
+                if *tls { target } else { format!("{target} (TLS off)") }
+            }
+            ConnectionSummary::Agent { endpoint, cert_expires_at } => match cert_expires_at {
+                Some(t) => format!("{endpoint} (client certificate expires {})", t.format("%Y-%m-%d")),
+                None => endpoint.clone(),
+            },
+            ConnectionSummary::SecretRef(reference) => reference.clone(),
+            ConnectionSummary::NotReadable => "stored encrypted".to_string(),
+        }
+    }
+}
+
+/// Account-wide figures for the dashboard KPI row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SummaryTotals {
+    pub reads_today: u64,
+    pub writes_today: u64,
+    /// Mean of the databases' last-24 h read p95; `None` when no database has samples.
+    pub avg_p95_read_ms: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Connection {
+    pub mode: DbBackendMode,
+    pub summary: ConnectionSummary,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -403,6 +563,16 @@ pub struct AppModel {
     pub members: Vec<Member>,
     /// Project API key rotation metadata keyed by database id.
     pub api_key_info: HashMap<DbId, ProjectApiKeyInfo>,
+    /// Hourly metrics per database (`GET /projects/:id/metrics`).
+    pub db_metrics: HashMap<DbId, DbMetrics>,
+    /// Dashboard summary per database (`GET /metrics/summary`).
+    pub metrics_summary: HashMap<DbId, MetricsSummaryRow>,
+    /// Masked connection per database (`GET /projects/:id/connection`).
+    pub connections: HashMap<DbId, Connection>,
+    /// Bumped on every server-confirmed connection save; views close their edit form on change.
+    pub connection_saves: u32,
+    /// One-time plaintext secret for the reveal modal; cleared on close/navigation/sign-out.
+    pub revealed_secret: Option<RevealedSecret>,
     /// Service accounts.
     pub service_accounts: Vec<ServiceAccount>,
     /// Account-level admin API keys.
@@ -451,6 +621,11 @@ impl AppModel {
             databases: mock::databases(),
             members: mock::members(),
             api_key_info: std::collections::HashMap::new(),
+            db_metrics: HashMap::new(),
+            metrics_summary: HashMap::new(),
+            connections: HashMap::new(),
+            connection_saves: 0,
+            revealed_secret: None,
             service_accounts: mock::service_accounts(),
             admin_keys: mock::admin_keys(),
             oidc_providers: mock::oidc_providers(),
@@ -480,6 +655,28 @@ impl AppModel {
             upgrade_modal_open: false,
             upgrade_modal_step: UpgradeModalStep::default(),
         }
+    }
+}
+
+impl AppModel {
+    /// Owner and Admin may change databases; Viewers see disabled controls (AC-AUW-21).
+    /// The server enforces the same rule.
+    pub fn can_manage_databases(&self) -> bool {
+        self.current_user.as_ref().is_some_and(|u| u.role != Role::Viewer)
+    }
+
+    /// Dashboard totals from `GET /metrics/summary`; `None` until it has loaded.
+    pub fn summary_totals(&self) -> Option<SummaryTotals> {
+        if self.metrics_summary.is_empty() {
+            return None;
+        }
+        let rows = self.metrics_summary.values();
+        let p95s: Vec<f64> = rows.clone().filter_map(|r| r.p95_read_ms).collect();
+        Some(SummaryTotals {
+            reads_today: rows.clone().map(|r| r.reads_today).sum(),
+            writes_today: rows.map(|r| r.writes_today).sum(),
+            avg_p95_read_ms: (!p95s.is_empty()).then(|| p95s.iter().sum::<f64>() / p95s.len() as f64),
+        })
     }
 }
 

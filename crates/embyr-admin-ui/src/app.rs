@@ -42,6 +42,8 @@ mod inner {
         init.set_method(match request.method {
             Method::Get => "GET",
             Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Patch => "PATCH",
         });
         if let Some(body) = &request.body {
             let headers = web_sys::Headers::new().map_err(js)?;
