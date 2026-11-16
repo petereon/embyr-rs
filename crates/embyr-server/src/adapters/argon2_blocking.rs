@@ -21,6 +21,16 @@ pub async fn verify_api_key(api_key: &[u8], phc_hash: &str) -> Result<bool, Core
     run(move || argon2::verify_api_key(&key, &hash)).await
 }
 
+/// ADR-085: current key, else the still-live previous key (see `argon2::verify_project_key`).
+pub async fn verify_project_key(
+    api_key: &[u8],
+    current: &str,
+    previous_live: Option<&str>,
+) -> Result<bool, CoreError> {
+    let (key, cur, prev) = (api_key.to_vec(), current.to_owned(), previous_live.map(str::to_owned));
+    run(move || Ok(argon2::verify_project_key(&key, &cur, prev.as_deref()))).await
+}
+
 pub async fn verify_password(password: &[u8], phc_hash: &str) -> Result<bool, CoreError> {
     let (pw, hash) = (password.to_vec(), phc_hash.to_owned());
     run(move || argon2::verify_password(&pw, &hash)).await

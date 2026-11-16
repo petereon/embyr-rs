@@ -109,7 +109,12 @@ pub async fn sign_in_anonymously(
         }
     };
 
-    let verified = match argon2::verify_api_key(api_key.as_bytes(), &auth_row.api_key_hash_current).await
+    let verified = match argon2::verify_project_key(
+        api_key.as_bytes(),
+        &auth_row.api_key_hash_current,
+        auth_row.api_key_hash_previous.as_deref(),
+    )
+    .await
     {
         Ok(v) => v,
         Err(e) => {
