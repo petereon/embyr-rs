@@ -152,7 +152,9 @@ async fn ratelimit_remaining_decrements_per_request() {
 /// @driving_port @real-io @US-14 @AC-14-03
 #[tokio::test]
 async fn rate_limited_response_includes_retry_after_ms() {
-    let ctx = DrlTestContext::new(10.0).await;
+    // 2 rps: an empty bucket needs 500ms to earn a token, so a slow CI
+    // round-trip can't refill it before the request (10 rps gave only 100ms).
+    let ctx = DrlTestContext::new(2.0).await;
     ctx.insert_project_with_bucket("proj-retry", "key-rt", 0.0).await;
     let (addr, _server) = start_distributed_grpc_server(&ctx).await;
     let ctx = ctx.with_grpc_addr(addr);
@@ -176,5 +178,5 @@ async fn rate_limited_response_includes_retry_after_ms() {
         .parse()
         .expect("integer retry-after-ms");
     assert!(retry_ms > 0, "retry-after-ms must be positive");
-    assert!(retry_ms <= 2000, "retry-after-ms {retry_ms} should not exceed 2s for a 10 rps bucket");
+    assert!(retry_ms <= 2000, "retry-after-ms {retry_ms} should not exceed 2s for a 2 rps bucket");
 }

@@ -74,6 +74,15 @@ pub fn verify_api_key(api_key: &[u8], phc_hash: &str) -> Result<bool, CoreError>
     Ok(gate().run(|| argon2_instance().verify_password(api_key, &parsed)).is_ok())
 }
 
+/// api-key-rotation (ADR-085): the one "current, else still-live previous"
+/// rule every verify site shares. `previous_live` is already filtered by the
+/// system DB (`now()` in SQL), so this stays pure. A malformed stored hash
+/// counts as a mismatch.
+pub fn verify_project_key(api_key: &[u8], current: &str, previous_live: Option<&str>) -> bool {
+    verify_api_key(api_key, current).unwrap_or(false)
+        || previous_live.is_some_and(|p| verify_api_key(api_key, p).unwrap_or(false))
+}
+
 /// client-auth-hosted-identity (ADR-036 Decision 8): end-user password
 /// hashing — a conceptually distinct credential class from an API key, even
 /// though the Argon2id tuning is identical. Body is byte-for-byte the same
@@ -143,6 +152,37 @@ mod tests {
         assert_ne!(h1, h2, "random salts must differ");
         assert!(verify_api_key(key, &h1).unwrap());
         assert!(verify_api_key(key, &h2).unwrap());
+    }
+
+    // ── verify_project_key (api-key-rotation, ADR-085) ──
+
+    mod project_key {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            // Argon2id is ~64 MiB per hash; keep the case count small.
+            #![proptest_config(ProptestConfig::with_cases(4))]
+
+            /// Accepts exactly the current key and the live previous key; nothing else.
+            #[test]
+            fn accepts_current_and_live_previous_only(
+                k1 in "[a-z0-9]{8,24}", k0 in "[A-Z0-9]{8,24}", other in "[+/=]{8,24}",
+            ) {
+                let (cur, prev) = (hash_api_key(k1.as_bytes()).unwrap(), hash_api_key(k0.as_bytes()).unwrap());
+                prop_assert!(verify_project_key(k1.as_bytes(), &cur, Some(&prev)));
+                prop_assert!(verify_project_key(k0.as_bytes(), &cur, Some(&prev)));
+                prop_assert!(!verify_project_key(k0.as_bytes(), &cur, None), "dead previous must not verify");
+                prop_assert!(!verify_project_key(other.as_bytes(), &cur, Some(&prev)));
+            }
+        }
+
+        #[test]
+        fn malformed_hash_is_a_mismatch_not_a_panic() {
+            let good = hash_api_key(b"k").unwrap();
+            assert!(!verify_project_key(b"k", "not-a-phc-hash", None));
+            assert!(verify_project_key(b"k", "not-a-phc-hash", Some(&good)));
+        }
     }
 
     // ── hash_password / verify_password (client-auth-hosted-identity, ADR-036 Decision 8) ──

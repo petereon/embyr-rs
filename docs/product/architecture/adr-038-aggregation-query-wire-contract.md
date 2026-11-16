@@ -90,9 +90,8 @@ Field numbers mirror this architect's best available knowledge of the real publi
 
 ### v1 server-side restrictions (not wire-shape — enforced in `grpc/handler.rs`, not the proto)
 
-- `aggregations.len() != 1` → `Status::unimplemented("multiple aggregations per request are not yet supported")`.
-- `Aggregation.Count.up_to` set → `Status::unimplemented("count up_to limiting is not yet supported")`.
-- `alias` empty → server synthesizes `"field_0"` (always index 0, since exactly one aggregation is permitted in v1).
+- *(Superseded, go-live P4)* 1-5 aggregations per request are computed in one SQL statement (0 or >5 → `invalid_argument`); `Count.up_to` is supported (result = `min(count, up_to)`; `up_to <= 0` → `invalid_argument`). SUM/AVG remain rejected for `backend_mode=agent` (the agent proto carries only `count`).
+- `alias` empty → server synthesizes `field_<n>` with `n` counting only the generated aliases, from 1 (Firestore semantics; a name already taken by an explicit alias is skipped). Duplicate explicit aliases → `invalid_argument`.
 - Response stream carries exactly one `RunAggregationQueryResponse` message, then closes (no `done`-marker continuation message — unlike `RunQuery`, `RunAggregationQueryResponse` carries no `continuation_selector` in the real proto; a second, terminal message is neither required nor present).
 - `read_time` is left unset in v1 — mirrors `handle_run_query`'s own existing, pre-feature behavior (`RunQueryResponse.read_time` is never populated for document results either; confirmed by reading the current handler). Named explicitly so this is not mistaken for an oversight introduced by this feature.
 - `transaction`/`new_transaction`/`read_time` consistency-selector fields are present on the wire for schema parity with `RunQueryRequest`, but v1's handler never threads them to the adapter (`transaction_id` is always `None`) — mirrors `handle_run_query`'s own existing precedent (`adapter.run_query(&collection, &domain_query, None)` is already unconditionally `None` today despite the proto supporting `transaction`/`new_transaction`).
