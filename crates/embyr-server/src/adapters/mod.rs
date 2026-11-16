@@ -6,11 +6,15 @@ pub mod cap_status_cache;
 // one-shot build-task orchestration for real composite-index provisioning.
 pub mod composite_index_builder;
 pub mod composite_index_ddl;
+// ADR-083: single server-held encrypted store for connection secrets.
+pub mod connection_secrets;
 pub mod credential_cache;
 // composite-index-real-creation (ADR-072 Decision C): shared DSN-resolution
 // for reaching a customer DB without a live api_key, extracted from
 // sweepers/transaction_sweeper.rs.
 pub mod customer_db_connect;
+// ADR-083 + audit #65/X10: customer-DSN host/TLS policy.
+pub mod dsn_policy;
 pub mod email;
 pub mod encryption;
 pub mod gcp_secret_fetcher;

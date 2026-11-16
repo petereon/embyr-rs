@@ -42,10 +42,14 @@ async fn start_postgres() -> (ContainerAsync<Postgres>, String) {
 /// AC-REST-RL-01: a REST call to a project whose token bucket is exhausted
 /// is rejected with 429 BEFORE any handler-specific logic runs.
 ///
-/// No `?key=` query param is supplied and no project row exists — the
-/// handler's own logic would normally return 401 `INVALID_API_KEY` for that
-/// shape. Getting 429 instead (SPEC.md's documented REST rate-limit shape)
-/// proves the rate-limit gate runs strictly before the handler.
+/// MODIFIED for security finding X4: the gate now charges only requests whose
+/// `?key=` is already verified (held by the credential cache) — it used to
+/// charge every request, even key-less ones for a project that does not
+/// exist, which let anyone drain a known project's bucket. So this test now
+/// provisions a real project, sends one warm-up call with its real key (not
+/// charged: the key is not yet cached; the handler verifies it and caches
+/// it), and then proves the NEXT call with that key is rejected with 429
+/// before the handler runs (no body would otherwise be accepted either way).
 #[tokio::test]
 #[serial]
 async fn rest_call_rejected_with_429_when_bucket_exhausted() {
@@ -53,15 +57,42 @@ async fn rest_call_rejected_with_429_when_bucket_exhausted() {
     let system_db = Arc::new(SystemDb::new(&sys_url).await.unwrap());
     system_db.migrate().await.unwrap();
 
+    let project_id = "rest-rl-exhausted-project";
+    let api_key = "rest-rl-exhausted-key";
+    let api_key_hash = embyr_core::auth::argon2::hash_api_key(api_key.as_bytes()).unwrap();
+    let encrypted_dsn = embyr_core::auth::ecies::encrypt(
+        &embyr_core::auth::ecies::derive_public_key(api_key.as_bytes()),
+        sys_url.as_bytes(),
+    )
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO projects \
+         (id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
+         VALUES ($1, 'active', 'direct_pg', $2, $3)",
+    )
+    .bind(project_id)
+    .bind(&api_key_hash)
+    .bind(&encrypted_dsn)
+    .execute(system_db.pool())
+    .await
+    .unwrap();
+
     // capacity=0.0 -> the in-process bucket is permanently empty (tokens are
     // capped at capacity on every refill), so every check() rejects.
     let server = start_test_server_with_rate_limit(system_db, 0.0, 0.0, true).await;
 
     let client = reqwest::Client::new();
     let url = format!(
-        "http://{}/v1/projects/rest-rl-exhausted-project/accounts:signUp",
+        "http://{}/v1/projects/{project_id}/accounts:signUp?key={api_key}",
         server.rest_addr
     );
+    let warm_up = client
+        .post(&url)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("warm-up POST accounts:signUp");
+    assert_ne!(warm_up.status().as_u16(), 429, "an unverified key must not spend tokens");
     let response = client
         .post(&url)
         .json(&serde_json::json!({}))

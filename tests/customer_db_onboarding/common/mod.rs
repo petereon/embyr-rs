@@ -362,6 +362,8 @@ impl ServerProcess {
         let bin = Self::embyr_server_binary();
         let mut cmd = Command::new(&bin);
         cmd.env("DATABASE_URL", db_url)
+            // audit #65 / X10: these tests provision Testcontainers DSNs (loopback, no TLS).
+            .env("EMBYR_ALLOW_PRIVATE_DSN_HOSTS", "true")
             .env("GRPC_PORT", grpc_port.to_string())
             .env("REST_PORT", rest_port.to_string())
             .env("ADMIN_PORT", admin_port.to_string())

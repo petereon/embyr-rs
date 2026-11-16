@@ -34,12 +34,10 @@ use axum::{
     Json,
 };
 use crate::adapters::argon2_blocking as argon2;
-use embyr_core::{
-    auth::ecies,
-    client_identity,
-};
+use embyr_core::client_identity;
 use serde::{Deserialize, Serialize};
 
+use crate::adapters::encryption::decrypt_hosted_signing_seed;
 use crate::adapters::project_auth::{resolve_customer_db_adapter, ProjectAuthError};
 use crate::rest::sign_up::{
     hosted_identity_not_enabled, invalid_api_key, HostedIdentityState, SignUpQuery,
@@ -100,6 +98,7 @@ pub async fn sign_in_with_password(
         &api_key,
         state.tenant_db_max_connections,
         state.tenant_db_acquire_timeout,
+        &state.server_keys,
     )
     .await
     {
@@ -173,10 +172,16 @@ pub async fn sign_in_with_password(
 
     // Decrypt the project's embyr-owned signing key seed and mint a token —
     // identical call shape to `sign_up.rs`.
-    let seed_bytes = match ecies::decrypt(api_key.as_bytes(), &hosted_key_row.private_key_enc) {
+    let seed_bytes = match decrypt_hosted_signing_seed(
+        &state.encryption_key,
+        state.encryption_key_previous.as_ref(),
+        &api_key,
+        hosted_key_row.private_key_srv_enc.as_deref(),
+        hosted_key_row.private_key_enc.as_deref(),
+    ) {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!("sign_in_with_password: ecies decrypt signing key failed: {e}");
+            tracing::error!("sign_in_with_password: decrypt signing key failed: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };

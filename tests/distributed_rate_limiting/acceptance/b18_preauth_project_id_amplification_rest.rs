@@ -17,7 +17,8 @@
 //!     rows created, per action, with the SAME response shape that action
 //!     already produces today (only earlier).
 //!   AC-PDA-02: known, provisioned project_id -> unaffected (regression).
-//!   AC-PDA-05: well-formed-but-unprovisioned project_id -> residual NOT closed.
+//!   AC-PDA-05: well-formed-but-unprovisioned project_id -> residual now CLOSED
+//!     by finding X4 (REST charges only requests whose `?key=` is cached).
 //!
 //! Driving port: REST :8081 — `POST /v1/projects/{project_id}/accounts:<action>`.
 //! Assertion level: real Postgres container (testcontainers-rs) + in-process
@@ -175,8 +176,10 @@ async fn garbage_project_id_sign_up_returns_invalid_api_key_with_no_db_row() {
 ///
 /// AC-PDA-02
 ///
-/// Already true both before AND after this fix (the guard is a pass-through
-/// no-op for any well-formed project_id) — included as a regression guard.
+/// MODIFIED for security finding X4: the REST gate charges only requests whose
+/// `?key=` is already held by the credential cache (proof of prior
+/// authentication), so the request now carries the key the warm-up cached —
+/// a key-less request would (correctly) not spend a token.
 ///
 /// @driving_port @real-io @US-01 @AC-PDA-02
 #[tokio::test]
@@ -198,7 +201,10 @@ async fn known_provisioned_project_id_rest_request_is_unaffected_by_the_guard() 
         .expect("known-rest-project bucket must already exist");
 
     let response = client
-        .post(accounts_url(server.rest_addr, "known-rest-project", "signUp"))
+        .post(format!(
+            "{}?key=known-rest-key",
+            accounts_url(server.rest_addr, "known-rest-project", "signUp")
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -228,18 +234,20 @@ async fn known_provisioned_project_id_rest_request_is_unaffected_by_the_guard() 
 
 // ─── AC-PDA-05: well-formed-but-unprovisioned residual, REST side ──────────
 
-/// A syntactically valid but never-provisioned project_id still reaches the
-/// full 3-round-trip `check_pg` path via REST — this residual (OQ-PDA-02) is
-/// deliberately NOT closed by this feature. Guards against DELIVER
-/// accidentally over-implementing a closure of this residual on the REST side.
+/// A syntactically valid but never-provisioned project_id no longer reaches
+/// `RateLimiter::check()` via REST.
 ///
-/// AC-PDA-05
+/// AC-PDA-05 — EXPECTATION INVERTED by security finding X4 (was: "still
+/// reaches the 3-round-trip check_pg path", the accepted residual OQ-PDA-02;
+/// mirrors the gRPC sibling b17). `rest_rate_limit_middleware` now charges a
+/// request only when its `?key=` is already in the credential cache, and an
+/// unprovisioned project can never have a cached key, so the request is
+/// passed through uncharged: no limiter call, no bucket row. Kept (not
+/// deleted) as the regression guard for that ordering.
 ///
-/// Already true both before AND after this fix.
-///
-/// @driving_port @real-io @US-01 @AC-PDA-05
+/// @driving_port @real-io @US-01 @AC-PDA-05 @X4
 #[tokio::test]
-async fn well_formed_but_unprovisioned_project_id_still_reaches_shared_database_via_rest() {
+async fn well_formed_but_unprovisioned_project_id_never_reaches_shared_database_via_rest() {
     let ctx = DrlTestContext::new(10.0).await;
     let (_addr, server) = start_distributed_grpc_server(&ctx).await;
     let client = reqwest::Client::new();
@@ -254,17 +262,20 @@ async fn well_formed_but_unprovisioned_project_id_still_reaches_shared_database_
         .await
         .expect("POST accounts:signUp");
 
-    // No ?key= supplied -> sign_up's own first check fires regardless of
-    // project provisioning state -> 401 INVALID_API_KEY, unaffected by
-    // whether the guard exists or not (same shape either way).
+    // No ?key= supplied -> sign_up's own first check fires -> 401
+    // INVALID_API_KEY, independent of the limiter.
     assert_eq!(response.status().as_u16(), 401);
 
     let after = unconfirmed_allowed_total(&admin_client, server.admin_addr).await;
     assert_eq!(
-        after,
-        before + 1.0,
-        "AC-PDA-05: the residual path must still invoke RateLimiter::check() via \
-         REST (before={before}, after={after})"
+        after, before,
+        "AC-PDA-05/X4: an unprovisioned project_id has no cached key, so it must \
+         never invoke RateLimiter::check() via REST (before={before}, after={after})"
+    );
+    assert_eq!(
+        ctx.rate_bucket_row_count("acme-corp-2026-rest").await,
+        0,
+        "AC-PDA-05/X4: no rate_buckets row may be created for an unprovisioned project"
     );
     let _ = &ctx; // held for container lifetime only
 }

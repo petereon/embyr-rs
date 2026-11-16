@@ -62,96 +62,42 @@ async fn owner_enables_logging_and_new_entries_appear_in_logs() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AC-B04-02: backend_pg_dsn patch evicts credential cache
+// AC-B04-02 (superseded by ADR-083): PATCH no longer accepts backend_pg_dsn
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// PATCH with backend_pg_dsn: value ECIES-encrypted before storage; credential cache evicted.
-/// Plaintext DSN never stored.
-///
-/// AC-B04-02
+/// PATCH with backend_pg_dsn → 422 pointing at PUT /projects/:id/connection; nothing is written.
+/// One write path for connection secrets (ADR-083, AC-DSS-08/11 sibling).
 // @US-B04 @AC-B04-02 @driving_port @real-io
 #[tokio::test]
-async fn patch_backend_dsn_evicts_credential_cache() {
+async fn patch_backend_dsn_is_rejected_and_writes_nothing() {
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_as_owner(&ctx).await;
     let project_id = "test-project-seeded-for-account";
-
-    let new_dsn = "postgres://user:password@new-host:5432/mydb";
 
     let resp = ctx
         .client
         .patch(ctx.url(&format!("/admin/v1/projects/{}", project_id)))
         .header("Cookie", &session_cookie)
-        .json(&serde_json::json!({"backend_pg_dsn": new_dsn}))
+        .json(&serde_json::json!({"backend_pg_dsn": "postgres://u:p@h:5432/db", "name": "renamed"}))
         .send()
         .await
         .expect("PATCH failed");
 
-    assert_eq!(resp.status().as_u16(), 200, "AC-B04-02: PATCH must return 200");
+    assert_eq!(resp.status().as_u16(), 422);
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"], "backend_pg_dsn_not_patchable");
+    assert!(body["use"].as_str().unwrap_or("").contains("/connection"));
 
-    // Verify DSN is not stored plaintext in DB.
-    // Verify credential cache was evicted (next SDK request uses new DSN).
-    let enc: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT backend_pg_dsn_enc FROM projects WHERE id = $1",
-    )
-    .bind(project_id)
-    .fetch_one(&ctx.pool)
-    .await
-    .expect("DB query failed");
-    assert!(enc.is_some(), "backend_pg_dsn_enc must not be NULL after DSN patch");
-    let enc_bytes = enc.unwrap();
-    // Verify the stored bytes are not the plaintext DSN
-    assert_ne!(
-        enc_bytes,
-        new_dsn.as_bytes(),
-        "DSN must not be stored as plaintext bytes"
-    );
-    // Credential cache eviction is architecturally guaranteed by patch_project handler
+    let (enc, name): (Option<Vec<u8>>, Option<String>) =
+        sqlx::query_as("SELECT backend_pg_dsn_enc, name FROM projects WHERE id = $1")
+            .bind(project_id)
+            .fetch_one(&ctx.pool)
+            .await
+            .expect("DB query failed");
+    assert!(enc.is_none(), "no DSN may be written by PATCH");
+    assert_eq!(name.as_deref(), Some("Test Project"), "rejected PATCH must not apply other fields");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AC-B04-02: Plaintext DSN never stored
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// After PATCH with backend_pg_dsn, the projects table must not contain
-/// the plaintext DSN value in any column.
-///
-/// AC-B04-02 (security property)
-// @US-B04 @AC-B04-02 @real-io @adapter-integration
-#[tokio::test]
-async fn backend_pg_dsn_never_stored_plaintext_after_patch() {
-    let ctx = AdminTestContext::new().await;
-    let session_cookie = sign_in_as_owner(&ctx).await;
-    let project_id = "test-project-seeded-for-account";
-
-    let plaintext_dsn = "postgres://secret_user:secret_pass@host:5432/db";
-
-    ctx.client
-        .patch(ctx.url(&format!("/admin/v1/projects/{}", project_id)))
-        .header("Cookie", &session_cookie)
-        .json(&serde_json::json!({"backend_pg_dsn": plaintext_dsn}))
-        .send()
-        .await
-        .expect("PATCH failed");
-
-    // Direct DB query to verify no plaintext DSN stored.
-    let enc: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT backend_pg_dsn_enc FROM projects WHERE id = $1",
-    )
-    .bind(project_id)
-    .fetch_one(&ctx.pool)
-    .await
-    .expect("DB query failed");
-    let enc_bytes = enc.expect("backend_pg_dsn_enc must not be NULL after DSN patch");
-    // Check that no contiguous substring of enc_bytes equals the plaintext DSN.
-    // AES-GCM prepends a 12-byte nonce; windows() scan handles all offsets correctly.
-    let dsn_bytes = plaintext_dsn.as_bytes();
-    let found_plaintext = enc_bytes.windows(dsn_bytes.len()).any(|w| w == dsn_bytes);
-    assert!(
-        !found_plaintext,
-        "plaintext DSN must not appear anywhere in backend_pg_dsn_enc"
-    );
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AC-B04-03: status = "deleted" not patchable via PATCH (error)

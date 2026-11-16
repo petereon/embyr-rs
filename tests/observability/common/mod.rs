@@ -228,6 +228,37 @@ impl ObsTestContext {
     /// The counter `embyr_grpc_requests_total{method="GetDocument", ...}` is
     /// incremented regardless of success or failure.
     pub async fn make_grpc_call(&self, project_id: &str) {
+        self.make_grpc_call_as(project_id, "obs-test-key").await;
+    }
+
+    /// Insert an active `direct_pg` project whose API key is `api_key`, so
+    /// `make_grpc_call_as(project_id, api_key)` authenticates. The DSN points
+    /// at this test's own Postgres: it connects (so the credential is cached
+    /// after the first call) even though no customer schema exists there.
+    pub async fn seed_project_with_key(&self, project_id: &str, api_key: &str) {
+        use embyr_core::auth::{argon2, ecies};
+        let api_key_hash = argon2::hash_api_key(api_key.as_bytes()).expect("hash api key");
+        let encrypted_dsn = ecies::encrypt(
+            &ecies::derive_public_key(api_key.as_bytes()),
+            self.db_url.as_bytes(),
+        )
+        .expect("encrypt dsn");
+        let pool = sqlx::PgPool::connect(&self.db_url).await.expect("connect system db");
+        sqlx::query(
+            "INSERT INTO projects \
+             (id, status, backend_mode, api_key_hash_current, ecies_encrypted_dsn) \
+             VALUES ($1, 'active', 'direct_pg', $2, $3)",
+        )
+        .bind(project_id)
+        .bind(&api_key_hash)
+        .bind(&encrypted_dsn)
+        .execute(&pool)
+        .await
+        .expect("insert project");
+    }
+
+    /// `make_grpc_call` with a caller-chosen API key.
+    pub async fn make_grpc_call_as(&self, project_id: &str, api_key: &str) {
         let channel =
             tonic::transport::Channel::from_shared(format!("http://{}", self.grpc_addr))
                 .expect("valid gRPC channel URI")
@@ -242,10 +273,10 @@ impl ObsTestContext {
             name,
             ..Default::default()
         });
-        // Inject a synthetic API key — counter fires on any outcome including auth errors.
+        // The gRPC request counter fires on any outcome including auth errors.
         req.metadata_mut().insert(
             "authorization",
-            "bearer obs-test-key"
+            format!("bearer {api_key}")
                 .parse()
                 .expect("valid metadata value"),
         );

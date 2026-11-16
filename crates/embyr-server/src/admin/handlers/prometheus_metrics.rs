@@ -28,6 +28,12 @@ pub async fn get_prometheus_metrics(State(state): State<OperatorState>) -> impl 
     metrics::gauge!("embyr_pg_pool_size", "pool" => "system").set(pool.size() as f64);
     metrics::gauge!("embyr_pg_pool_idle", "pool" => "system").set(pool.num_idle() as f64);
 
+    // ADR-083 / AC-DSS-15: contract-migration readiness. Skipped on a failed query so a transient DB
+    // error never reports a false 0.
+    if let Ok(n) = state.system_db.count_unconverted_connection_secrets().await {
+        metrics::gauge!("embyr_projects_unconverted_connection_secrets").set(n as f64);
+    }
+
     let body = state.prometheus_handle.render();
     (
         StatusCode::OK,

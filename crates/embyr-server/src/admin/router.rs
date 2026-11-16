@@ -69,6 +69,7 @@ use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::metrics::get_project_metrics;
+use super::handlers::connection::{get_connection, put_connection};
 use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::prometheus_metrics::get_prometheus_metrics;
 use super::handlers::provision::provision;
@@ -150,6 +151,10 @@ pub fn build_admin_router(
         rate_limit_capacity,
         prometheus_handle,
         stripe_gateway: stripe_gateway.clone(),
+        server_keys: crate::adapters::connection_secrets::ServerKeys {
+            current: encryption_key,
+            previous: encryption_key_previous,
+        },
     };
 
     // Webhook sub-router: no session/operator auth (AC-203-01) — gated by its
@@ -249,6 +254,10 @@ pub fn build_admin_router(
     let session_router = Router::<UserAdminState>::new()
         .route("/admin/v1/projects", get(list_projects))
         .route("/admin/v1/projects/:project_id", patch(patch_project))
+        .route(
+            "/admin/v1/projects/:project_id/connection",
+            get(get_connection).put(put_connection),
+        )
         // client-auth (US-01/US-03/US-04, ADR-025): credential lifecycle.
         // Owner/Admin gate for register/rotate enforced inside the handlers
         // (in-handler role check); verify (debug

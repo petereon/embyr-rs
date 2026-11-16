@@ -9,6 +9,8 @@ pub mod billing_subscription;
 // client-auth (US-01/US-03/US-04, ADR-025): credential register/rotate/verify.
 pub mod client_identity;
 pub mod composite_indexes;
+// ADR-083: GET/PUT /projects/:id/connection.
+pub mod connection;
 pub mod get_project;
 // client-auth-hosted-identity (US-01, ADR-036): admin enablement action.
 pub mod hosted_identity;

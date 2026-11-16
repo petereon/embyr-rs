@@ -33,12 +33,13 @@ use std::sync::Arc;
 
 use super::argon2_blocking as argon2;
 use embyr_core::{
-    auth::{blake3, ecies},
+    auth::blake3,
     domain::project::{CredentialCacheKey, ProjectId},
 };
 
 use crate::adapters::{
     aws_secret_fetcher::AwsSecretFetcher,
+    connection_secrets::{read_secret, spawn_conversion, Secret, ServerKeys},
     credential_cache::{CachedEntry, CredentialCache, SharedBackendAdapter},
     gcp_secret_fetcher::GcpSecretFetcher,
     postgres_backend::PostgresBackendAdapter,
@@ -74,6 +75,7 @@ pub async fn resolve_customer_db_adapter(
     api_key: &str,
     tenant_db_max_connections: u32,
     tenant_db_acquire_timeout: std::time::Duration,
+    server_keys: &ServerKeys,
 ) -> Result<Arc<PostgresBackendAdapter>, ProjectAuthError> {
     let api_key_blake3 = blake3::derive_cache_key(api_key.as_bytes());
     let domain_project_id =
@@ -122,6 +124,7 @@ pub async fn resolve_customer_db_adapter(
         return Err(ProjectAuthError::InvalidApiKey);
     }
 
+    let mut pending_conversion = None;
     let dsn = match row.backend_mode.as_str() {
         "aws_secret" => {
             let arn = row.backend_secret_arn.ok_or_else(|| {
@@ -148,13 +151,16 @@ pub async fn resolve_customer_db_adapter(
                 .map_err(|e| ProjectAuthError::Internal(format!("gcp secret fetch failed: {e}")))?
         }
         "direct_pg" => {
-            let encrypted_dsn = row.ecies_encrypted_dsn.ok_or_else(|| {
-                ProjectAuthError::Internal("project has no stored DSN".into())
-            })?;
-            let dsn_bytes = ecies::decrypt(api_key.as_bytes(), &encrypted_dsn)
-                .map_err(|e| ProjectAuthError::Internal(e.to_string()))?;
-            String::from_utf8(dsn_bytes)
-                .map_err(|_| ProjectAuthError::Internal("DSN is not valid UTF-8".into()))?
+            // ADR-083: server-key store, legacy ECIES fallback, lazy conversion (after connect below).
+            let (dsn, conversion) = read_secret(
+                server_keys,
+                api_key,
+                row.backend_pg_dsn_enc.as_deref(),
+                row.ecies_encrypted_dsn.as_deref(),
+            )
+            .ok_or_else(|| ProjectAuthError::Internal("project has no stored DSN".into()))?;
+            pending_conversion = Some((conversion, row.backend_pg_dsn_enc.clone(), dsn.clone()));
+            dsn
         }
         _ => {
             // "agent" (or any future unrecognized mode): structurally
@@ -170,6 +176,17 @@ pub async fn resolve_customer_db_adapter(
     )
         .await
         .map_err(|e| ProjectAuthError::Internal(e.to_string()))?;
+    if let Some((conversion, old_enc, plaintext)) = pending_conversion {
+        spawn_conversion(
+            system_db.pool().clone(),
+            project_id.to_string(),
+            Secret::Dsn,
+            conversion,
+            old_enc,
+            plaintext,
+            *server_keys,
+        );
+    }
     let concrete = Arc::new(concrete);
     let shared: SharedBackendAdapter = concrete.clone();
     credential_cache
