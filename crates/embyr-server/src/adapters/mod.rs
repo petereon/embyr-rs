@@ -1,3 +1,4 @@
+pub mod argon2_blocking;
 pub mod agent_backend;
 pub mod aws_secret_fetcher;
 pub mod cap_status_cache;
