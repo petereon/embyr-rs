@@ -45,7 +45,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapters::project_auth::{resolve_customer_db_adapter, ProjectAuthError};
 use crate::rest::sign_up::{
-    hosted_identity_not_enabled, invalid_api_key, HostedIdentityState, SignUpQuery,
+    hosted_identity_not_enabled, invalid_api_key, throttle_key, throttled, HostedIdentityState,
+    SignUpQuery,
 };
 
 #[derive(Deserialize)]
@@ -168,6 +169,17 @@ pub async fn send_oob_code(
     let Some(email) = body.email.filter(|e| !e.is_empty()) else {
         return generic_sent_response();
     };
+
+    // Per-account throttle (security finding X5): bounds email bombing.
+    // Keyed on (project, email) before any lookup, so a throttled response is
+    // identical for registered and unregistered emails (AC-18-14 intact).
+    if let Err(retry_after_ms) = state
+        .oob_throttle
+        .check(&throttle_key(&project_id, &email))
+        .await
+    {
+        return throttled(retry_after_ms);
+    }
 
     // AC-18-14: perform the SAME lookup regardless of the eventual outcome,
     // so the registered/unregistered timing stays close -- no early return

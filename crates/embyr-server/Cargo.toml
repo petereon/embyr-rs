@@ -173,6 +173,10 @@ name = "admin_api_v2_security_58_60"
 path = "../../tests/admin_api_v2/acceptance/security_58_60.rs"
 
 [[test]]
+name = "admin_api_v2_x8_trusted_proxy_hops"
+path = "../../tests/admin_api_v2/acceptance/x8_trusted_proxy_hops.rs"
+
+[[test]]
 name = "dsn_single_store_ds01_request_path"
 path = "../../tests/dsn_single_store/acceptance/ds01_request_path.rs"
 
@@ -371,6 +375,10 @@ path = "../../tests/client_auth_hosted_identity/acceptance/hi03_maria_signs_in.r
 [[test]]
 name = "client_auth_hosted_identity_hi04_maria_resets_password"
 path = "../../tests/client_auth_hosted_identity/acceptance/hi04_maria_resets_password.rs"
+
+[[test]]
+name = "client_auth_hosted_identity_hi05_per_account_throttles"
+path = "../../tests/client_auth_hosted_identity/acceptance/hi05_per_account_throttles.rs"
 
 # oauth-providers acceptance tests (Slice 01, ADR-037).
 [[test]]
