@@ -45,8 +45,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use crate::adapters::argon2_blocking as argon2;
 use embyr_core::{
-    auth::{argon2, ecies},
+    auth::ecies,
     client_identity, hosted_identity,
 };
 use serde::{Deserialize, Serialize};
@@ -214,7 +215,7 @@ pub async fn sign_up(
         return failure(StatusCode::BAD_REQUEST, "WEAK_PASSWORD");
     }
 
-    let password_hash = match argon2::hash_password(password.as_bytes()) {
+    let password_hash = match argon2::hash_password(password.as_bytes()).await {
         Ok(h) => h,
         Err(e) => {
             tracing::error!("sign_up: hash_password failed: {e}");

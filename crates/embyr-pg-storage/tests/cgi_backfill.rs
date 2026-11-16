@@ -164,7 +164,15 @@ async fn interrupted_backfill_resumes_without_reprocessing_or_leaving_gaps() {
     let handle = tokio::spawn(async move {
         interrupt_adapter.backfill_collection_id(5, Duration::from_millis(150)).await
     });
-    tokio::time::sleep(Duration::from_millis(220)).await; // allow ~1 batch to land
+    // Wait until the first batch has actually committed (a fixed sleep raced
+    // slow CI runners), then abort: 6 batches x 150ms pause leaves a wide
+    // mid-run window.
+    for _ in 0..1000 {
+        if count_null_collection_id(&pool, project_id).await < TOTAL {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     handle.abort();
     let _ = handle.await;
 

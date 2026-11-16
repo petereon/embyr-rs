@@ -31,8 +31,9 @@
 
 use std::sync::Arc;
 
+use super::argon2_blocking as argon2;
 use embyr_core::{
-    auth::{argon2, blake3},
+    auth::blake3,
     domain::project::{CredentialCacheKey, ProjectId},
 };
 
@@ -111,12 +112,14 @@ pub async fn resolve_customer_db_adapter(
         return Err(ProjectAuthError::ProjectNotFound);
     }
 
-    let verified = argon2::verify_api_key(api_key.as_bytes(), &row.api_key_hash_current)
-        .unwrap_or(false)
-        || row
-            .api_key_hash_previous
-            .as_deref()
-            .is_some_and(|prev| argon2::verify_api_key(api_key.as_bytes(), prev).unwrap_or(false));
+    let mut verified = argon2::verify_api_key(api_key.as_bytes(), &row.api_key_hash_current)
+        .await
+        .unwrap_or(false);
+    if !verified {
+        if let Some(prev) = row.api_key_hash_previous.as_deref() {
+            verified = argon2::verify_api_key(api_key.as_bytes(), prev).await.unwrap_or(false);
+        }
+    }
     if !verified {
         return Err(ProjectAuthError::InvalidApiKey);
     }

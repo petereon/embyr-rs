@@ -38,7 +38,8 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use embyr_core::{admin::email::EmailMessage, auth::argon2, hosted_identity};
+use crate::adapters::argon2_blocking as argon2;
+use embyr_core::{admin::email::EmailMessage, hosted_identity};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 
@@ -328,7 +329,7 @@ pub async fn reset_password(
         return weak_password();
     }
 
-    let password_hash = match argon2::hash_password(new_password.as_bytes()) {
+    let password_hash = match argon2::hash_password(new_password.as_bytes()).await {
         Ok(h) => h,
         Err(e) => {
             tracing::error!("reset_password: hash_password failed: {e}");
