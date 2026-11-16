@@ -140,12 +140,26 @@ impl AdminTestContext {
         // acceptance test run under a shared testcontainers Postgres
         // instance can pollute another test's throttle counters via a
         // shared table row.
-        Self::with_signin_limiter(SigninRateLimiter::new(150.0, 10.0 / 60.0)).await
+        Self::build(
+            SigninRateLimiter::new(150.0, 10.0 / 60.0),
+            "stripe-secret-key-not-configured",
+        )
+        .await
+    }
+
+    /// Same as `new()` with a caller-supplied Stripe key (account-deletion
+    /// scenarios that need a real test-mode gateway).
+    pub async fn new_with_stripe_key(stripe_key: &str) -> Self {
+        Self::build(SigninRateLimiter::new(150.0, 10.0 / 60.0), stripe_key).await
     }
 
     /// Same as `new()` with a caller-supplied sign-in limiter (e.g. a tiny
     /// burst + `with_trusted_proxy_hops`, to observe throttle keying).
     pub async fn with_signin_limiter(signin_limiter: Arc<SigninRateLimiter>) -> Self {
+        Self::build(signin_limiter, "stripe-secret-key-not-configured").await
+    }
+
+    async fn build(signin_limiter: Arc<SigninRateLimiter>, stripe_key: &str) -> Self {
         // ── 1. Start Postgres container ───────────────────────────────────────
         let container = Postgres::default()
             .with_tag("15-alpine")
@@ -391,7 +405,7 @@ impl AdminTestContext {
         let prometheus_handle = embyr_server::observability::get_or_install_prometheus_handle();
         // admin_api_v2 predates card-payments-backend and never exercises
         // billing routes — placeholder StripeGateway (no I/O at construction).
-        let stripe_gateway = Arc::new(StripeGateway::new("stripe-secret-key-not-configured"));
+        let stripe_gateway = Arc::new(StripeGateway::new(stripe_key));
         let router = build_admin_router(
             system_db,
             "test-admin-key-from-env".to_string(),

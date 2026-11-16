@@ -1,4 +1,5 @@
 pub mod access_rules;
+pub mod account;
 pub mod admin_keys;
 // ADR-085: POST /projects/:id/api_key/{rotate,revoke}.
 pub mod api_key;

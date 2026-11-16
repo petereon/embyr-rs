@@ -197,6 +197,14 @@ name = "admin_api_v2_account_bootstrap_invitations"
 path = "../../tests/admin_api_v2/acceptance/account_bootstrap_invitations.rs"
 
 [[test]]
+name = "admin_api_v2_account_deletion"
+path = "../../tests/admin_api_v2/acceptance/account_deletion.rs"
+
+[[test]]
+name = "admin_api_v2_account_deletion_purge"
+path = "../../tests/admin_api_v2/acceptance/account_deletion_purge.rs"
+
+[[test]]
 name = "admin_api_v2_akr03_sdk_keys_removed"
 path = "../../tests/admin_api_v2/acceptance/akr03_sdk_keys_removed.rs"
 
