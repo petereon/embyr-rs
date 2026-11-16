@@ -342,6 +342,7 @@ async fn main() {
         webhook_signing_secret,
         Arc::clone(&cap_status_cache),
         Arc::clone(&signin_rate_limiter),
+        cfg.api_key_rotation_window_secs,
     )
     .merge(healthz_app);
 

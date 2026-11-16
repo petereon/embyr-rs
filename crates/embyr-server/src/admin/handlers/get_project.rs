@@ -21,6 +21,10 @@ pub struct GetProjectDetail {
     pub logging_enabled: bool,
     pub log_retention_days: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// ADR-085: when the project API key was last rotated (never a hash); `None` = never.
+    pub api_key_rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// ADR-085: when the previous key stops working; `None` = no previous key.
+    pub api_key_previous_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// GET /admin/v1/projects/:project_id
@@ -37,7 +41,7 @@ pub async fn get_project(
 
     let row = sqlx::query(
         "SELECT id, name, status, backend_mode, logging_enabled, log_retention_days, \
-         created_at, account_id \
+         created_at, account_id, api_key_rotated_at, api_key_previous_expires_at \
          FROM projects WHERE id = $1",
     )
     .bind(&project_id)
@@ -76,5 +80,7 @@ pub async fn get_project(
         created_at: row
             .try_get("created_at")
             .unwrap_or_else(|_| chrono::Utc::now()),
+        api_key_rotated_at: row.try_get("api_key_rotated_at").unwrap_or(None),
+        api_key_previous_expires_at: row.try_get("api_key_previous_expires_at").unwrap_or(None),
     }))
 }

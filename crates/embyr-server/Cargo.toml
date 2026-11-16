@@ -270,6 +270,10 @@ path = "../../tests/distributed_rate_limiting/acceptance/b20_rate_limit_after_au
 name = "akr01_two_hash_verify"
 path = "../../tests/api_key_rotation/acceptance/akr01_two_hash_verify.rs"
 
+[[test]]
+name = "akr04_rotate_revoke"
+path = "../../tests/api_key_rotation/acceptance/akr04_rotate_revoke.rs"
+
 # production-readiness acceptance tests
 [[test]]
 name = "production_readiness"

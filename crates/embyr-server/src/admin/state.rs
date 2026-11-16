@@ -89,6 +89,9 @@ pub struct UserAdminState {
     /// `POST /admin/v1/auth/signin` — checked as the first statement in
     /// `signin()`, before any DB call.
     pub signin_rate_limiter: Arc<SigninRateLimiter>,
+    /// `EMBYR_API_KEY_ROTATION_WINDOW_SECS` (ADR-085): how long a rotated-out project API key
+    /// keeps authenticating.
+    pub api_key_rotation_window_secs: u32,
 }
 
 /// State for the Stripe webhook sub-router (US-203). No session/operator
