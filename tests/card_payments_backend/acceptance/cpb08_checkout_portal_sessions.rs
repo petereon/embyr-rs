@@ -17,7 +17,8 @@ use common::{sign_stripe_payload, CpbTestContext};
 use embyr_server::adapters::stripe_gateway::StripeGateway;
 
 const WEBHOOK_SECRET: &str = "whsec_cpb08_test_signing_secret";
-const BASE_URL: &str = "https://console.example.test";
+// Real-public-suffix host: Stripe validates return URLs; a `.test` TLD may be rejected.
+const BASE_URL: &str = "https://console.example.com";
 /// `PRO_PLAN_STRIPE_PRICE_ID` (stripe_gateway.rs) — the price the webhook maps to Pro.
 const PRO_PRICE_ID: &str = "price_1U3IuADomd8yk6u5rAtzmWPt";
 
@@ -213,18 +214,24 @@ async fn subscription_created_for_unknown_customer_is_a_safe_noop() {
 /// @driving_port @real-io
 #[tokio::test]
 async fn owner_checkout_returns_hosted_url_and_reuses_the_stripe_customer() {
+    // The handler logs the Stripe error server-side (502 hides it from the
+    // client); surface it on stderr so a CI failure is diagnosable.
+    let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).try_init();
     let gateway = StripeGateway::new(common::stripe_secret_key()).with_public_base_url(Some(BASE_URL.to_string()));
     let ctx = CpbTestContext::with_gateway(WEBHOOK_SECRET, gateway).await;
     let cookie = ctx.seed_session("owner@cpb08.example", "Owner").await;
 
     let first = post(&ctx, "/admin/v1/billing/checkout_session", &cookie, serde_json::json!({"plan": "pro"})).await;
-    assert_eq!(first.status().as_u16(), 200);
-    let body: serde_json::Value = first.json().await.expect("json body");
+    let status = first.status().as_u16();
+    let text = first.text().await.expect("body text");
+    assert_eq!(status, 200, "checkout_session response body: {text}");
+    let body: serde_json::Value = serde_json::from_str(&text).expect("json body");
     let url = body["url"].as_str().expect("url string");
     assert!(url.starts_with("https://checkout.stripe.com/"), "hosted page url, got {url}");
 
     let customer = ctx.account_stripe_customer_id().await.expect("customer persisted");
     let second = post(&ctx, "/admin/v1/billing/checkout_session", &cookie, serde_json::json!({"plan": "pro"})).await;
-    assert_eq!(second.status().as_u16(), 200);
+    let status = second.status().as_u16();
+    assert_eq!(status, 200, "second checkout_session response body: {}", second.text().await.unwrap_or_default());
     assert_eq!(ctx.account_stripe_customer_id().await, Some(customer), "customer reused, not re-created");
 }
