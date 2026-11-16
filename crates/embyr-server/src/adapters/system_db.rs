@@ -227,9 +227,24 @@ pub struct ProjectAuthRow {
 #[derive(Debug)]
 pub struct SystemDb {
     pool: PgPool,
+    /// hourly-metrics-rollup (ADR-084): write-behind buffer for
+    /// `hourly_project_metrics`, flushed by `crate::rollup`.
+    rollup: std::sync::Arc<embyr_core::metrics_rollup::RollupBuffer>,
 }
 
 impl SystemDb {
+    fn from_pool(pool: PgPool) -> Self {
+        let rollup = std::sync::Arc::new(embyr_core::metrics_rollup::RollupBuffer::new(
+            embyr_core::metrics_rollup::DEFAULT_MAX_KEYS,
+        ));
+        Self { pool, rollup }
+    }
+
+    /// The in-process hourly-rollup buffer (ADR-084).
+    pub fn rollup(&self) -> &std::sync::Arc<embyr_core::metrics_rollup::RollupBuffer> {
+        &self.rollup
+    }
+
     /// Connect to system DB. Does NOT run migrations — call migrate() separately.
     ///
     /// Pool acquire timeout is 5 seconds to ensure startup fails fast when the
@@ -241,7 +256,7 @@ impl SystemDb {
             .connect(database_url)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(pool))
     }
 
     /// Connect with an operator-configured `max_connections`
@@ -259,7 +274,7 @@ impl SystemDb {
             .connect(database_url)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(pool))
     }
 
     /// Run sqlx migrations from the `migrations/` directory (workspace root).

@@ -256,6 +256,7 @@ impl FirestoreService {
         Status,
     > {
         let authenticated = self.authenticate(project_id_str, api_key).await?;
+        crate::rollup::mark_authenticated(project_id_str);
         let rate_info = self
             .rate_limiter
             .check(project_id_str)
@@ -4071,7 +4072,12 @@ impl Firestore for FirestoreService {
         request: Request<GetDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_get_document(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_GET_DOCUMENT,
+            self.handle_get_document(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_GET_DOCUMENT, &result, obs_start);
         result
     }
@@ -4081,7 +4087,12 @@ impl Firestore for FirestoreService {
         request: Request<CreateDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_create_document(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_CREATE_DOCUMENT,
+            self.handle_create_document(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_CREATE_DOCUMENT, &result, obs_start);
         result
     }
@@ -4091,7 +4102,12 @@ impl Firestore for FirestoreService {
         request: Request<UpdateDocumentRequest>,
     ) -> Result<Response<Document>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_update_document(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_UPDATE_DOCUMENT,
+            self.handle_update_document(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_UPDATE_DOCUMENT, &result, obs_start);
         result
     }
@@ -4101,7 +4117,12 @@ impl Firestore for FirestoreService {
         request: Request<DeleteDocumentRequest>,
     ) -> Result<Response<()>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_delete_document(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_DELETE_DOCUMENT,
+            self.handle_delete_document(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_DELETE_DOCUMENT, &result, obs_start);
         result
     }
@@ -4111,7 +4132,12 @@ impl Firestore for FirestoreService {
         request: Request<ListDocumentsRequest>,
     ) -> Result<Response<ListDocumentsResponse>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_list_documents(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_LIST_DOCUMENTS,
+            self.handle_list_documents(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_LIST_DOCUMENTS, &result, obs_start);
         result
     }
@@ -4121,7 +4147,12 @@ impl Firestore for FirestoreService {
         request: Request<ListCollectionIdsRequest>,
     ) -> Result<Response<ListCollectionIdsResponse>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_list_collection_ids(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_LIST_COLLECTION_IDS,
+            self.handle_list_collection_ids(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_LIST_COLLECTION_IDS, &result, obs_start);
         result
     }
@@ -4133,7 +4164,12 @@ impl Firestore for FirestoreService {
         request: Request<BatchGetDocumentsRequest>,
     ) -> Result<Response<Self::BatchGetDocumentsStream>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_batch_get_documents(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_BATCH_GET_DOCUMENTS,
+            self.handle_batch_get_documents(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(
             obs_helpers::METHOD_BATCH_GET_DOCUMENTS,
             &result,
@@ -4161,7 +4197,12 @@ impl Firestore for FirestoreService {
         request: Request<CommitRequest>,
     ) -> Result<Response<CommitResponse>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_commit(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_COMMIT,
+            self.handle_commit(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_COMMIT, &result, obs_start);
         result
     }
@@ -4171,7 +4212,12 @@ impl Firestore for FirestoreService {
         request: Request<BatchWriteRequest>,
     ) -> Result<Response<BatchWriteResponse>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_batch_write(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_BATCH_WRITE,
+            self.handle_batch_write(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_BATCH_WRITE, &result, obs_start);
         result
     }
@@ -4193,7 +4239,12 @@ impl Firestore for FirestoreService {
         request: Request<RunQueryRequest>,
     ) -> Result<Response<Self::RunQueryStream>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_run_query(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_RUN_QUERY,
+            self.handle_run_query(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(obs_helpers::METHOD_RUN_QUERY, &result, obs_start);
         result
     }
@@ -4205,7 +4256,12 @@ impl Firestore for FirestoreService {
         request: Request<RunAggregationQueryRequest>,
     ) -> Result<Response<Self::RunAggregationQueryStream>, Status> {
         let obs_start = std::time::Instant::now();
-        let result = self.handle_run_aggregation_query(request).await;
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_RUN_AGGREGATION_QUERY,
+            self.handle_run_aggregation_query(request),
+        )
+        .await;
         obs_helpers::record_grpc_call(
             obs_helpers::METHOD_RUN_AGGREGATION_QUERY,
             &result,

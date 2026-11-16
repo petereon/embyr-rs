@@ -1169,6 +1169,20 @@ path = "../../tests/agent_field_path_validation/acceptance/afp06_cross_binary_pa
 name = "admin_signin_hardening_us02_sweeper_bounds_table_growth"
 path = "../../tests/admin_signin_hardening/acceptance/us02_sweeper_bounds_table_growth.rs"
 
+# hourly-metrics-rollup (ADR-084) — write path (buffer/flush/handler hook),
+# retention sweeper, admin endpoints.
+[[test]]
+name = "hourly_metrics_rollup_write_path"
+path = "../../tests/hourly_metrics_rollup/acceptance/hmr_write_path.rs"
+
+[[test]]
+name = "hourly_metrics_rollup_retention"
+path = "../../tests/hourly_metrics_rollup/acceptance/hmr_retention.rs"
+
+[[test]]
+name = "hourly_metrics_rollup_endpoints"
+path = "../../tests/hourly_metrics_rollup/acceptance/hmr_endpoints.rs"
+
 # deployment-release-process (finding #19) — version/tag/CHANGELOG/startup-log
 # convention (US-DRP-01) + docker-compose.yml for local evaluation (US-DRP-02).
 [[test]]
