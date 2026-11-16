@@ -216,7 +216,7 @@ async fn subscription_created_for_unknown_customer_is_a_safe_noop() {
 async fn owner_checkout_returns_hosted_url_and_reuses_the_stripe_customer() {
     // The handler logs the Stripe error server-side (502 hides it from the
     // client); surface it on stderr so a CI failure is diagnosable.
-    let _ = tracing_subscriber::fmt().with_writer(std::io::stderr).try_init();
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let gateway = StripeGateway::new(common::stripe_secret_key()).with_public_base_url(Some(BASE_URL.to_string()));
     let ctx = CpbTestContext::with_gateway(WEBHOOK_SECRET, gateway).await;
     let cookie = ctx.seed_session("owner@cpb08.example", "Owner").await;
