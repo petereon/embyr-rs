@@ -71,7 +71,7 @@ use super::handlers::composite_indexes::{
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
-use super::handlers::metrics::get_project_metrics;
+use super::handlers::metrics::{get_metrics_summary, get_project_metrics};
 use super::handlers::api_key::{revoke_api_key, rotate_api_key};
 use super::handlers::connection::{get_connection, put_connection};
 use super::handlers::projects::{list_projects, patch_project};
@@ -412,6 +412,8 @@ pub fn build_admin_router(
             "/admin/v1/projects/:project_id/metrics",
             get(get_project_metrics),
         )
+        // hourly-metrics-rollup (ADR-084): per-project summary in one call.
+        .route("/admin/v1/metrics/summary", get(get_metrics_summary))
         .route(
             "/admin/v1/projects/:project_id/query_logs",
             get(list_query_logs),

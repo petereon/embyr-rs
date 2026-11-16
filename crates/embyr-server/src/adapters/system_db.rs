@@ -229,6 +229,9 @@ pub struct ProjectAuthRow {
 #[derive(Debug)]
 pub struct SystemDb {
     pool: PgPool,
+    /// hourly-metrics-rollup (ADR-084): write-behind buffer for
+    /// `hourly_project_metrics`, flushed by `crate::rollup`.
+    rollup: std::sync::Arc<embyr_core::metrics_rollup::RollupBuffer>,
 }
 
 /// ADR-083 AC-DSS-15 "unconverted" predicate over a `projects` row: connection secrets still only
@@ -238,6 +241,18 @@ pub const UNCONVERTED_CONNECTION_SECRETS_SQL: &str = "((backend_mode = 'direct_p
      OR (backend_mode = 'agent' AND agent_tls_bundle_srv_enc IS NULL))";
 
 impl SystemDb {
+    fn from_pool(pool: PgPool) -> Self {
+        let rollup = std::sync::Arc::new(embyr_core::metrics_rollup::RollupBuffer::new(
+            embyr_core::metrics_rollup::DEFAULT_MAX_KEYS,
+        ));
+        Self { pool, rollup }
+    }
+
+    /// The in-process hourly-rollup buffer (ADR-084).
+    pub fn rollup(&self) -> &std::sync::Arc<embyr_core::metrics_rollup::RollupBuffer> {
+        &self.rollup
+    }
+
     /// Connect to system DB. Does NOT run migrations — call migrate() separately.
     ///
     /// Pool acquire timeout is 5 seconds to ensure startup fails fast when the
@@ -249,7 +264,7 @@ impl SystemDb {
             .connect(database_url)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(pool))
     }
 
     /// Connect with an operator-configured `max_connections`
@@ -267,7 +282,7 @@ impl SystemDb {
             .connect(database_url)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(pool))
     }
 
     /// Run sqlx migrations from the `migrations/` directory (workspace root).

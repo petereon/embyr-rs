@@ -7,6 +7,7 @@ pub mod grpc;
 pub mod middleware;
 pub mod observability;
 pub mod realtime;
+pub mod rollup;
 pub mod rest;
 pub mod sweepers;
 

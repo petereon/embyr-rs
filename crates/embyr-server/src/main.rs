@@ -403,6 +403,20 @@ async fn main() {
         std::time::Duration::from_secs(3600),
     );
 
+    // hourly-metrics-rollup (ADR-084): flush the per-project hourly buffer
+    // every EMBYR_ROLLUP_FLUSH_SECS (final flush on shutdown) and purge rows
+    // older than EMBYR_ROLLUP_RETENTION_DAYS hourly.
+    let rollup_cfg = embyr_server::rollup::RollupConfig::from_env();
+    system_db.rollup().set_max_keys(rollup_cfg.max_keys);
+    let rollup_flusher =
+        embyr_server::rollup::spawn_flusher(Arc::clone(&system_db), rollup_cfg.flush_interval);
+    let _hourly_metrics_retention_sweeper =
+        embyr_server::sweepers::hourly_metrics_retention_sweeper::spawn(
+            Arc::clone(&system_db),
+            std::time::Duration::from_secs(3600),
+            rollup_cfg.retention_days,
+        );
+
     // ── Step 11: spawn gRPC + REST + admin servers ────────────────────────
     // firestore-tls-support: derive the 2 listener-facing TLS types from
     // `cfg.tls` (both `None` when TLS is not configured — AC-TLS-01).
@@ -477,5 +491,7 @@ async fn main() {
     if tokio::time::timeout(grace, server_task).await.is_err() {
         tracing::warn!("drain deadline reached, dropping remaining connections");
     }
+    // In-flight requests have finished: persist the last buffered rollup data.
+    rollup_flusher.shutdown().await;
     tracing::info!("embyr-server stopped");
 }
