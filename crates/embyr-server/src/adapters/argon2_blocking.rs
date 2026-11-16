@@ -16,6 +16,11 @@ async fn run<T: Send + 'static>(
         .unwrap_or_else(|e| Err(CoreError::InvalidArgument(format!("argon2 task failed: {e}"))))
 }
 
+pub async fn hash_api_key(api_key: &[u8]) -> Result<String, CoreError> {
+    let key = api_key.to_vec();
+    run(move || argon2::hash_api_key(&key)).await
+}
+
 pub async fn verify_api_key(api_key: &[u8], phc_hash: &str) -> Result<bool, CoreError> {
     let (key, hash) = (api_key.to_vec(), phc_hash.to_owned());
     run(move || argon2::verify_api_key(&key, &hash)).await

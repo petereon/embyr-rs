@@ -411,6 +411,7 @@ impl AdminTestContext {
             // ADR-020, step 03-01 signature addition).
             Arc::new(CapStatusCache::new()),
             signin_limiter,
+            86_400,
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
