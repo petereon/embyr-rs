@@ -152,10 +152,6 @@ name = "admin_api_v2_b02_project_list"
 path = "../../tests/admin_api_v2/acceptance/b02_project_list.rs"
 
 [[test]]
-name = "admin_api_v2_b03_sdk_keys"
-path = "../../tests/admin_api_v2/acceptance/b03_sdk_keys.rs"
-
-[[test]]
 name = "admin_api_v2_b04_project_patch"
 path = "../../tests/admin_api_v2/acceptance/b04_project_patch.rs"
 
@@ -174,6 +170,10 @@ path = "../../tests/admin_api_v2/acceptance/security_58_60.rs"
 [[test]]
 name = "admin_api_v2_account_bootstrap_invitations"
 path = "../../tests/admin_api_v2/acceptance/account_bootstrap_invitations.rs"
+
+[[test]]
+name = "admin_api_v2_akr03_sdk_keys_removed"
+path = "../../tests/admin_api_v2/acceptance/akr03_sdk_keys_removed.rs"
 
 # card-payments-backend acceptance tests (one file per slice, mirroring
 # admin-api-v2's bNN registration convention). Release grouping:
