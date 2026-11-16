@@ -20,6 +20,15 @@ use crate::middleware::obs_helpers as obs;
 /// Distinct (project, hour, op) keys upserted per statement.
 const FLUSH_CHUNK_KEYS: usize = 500;
 
+/// How long the flusher waits for a system-DB connection before skipping this
+/// flush (data stays buffered). Short on purpose: the flusher must yield the
+/// pool to requests rather than queue for the pool's full 5s acquire timeout.
+const FLUSH_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Postgres `undefined_table`: the rollup table does not exist (yet), e.g. a
+/// rolling deploy where migration 0047 has not been applied.
+const PG_UNDEFINED_TABLE: &str = "42P01";
+
 /// Env-tunable knobs (defaults per ADR-084).
 #[derive(Debug, Clone, Copy)]
 pub struct RollupConfig {
@@ -168,7 +177,15 @@ async fn upsert_chunk(
     for column in columns {
         query = query.bind(column);
     }
-    query.execute(system_db.pool()).await.map(|_| ())
+    // Exactly one connection, held for this chunk only.
+    let mut conn = tokio::time::timeout(FLUSH_ACQUIRE_TIMEOUT, system_db.pool().acquire())
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)??;
+    query.execute(&mut *conn).await.map(|_| ())
+}
+
+fn is_missing_table(e: &sqlx::Error) -> bool {
+    e.as_database_error().and_then(|d| d.code()).as_deref() == Some(PG_UNDEFINED_TABLE)
 }
 
 /// Drain the system DB's buffer into `hourly_project_metrics` (additive
@@ -185,7 +202,16 @@ pub async fn flush(system_db: &SystemDb) -> Result<(), sqlx::Error> {
             if dropped > 0 {
                 metrics::counter!("embyr_rollup_dropped_total").increment(dropped);
             }
-            tracing::warn!(error = %e, dropped, "rollup flush failed; data kept for next flush");
+            if is_missing_table(&e) {
+                // Quiet: log once, keep buffering (bounded) until the table exists.
+                static LOGGED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!("rollup table missing (migration 0047 pending?); buffering");
+                }
+            } else {
+                tracing::warn!(error = %e, dropped, "rollup flush failed; data kept for next flush");
+            }
             metrics::counter!("embyr_rollup_flush_total", "outcome" => "error").increment(1);
             return Err(e);
         }
