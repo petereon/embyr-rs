@@ -44,7 +44,7 @@ pub use shell::ShellView;
 /// `model.nav.section`.
 #[cfg(feature = "csr")]
 mod shell {
-    use crate::components::{Sidebar, SuspensionBanner, Topbar};
+    use crate::components::{SecretModal, Sidebar, SuspensionBanner, Topbar};
     use crate::model::{AppModel, Section};
     use crate::views::api_keys::ApiKeysView;
     use crate::views::billing::{BillingView, CardModal, UpgradeModal};
@@ -91,6 +91,8 @@ mod shell {
                 // Section via the same Msg dispatch.
                 <CardModal />
                 <UpgradeModal />
+                // One-time secrets (AC-AUW-20): global so any screen can reveal one.
+                <SecretModal />
             </div>
 
         }

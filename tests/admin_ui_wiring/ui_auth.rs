@@ -58,7 +58,10 @@ fn drive(model: &mut AppModel, msg: Msg, server: &dyn Fn(&HttpRequest) -> HttpRe
 
 fn signed_in_model() -> AppModel {
     let mut model = AppModel::default();
-    drive(&mut model, Msg::SessionEstablished(user()), &|_| response(200, PROJECTS_JSON));
+    drive(&mut model, Msg::SessionEstablished(user()), &|req| match req.path.as_str() {
+        "/admin/v1/metrics/summary" => response(200, "[]"),
+        _ => response(200, PROJECTS_JSON),
+    });
     model
 }
 
@@ -196,6 +199,7 @@ fn full_sign_in_reaches_the_shell_with_the_users_projects() {
         "/admin/v1/auth/signin" => response(200, r#"{"account_id":"a-1","display_name":"Ada","role":"Admin"}"#),
         "/admin/v1/auth/session" => response(200, SESSION_JSON),
         "/admin/v1/projects" => response(200, PROJECTS_JSON),
+        "/admin/v1/metrics/summary" => response(200, "[]"),
         other => panic!("unexpected call {other}"),
     };
     let mut model = AppModel { booting: false, ..AppModel::default() };
@@ -326,12 +330,29 @@ fn opening_a_section_loads_its_data() {
     assert!(update(&mut model, Msg::NavigateTo(Section::Billing)).is_empty(), "no loads wired for Billing yet");
 }
 
-// ── AC-AUW-18: the shipped entry point never reaches for mock data ───────────
+// ── AC-AUW-18: shipped UI code never reaches for mock data ───────────────────
+
+fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_sources(&path, found);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            found.push(path);
+        }
+    }
+}
 
 #[test]
-fn app_entry_point_has_no_mock_references() {
-    let app = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/app.rs")).unwrap();
-    for needle in ["from_mock", "data::mock", "display_stats"] {
-        assert!(!app.contains(needle), "app.rs must not reference {needle}");
+fn shipped_ui_code_has_no_mock_references() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src.join("app.rs")];
+    rust_sources(&src.join("views"), &mut files);
+    rust_sources(&src.join("components"), &mut files);
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for needle in ["from_mock", "data::mock", "display_stats"] {
+            assert!(!text.contains(needle), "{} must not reference {needle}", file.display());
+        }
     }
 }

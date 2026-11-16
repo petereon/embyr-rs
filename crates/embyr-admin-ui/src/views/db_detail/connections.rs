@@ -1,11 +1,17 @@
-//! Connections tab — backend config + active connections panel.
+//! Connections tab — masked backend summary, edit DSN / agent config, switch mode (ADR-083).
+//!
+//! The server never returns credentials; the summary is host/port/database/TLS (or the agent
+//! endpoint and certificate expiry). Saving calls `PUT /projects/:id/connection`, which probes the
+//! new backend first: on failure the server's error is shown and nothing changes. New secrets live
+//! only in this view's local signals and are wiped when the edit form closes; they never enter the
+//! model.
 
+#[cfg(feature = "csr")]
+use crate::api::{ApiCall, CallKind, ConnectionConfig};
 #[cfg(feature = "csr")]
 use crate::components::Icon;
 #[cfg(feature = "csr")]
-use crate::data::display_stats;
-#[cfg(feature = "csr")]
-use crate::model::{Database, DbBackendMode, DbPatch};
+use crate::model::{AppModel, DbBackendMode, DbId};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -13,187 +19,202 @@ use leptos::prelude::*;
 
 #[cfg(feature = "csr")]
 #[component]
-pub fn ConnectionsView(db: Database, idx: usize) -> impl IntoView {
+pub fn ConnectionsView(id: DbId) -> impl IntoView {
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
 
-    let stats = display_stats(idx);
-    let is_direct = db.backend_mode == DbBackendMode::DirectPg;
-    let db_id = db.id.clone();
-    let db_id2 = db.id.clone();
+    let mode = Memo::new({
+        let id = id.clone();
+        move |_| model.with(|m| m.databases.iter().find(|d| d.id == id).map(|d| d.backend_mode.clone()))
+    });
+    let connection = Memo::new({
+        let id = id.clone();
+        move |_| model.with(|m| m.connections.get(&id).cloned())
+    });
+    let loading = move || model.with(|m| m.pending.contains(&CallKind::Connection));
+    let saving = move || model.with(|m| m.pending.contains(&CallKind::PutConnection));
+    let can_manage = move || model.with(|m| m.can_manage_databases());
+    let saves = move || model.with(|m| m.connection_saves);
 
-    let edit_mode = RwSignal::new(false);
-    let draft = RwSignal::new(String::new());
+    let editing = RwSignal::new(false);
+    let target_agent = RwSignal::new(false);
+    let dsn = RwSignal::new(String::new());
+    let endpoint = RwSignal::new(String::new());
+    let ca_pem = RwSignal::new(String::new());
+    let client_cert_pem = RwSignal::new(String::new());
+    let client_key_pem = RwSignal::new(String::new());
 
-    let mode_label = if is_direct { "direct_pg" } else { "agent_mode" };
-    let mode_desc = if is_direct {
-        "Embyr connects directly to Postgres via TCP. DSN stored encrypted."
-    } else {
-        "Embyr routes operations through your VPC agent binary. No direct DB access from embyr servers."
+    let wipe = move || {
+        for field in [dsn, endpoint, ca_pem, client_cert_pem, client_key_pem] {
+            field.set(String::new());
+        }
+        editing.set(false);
     };
-    let field_label = if is_direct {
-        "Postgres DSN"
-    } else {
-        "Agent endpoint"
+    // A server-confirmed save closes the form and drops the secrets that were typed into it.
+    Effect::new(move |previous: Option<u32>| {
+        let now = saves();
+        if previous.is_some_and(|p| p != now) {
+            wipe();
+        }
+        now
+    });
+
+    let config = move || {
+        if target_agent.get() {
+            ConnectionConfig::Agent {
+                endpoint: endpoint.get(),
+                ca_pem: ca_pem.get(),
+                client_cert_pem: client_cert_pem.get(),
+                client_key_pem: client_key_pem.get(),
+            }
+        } else {
+            ConnectionConfig::DirectPg { dsn: dsn.get() }
+        }
     };
-    let field_placeholder = if is_direct {
-        "postgres://user:pass@host:5432/db"
-    } else {
-        "10.0.0.5:9191"
+    let complete = move || match config() {
+        ConnectionConfig::DirectPg { dsn } => !dsn.trim().is_empty(),
+        ConnectionConfig::Agent { endpoint, ca_pem, client_cert_pem, client_key_pem } => {
+            [endpoint, ca_pem, client_cert_pem, client_key_pem].iter().all(|v| !v.trim().is_empty())
+        }
     };
-    let masked_value = if is_direct {
-        "postgres://****@db.internal:5432/embyr_prod"
-    } else {
-        stats.connection_detail
-    };
+    // Secret-manager modes are managed outside the console (G-25).
+    let editable_mode = move || matches!(mode.get(), Some(DbBackendMode::DirectPg | DbBackendMode::AgentMode));
+
+    let save_id = id.clone();
 
     view! {
-        <div class="fade-in" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start">
-
-            // ── Backend configuration card ────────────────────────────────────
+        <div class="fade-in" style="max-width:720px">
             <div class="card" style="padding:0;overflow:hidden">
-                // Card header
                 <div style="display:flex;align-items:center;justify-content:space-between;\
                              padding:16px 20px;border-bottom:1px solid var(--border)">
                     <div>
                         <div style="font-size:14px;font-weight:600">"Backend configuration"</div>
                         <div style="font-size:12px;color:var(--text-3);margin-top:2px">"How this database reaches Postgres"</div>
                     </div>
-                    {move || if !edit_mode.get() {
-                        view! {
-                            <button
-                                class="btn btn-ghost btn-sm"
-                                type="button"
-                                on:click=move |_| edit_mode.set(true)
-                            >"Edit"</button>
-                        }.into_any()
-                    } else {
-                        let d = dispatch.clone();
-                        let did = db_id.clone();
-                        view! {
-                            <div class="row" style="gap:8px">
-                                <button
-                                    class="btn btn-ghost btn-sm"
-                                    type="button"
-                                    on:click=move |_| edit_mode.set(false)
-                                >"Cancel"</button>
-                                <button
-                                    class="btn btn-primary btn-sm"
-                                    type="button"
-                                    on:click=move |_| {
-                                        let patch = if is_direct {
-                                            DbPatch::Dsn(draft.get_untracked())
-                                        } else {
-                                            DbPatch::AgentEndpoint(draft.get_untracked())
-                                        };
-                                        d.run(Msg::PatchDb(did.clone(), patch));
-                                        edit_mode.set(false);
-                                    }
-                                >"Save"</button>
-                            </div>
-                        }.into_any()
-                    }}
+                    {move || (!editing.get() && editable_mode()).then(|| view! {
+                        <button
+                            class="btn btn-ghost btn-sm"
+                            type="button"
+                            disabled=move || !can_manage()
+                            on:click=move |_| {
+                                target_agent.set(mode.get_untracked() == Some(DbBackendMode::AgentMode));
+                                editing.set(true);
+                            }
+                        >"Edit"</button>
+                    })}
                 </div>
 
-                // Body
                 <div style="padding:16px 20px;display:flex;flex-direction:column;gap:16px">
-                    // Mode badge row
                     <div class="row" style="gap:8px">
                         <span style="width:28px;height:28px;border-radius:7px;background:var(--accent-soft);\
                                      color:var(--accent);display:grid;place-items:center;flex-shrink:0">
                             <Icon name="database" size=14/>
                         </span>
                         <div>
-                            <div class="mono" style="font-size:13px;font-weight:600">{mode_label}</div>
-                            <div style="font-size:11.5px;color:var(--text-3);margin-top:1px">{mode_desc}</div>
+                            <div class="mono" style="font-size:13px;font-weight:600">
+                                {move || mode.get().map(|m| m.api_value()).unwrap_or("—")}
+                            </div>
+                            <div style="font-size:11.5px;color:var(--text-3);margin-top:1px">
+                                {move || match mode.get() {
+                                    Some(DbBackendMode::DirectPg) => "Embyr connects directly to Postgres. The DSN is stored encrypted.",
+                                    Some(DbBackendMode::AgentMode) => "Embyr routes operations through your VPC agent over mTLS.",
+                                    Some(_) => "The credentials come from your secret manager (read-only here).",
+                                    None => "",
+                                }}
+                            </div>
                         </div>
                     </div>
 
-                    // Connection field
                     <div class="field">
-                        <label class="field-label">{field_label}</label>
-                        {move || if edit_mode.get() {
-                            view! {
-                                <input
-                                    class="input mono"
-                                    type="text"
-                                    placeholder=field_placeholder
-                                    prop:value=move || draft.get()
-                                    on:input=move |e| draft.set(event_target_value(&e))
-                                />
-                            }.into_any()
-                        } else {
-                            view! {
-                                <div class="row" style="gap:8px;margin-top:4px">
-                                    <span class="mono" style="font-size:13px;color:var(--text-2)">
-                                        {masked_value}
-                                    </span>
-                                    {if is_direct {
-                                        Some(view! { <span class="tag">"credentials masked"</span> })
-                                    } else { None }}
-                                </div>
-                            }.into_any()
-                        }}
+                        <label class="field-label">"Current connection"</label>
+                        <div class="row" style="gap:8px;margin-top:4px">
+                            <span class="mono" style="font-size:13px;color:var(--text-2)">
+                                {move || match connection.get() {
+                                    Some(c) => c.summary.describe(),
+                                    None if loading() => "Loading…".to_string(),
+                                    None => "—".to_string(),
+                                }}
+                            </span>
+                            <span class="tag">"credentials masked"</span>
+                        </div>
                     </div>
 
-                    <p style="font-size:11.5px;color:var(--text-3);margin:0">
-                        "Changes take effect on next connection attempt."
-                    </p>
-
-                    // Switch backend mode
-                    <div style="padding-top:14px;border-top:1px solid var(--border)">
-                        <div style="font-size:12.5px;color:var(--text-2);margin-bottom:10px">
-                            "Switch backend mode"
-                        </div>
-                        <div class="row" style="gap:8px">
-                            {let d = dispatch.clone();
-                             let did = db_id2.clone();
-                             view! {
+                    {move || editing.get().then(|| view! {
+                        <div style="padding-top:14px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:12px">
+                            <div class="row" style="gap:8px">
                                 <button
-                                    class=move || if is_direct { "btn btn-primary btn-sm" } else { "btn btn-ghost btn-sm" }
+                                    class=move || if !target_agent.get() { "btn btn-primary btn-sm" } else { "btn btn-ghost btn-sm" }
                                     type="button"
-                                    on:click=move |_| {
-                                        d.run(Msg::PatchDb(did.clone(), DbPatch::BackendMode(crate::model::DbBackendMode::DirectPg)));
-                                    }
+                                    on:click=move |_| target_agent.set(false)
                                 >"Direct PG"</button>
-                            }}
-                            {let d = dispatch.clone();
-                             let did = db.id.clone();
-                             view! {
                                 <button
-                                    class=move || if !is_direct { "btn btn-primary btn-sm" } else { "btn btn-ghost btn-sm" }
+                                    class=move || if target_agent.get() { "btn btn-primary btn-sm" } else { "btn btn-ghost btn-sm" }
                                     type="button"
-                                    on:click=move |_| {
-                                        d.run(Msg::PatchDb(did.clone(), DbPatch::BackendMode(crate::model::DbBackendMode::AgentMode)));
-                                    }
+                                    on:click=move |_| target_agent.set(true)
                                 >"Agent mode"</button>
-                            }}
-                        </div>
-                    </div>
-                </div>
-            </div>
+                            </div>
 
-            // ── Active connections (V2 placeholder) ───────────────────────────
-            <div class="card" style="padding:0;overflow:hidden">
-                <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
-                    <Icon name="connection" size=14/>
-                    <div style="font-size:14px;font-weight:600">"Active connections"</div>
-                    <span style="margin-left:auto;font-size:9.5px;font-weight:600;letter-spacing:.04em;\
-                                 color:var(--text-3);background:var(--surface-2);padding:2px 6px;border-radius:4px">
-                        "V2"
-                    </span>
-                </div>
-                <div style="padding:40px 20px;display:flex;flex-direction:column;align-items:center;\
-                             gap:12px;text-align:center">
-                    <div style="width:42px;height:42px;border-radius:11px;background:var(--surface-2);\
-                                display:grid;place-items:center;color:var(--text-3)">
-                        <Icon name="connection" size=20/>
-                    </div>
-                    <div>
-                        <div style="font-size:14px;font-weight:600;margin-bottom:4px">"Live connection map"</div>
-                        <div style="font-size:12.5px;color:var(--text-3);max-width:240px;line-height:1.5">
-                            "Per-client connection telemetry arrives in V2. Enable the agent binary for early access."
+                            {move || if target_agent.get() {
+                                view! {
+                                    <div class="field">
+                                        <label class="field-label">"Agent endpoint"</label>
+                                        <input class="input mono" type="text" placeholder="10.0.0.5:9191"
+                                            autocomplete="off" spellcheck="false"
+                                            prop:value=move || endpoint.get()
+                                            on:input=move |e| endpoint.set(event_target_value(&e))/>
+                                    </div>
+                                    <div class="field">
+                                        <label class="field-label">"CA certificate (PEM)"</label>
+                                        <textarea class="input mono" rows="4" spellcheck="false"
+                                            prop:value=move || ca_pem.get()
+                                            on:input=move |e| ca_pem.set(event_target_value(&e))/>
+                                    </div>
+                                    <div class="field">
+                                        <label class="field-label">"Client certificate (PEM)"</label>
+                                        <textarea class="input mono" rows="4" spellcheck="false"
+                                            prop:value=move || client_cert_pem.get()
+                                            on:input=move |e| client_cert_pem.set(event_target_value(&e))/>
+                                    </div>
+                                    <div class="field">
+                                        <label class="field-label">"Client key (PEM)"</label>
+                                        <textarea class="input mono" rows="4" spellcheck="false"
+                                            prop:value=move || client_key_pem.get()
+                                            on:input=move |e| client_key_pem.set(event_target_value(&e))/>
+                                    </div>
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <div class="field">
+                                        <label class="field-label">"Postgres DSN"</label>
+                                        <input class="input mono" type="password" placeholder="postgres://user:pass@host:5432/db"
+                                            autocomplete="off" spellcheck="false"
+                                            prop:value=move || dsn.get()
+                                            on:input=move |e| dsn.set(event_target_value(&e))/>
+                                    </div>
+                                }.into_any()
+                            }}
+
+                            <p style="font-size:11.5px;color:var(--text-3);margin:0">
+                                "Saving connects to the new backend first. If that fails, the server's error is shown \
+                                 and the current connection stays in place."
+                            </p>
+                            <div class="row" style="gap:8px;justify-content:flex-end">
+                                <button class="btn btn-ghost btn-sm" type="button" on:click=move |_| wipe()>"Cancel"</button>
+                                <button
+                                    class="btn btn-primary btn-sm"
+                                    type="button"
+                                    disabled=move || saving() || !complete() || !can_manage()
+                                    on:click={
+                                        let id = save_id.clone();
+                                        move |_| dispatch.run(Msg::Request(ApiCall::PutConnection {
+                                            id: id.clone(),
+                                            config: config(),
+                                        }))
+                                    }
+                                >{move || if saving() { "Checking…" } else { "Save" }}</button>
+                            </div>
                         </div>
-                    </div>
+                    })}
                 </div>
             </div>
         </div>

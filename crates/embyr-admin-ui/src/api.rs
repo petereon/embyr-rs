@@ -7,7 +7,10 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use crate::model::{CurrentUser, Database, DbBackendMode, DbId, DbStatus, Role};
+use crate::model::{
+    Connection, ConnectionSummary, CurrentUser, Database, DbBackendMode, DbId, DbMetrics, DbStatus, LatencyStats,
+    LogRetention, MetricsSummaryRow, MetricsWindow, ProjectApiKeyInfo, RevealedSecret, Role, SeriesPoint,
+};
 use crate::msg::Msg;
 
 /// Which call is in flight (the `model.pending` key).
@@ -17,6 +20,14 @@ pub enum CallKind {
     Session,
     SignOut,
     Projects,
+    Project,
+    MetricsSummary,
+    DbMetrics,
+    Connection,
+    PutConnection,
+    PatchProject,
+    /// Rotate and revoke share a kind: one key operation at a time.
+    ApiKey,
 }
 
 /// How the second factor was supplied. Exactly one reaches the server.
@@ -26,6 +37,22 @@ pub enum SignInCode {
     Recovery(String),
 }
 
+/// New connection secrets for `PUT /projects/:id/connection`. Only ever inside an `ApiCall`.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ConnectionConfig {
+    DirectPg { dsn: String },
+    Agent { endpoint: String, ca_pem: String, client_cert_pem: String, client_key_pem: String },
+}
+
+impl ConnectionConfig {
+    pub fn mode(&self) -> DbBackendMode {
+        match self {
+            ConnectionConfig::DirectPg { .. } => DbBackendMode::DirectPg,
+            ConnectionConfig::Agent { .. } => DbBackendMode::AgentMode,
+        }
+    }
+}
+
 /// A user intent that needs the server. Secrets live only inside this value; `Debug` redacts them.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ApiCall {
@@ -33,6 +60,15 @@ pub enum ApiCall {
     LoadSession,
     SignOut,
     LoadProjects,
+    LoadProject(DbId),
+    LoadMetricsSummary,
+    LoadDbMetrics { id: DbId, window: MetricsWindow },
+    LoadConnection(DbId),
+    PutConnection { id: DbId, config: ConnectionConfig },
+    SetSuspended { id: DbId, suspended: bool },
+    SetLogging { id: DbId, enabled: bool, retention: Option<LogRetention> },
+    RotateApiKey(DbId),
+    RevokeApiKey(DbId),
 }
 
 impl ApiCall {
@@ -42,7 +78,23 @@ impl ApiCall {
             ApiCall::LoadSession => CallKind::Session,
             ApiCall::SignOut => CallKind::SignOut,
             ApiCall::LoadProjects => CallKind::Projects,
+            ApiCall::LoadProject(_) => CallKind::Project,
+            ApiCall::LoadMetricsSummary => CallKind::MetricsSummary,
+            ApiCall::LoadDbMetrics { .. } => CallKind::DbMetrics,
+            ApiCall::LoadConnection(_) => CallKind::Connection,
+            ApiCall::PutConnection { .. } => CallKind::PutConnection,
+            ApiCall::SetSuspended { .. } | ApiCall::SetLogging { .. } => CallKind::PatchProject,
+            ApiCall::RotateApiKey(_) | ApiCall::RevokeApiKey(_) => CallKind::ApiKey,
         }
+    }
+
+    /// Per-database reads are re-issued even while one of the same kind is in flight, so opening
+    /// database B never waits on database A's load.
+    pub fn repeatable(&self) -> bool {
+        matches!(
+            self,
+            ApiCall::LoadProject(_) | ApiCall::LoadDbMetrics { .. } | ApiCall::LoadConnection(_)
+        )
     }
 }
 
@@ -58,6 +110,22 @@ impl std::fmt::Debug for ApiCall {
             ApiCall::LoadSession => f.write_str("LoadSession"),
             ApiCall::SignOut => f.write_str("SignOut"),
             ApiCall::LoadProjects => f.write_str("LoadProjects"),
+            ApiCall::LoadProject(id) => write!(f, "LoadProject({})", id.0),
+            ApiCall::LoadMetricsSummary => f.write_str("LoadMetricsSummary"),
+            ApiCall::LoadDbMetrics { id, window } => write!(f, "LoadDbMetrics({}, {})", id.0, window.api_value()),
+            ApiCall::LoadConnection(id) => write!(f, "LoadConnection({})", id.0),
+            ApiCall::PutConnection { id, config } => f
+                .debug_struct("PutConnection")
+                .field("id", &id.0)
+                .field("mode", &config.mode().api_value())
+                .field("config", &"<redacted>")
+                .finish(),
+            ApiCall::SetSuspended { id, suspended } => write!(f, "SetSuspended({}, {suspended})", id.0),
+            ApiCall::SetLogging { id, enabled, retention } => {
+                write!(f, "SetLogging({}, {enabled}, {retention:?})", id.0)
+            }
+            ApiCall::RotateApiKey(id) => write!(f, "RotateApiKey({})", id.0),
+            ApiCall::RevokeApiKey(id) => write!(f, "RevokeApiKey({})", id.0),
         }
     }
 }
@@ -66,6 +134,8 @@ impl std::fmt::Debug for ApiCall {
 pub enum Method {
     Get,
     Post,
+    Put,
+    Patch,
 }
 
 /// Plain request data; the runtime adds same-origin credentials and the JSON content type.
@@ -115,6 +185,8 @@ pub enum ApiError {
 
 pub fn to_request(call: &ApiCall) -> HttpRequest {
     let get = |path: &str| HttpRequest { method: Method::Get, path: path.to_string(), body: None };
+    // Project ids are validated server-side (`ProjectId::new`), so they need no URL escaping.
+    let project = |id: &DbId, suffix: &str| format!("/admin/v1/projects/{}{suffix}", id.0);
     match call {
         ApiCall::SignIn { email, password, code } => {
             let mut body = serde_json::json!({ "email": email, "password": password });
@@ -125,13 +197,52 @@ pub fn to_request(call: &ApiCall) -> HttpRequest {
             HttpRequest { method: Method::Post, path: "/admin/v1/auth/signin".into(), body: Some(body) }
         }
         ApiCall::LoadSession => get("/admin/v1/auth/session"),
-        ApiCall::SignOut => HttpRequest {
-            method: Method::Post,
-            path: "/admin/v1/auth/signout".into(),
-            body: None,
-        },
+        ApiCall::SignOut => post("/admin/v1/auth/signout".into()),
         ApiCall::LoadProjects => get("/admin/v1/projects"),
+        ApiCall::LoadProject(id) => get(&project(id, "")),
+        ApiCall::LoadMetricsSummary => get("/admin/v1/metrics/summary"),
+        ApiCall::LoadDbMetrics { id, window } => {
+            get(&project(id, &format!("/metrics?window={}", window.api_value())))
+        }
+        ApiCall::LoadConnection(id) => get(&project(id, "/connection")),
+        ApiCall::PutConnection { id, config } => HttpRequest {
+            method: Method::Put,
+            path: project(id, "/connection"),
+            body: Some(match config {
+                ConnectionConfig::DirectPg { dsn } => {
+                    serde_json::json!({ "backend_mode": "direct_pg", "dsn": dsn })
+                }
+                ConnectionConfig::Agent { endpoint, ca_pem, client_cert_pem, client_key_pem } => serde_json::json!({
+                    "backend_mode": "agent",
+                    "agent_endpoint": endpoint,
+                    "agent_ca_pem": ca_pem,
+                    "agent_client_cert_pem": client_cert_pem,
+                    "agent_client_key_pem": client_key_pem,
+                }),
+            }),
+        },
+        ApiCall::SetSuspended { id, suspended } => patch(
+            project(id, ""),
+            serde_json::json!({ "status": if *suspended { "suspended" } else { "active" } }),
+        ),
+        ApiCall::SetLogging { id, enabled, retention } => {
+            let mut body = serde_json::json!({ "logging_enabled": enabled });
+            if let Some(r) = retention {
+                body["log_retention_days"] = r.days().into();
+            }
+            patch(project(id, ""), body)
+        }
+        ApiCall::RotateApiKey(id) => post(project(id, "/api_key/rotate")),
+        ApiCall::RevokeApiKey(id) => post(project(id, "/api_key/revoke")),
     }
+}
+
+fn post(path: String) -> HttpRequest {
+    HttpRequest { method: Method::Post, path, body: None }
+}
+
+fn patch(path: String, body: serde_json::Value) -> HttpRequest {
+    HttpRequest { method: Method::Patch, path, body: Some(body) }
 }
 
 /// Response -> `Msg`s. The first message always settles the call (clears `pending`); failures follow
@@ -140,7 +251,7 @@ pub fn decode(call: &ApiCall, response: HttpResponse) -> Vec<Msg> {
     let result = if (200..300).contains(&response.status) {
         decode_success(call, &response.body)
     } else {
-        Err(error_for(&response))
+        Err(refine(call, error_for(&response)))
     };
     settle(call, result)
 }
@@ -172,11 +283,67 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
             let databases = projects.into_iter().map(Database::try_from).collect::<Result<_, _>>()?;
             Ok(vec![Msg::SetDatabases(databases)])
         }
+        // A PATCH answers with the same detail shape as GET, so both refresh the model from the
+        // server's truth rather than from what the client asked for.
+        ApiCall::LoadProject(_) | ApiCall::SetSuspended { .. } | ApiCall::SetLogging { .. } => {
+            let dto: ProjectDto = parse(body)?;
+            let info = dto.api_key_info()?;
+            let db = Database::try_from(dto)?;
+            // The database goes first: key info for an unknown database is dropped.
+            let id = db.id.clone();
+            Ok(vec![Msg::DatabaseLoaded(db), Msg::ApiKeyInfoLoaded(id, info)])
+        }
+        ApiCall::LoadMetricsSummary => {
+            let rows: Vec<SummaryDto> = parse(body)?;
+            Ok(vec![Msg::SetMetricsSummary(rows.into_iter().map(SummaryDto::into_row).collect())])
+        }
+        ApiCall::LoadDbMetrics { id, window } => {
+            Ok(vec![Msg::SetDbMetrics(id.clone(), parse::<MetricsDto>(body)?.into_model(*window)?)])
+        }
+        ApiCall::LoadConnection(id) => {
+            Ok(vec![Msg::SetConnection(id.clone(), parse::<ConnectionDto>(body)?.into_model()?)])
+        }
+        ApiCall::PutConnection { id, config } => Ok(vec![
+            Msg::ConnectionSaved(id.clone(), config.mode()),
+            Msg::Request(ApiCall::LoadConnection(id.clone())),
+        ]),
+        // Revoke is rotate with a zero window: both return the replacement key, shown once.
+        ApiCall::RotateApiKey(id) | ApiCall::RevokeApiKey(id) => {
+            let dto: RotatedKeyDto = parse(body)?;
+            let info = ProjectApiKeyInfo {
+                rotated_at: Some(parse_ts("rotated_at", &dto.rotated_at)?),
+                previous_expires_at: parse_opt_ts("previous_key_expires_at", dto.previous_key_expires_at.as_deref())?,
+            };
+            Ok(vec![
+                Msg::ApiKeyInfoLoaded(id.clone(), info),
+                Msg::SecretRevealed(RevealedSecret { db: id.clone(), secret: dto.api_key }),
+            ])
+        }
+    }
+}
+
+/// Call-specific wording for statuses that carry no body of their own.
+fn refine(call: &ApiCall, error: ApiError) -> ApiError {
+    match (call, &error) {
+        (ApiCall::SetSuspended { suspended: false, .. }, ApiError::Conflict(_)) => ApiError::Conflict(
+            "cannot activate: the account is on a billing hold (past due or free-plan limit reached)".into(),
+        ),
+        _ => error,
     }
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, ApiError> {
     serde_json::from_str(body).map_err(|e| ApiError::Decode(e.to_string()))
+}
+
+fn parse_ts(field: &str, value: &str) -> Result<DateTime<Utc>, ApiError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| ApiError::Decode(format!("{field}: {e}")))
+}
+
+fn parse_opt_ts(field: &str, value: Option<&str>) -> Result<Option<DateTime<Utc>>, ApiError> {
+    value.map(|v| parse_ts(field, v)).transpose()
 }
 
 /// Server text from the three body shapes in use: `{message}`, `{error, detail}`, or empty.
@@ -240,6 +407,17 @@ fn parse_role(value: &str) -> Result<Role, ApiError> {
     }
 }
 
+fn parse_backend_mode(value: &str) -> Result<DbBackendMode, ApiError> {
+    match value {
+        "direct_pg" => Ok(DbBackendMode::DirectPg),
+        "agent" => Ok(DbBackendMode::AgentMode),
+        "aws_secret" => Ok(DbBackendMode::AwsSecret),
+        "gcp_secret" => Ok(DbBackendMode::GcpSecret),
+        other => Err(ApiError::Decode(format!("unknown backend mode '{other}'"))),
+    }
+}
+
+/// One DTO for the list entry and the detail: the detail-only fields default to absent.
 #[derive(Deserialize)]
 struct ProjectDto {
     id: String,
@@ -248,6 +426,24 @@ struct ProjectDto {
     backend_mode: String,
     logging_enabled: bool,
     created_at: String,
+    #[serde(default)]
+    log_retention_days: Option<u32>,
+    #[serde(default)]
+    api_key_rotated_at: Option<String>,
+    #[serde(default)]
+    api_key_previous_expires_at: Option<String>,
+}
+
+impl ProjectDto {
+    fn api_key_info(&self) -> Result<ProjectApiKeyInfo, ApiError> {
+        Ok(ProjectApiKeyInfo {
+            rotated_at: parse_opt_ts("api_key_rotated_at", self.api_key_rotated_at.as_deref())?,
+            previous_expires_at: parse_opt_ts(
+                "api_key_previous_expires_at",
+                self.api_key_previous_expires_at.as_deref(),
+            )?,
+        })
+    }
 }
 
 impl TryFrom<ProjectDto> for Database {
@@ -259,26 +455,154 @@ impl TryFrom<ProjectDto> for Database {
             "deleted" => DbStatus::Deleted,
             other => return Err(ApiError::Decode(format!("unknown project status '{other}'"))),
         };
-        let backend_mode = match dto.backend_mode.as_str() {
-            "direct_pg" => DbBackendMode::DirectPg,
-            "agent" => DbBackendMode::AgentMode,
-            "aws_secret" => DbBackendMode::AwsSecret,
-            "gcp_secret" => DbBackendMode::GcpSecret,
-            other => return Err(ApiError::Decode(format!("unknown backend mode '{other}'"))),
-        };
-        let created_at = DateTime::parse_from_rfc3339(&dto.created_at)
-            .map_err(|e| ApiError::Decode(format!("created_at: {e}")))?
-            .with_timezone(&Utc);
         Ok(Database {
+            backend_mode: parse_backend_mode(&dto.backend_mode)?,
+            created_at: Some(parse_ts("created_at", &dto.created_at)?),
             // G-07: `name` is nullable; fall back to the id.
             name: dto.name.filter(|n| !n.is_empty()).unwrap_or_else(|| dto.id.clone()),
             id: DbId(dto.id),
             status,
-            backend_mode,
             logging_enabled: dto.logging_enabled,
-            log_retention: None,
-            created_at: Some(created_at),
+            log_retention: dto.log_retention_days.map(LogRetention::from_days),
             usage: Default::default(),
         })
     }
+}
+
+#[derive(Deserialize)]
+struct LatencyStatsDto {
+    p50_ms: Option<f64>,
+    p95_ms: Option<f64>,
+    p99_ms: Option<f64>,
+    samples: u64,
+    #[serde(default)]
+    saturated: bool,
+}
+
+impl From<LatencyStatsDto> for LatencyStats {
+    fn from(dto: LatencyStatsDto) -> Self {
+        LatencyStats {
+            p50_ms: dto.p50_ms,
+            p95_ms: dto.p95_ms,
+            p99_ms: dto.p99_ms,
+            samples: dto.samples,
+            saturated: dto.saturated,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LatencyDto {
+    read: LatencyStatsDto,
+    write: LatencyStatsDto,
+}
+
+#[derive(Deserialize)]
+struct SeriesPointDto {
+    hour: String,
+    reads: u64,
+    writes: u64,
+    deletes: u64,
+    errors: u64,
+}
+
+#[derive(Deserialize)]
+struct MetricsDto {
+    reads_today: u64,
+    writes_today: u64,
+    deletes_today: u64,
+    latency: LatencyDto,
+    series: Vec<SeriesPointDto>,
+}
+
+impl MetricsDto {
+    fn into_model(self, window: MetricsWindow) -> Result<DbMetrics, ApiError> {
+        let series = self
+            .series
+            .into_iter()
+            .map(|p| {
+                Ok(SeriesPoint {
+                    hour: parse_ts("series.hour", &p.hour)?,
+                    reads: p.reads,
+                    writes: p.writes,
+                    deletes: p.deletes,
+                    errors: p.errors,
+                })
+            })
+            .collect::<Result<_, ApiError>>()?;
+        Ok(DbMetrics {
+            window,
+            reads_today: self.reads_today,
+            writes_today: self.writes_today,
+            deletes_today: self.deletes_today,
+            read_latency: self.latency.read.into(),
+            write_latency: self.latency.write.into(),
+            series,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct SummaryDto {
+    project_id: String,
+    reads_today: u64,
+    writes_today: u64,
+    deletes_today: u64,
+    p95_read_ms: Option<f64>,
+    p95_write_ms: Option<f64>,
+}
+
+impl SummaryDto {
+    fn into_row(self) -> (DbId, MetricsSummaryRow) {
+        (
+            DbId(self.project_id),
+            MetricsSummaryRow {
+                reads_today: self.reads_today,
+                writes_today: self.writes_today,
+                deletes_today: self.deletes_today,
+                p95_read_ms: self.p95_read_ms,
+                p95_write_ms: self.p95_write_ms,
+            },
+        )
+    }
+}
+
+/// The three summary shapes of `GET /connection`, told apart by their fields.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SummaryShapeDto {
+    Dsn { host: String, port: u16, database: Option<String>, tls: bool },
+    Agent { endpoint: String, cert_expires_at: Option<String> },
+    Reference { reference: String },
+}
+
+#[derive(Deserialize)]
+struct ConnectionDto {
+    backend_mode: String,
+    summary: Option<SummaryShapeDto>,
+}
+
+impl ConnectionDto {
+    fn into_model(self) -> Result<Connection, ApiError> {
+        let mode = parse_backend_mode(&self.backend_mode)?;
+        let summary = match self.summary {
+            None => ConnectionSummary::NotReadable,
+            Some(SummaryShapeDto::Dsn { host, port, database, tls }) => {
+                ConnectionSummary::Dsn { host, port, database, tls }
+            }
+            Some(SummaryShapeDto::Agent { endpoint, cert_expires_at }) => ConnectionSummary::Agent {
+                endpoint,
+                cert_expires_at: parse_opt_ts("cert_expires_at", cert_expires_at.as_deref())?,
+            },
+            Some(SummaryShapeDto::Reference { reference }) => ConnectionSummary::SecretRef(reference),
+        };
+        Ok(Connection { mode, summary })
+    }
+}
+
+#[derive(Deserialize)]
+struct RotatedKeyDto {
+    api_key: String,
+    rotated_at: String,
+    previous_key_expires_at: Option<String>,
 }
