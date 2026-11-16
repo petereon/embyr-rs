@@ -1801,6 +1801,10 @@ pub enum UnsatisfiedConjunct {
     /// `request.auth != null` conjunct unmet (Slice 03, ADR-031) — the
     /// caller is not signed in.
     AuthRequired,
+    /// A conjunct over the queried collection's own ancestor path variables
+    /// (e.g. `request.auth.uid == uid` on `users/{uid}/posts`) evaluated
+    /// false for this caller and this collection path.
+    PathConditionUnmet,
 }
 
 impl UnsatisfiedConjunct {
@@ -1817,6 +1821,7 @@ impl UnsatisfiedConjunct {
             Self::OwnershipFilterMissing { .. } => "OWNERSHIP_FILTER_MISSING",
             Self::DenyAll => "RULE_DENIES_ALL",
             Self::AuthRequired => "AUTH_REQUIRED",
+            Self::PathConditionUnmet => "PATH_CONDITION_UNMET",
         }
     }
 }
@@ -1846,7 +1851,26 @@ pub fn check_query_compliance(
     filter: Option<&QueryFilter>,
     auth: Option<&AuthContext>,
 ) -> QueryComplianceOutcome {
-    let atoms = match decompose_decidable(condition) {
+    check_query_compliance_with_ancestor_bindings(condition, filter, auth, &BTreeMap::new())
+}
+
+/// [`check_query_compliance`] for a rule matched by a path PATTERN
+/// (ADR-063/064). `ancestor_path_variable_values` are the wildcard captures
+/// the queried collection's own concrete path fixes (`users/u1/posts`
+/// against `users/{uid}/posts` -> `uid = "u1"`) — the SAME map `evaluate()`
+/// takes for a single document. Every document the query can return shares
+/// them, so a conjunct reading only those variables, the caller's identity
+/// and literals has one answer for the whole query and is decided here by
+/// `evaluate()` itself. A path variable NOT in the map (the document-id
+/// wildcard, or one a recursive pattern leaves open) differs per document
+/// and stays undecidable: `RejectedUnsupportedRuleShape`.
+pub fn check_query_compliance_with_ancestor_bindings(
+    condition: &Condition,
+    filter: Option<&QueryFilter>,
+    auth: Option<&AuthContext>,
+    ancestor_path_variable_values: &BTreeMap<String, String>,
+) -> QueryComplianceOutcome {
+    let atoms = match decompose_decidable(condition, ancestor_path_variable_values) {
         Err(Undecidable) => return QueryComplianceOutcome::RejectedUnsupportedRuleShape,
         Ok(atoms) => atoms,
     };
@@ -1867,6 +1891,24 @@ pub fn check_query_compliance(
                 unsatisfied.push(UnsatisfiedConjunct::AuthRequired);
             }
             Atom::AuthRequired => {}
+            Atom::AncestorBound(conjunct) => {
+                let no_fields = BTreeMap::new();
+                let outcome = evaluate(
+                    conjunct,
+                    &EvalContext {
+                        auth,
+                        resource_fields: &no_fields,
+                        request_resource_fields: &no_fields,
+                        path_variable_value: None,
+                        ancestor_path_variable_values,
+                        request_time: None,
+                        cross_document_reads: &BTreeMap::new(),
+                    },
+                );
+                if !matches!(outcome, EvaluationOutcome::Allow) {
+                    unsatisfied.push(UnsatisfiedConjunct::PathConditionUnmet);
+                }
+            }
             Atom::OwnershipEquality(field) => {
                 let satisfied = auth
                     .map(|a| filter_binds_field_to_uid(filter, field, &a.uid))
@@ -1904,6 +1946,10 @@ enum Atom {
     /// (`Compare(AuthNullSentinel, Ne, NullLiteral)`) — satisfied iff
     /// `auth.is_some()` (AC-17-57/58).
     AuthRequired,
+    /// A conjunct that is the same for every document the query can return
+    /// (see [`is_decided_by_ancestor_bindings`]) — satisfied iff `evaluate()`
+    /// allows it.
+    AncestorBound(Condition),
 }
 
 struct Undecidable;
@@ -1913,7 +1959,10 @@ struct Undecidable;
 /// ownership equality, either operand order) — this is the ONLY path to
 /// `RejectedUnsupportedRuleShape`, reached by an explicit wildcard match arm,
 /// not by the absence of a match (Decision Driver 1, ADR-031).
-fn decompose_decidable(condition: &Condition) -> Result<Vec<Atom>, Undecidable> {
+fn decompose_decidable(
+    condition: &Condition,
+    ancestor_path_variable_values: &BTreeMap<String, String>,
+) -> Result<Vec<Atom>, Undecidable> {
     match condition {
         // Bare `true`/`false` (Slice 03, ADR-031, AC-17-59).
         Condition::Literal(b) => Ok(vec![Atom::Literal(*b)]),
@@ -1943,9 +1992,15 @@ fn decompose_decidable(condition: &Condition) -> Result<Vec<Atom>, Undecidable> 
         // propagates `Undecidable` from either side unchanged (mirrors
         // `eval_bool`'s own `Condition::And` handling in this same module).
         Condition::And(left, right) => {
-            let mut atoms = decompose_decidable(left)?;
-            atoms.extend(decompose_decidable(right)?);
+            let mut atoms = decompose_decidable(left, ancestor_path_variable_values)?;
+            atoms.extend(decompose_decidable(right, ancestor_path_variable_values)?);
             Ok(atoms)
+        }
+
+        // A conjunct over ancestor-bound path variables (any shape,
+        // including `||`/`!`): document-independent, decided by `evaluate()`.
+        conjunct if is_decided_by_ancestor_bindings(conjunct, ancestor_path_variable_values) => {
+            Ok(vec![Atom::AncestorBound(conjunct.clone())])
         }
 
         // Everything else (out of Slice 01/03/04 scope): `Or`, `Not`,
@@ -1954,6 +2009,51 @@ fn decompose_decidable(condition: &Condition) -> Result<Vec<Atom>, Undecidable> 
         // etc. — undecidable.
         _ => Err(Undecidable),
     }
+}
+
+/// Is `condition` the same for EVERY document directly inside the queried
+/// collection? True iff it reads at least one path variable, every path
+/// variable it reads is bound by the collection's own ancestor path, and
+/// every other operand is the caller's identity or a literal. Explicit
+/// allow-list: document data, `get()`/`exists()`, `request.time`, list
+/// literals and arithmetic all answer `false` (fail closed).
+fn is_decided_by_ancestor_bindings(
+    condition: &Condition,
+    ancestor_path_variable_values: &BTreeMap<String, String>,
+) -> bool {
+    fn operands<'a>(condition: &'a Condition, out: &mut Vec<&'a Operand>) {
+        match condition {
+            Condition::Literal(_) => {}
+            Condition::Compare(left, _, right) | Condition::In(left, right) => {
+                out.extend([left, right])
+            }
+            Condition::And(left, right) | Condition::Or(left, right) => {
+                operands(left, out);
+                operands(right, out);
+            }
+            Condition::Not(inner) => operands(inner, out),
+        }
+    }
+    let mut all = Vec::new();
+    operands(condition, &mut all);
+    let is_bound = |operand: &&Operand| {
+        matches!(operand, Operand::PathVariable(name) if ancestor_path_variable_values.contains_key(name))
+    };
+    all.iter().any(is_bound)
+        && all.iter().all(|operand| {
+            is_bound(operand)
+                || matches!(
+                    operand,
+                    Operand::AuthUid
+                        | Operand::AuthNullSentinel
+                        | Operand::AuthTokenClaim(_)
+                        | Operand::BoolLiteral(_)
+                        | Operand::NullLiteral
+                        | Operand::StringLiteral(_)
+                        | Operand::IntLiteral(_)
+                        | Operand::DoubleLiteral(_)
+                )
+        })
 }
 
 /// Does the query's filter tree (recursively, through `QueryFilter::
@@ -4569,5 +4669,106 @@ mod tests {
                 QueryComplianceOutcome::Admitted
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod ancestor_bound_query_compliance_tests {
+    //! `check_query_compliance_with_ancestor_bindings` IS its own driving
+    //! port (pure function). Conditions are written in the stored, rewritten
+    //! form (`uid` -> `request.path.uid`) the rules-file importer produces.
+    use super::*;
+    use proptest::prelude::*;
+
+    fn bound(name: &str, value: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(name.to_string(), value.to_string())])
+    }
+
+    fn caller(uid: &str) -> AuthContext {
+        AuthContext { uid: uid.to_string(), claims: BTreeMap::new() }
+    }
+
+    fn path_condition_unmet() -> QueryComplianceOutcome {
+        QueryComplianceOutcome::Rejected {
+            unsatisfied_conjuncts: vec![UnsatisfiedConjunct::PathConditionUnmet],
+        }
+    }
+
+    proptest! {
+        /// `users/{uid}/posts` + `request.auth.uid == uid`: a query on
+        /// `users/<owner>/posts` is admitted for the owner and nobody else.
+        #[test]
+        fn owner_rule_admits_exactly_the_collection_paths_own_owner(
+            owner in "[a-z][a-z0-9-]{1,20}",
+            other in "[a-z][a-z0-9-]{1,20}",
+        ) {
+            prop_assume!(owner != other);
+            let condition = parse_condition("request.auth.uid == request.path.uid").unwrap();
+            let check = |auth: Option<&AuthContext>| {
+                check_query_compliance_with_ancestor_bindings(&condition, None, auth, &bound("uid", &owner))
+            };
+
+            prop_assert_eq!(check(Some(&caller(&owner))), QueryComplianceOutcome::Admitted);
+            prop_assert_eq!(check(Some(&caller(&other))), path_condition_unmet());
+            prop_assert_eq!(check(None), path_condition_unmet());
+        }
+    }
+
+    #[test]
+    fn conditions_that_can_differ_per_document_stay_undecidable() {
+        let uid_bound = bound("uid", "maria-santos");
+        let unbound = BTreeMap::new();
+        let maria = caller("maria-santos");
+        for (source, bindings) in [
+            // The document-id wildcard is never bound by the collection path.
+            ("request.auth.uid == request.path.postId", &uid_bound),
+            // No pattern bindings at all (exact-match rule): unchanged.
+            ("request.auth.uid == request.path.uid", &unbound),
+            // Document data mixed into the same conjunct.
+            ("resource.data.owner_id == request.path.uid", &uid_bound),
+            (
+                "request.auth.uid == request.path.uid || resource.data.public == true",
+                &uid_bound,
+            ),
+            // No path variable: ADR-031's own decidable set is not widened.
+            ("request.auth.uid != \"\"", &uid_bound),
+        ] {
+            let condition = parse_condition(source).unwrap();
+            assert_eq!(
+                check_query_compliance_with_ancestor_bindings(&condition, None, Some(&maria), bindings),
+                QueryComplianceOutcome::RejectedUnsupportedRuleShape,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn ancestor_bound_conjuncts_compose_with_the_existing_decidable_shapes() {
+        let maria = caller("maria-santos");
+        let check = |source: &str, owner: &str| {
+            let condition = parse_condition(source).unwrap();
+            check_query_compliance_with_ancestor_bindings(&condition, None, Some(&maria), &bound("uid", owner))
+        };
+
+        // `&&` with an ADR-031 conjunct: both are still required.
+        let with_auth = "request.auth != null && request.auth.uid == request.path.uid";
+        assert_eq!(check(with_auth, "maria-santos"), QueryComplianceOutcome::Admitted);
+        assert_eq!(check(with_auth, "dana-kim"), path_condition_unmet());
+        assert_eq!(
+            check(
+                "request.auth.uid == request.path.uid && request.auth.uid == resource.data.owner_id",
+                "maria-santos"
+            ),
+            QueryComplianceOutcome::Rejected {
+                unsatisfied_conjuncts: vec![UnsatisfiedConjunct::OwnershipFilterMissing {
+                    field_path: "owner_id".to_string()
+                }],
+            }
+        );
+
+        // `||` whose every operand is document-independent is one conjunct.
+        let or_public = "request.auth.uid == request.path.uid || request.path.uid == \"public\"";
+        assert_eq!(check(or_public, "public"), QueryComplianceOutcome::Admitted);
+        assert_eq!(check(or_public, "dana-kim"), path_condition_unmet());
     }
 }

@@ -1064,7 +1064,9 @@ fn detail_for(e: ConditionParseError) -> String {
 /// Rewrite every WHOLE-WORD occurrence of `var` in `condition` to
 /// `request.path.<var>` (ADR-062 § Decision — Condition rewrite) — a plain
 /// string substitution over word boundaries, so `userIdSuffix` is never
-/// partially matched inside a rewrite of `userId`.
+/// partially matched inside a rewrite of `userId`. A `.`-preceded occurrence
+/// is a member access, never the variable: `{uid}` must leave
+/// `request.auth.uid` alone.
 fn rewrite_path_variable(condition: &str, var: &str) -> String {
     let is_word_char = |c: char| c.is_ascii_alphanumeric() || c == '_';
     let chars: Vec<char> = condition.chars().collect();
@@ -1073,7 +1075,7 @@ fn rewrite_path_variable(condition: &str, var: &str) -> String {
     let mut i = 0;
     while i < chars.len() {
         let matches_here = chars[i..].starts_with(var_chars.as_slice())
-            && (i == 0 || !is_word_char(chars[i - 1]))
+            && (i == 0 || !(is_word_char(chars[i - 1]) || chars[i - 1] == '.'))
             && !chars.get(i + var_chars.len()).is_some_and(|c| is_word_char(*c));
         if matches_here {
             result.push_str("request.path.");
@@ -1327,6 +1329,22 @@ mod tests {
         assert_eq!(
             flat_targets, nested_targets,
             "AC-17-203: a nested match-block shell must decompose to the identical DecomposedTarget the flat form produces"
+        );
+    }
+
+    #[test]
+    fn decompose_leaves_member_accesses_sharing_a_wildcards_name_untouched() {
+        let blocks = parse_rules_file(
+            "service cloud.firestore { match /databases/{database}/documents { \
+             match /users/{uid}/posts/{postId} { allow read: if request.auth.uid == uid; } } }",
+        )
+        .unwrap();
+        let DecomposedTarget::MultiSegmentPattern(pattern) = &decompose(blocks).unwrap()[0] else {
+            panic!("expected a multi-segment pattern");
+        };
+        assert_eq!(
+            pattern.read_condition.as_deref(),
+            Some("request.auth.uid == request.path.uid")
         );
     }
 

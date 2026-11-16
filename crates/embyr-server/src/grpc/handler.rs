@@ -923,15 +923,27 @@ impl FirestoreService {
     /// SUPERSET of what any one document resolves to (a less specific
     /// catch-all shadowed by a more specific one is still returned), so a
     /// caller requiring ALL of them to admit fails closed, never open.
+    ///
+    /// Each pattern comes with the wildcard captures `collection_path` itself
+    /// fixes (`users/u1/posts` against `users/{uid}/posts` -> `uid = "u1"`),
+    /// from the SAME `bind_ancestor`/`bind_recursive_prefix` calls the
+    /// per-document resolver makes. A wildcard in the document-id position
+    /// is never among them: it differs per document.
     async fn resolve_collection_read_patterns(
         system_db: &SystemDb,
         project_id: &str,
         collection_path: &str,
-    ) -> Result<Vec<crate::adapters::system_db::AccessRulePatternRow>, Status> {
-        if let Some((row, _)) =
+    ) -> Result<
+        Vec<(
+            crate::adapters::system_db::AccessRulePatternRow,
+            std::collections::BTreeMap<String, String>,
+        )>,
+        Status,
+    > {
+        if let Some(matched) =
             Self::resolve_access_rule_pattern(system_db, project_id, collection_path, None).await?
         {
-            return Ok(vec![row]);
+            return Ok(vec![matched]);
         }
 
         let mut any_document =
@@ -953,10 +965,10 @@ impl FirestoreService {
         let mut governing = Vec::new();
         for candidate in candidates {
             let prefix_segments = Self::recursive_prefix_segments(&candidate)?;
-            if embyr_core::access_control::path_routing::bind_recursive_prefix(&prefix_segments, &any_document)
-                .is_some()
+            if let Some((bindings, _)) =
+                embyr_core::access_control::path_routing::bind_recursive_prefix(&prefix_segments, &any_document)
             {
-                governing.push(candidate);
+                governing.push((candidate, bindings));
             }
         }
         Ok(governing)
@@ -966,9 +978,12 @@ impl FirestoreService {
     /// RunAggregationQuery), called when the exact-match lookup missed.
     /// Follows ADR-031's own design for exact-match rules: every governing
     /// pattern's read condition must statically admit the query via the SAME
-    /// `check_query_compliance`, before any row is read. A condition that
-    /// function cannot decide (anything referencing a path variable, `||`,
-    /// cross-document reads, ...) rejects the query — fail CLOSED.
+    /// `check_query_compliance`, before any row is read, with the path
+    /// variables `collection_path` itself fixes bound as constants
+    /// (`request.auth.uid == uid` on `users/{uid}/posts`). A condition that
+    /// function cannot decide (the document-id wildcard, document data
+    /// beyond ADR-031's shapes, cross-document reads, ...) rejects the
+    /// query — fail CLOSED.
     async fn check_pattern_query_compliance(
         system_db: &SystemDb,
         project_id: &str,
@@ -980,7 +995,9 @@ impl FirestoreService {
             uid: v.end_user_id.clone(),
             claims: v.claims.clone(),
         });
-        for row in Self::resolve_collection_read_patterns(system_db, project_id, collection_path).await? {
+        for (row, ancestor_bindings) in
+            Self::resolve_collection_read_patterns(system_db, project_id, collection_path).await?
+        {
             let Some(read_condition_source) = row.read_condition else {
                 continue;
             };
@@ -988,7 +1005,12 @@ impl FirestoreService {
                 .map_err(|e| {
                     Status::internal(format!("stored access rule pattern failed to re-parse: {e:?}"))
                 })?;
-            match embyr_core::access_control::check_query_compliance(&condition, filter, auth_ctx.as_ref()) {
+            match embyr_core::access_control::check_query_compliance_with_ancestor_bindings(
+                &condition,
+                filter,
+                auth_ctx.as_ref(),
+                &ancestor_bindings,
+            ) {
                 embyr_core::access_control::QueryComplianceOutcome::Admitted => {}
                 outcome => return Err(query_compliance_rejection(&outcome)),
             }
