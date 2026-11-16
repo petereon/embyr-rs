@@ -34,6 +34,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/embyr
       EMBYR_ADMIN_KEY: dev-only-admin-key-do-not-use-in-production          # dev-only placeholder — do not reuse in any shared/production environment
       EMBYR_ENCRYPTION_KEY: 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20   # dev-only placeholder — 64 hex chars, mirrors ci.yml's own fixture value
+      EMBYR_ALLOW_PRIVATE_DSN_HOSTS: "true"   # dev-only: lets provision accept loopback/private/non-TLS DSNs (audit #65 SSRF + X10 TLS). NEVER set in production.
 
 volumes:
   embyr_pgdata:
