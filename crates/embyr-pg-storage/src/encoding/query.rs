@@ -225,21 +225,34 @@ pub(crate) fn push_scalar_comparison(
     op: &str,
     value: &FieldValue,
 ) {
+    // typed-order-by (P11): every arm is guarded by the stored type tag, so a
+    // range filter / cursor only matches values of the bound value's own
+    // Firestore type class (other types evaluate to NULL and are excluded)
+    // and a mixed-type collection can no longer hit a cast error. Same type
+    // classes and casts as `order_by_expr`, so both share one total order.
+    let t = format!("fields->'{field_path}'->>'t'");
+    let v = format!("fields->'{field_path}'->>'v'");
     match value {
-        FieldValue::Integer(v) => {
-            qb.push(format!("(fields->'{field_path}'->>'v')::bigint {op} "));
-            qb.push_bind(*v);
-        }
-        FieldValue::String(s) => {
-            qb.push(format!("fields->'{field_path}'->>'v' {op} "));
-            qb.push_bind(s.clone());
+        // Integer and Double are one numeric class, compared numerically
+        // against each other (Firestore semantics) — both via float8.
+        // ponytail: float8 loses exactness for integers beyond 2^53; add a
+        // numeric/bigint tiebreak if such magnitudes matter.
+        FieldValue::Integer(i) => {
+            qb.push(format!("CASE WHEN {t} IN ('I','D') THEN ({v})::float8 END {op} "));
+            qb.push_bind(*i as f64);
         }
         FieldValue::Double(d) => {
-            qb.push(format!("(fields->'{field_path}'->>'v')::float8 {op} "));
+            qb.push(format!("CASE WHEN {t} IN ('I','D') THEN ({v})::float8 END {op} "));
             qb.push_bind(*d);
         }
+        // `COLLATE "C"`: Firestore compares strings by UTF-8 byte order,
+        // which C collation gives on a UTF8 database (ORDER BY matches).
+        FieldValue::String(s) => {
+            qb.push(format!("CASE WHEN {t} = 'S' THEN {v} COLLATE \"C\" END {op} "));
+            qb.push_bind(s.clone());
+        }
         FieldValue::Boolean(b) => {
-            qb.push(format!("(fields->'{field_path}'->>'v')::boolean {op} "));
+            qb.push(format!("CASE WHEN {t} = 'B' THEN ({v})::boolean END {op} "));
             qb.push_bind(*b);
         }
         // firestore-range-operator-value-type-support (Slice 01, US-01,
@@ -251,7 +264,8 @@ pub(crate) fn push_scalar_comparison(
         // -overflow risk (vs. combining into one `seconds*1e9+nanos` value).
         FieldValue::Timestamp(s, n) => {
             qb.push(format!(
-                "ROW((fields->'{field_path}'->'s')::bigint, (fields->'{field_path}'->'n')::int) {op} ROW("
+                "ROW(CASE WHEN {t} = 'TS' THEN (fields->'{field_path}'->'s')::bigint END, \
+                 CASE WHEN {t} = 'TS' THEN (fields->'{field_path}'->'n')::int END) {op} ROW("
             ));
             qb.push_bind(*s);
             qb.push(", ");
@@ -270,7 +284,7 @@ pub(crate) fn push_scalar_comparison(
         // `STANDARD` (the SAME base64 engine `field_value_to_json` already
         // encodes with), never a second, divergent encoding.
         FieldValue::Bytes(b) => {
-            qb.push(format!("decode(fields->'{field_path}'->>'v', 'base64') {op} decode("));
+            qb.push(format!("CASE WHEN {t} = 'BY' THEN decode({v}, 'base64') END {op} decode("));
             qb.push_bind(STANDARD.encode(b));
             qb.push(", 'base64')");
         }
@@ -288,7 +302,7 @@ pub(crate) fn push_scalar_comparison(
         // (feature-delta.md § Out of Scope) — not silently claimed correct
         // in every case.
         FieldValue::Reference(r) => {
-            qb.push(format!("fields->'{field_path}'->>'v' {op} "));
+            qb.push(format!("CASE WHEN {t} = 'R' THEN {v} COLLATE \"C\" END {op} "));
             qb.push_bind(r.clone());
         }
         // firestore-range-operator-value-type-support (Slice 02, US-02):
@@ -356,6 +370,19 @@ fn push_value_equality(qb: &mut QueryBuilder<Postgres>, field_path: &str, target
 ///
 /// This string is pushed as raw SQL (no bind parameter), since ORDER BY
 /// expressions cannot be parameterised in Postgres.
+///
+/// typed-order-by (P11): a two-level key, every column carrying the clause's
+/// direction. (1) type rank per Firestore's cross-type order — null < boolean
+/// < NaN < numbers (integer + double together) < timestamp < string < bytes <
+/// reference < array < map; (2) one typed value column per type family, each
+/// `NULL` outside its own type so only the column of the rank group's own
+/// type discriminates. Same type classes/casts as `push_scalar_comparison`,
+/// so ORDER BY, cursors and range filters share one total order.
+///
+/// `__name__` orders by document id (byte order) — it is not a stored field.
+///
+/// ponytail: array/map fall back to jsonb's own stable ordering, not
+/// Firestore's element-wise rule; numbers go through float8 (exact to 2^53).
 pub fn order_by_expr(ob: &OrderBy) -> String {
     // field-path-defense-in-depth (finding #26): see `append_field_filter`'s
     // own identical guard comment for the full rationale.
@@ -366,7 +393,38 @@ pub fn order_by_expr(ob: &OrderBy) -> String {
         OrderDirection::Ascending => "ASC",
         OrderDirection::Descending => "DESC",
     };
-    format!("fields->'{}'->>'v' {}", ob.field_path, dir)
+    if ob.field_path == "__name__" {
+        return format!("document_id COLLATE \"C\" {dir}");
+    }
+    let fp = &ob.field_path;
+    let t = format!("fields->'{fp}'->>'t'");
+    let v = format!("fields->'{fp}'->>'v'");
+    [
+        format!(
+            "CASE {t} WHEN 'N' THEN 0 WHEN 'B' THEN 1 \
+             WHEN 'D' THEN CASE WHEN {v} = 'NaN' THEN 2 ELSE 3 END WHEN 'I' THEN 3 \
+             WHEN 'TS' THEN 4 WHEN 'S' THEN 5 WHEN 'BY' THEN 6 WHEN 'R' THEN 7 \
+             WHEN 'A' THEN 8 WHEN 'M' THEN 9 END"
+        ),
+        format!("CASE WHEN {t} = 'B' THEN ({v})::boolean END"),
+        format!("CASE WHEN {t} IN ('I','D') THEN ({v})::float8 END"),
+        format!("CASE WHEN {t} = 'TS' THEN (fields->'{fp}'->'s')::bigint END"),
+        format!("CASE WHEN {t} = 'TS' THEN (fields->'{fp}'->'n')::int END"),
+        format!("CASE WHEN {t} IN ('S','R') THEN {v} COLLATE \"C\" END"),
+        format!("CASE WHEN {t} = 'BY' THEN decode({v}, 'base64') END"),
+        format!("CASE WHEN {t} IN ('A','M') THEN fields->'{fp}'->'v' END"),
+    ]
+    .map(|k| format!("{k} {dir}"))
+    .join(", ")
+}
+
+/// WHERE predicate for an `OrderBy` clause: Firestore excludes documents that
+/// lack the ordered field. `None` for `__name__` (always present).
+pub fn order_by_presence_predicate(ob: &OrderBy) -> Option<String> {
+    if let Err(e) = validate_field_path(&ob.field_path) {
+        panic!("invalid field path reached SQL builder: {e}");
+    }
+    (ob.field_path != "__name__").then(|| format!("fields->'{}' IS NOT NULL", ob.field_path))
 }
 
 /// Return a raw SQL ORDER BY expression with explicit bigint cast (for integer fields).
@@ -728,10 +786,12 @@ mod tests {
         // compares_the_whole_field_value` above) — this test now covers
         // only the 4 range operators `push_scalar_comparison` still serves.
         let cases: Vec<(FilterOp, &str, FieldValue, &str)> = vec![
-            (FilterOp::LessThan, "<", FieldValue::Integer(5), "::bigint"),
+            // typed-order-by (P11): Integer now shares Double's float8 numeric
+            // class (cross-type numeric comparison), so its cast is float8.
+            (FilterOp::LessThan, "<", FieldValue::Integer(5), "::float8"),
             (FilterOp::LessThanOrEqual, "<=", FieldValue::Double(5.5), "::float8"),
             (FilterOp::GreaterThan, ">", FieldValue::Boolean(true), "::boolean"),
-            (FilterOp::GreaterThanOrEqual, ">=", FieldValue::Integer(5), "::bigint"),
+            (FilterOp::GreaterThanOrEqual, ">=", FieldValue::Integer(5), "::float8"),
         ];
         for (op, op_str, value, cast) in cases {
             let f = filter("n", op, value);
@@ -751,8 +811,9 @@ mod tests {
     fn greater_than_on_timestamp_uses_row_comparison() {
         let f = filter("createdAt", FilterOp::GreaterThan, FieldValue::Timestamp(1_700_000_000, 500));
         let sql = generated_sql(&f);
-        assert!(sql.contains("ROW((fields->'createdAt'->'s')::bigint"), "got: {sql}");
-        assert!(sql.contains("(fields->'createdAt'->'n')::int)"), "got: {sql}");
+        // typed-order-by (P11): each ROW element is now type-tag guarded.
+        assert!(sql.contains("THEN (fields->'createdAt'->'s')::bigint END"), "got: {sql}");
+        assert!(sql.contains("THEN (fields->'createdAt'->'n')::int END)"), "got: {sql}");
         assert!(sql.contains(" > ROW("), "got: {sql}");
     }
 
@@ -767,7 +828,7 @@ mod tests {
     fn less_than_on_bytes_decodes_to_bytea_not_base64_text() {
         let f = filter("payload", FilterOp::LessThan, FieldValue::Bytes(vec![0xFF]));
         let sql = generated_sql(&f);
-        assert!(sql.contains("decode(fields->'payload'->>'v', 'base64')"), "got: {sql}");
+        assert!(sql.contains("THEN decode(fields->'payload'->>'v', 'base64') END"), "got: {sql}");
         assert!(sql.contains(" < decode("), "got: {sql}");
         assert!(sql.contains(", 'base64')"), "got: {sql}");
         assert!(!sql.contains("->>'v' <"), "must not compare the base64 TEXT directly, got: {sql}");
@@ -784,7 +845,11 @@ mod tests {
             FieldValue::Reference("projects/p/databases/(default)/documents/users/alice".to_string()),
         );
         let sql = generated_sql(&f);
-        assert_eq!(sql.trim(), "fields->'ownerRef'->>'v' >= $1");
+        // typed-order-by (P11): type-tag guarded, byte-order (C) collation.
+        assert_eq!(
+            sql.trim(),
+            "CASE WHEN fields->'ownerRef'->>'t' = 'R' THEN fields->'ownerRef'->>'v' COLLATE \"C\" END >= $1"
+        );
     }
 
     /// Regression guard: `Array`/`Map` still panic if they somehow reach
@@ -820,12 +885,103 @@ mod tests {
         generated_sql(&f);
     }
 
-    /// Regression guard: a legitimate field path is unaffected by the new
-    /// guard — `order_by_expr` still produces the same ORDER BY fragment.
+    fn ob(field: &str, direction: OrderDirection) -> OrderBy {
+        OrderBy { field_path: field.to_string(), direction }
+    }
+
+    /// Regression guard: a legitimate field path still builds. Updated for
+    /// typed-order-by (P11): the old exact string `fields->'f'->>'v' DESC`
+    /// was the text-sort bug itself (5 sorted above 30), so the assertion now
+    /// pins the new shape — type-rank key first, typed value keys after,
+    /// EVERY key carrying the clause direction, and no raw text-`v` sort key.
     #[test]
     fn order_by_expr_still_works_for_a_legitimate_field_path() {
-        let ob = OrderBy { field_path: "created_at".to_string(), direction: OrderDirection::Descending };
-        assert_eq!(order_by_expr(&ob), "fields->'created_at'->>'v' DESC");
+        let sql = order_by_expr(&ob("created_at", OrderDirection::Descending));
+        assert!(sql.starts_with("CASE fields->'created_at'->>'t' WHEN 'N' THEN 0"), "got: {sql}");
+        assert!(sql.contains("(fields->'created_at'->>'v')::float8"), "got: {sql}");
+        assert_eq!(sql.matches(" DESC").count(), sql.split(", CASE").count(), "every key must be DESC: {sql}");
+        assert!(!sql.contains("ASC"), "got: {sql}");
+        assert!(!sql.starts_with("fields->"), "must not sort by raw text v: {sql}");
+    }
+
+    #[test]
+    fn order_by_name_sorts_by_document_id_and_is_never_excluded() {
+        let o = ob("__name__", OrderDirection::Ascending);
+        assert_eq!(order_by_expr(&o), "document_id COLLATE \"C\" ASC");
+        assert_eq!(order_by_presence_predicate(&o), None);
+    }
+
+    #[test]
+    fn order_by_excludes_documents_lacking_the_field() {
+        let p = order_by_presence_predicate(&ob("score", OrderDirection::Ascending));
+        assert_eq!(p.as_deref(), Some("fields->'score' IS NOT NULL"));
+    }
+
+    // Reference oracle: Firestore's cross-type order, written independently
+    // of the SQL builder. Tags are the type-order positions.
+    fn oracle_type_position(v: &FieldValue) -> u8 {
+        match v {
+            FieldValue::Null => 0,
+            FieldValue::Boolean(_) => 1,
+            FieldValue::Double(d) if d.is_nan() => 2,
+            FieldValue::Integer(_) | FieldValue::Double(_) => 3,
+            FieldValue::Timestamp(..) => 4,
+            FieldValue::String(_) => 5,
+            FieldValue::Bytes(_) => 6,
+            FieldValue::Reference(_) => 7,
+            FieldValue::Array(_) => 8,
+            FieldValue::Map(_) => 9,
+        }
+    }
+
+    /// Reads the rank `order_by_expr`'s SQL assigns to `v`'s stored type tag.
+    fn sql_rank(sql: &str, v: &FieldValue) -> u8 {
+        let digit_after = |pat: &str| -> u8 {
+            let i = sql.find(pat).unwrap_or_else(|| panic!("`{pat}` missing in: {sql}"));
+            sql[i + pat.len()..].chars().next().unwrap().to_digit(10).unwrap() as u8
+        };
+        let tag = field_value_to_json(v)["t"].as_str().unwrap().to_string();
+        match v {
+            FieldValue::Double(d) if d.is_nan() => digit_after("= 'NaN' THEN "),
+            FieldValue::Double(_) => digit_after(" ELSE "),
+            _ => digit_after(&format!("WHEN '{tag}' THEN ")),
+        }
+    }
+
+    /// Property over all ordered pairs of a mixed-type sample: the SQL's rank
+    /// key orders two values exactly as the Firestore oracle orders their
+    /// types, and ranks tie exactly when the oracle puts them in one class
+    /// (integer and double compare numerically, so they MUST tie on rank and
+    /// be separated by the float8 value key). Value ordering inside a class
+    /// executes in Postgres and is covered by the Docker acceptance test.
+    #[test]
+    fn sql_type_rank_agrees_with_firestore_cross_type_oracle() {
+        use std::collections::BTreeMap;
+        let sample = [
+            FieldValue::Null,
+            FieldValue::Boolean(false),
+            FieldValue::Boolean(true),
+            FieldValue::Double(f64::NAN),
+            FieldValue::Integer(-1),
+            FieldValue::Integer(30),
+            FieldValue::Double(7.5),
+            FieldValue::Timestamp(10, 0),
+            FieldValue::String("a".into()),
+            FieldValue::Bytes(vec![1]),
+            FieldValue::Reference("projects/p/databases/d/documents/c/x".into()),
+            FieldValue::Array(vec![FieldValue::Integer(1)]),
+            FieldValue::Map(BTreeMap::new()),
+        ];
+        let sql = order_by_expr(&ob("f", OrderDirection::Ascending));
+        for a in &sample {
+            for b in &sample {
+                assert_eq!(
+                    sql_rank(&sql, a).cmp(&sql_rank(&sql, b)),
+                    oracle_type_position(a).cmp(&oracle_type_position(b)),
+                    "rank order of {a:?} vs {b:?} in: {sql}"
+                );
+            }
+        }
     }
 
     /// Defense-in-depth: `order_by_expr` called directly with a malicious

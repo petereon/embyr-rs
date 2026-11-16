@@ -875,7 +875,8 @@ impl BackendAdapter for PostgresBackendAdapter {
     ) -> Result<Vec<FirestoreDocument>, CoreError> {
         use sqlx::QueryBuilder;
         use crate::encoding::query::{
-            append_filter, order_by_expr, push_all_descendants_predicate, push_scalar_comparison,
+            append_filter, order_by_expr, order_by_presence_predicate,
+            push_all_descendants_predicate, push_scalar_comparison,
         };
 
         let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
@@ -911,6 +912,14 @@ impl BackendAdapter for PostgresBackendAdapter {
         if let Some(since_ts) = query.since_update_time {
             qb.push(" AND update_time > ");
             qb.push_bind(since_ts);
+        }
+
+        // Firestore excludes documents lacking an ordered field (typed-order-by).
+        for ob in &query.order_by {
+            if let Some(pred) = order_by_presence_predicate(ob) {
+                qb.push(" AND ");
+                qb.push(pred);
+            }
         }
 
         // startAt/startAfter cursor — single-field orderBy only (step 04-01)
