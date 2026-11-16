@@ -105,6 +105,8 @@ pub struct RateLimiter {
     refill_rate: f64,
     enabled: bool,
     pg_pool: Option<sqlx::PgPool>,
+    /// Budget for the shared-Postgres check before falling back in-process.
+    pg_timeout_ms: u64,
 }
 
 impl RateLimiter {
@@ -121,6 +123,7 @@ impl RateLimiter {
             refill_rate,
             enabled: true,
             pg_pool: None,
+            pg_timeout_ms: RATE_LIMIT_PG_TIMEOUT_MS,
         })
     }
 
@@ -128,12 +131,25 @@ impl RateLimiter {
     ///
     /// Falls back to per-instance buckets if the Postgres call times out (20 ms).
     pub fn with_pg(capacity: f64, refill_rate: f64, pool: sqlx::PgPool) -> Arc<Self> {
+        Self::with_pg_timeout(capacity, refill_rate, pool, RATE_LIMIT_PG_TIMEOUT_MS)
+    }
+
+    /// Same as [`with_pg`](Self::with_pg) with an explicit Postgres budget. Production uses
+    /// the default; test servers that must not trip the in-process fallback on a loaded CI
+    /// runner pass a generous value.
+    pub fn with_pg_timeout(
+        capacity: f64,
+        refill_rate: f64,
+        pool: sqlx::PgPool,
+        pg_timeout_ms: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
             buckets: Mutex::new(HashMap::new()),
             capacity,
             refill_rate,
             enabled: true,
             pg_pool: Some(pool),
+            pg_timeout_ms,
         })
     }
 
@@ -145,6 +161,7 @@ impl RateLimiter {
             refill_rate: f64::MAX,
             enabled: false,
             pg_pool: None,
+            pg_timeout_ms: RATE_LIMIT_PG_TIMEOUT_MS,
         })
     }
 
@@ -207,7 +224,7 @@ impl RateLimiter {
 
         if let Some(pool) = &self.pg_pool {
             match tokio::time::timeout(
-                std::time::Duration::from_millis(RATE_LIMIT_PG_TIMEOUT_MS),
+                std::time::Duration::from_millis(self.pg_timeout_ms),
                 self.check_pg(project_id, pool),
             )
             .await
@@ -226,7 +243,7 @@ impl RateLimiter {
                     tracing::warn!(
                         project_id = project_id,
                         "rate_limit_pg_timeout: Postgres check exceeded {}ms, falling back to in-process bucket",
-                        RATE_LIMIT_PG_TIMEOUT_MS,
+                        self.pg_timeout_ms,
                     );
                     // OBS-04: pg-timeout counter alongside the warn! log (ADR-016).
                     metrics::counter!("embyr_rate_limit_pg_timeout_total").increment(1);
