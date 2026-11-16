@@ -326,15 +326,7 @@ impl FirestoreService {
         let hash_current = row.api_key_hash_current.clone();
         let hash_previous = row.api_key_hash_previous.clone();
         let verified = tokio::task::spawn_blocking(move || {
-            if argon2::verify_api_key(&api_key_bytes, &hash_current).unwrap_or(false) {
-                return true;
-            }
-            if let Some(prev) = &hash_previous {
-                if argon2::verify_api_key(&api_key_bytes, prev).unwrap_or(false) {
-                    return true;
-                }
-            }
-            false
+            argon2::verify_project_key(&api_key_bytes, &hash_current, hash_previous.as_deref())
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
