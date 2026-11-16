@@ -206,6 +206,18 @@ impl CpbTestContext {
     /// signature-verification scenarios that need to compute a matching
     /// `Stripe-Signature` header locally.
     pub async fn with_webhook_secret(webhook_signing_secret: &str) -> Self {
+        Self::with_gateway(
+            webhook_signing_secret,
+            StripeGateway::new(stripe_secret_key()),
+        )
+        .await
+    }
+
+    /// Same as `with_webhook_secret`, with an explicit `StripeGateway` —
+    /// lets stripe-checkout-portal tests choose the API key and
+    /// `EMBYR_PUBLIC_BASE_URL` (checkout/portal 503/409/422/403 paths never
+    /// reach Stripe, so they run with a placeholder key).
+    pub async fn with_gateway(webhook_signing_secret: &str, gateway: StripeGateway) -> Self {
         let container = Postgres::default()
             .with_tag("15-alpine")
             .start()
@@ -229,7 +241,7 @@ impl CpbTestContext {
         .expect("insert account");
 
         let credential_cache = Arc::new(CredentialCache::new(1024));
-        let stripe_gateway = Arc::new(StripeGateway::new(stripe_secret_key()));
+        let stripe_gateway = Arc::new(gateway);
         let prometheus_handle = embyr_server::observability::get_or_install_prometheus_handle();
         // card-payments-backend (US-206, step 03-01): ONE shared cache
         // between the router (reader, via `get_subscription`) and

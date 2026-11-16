@@ -162,6 +162,11 @@ pub struct ServerConfig {
     /// unset) = no origin is allowed, matching today's pre-CORS-layer
     /// behavior exactly (fails closed is the deliberate baseline).
     pub cors_allowed_origins: Vec<String>,
+    /// `EMBYR_PUBLIC_BASE_URL` — optional origin of the customer-facing SPA
+    /// (e.g. `https://console.example.com`), for absolute links: Stripe
+    /// Checkout/Portal return URLs (stripe-checkout-portal). Unset = those
+    /// endpoints answer 503. Blank is treated as unset.
+    pub public_base_url: Option<String>,
     /// `EMBYR_SHUTDOWN_GRACE_SECS` — after SIGTERM, how long open requests
     /// and streams on all three listeners may keep draining before the
     /// process exits and drops them. Default 25 (under Docker/K8s' usual
@@ -472,6 +477,9 @@ impl ServerConfig {
             listener_db_max_connections,
             listener_db_acquire_timeout_secs,
             cors_allowed_origins,
+            public_base_url: std::env::var("EMBYR_PUBLIC_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             shutdown_grace_secs,
         })
     }

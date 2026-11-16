@@ -95,6 +95,10 @@ pub struct StripeGateway {
     /// logged, mirrors the `EMBYR_ADMIN_KEY` / `EMBYR_AGENT_DB_DSN`
     /// no-plaintext-in-logs precedent, ADR-018 Enforcement section).
     client: stripe::Client,
+    /// `EMBYR_PUBLIC_BASE_URL` (no trailing slash) — origin of the customer-
+    /// facing SPA, used to build Checkout/Portal return links. `None` =
+    /// hosted-checkout/portal endpoints answer 503 (stripe-checkout-portal).
+    public_base_url: Option<String>,
 }
 
 impl StripeGateway {
@@ -119,7 +123,60 @@ impl StripeGateway {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Self {
             client: stripe::Client::new(api_key),
+            public_base_url: None,
         }
+    }
+
+    /// Builder: set the public base URL (trailing `/` trimmed; blank = unset).
+    pub fn with_public_base_url(mut self, url: Option<String>) -> Self {
+        self.public_base_url = url
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty());
+        self
+    }
+
+    pub fn public_base_url(&self) -> Option<&str> {
+        self.public_base_url.as_deref()
+    }
+
+    /// Hosted Stripe Checkout Session (`subscription` mode) for `plan`'s
+    /// price. Card data never touches this server. `client_reference_id` and
+    /// metadata carry the account id. Returns the hosted page URL. Fails if
+    /// `plan` is Free or `public_base_url` is unset (handler gates both first).
+    pub async fn create_checkout_session(
+        &self,
+        customer_id: &str,
+        account_id: uuid::Uuid,
+        plan: embyr_core::admin::SubscriptionPlan,
+    ) -> Result<String, StripeError> {
+        let (Some(price_id), Some(base)) = (price_id_for_plan(plan), self.public_base_url()) else {
+            return Err(StripeError::ApiError(
+                "checkout needs a paid plan and EMBYR_PUBLIC_BASE_URL".to_string(),
+            ));
+        };
+        let session = checkout_session_request(customer_id, account_id, price_id, base)
+            .send(&self.client)
+            .await
+            .map_err(map_stripe_error)?;
+        session
+            .url
+            .ok_or_else(|| StripeError::ApiError("checkout session has no url".to_string()))
+    }
+
+    /// Hosted Stripe Billing Portal session (payment method / invoices /
+    /// cancel) for an existing Stripe Customer. Returns the portal URL.
+    /// Requires a default Billing Portal configuration in the Stripe account.
+    pub async fn create_portal_session(&self, customer_id: &str) -> Result<String, StripeError> {
+        let base = self.public_base_url().ok_or_else(|| {
+            StripeError::ApiError("portal needs EMBYR_PUBLIC_BASE_URL".to_string())
+        })?;
+        let session = stripe_billing::billing_portal_session::CreateBillingPortalSession::new()
+            .customer(customer_id)
+            .return_url(format!("{base}/billing"))
+            .send(&self.client)
+            .await
+            .map_err(map_stripe_error)?;
+        Ok(session.url)
     }
 
     /// Get-or-create a Stripe Customer for `account_id`. Idempotent in
@@ -406,6 +463,38 @@ impl StripeGateway {
     }
 }
 
+/// Stripe Price id for a plan; `None` for Free (nothing to check out).
+pub(crate) fn price_id_for_plan(plan: embyr_core::admin::SubscriptionPlan) -> Option<&'static str> {
+    match plan {
+        embyr_core::admin::SubscriptionPlan::Pro => Some(PRO_PLAN_STRIPE_PRICE_ID),
+        embyr_core::admin::SubscriptionPlan::Free => None,
+    }
+}
+
+/// Pure request builder for the hosted Checkout Session (unit-testable via
+/// `.build().body` — no I/O).
+fn checkout_session_request(
+    customer_id: &str,
+    account_id: uuid::Uuid,
+    price_id: &str,
+    base_url: &str,
+) -> stripe_checkout::checkout_session::CreateCheckoutSession {
+    let mut item = stripe_checkout::checkout_session::CreateCheckoutSessionLineItems::new();
+    item.price = Some(price_id.to_string());
+    item.quantity = Some(1);
+    let mut metadata = HashMap::with_capacity(1);
+    metadata.insert("embyr_account_id".to_string(), account_id.to_string());
+
+    stripe_checkout::checkout_session::CreateCheckoutSession::new()
+        .mode(stripe_checkout::CheckoutSessionMode::Subscription)
+        .customer(customer_id)
+        .client_reference_id(account_id.to_string())
+        .metadata(metadata)
+        .line_items(vec![item])
+        .success_url(format!("{base_url}/billing?checkout=success"))
+        .cancel_url(format!("{base_url}/billing?checkout=cancelled"))
+}
+
 /// Maps `stripe::StripeError` (the vendor SDK's transport/API error enum) to
 /// this adapter's own `StripeError` — `Stripe(_, status)` (a real Stripe API
 /// error response, e.g. 401 on an invalid key) becomes `ApiError`; anything
@@ -461,5 +550,63 @@ fn map_stripe_error(err: stripe::StripeError) -> StripeError {
             "stripe API call failed, status {status}: {errors:?}"
         )),
         other => StripeError::Unreachable(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embyr_core::admin::SubscriptionPlan;
+
+    #[test]
+    fn only_paid_plan_has_a_price_id() {
+        assert_eq!(
+            price_id_for_plan(SubscriptionPlan::Pro),
+            Some(PRO_PLAN_STRIPE_PRICE_ID)
+        );
+        assert_eq!(price_id_for_plan(SubscriptionPlan::Free), None);
+    }
+
+    #[test]
+    fn public_base_url_is_trimmed_and_blank_means_unset() {
+        let url_of = |u: Option<&str>| {
+            StripeGateway::new("sk_test_x")
+                .with_public_base_url(u.map(str::to_string))
+                .public_base_url()
+                .map(str::to_string)
+        };
+        assert_eq!(
+            url_of(Some(" https://app.example.com/ ")).as_deref(),
+            Some("https://app.example.com")
+        );
+        assert_eq!(url_of(Some("  ")), None);
+        assert_eq!(url_of(None), None);
+    }
+
+    #[test]
+    fn checkout_request_is_subscription_mode_for_account_with_return_urls() {
+        let account = uuid::Uuid::nil();
+        let built = checkout_session_request("cus_1", account, "price_1", "https://app.example.com")
+            .build();
+        let body = built
+            .body
+            .expect("form body")
+            .replace("%5B", "[")
+            .replace("%5D", "]")
+            .replace("%3A", ":")
+            .replace("%2F", "/")
+            .replace("%3F", "?")
+            .replace("%3D", "=");
+        for expected in [
+            "mode=subscription",
+            "customer=cus_1",
+            &format!("client_reference_id={account}"),
+            "line_items[0][price]=price_1",
+            "line_items[0][quantity]=1",
+            "success_url=https://app.example.com/billing?checkout=success",
+            "cancel_url=https://app.example.com/billing?checkout=cancelled",
+        ] {
+            assert!(body.contains(expected), "missing {expected:?} in {body}");
+        }
     }
 }

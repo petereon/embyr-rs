@@ -249,7 +249,8 @@ async fn main() {
         cfg.stripe_secret_key
             .clone()
             .unwrap_or_else(|| "stripe-secret-key-not-configured".to_string()),
-    ));
+    )
+    .with_public_base_url(cfg.public_base_url.clone()));
 
     if let Err(e) = stripe_gateway.probe().await {
         tracing::warn!(
