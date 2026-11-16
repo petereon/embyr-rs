@@ -15,6 +15,9 @@ pub mod auth;
 pub mod client_identity;
 pub mod domain;
 pub mod error;
+// hourly-metrics-rollup (ADR-084): pure bucket/percentile fns + in-memory
+// write buffer. Zero IO.
+pub mod metrics_rollup;
 // client-auth-hosted-identity (BC-5, ADR-036 Decision 9): pure
 // validate_password_strength(). Zero IO.
 pub mod hosted_identity;
