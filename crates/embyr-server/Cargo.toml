@@ -657,6 +657,17 @@ path = "../../tests/security_rules_realtime/acceptance/regression_baseline_unaff
 name = "security_rules_realtime_listen_subscription_simulation"
 path = "../../tests/security_rules_realtime/acceptance/listen_subscription_simulation.rs"
 
+# listen-multi-target acceptance tests (go-live finding P2) — multiplexed Listen
+# stream: multiple Query/Documents targets, server-assigned ids, REMOVE,
+# orderBy/limit/offset windows, per-document rules on Documents targets.
+[[test]]
+name = "listen_multi_target_multiplexed_listen"
+path = "../../tests/listen_multi_target/acceptance/lmt_multiplexed_listen.rs"
+
+[[test]]
+name = "listen_multi_target_documents_target_rules"
+path = "../../tests/listen_multi_target/acceptance/lmt_documents_target_rules.rs"
+
 # custom-claims acceptance tests (Slice 02, ADR-034) — boolean-claim rule
 # gates a GetDocument read.
 [[test]]
