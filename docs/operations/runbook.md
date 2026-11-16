@@ -16,7 +16,9 @@ scenario needs one (notably system-DB loss), it links out rather than duplicatin
   Prometheus text format. Metric names and their source: see
   `docs/evolution/2026-08-08-observability.md` and `crates/embyr-server/src/observability.rs`.
 - `GET /healthz` on **:8081** — readiness. Calls `SystemDb::probe()` (shared system Postgres
-  pool) with a 3s timeout; 200 `{"status":"ok"}` or 503 `{"status":"unhealthy"}`. No auth,
+  pool) with a 3s timeout; 200 `{"status":"ok"}` or 503 `{"status":"unhealthy"}`. After
+  SIGTERM it answers 503 `{"status":"draining"}` until the process exits (at most
+  `EMBYR_SHUTDOWN_GRACE_SECS`, default 25) — expected during a deploy, not an incident. No auth,
   no request body echoed back (ADR-078, AC-HDC-11 — never leaks raw driver/schema text).
 - `GET /livez` on **:8081** — liveness. Zero I/O, always 200 while the process is up. Never
   fails on a Postgres outage by design (ADR-078) — do not alert on `/livez` for DB problems,
@@ -130,6 +132,53 @@ ever encrypted for that project**, not just future ones.
 4. The 2026-09-19 KDF domain-separation fix (`docs/evolution/2026-09-19-ecies-kdf-domain-separation.md`)
    does not mitigate this scenario — it hardens against key-substitution
    attacks in the DH exchange, not against the API key itself leaking.
+
+## Incident: service down or not scraped
+
+**Detect:** `EmbyrTargetDown` (`up{job="embyr-server"} == 0` for 1m) or `EmbyrMetricsAbsent`
+(no `up` series for the job at all, or `embyr_pg_pool_idle{pool="system"}` missing for 5m).
+While either fires, every other embyr alert is blind — treat as critical.
+
+**Triage:**
+1. Is the process up? `systemctl status embyr-server` / `docker ps`. If not, read the last
+   log lines: a startup refusal prints `Error: ...` and exits 1 (missing/invalid env var,
+   `EMBYR_REQUIRE_SMTP=true` without SMTP, unreachable `DATABASE_URL`).
+2. Process up but target down: `curl -s -H "Authorization: Bearer $EMBYR_ADMIN_KEY"
+   http://127.0.0.1:9090/metrics | head`. 401 → the scrape config's bearer token is stale
+   (admin-key rotation). Connection refused/timeout → firewall or `:9090` binding.
+3. `EmbyrMetricsAbsent` only: the target left the scrape config / service discovery, or the
+   `job` name no longer matches the `job="embyr-server"` matcher in `alert-rules.yml`.
+
+**Mitigate:** restart the service; if the newest release will not start, roll back to the
+previous immutable image (`release-process.md` → Rollback Procedure).
+
+## Incident: restart loop
+
+**Detect:** `EmbyrRestartLoop` (`up` flipped more than 3 times in 15m). Cross-check the
+supervisor's own count — `systemctl show embyr-server -p NRestarts` or
+`docker inspect -f '{{.RestartCount}}' embyr-server` — since a loop faster than the scrape
+interval can hide from Prometheus.
+
+**Triage:** `journalctl -u embyr-server -n 200` (or `docker logs --tail 200`). Exit code 1
+with an `Error:` line right after start = configuration/dependency refusal (same list as
+above). A panic or OOM-kill (`dmesg | grep -i oom`, exit 137) after serving for a while =
+runtime fault; compare memory against `resource-sizing.md`.
+
+**Mitigate:** config refusal → fix the env file and restart. Regression in a new release →
+roll back to the previous `:sha-<short sha>` image. Do not just raise the restart limit.
+
+## Incident: readiness failing
+
+**Detect:** there is no native metric for `/healthz`. Either the orchestrator/load balancer
+reports the instance unready, or (if you deployed `blackbox_exporter` and enabled the
+commented `EmbyrReadinessFailing` rule) `probe_success == 0` for 2m.
+
+**Triage:** `curl -s http://127.0.0.1:8081/healthz`.
+- `{"status":"draining"}` — the process received SIGTERM and is shutting down; it exits
+  within `EMBYR_SHUTDOWN_GRACE_SECS`. Only a problem if nothing is starting in its place.
+- `{"status":"unhealthy"}` — system Postgres is unreachable or slow (>3s): follow
+  "Postgres down after startup" above.
+- No response — the process is down: follow "service down or not scraped".
 
 ## Where to look next
 

@@ -466,11 +466,13 @@ pub fn spawn_all_servers(
         .layer(axum::extract::DefaultBodyLimit::max(MAX_REST_BODY_BYTES))
         .layer(cors);
 
+    let (stop_tx, mut open_rx, drain) = Drain::new();
     let rest_task = rest::grpc_web::spawn_hybrid_server(
         rest_listener,
         service_for_rest,
         axum_app,
         tls_acceptor.clone(),
+        drain.clone(),
     );
 
     tokio::spawn(async move {
@@ -505,7 +507,7 @@ pub fn spawn_all_servers(
         // it can keep draining after this task moves on to the join below.
         let grpc_handle = tokio::spawn(grpc_fut);
 
-        let admin_fut = spawn_admin_server(admin_listener, admin_app, tls_acceptor);
+        let admin_fut = spawn_admin_server(admin_listener, admin_app, tls_acceptor, drain);
 
         tokio::select! {
             _ = rest_task => {},
@@ -513,11 +515,42 @@ pub fn spawn_all_servers(
             _ = async { let _ = shutdown_rx.await; } => {},
         }
 
-        // Stop accepting new gRPC connections; wait for in-flight requests
-        // on already-open connections to finish naturally before returning.
+        // Stop accepting on all three listeners, then wait for in-flight
+        // requests / open streams on every one of them. Unbounded here on
+        // purpose: the caller owns the deadline (main.rs wraps this task in
+        // `EMBYR_SHUTDOWN_GRACE_SECS`), after which process exit drops
+        // whatever is still open (e.g. a long-lived Listen stream).
+        let _ = stop_tx.send(true);
         let _ = grpc_shutdown_tx.send(());
-        let _ = grpc_handle.await;
+        let _ = tokio::join!(grpc_handle, open_rx.recv());
     })
+}
+
+/// Stop signal + open-connection tracker for the hand-rolled REST (:8081)
+/// and admin (:9090) accept loops. Every accept loop and every connection
+/// task holds a clone; `open_rx.recv()` resolves (`None`) once all of them
+/// have finished, i.e. the listeners are closed and fully drained.
+#[derive(Clone)]
+pub(crate) struct Drain {
+    stop: tokio::sync::watch::Receiver<bool>,
+    _open: tokio::sync::mpsc::Sender<()>,
+}
+
+impl Drain {
+    fn new() -> (
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::mpsc::Receiver<()>,
+        Self,
+    ) {
+        let (stop_tx, stop) = tokio::sync::watch::channel(false);
+        let (_open, open_rx) = tokio::sync::mpsc::channel(1);
+        (stop_tx, open_rx, Self { stop, _open })
+    }
+
+    /// Resolves once shutdown has been requested (or the server task is gone).
+    pub(crate) async fn stopped(&mut self) {
+        let _ = self.stop.wait_for(|stop| *stop).await;
+    }
 }
 
 /// Serve `admin_app` on `listener`, optionally TLS-wrapped. Mirrors
@@ -529,15 +562,20 @@ fn spawn_admin_server(
     listener: tokio::net::TcpListener,
     admin_app: axum::Router,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    mut drain: Drain,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(pair) => pair,
-                Err(_) => break,
+            let (stream, peer) = tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                },
+                _ = drain.stopped() => break,
             };
             let app = admin_app.clone();
             let tls_acceptor = tls_acceptor.clone();
+            let mut drain = drain.clone();
             tokio::spawn(async move {
                 let io = match adapters::tls::accept_maybe_tls(stream, tls_acceptor.as_ref()).await
                 {
@@ -571,13 +609,22 @@ fn spawn_admin_server(
                         )
                     }
                 });
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection_with_upgrades(
-                        io,
-                        hyper_util::service::TowerToHyperService::new(svc),
-                    )
-                    .await
-                    .ok();
+                let builder = hyper_util::server::conn::auto::Builder::new(
+                    hyper_util::rt::TokioExecutor::new(),
+                );
+                let conn = builder.serve_connection_with_upgrades(
+                    io,
+                    hyper_util::service::TowerToHyperService::new(svc),
+                );
+                tokio::pin!(conn);
+                tokio::select! {
+                    _ = conn.as_mut() => {}
+                    _ = drain.stopped() => {
+                        // Finish the in-flight request, close idle keep-alives.
+                        conn.as_mut().graceful_shutdown();
+                        let _ = conn.await;
+                    }
+                }
             });
         }
     })
@@ -1162,5 +1209,57 @@ pub async fn start_test_server_with_tls(
         listen_registry: listen_registry_ret,
         rate_limiter: rate_limiter_ret,
         shutdown_tx: Some(c.shutdown_tx),
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+
+    /// Shutdown closes the listener and idle keep-alive connections at once,
+    /// but keeps waiting on a request that is still open — that one is what
+    /// the caller's `EMBYR_SHUTDOWN_GRACE_SECS` deadline exists to cut off.
+    #[tokio::test]
+    async fn stop_drains_idle_connections_and_waits_for_open_requests() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route("/ok", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/hang",
+                axum::routing::get(|| async { std::future::pending::<()>().await }),
+            );
+        let (stop_tx, mut open_rx, drain) = Drain::new();
+        spawn_admin_server(listener, app, None, drain);
+
+        let mut idle = TcpStream::connect(addr).await.unwrap();
+        idle.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+        let mut buf = [0u8; 1024];
+        assert!(idle.read(&mut buf).await.unwrap() > 0, "got a response");
+
+        let mut hanging = TcpStream::connect(addr).await.unwrap();
+        hanging.write_all(b"GET /hang HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        stop_tx.send(true).unwrap();
+
+        // Idle keep-alive connection is closed by the server (EOF).
+        let eof = timeout(Duration::from_secs(2), idle.read(&mut buf)).await;
+        assert_eq!(eof.expect("idle connection closed promptly").unwrap(), 0);
+        // The open request keeps the drain pending: a deadline must bound it.
+        assert!(timeout(Duration::from_millis(300), open_rx.recv()).await.is_err());
+        // No new connections are served once shutdown started.
+        if let Ok(mut late) = TcpStream::connect(addr).await {
+            let _ = late.write_all(b"GET /ok HTTP/1.1\r\nHost: x\r\n\r\n").await;
+            assert_eq!(late.read(&mut buf).await.unwrap_or(0), 0, "listener closed");
+        }
+        // Once the last open request ends, the drain completes.
+        drop(hanging);
+        let drained = timeout(Duration::from_secs(2), open_rx.recv()).await;
+        assert_eq!(drained.expect("drain completes"), None);
     }
 }
