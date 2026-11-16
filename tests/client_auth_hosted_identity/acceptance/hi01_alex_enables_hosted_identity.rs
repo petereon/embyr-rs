@@ -9,8 +9,10 @@
 //!             regeneration, no re-encryption).
 //!   AC-18-03: missing/invalid admin session -> 401.
 //!   AC-18-04: enablement for a non-existent/deleted project -> 404.
-//!   AC-18-19: correct session, wrong/stale api_key -> 401
-//!             {"reason": "INVALID_API_KEY"}.
+//!   AC-18-19: (superseded by ADR-085 / AC-AKR-13) the enable request needs
+//!             no api_key; a wrong one in the body is ignored -> 201.
+//!   AC-AKR-13: enablement on a new row writes only private_key_srv_enc
+//!             (server key); legacy private_key_enc stays NULL.
 //!   AC-18-20: backend_mode=agent project -> 403
 //!             {"reason": "HOSTED_IDENTITY_UNAVAILABLE_FOR_BACKEND_MODE"}.
 //!
@@ -61,11 +63,11 @@ async fn alex_enables_hosted_identity_and_no_signing_material_is_echoed_back() {
         ctx.signing_key_row_exists("trailmark-prod").await,
     )]);
 
+    // AC-AKR-13: no request body, no api_key needed.
     let resp = ctx
         .client
         .post(ctx.url("/admin/v1/projects/trailmark-prod/hosted_identity/enable"))
         .header("Cookie", &cookie)
-        .json(&serde_json::json!({"api_key": API_KEY}))
         .send()
         .await
         .expect("enable request failed");
@@ -100,6 +102,15 @@ async fn alex_enables_hosted_identity_and_no_signing_material_is_echoed_back() {
         &[universe::SIGNING_KEY_ROW_EXISTS],
         &expected,
     );
+
+    // AC-AKR-13: only the server-key column is written for a new row; the
+    // legacy ECIES-to-API-key column stays NULL.
+    let (_, legacy, srv) = ctx
+        .signing_key_material("trailmark-prod")
+        .await
+        .expect("signing key row must exist");
+    assert!(legacy.is_none(), "AC-AKR-13: legacy private_key_enc must stay NULL");
+    assert!(srv.is_some(), "AC-AKR-13: private_key_srv_enc must be set");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -237,11 +248,13 @@ async fn enablement_against_a_non_existent_project_is_rejected_as_not_found() {
 // AC-18-19: wrong/stale api_key in the body (error/edge)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// AC-18-19
+/// AC-18-19, superseded by ADR-085 Decision 5 / AC-AKR-13: the enable request
+/// no longer carries or verifies an `api_key`; a body, if a legacy client
+/// still sends one (even a wrong one), is ignored.
 ///
-/// @error @driving_port @real-io @US-01 @AC-18-19
+/// @driving_port @real-io @US-01 @AC-AKR-13
 #[tokio::test]
-async fn enablement_with_a_wrong_api_key_is_rejected_and_never_silently_accepted() {
+async fn enablement_ignores_any_api_key_in_the_body() {
     let ctx = HostedIdentityAdminContext::new().await;
     let cookie = ctx.seed_session("alex@trailmark.example", "Owner").await;
     ctx.insert_project("trailmark-prod", "direct_pg", API_KEY)
@@ -258,15 +271,14 @@ async fn enablement_with_a_wrong_api_key_is_rejected_and_never_silently_accepted
 
     assert_eq!(
         resp.status().as_u16(),
-        401,
-        "AC-18-19: wrong api_key must return 401"
+        201,
+        "AC-AKR-13: the body api_key is ignored, enablement succeeds"
     );
-    let body: serde_json::Value = resp.json().await.expect("response body must be JSON");
-    assert_eq!(body["reason"], "INVALID_API_KEY");
-    assert!(
-        !ctx.signing_key_row_exists("trailmark-prod").await,
-        "AC-18-19: a wrong api_key must never result in a stored signing key"
-    );
+    let (_, legacy, srv) = ctx
+        .signing_key_material("trailmark-prod")
+        .await
+        .expect("signing key row must exist");
+    assert!(legacy.is_none() && srv.is_some());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -221,12 +221,17 @@ impl HostedIdentityAdminContext {
     }
 
     /// Read the stored signing-key material directly (public_key,
-    /// private_key_enc) — used by AC-18-02 to prove a second enablement
-    /// call is byte-identical to the first (no regeneration).
-    pub async fn signing_key_material(&self, project_id: &str) -> Option<(Vec<u8>, Vec<u8>)> {
-        sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>(
-            "SELECT public_key, private_key_enc FROM hosted_identity_signing_keys \
-             WHERE project_id = $1",
+    /// legacy private_key_enc, private_key_srv_enc) — used by AC-18-02 to
+    /// prove a second enablement call is byte-identical to the first (no
+    /// regeneration), and by AC-AKR-13 to prove only the server-key column
+    /// is written for new rows.
+    pub async fn signing_key_material(
+        &self,
+        project_id: &str,
+    ) -> Option<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> {
+        sqlx::query_as::<_, (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)>(
+            "SELECT public_key, private_key_enc, private_key_srv_enc \
+             FROM hosted_identity_signing_keys WHERE project_id = $1",
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
@@ -383,12 +388,38 @@ impl HostedIdentityFullContext {
         .expect("insert hosted_identity_reset_tokens row");
     }
 
-    /// Hand-seed `hosted_identity_signing_keys` directly (bypasses the
-    /// Slice-01 admin enable endpoint — same "hand-seeded row" allowance
+    /// Hand-seed a NEW-shape `hosted_identity_signing_keys` row: seed
+    /// AES-256-GCM-encrypted under the test server's `EMBYR_ENCRYPTION_KEY`
+    /// (all zeroes in `start_test_server`) in `private_key_srv_enc`, legacy
+    /// column NULL (ADR-085 Decision 5). Returns the Ed25519 public key.
+    pub async fn enable_hosted_identity_server_key(&self) -> [u8; 32] {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let public_key = signing_key.verifying_key().to_bytes();
+        let private_key_srv_enc =
+            embyr_server::adapters::encryption::encrypt(&[0u8; 32], &signing_key.to_bytes())
+                .expect("encrypt signing key under server key");
+
+        sqlx::query(
+            "INSERT INTO hosted_identity_signing_keys \
+             (project_id, public_key, private_key_srv_enc, algorithm) \
+             VALUES ($1, $2, $3, 'EdDSA')",
+        )
+        .bind(&self.project_id)
+        .bind(&public_key[..])
+        .bind(&private_key_srv_enc)
+        .execute(&self.sys_pool)
+        .await
+        .expect("insert hosted_identity_signing_keys row");
+        public_key
+    }
+
+    /// Hand-seed a LEGACY-shape `hosted_identity_signing_keys` row
+    /// (ECIES `private_key_enc` only; bypasses the Slice-01 admin enable
+    /// endpoint — same "hand-seeded row" allowance
     /// `ClientAuthAdminContext::seed_credential` already uses). Encrypts a
     /// freshly-generated Ed25519 seed under a pubkey derived from
-    /// `self.api_key`, mirroring `enable_hosted_identity`'s own exact
-    /// crypto call shape (ADR-036 Decision 2).
+    /// `self.api_key`, mirroring the pre-ADR-085 crypto call shape (ADR-036
+    /// Decision 2). Models rows created before slice 2 of `api-key-rotation`.
     pub async fn enable_hosted_identity(&self) {
         let signing_key = SigningKey::generate(&mut OsRng);
         let public_key = signing_key.verifying_key().to_bytes();
