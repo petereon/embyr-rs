@@ -7,26 +7,31 @@
 //! (AC-CXR-04) — the same reuse `encoding/query.rs`'s own WHERE/ORDER-BY
 //! builders rely on, not a new, parallel validator.
 //!
-//! Expression shape (ADR-072 Decision D), for `fields = [f_1, ..., f_n]`:
+//! Expression shape (ADR-072 Decision D, updated for typed-order-by P11), for
+//! `fields = [f_1, ..., f_n]`:
 //! ```sql
 //! CREATE INDEX CONCURRENTLY IF NOT EXISTS cix_<hex(id)>
 //!   ON documents (
 //!     project_id,
 //!     collection_path,
-//!     (fields->'{f_1}'), ..., (fields->'{f_{n-1}}'),
-//!     (fields->'{f_n}'->>'v') {ASC|DESC}
+//!     (<equality_key_expr(f_1)>), ..., (<equality_key_expr(f_{n-1})>),
+//!     (<order_key_exprs(f_n)[0]>) {ASC|DESC}, ..., (<order_key_exprs(f_n)[7]>) {ASC|DESC}
 //!   )
 //!   WHERE NOT deleted;
 //! ```
 //! — leading literal `(project_id, collection_path)` matching `run_query`'s
-//! own bound predicates; all-but-last fields as whole-value JSONB
-//! (`push_value_equality`'s own shape); the last field as text-extraction +
-//! direction (`order_by_expr`'s own shape).
+//! own bound predicates; all-but-last fields as the equality filter's own key
+//! expression; the last field as EVERY typed ORDER BY key with the direction.
+//! Both key builders live in `embyr_pg_storage::encoding::query` and are the
+//! SAME functions the query side calls, so the planner can match the index.
+//! Indexes created before typed-order-by (old `->>'v'` text key) no longer
+//! match ORDER BY and must be dropped and re-created.
 
 use uuid::Uuid;
 
 use embyr_core::domain::query::validate_field_path;
 use embyr_core::error::CoreError;
+use embyr_pg_storage::encoding::query::{equality_key_expr, order_key_exprs};
 
 use crate::admin::handlers::composite_indexes::{IndexFieldOrder, IndexFieldSpec};
 
@@ -52,6 +57,16 @@ pub fn validate_fields(fields: &[IndexFieldSpec]) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Index columns for the trailing sort field: every ORDER BY key as a
+/// parenthesised index expression carrying the field's direction.
+fn sort_key_columns(f: &IndexFieldSpec) -> Vec<String> {
+    let dir = match f.order {
+        IndexFieldOrder::Asc => "ASC",
+        IndexFieldOrder::Desc => "DESC",
+    };
+    order_key_exprs(&f.field).into_iter().map(|k| format!("({k}) {dir}")).collect()
+}
+
 /// Build the `CREATE INDEX CONCURRENTLY` DDL for `id`'s composite index
 /// (ADR-072 Decision B/D). Re-validates every field path (defense in depth —
 /// the handler already validates before INSERT).
@@ -61,14 +76,8 @@ pub fn build_create_index_sql(id: Uuid, fields: &[IndexFieldSpec]) -> Result<Str
     let (last, rest) = fields.split_last().expect("validate_fields rejects empty");
 
     let mut columns: Vec<String> = vec!["project_id".to_string(), "collection_path".to_string()];
-    for f in rest {
-        columns.push(format!("(fields->'{}')", f.field));
-    }
-    let dir = match last.order {
-        IndexFieldOrder::Asc => "ASC",
-        IndexFieldOrder::Desc => "DESC",
-    };
-    columns.push(format!("(fields->'{}'->>'v') {dir}", last.field));
+    columns.extend(rest.iter().map(|f| format!("({})", equality_key_expr(&f.field))));
+    columns.extend(sort_key_columns(last));
 
     Ok(format!(
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON documents ({}) WHERE NOT deleted",
@@ -112,12 +121,66 @@ mod tests {
 
         let sql = build_create_index_sql(id, &fields).expect("valid fields must build");
 
-        assert_eq!(
-            sql,
+        assert!(sql.starts_with(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS cix_3fa85f6457174562b3fc2c963f66afa6 \
              ON documents (project_id, collection_path, (fields->'category'), \
-             (fields->'score'->>'v') DESC) WHERE NOT deleted"
-        );
+             (CASE fields->'score'->>'t' WHEN 'N'"
+        ));
+        assert!(sql.ends_with(") DESC) WHERE NOT deleted"));
+        // 8 typed ORDER BY keys, all descending; equality column carries no direction.
+        assert_eq!(sql.matches(") DESC").count(), 8);
+        assert!(!sql.contains("(fields->'category') ASC"));
+    }
+
+    // Drift guard: the index's trailing sort columns, stripped of their index
+    // paren-wrapping, are byte-identical to the query-side ORDER BY, and the
+    // equality column is the exact expression the equality filter compares.
+    #[test]
+    fn index_key_expressions_equal_the_query_side_expressions_for_every_field_and_direction() {
+        use embyr_core::domain::field_value::FieldValue;
+        use embyr_core::domain::query::{
+            FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter,
+        };
+        use embyr_pg_storage::encoding::query::{append_filter, order_by_expr};
+        use sqlx::{Postgres, QueryBuilder};
+
+        for field in ["score", "a.b", "_x1", "__name__"] {
+            for (order, direction) in [
+                (IndexFieldOrder::Asc, OrderDirection::Ascending),
+                (IndexFieldOrder::Desc, OrderDirection::Descending),
+            ] {
+                let index_side = sort_key_columns(&spec(field, order))
+                    .iter()
+                    .map(|c| {
+                        let (key, dir) = c.strip_prefix('(').unwrap().rsplit_once(") ").unwrap();
+                        format!("{key} {dir}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let query_side = order_by_expr(&OrderBy {
+                    field_path: field.to_string(),
+                    direction,
+                });
+                assert_eq!(index_side, query_side, "field={field}");
+            }
+        }
+
+        let filter = QueryFilter::Field(FieldFilter {
+            field_path: "category".to_string(),
+            op: FilterOp::Equal,
+            value: FieldValue::String("x".to_string()),
+        });
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("");
+        append_filter(&mut qb, &filter);
+        let id = Uuid::nil();
+        let sql = build_create_index_sql(
+            id,
+            &[spec("category", IndexFieldOrder::Asc), spec("score", IndexFieldOrder::Asc)],
+        )
+        .unwrap();
+        let eq_col = sql.split(", ").nth(2).unwrap(); // "(fields->'category')"
+        let eq_expr = eq_col.strip_prefix('(').unwrap().strip_suffix(')').unwrap();
+        assert!(qb.sql().starts_with(&format!("{eq_expr} = ")));
     }
 
     #[test]
@@ -127,12 +190,12 @@ mod tests {
 
         let sql = build_create_index_sql(id, &fields).expect("valid single field must build");
 
-        assert_eq!(
-            sql,
+        assert!(sql.starts_with(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS cix_3fa85f6457174562b3fc2c963f66afa6 \
-             ON documents (project_id, collection_path, (fields->'category'->>'v') ASC) \
-             WHERE NOT deleted"
-        );
+             ON documents (project_id, collection_path, (CASE fields->'category'->>'t' WHEN 'N'"
+        ));
+        assert!(sql.ends_with(") ASC) WHERE NOT deleted"));
+        assert_eq!(sql.matches(") ASC").count(), 8);
     }
 
     #[test]

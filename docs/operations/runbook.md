@@ -104,6 +104,16 @@ to — see `GRPC_DURATION_BUCKETS` in `observability.rs`).
    is disproportionately represented (finding #17's collection-group scan cost is one
    known source of slow queries; `docs/evolution/2026-09-14-collection-group-query-index.md`).
 
+## Maintenance: composite indexes created before typed ORDER BY
+
+`ORDER BY` is now a typed multi-key expression (type rank + typed value). Composite
+indexes created by earlier builds used the old text key `(fields->'f'->>'v')`; Postgres
+cannot use them for `ORDER BY` any more (seq scan + sort on large collections). Newly
+created indexes use the new keys (`order_key_exprs` in `embyr-pg-storage`, shared with
+the query side). For each pre-existing composite index: delete it via the admin API
+(`DELETE /admin/v1/projects/{id}/indexes/{index_id}`) and create it again with the same
+fields. No automatic migration touches customer databases.
+
 ## Incident: customer API-key compromise (finding #33)
 
 **Why this is here:** every backend DSN / TOTP secret / OIDC client secret is
