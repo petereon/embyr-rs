@@ -540,14 +540,17 @@ impl BackendAdapter for AgentBackendAdapter {
         collection: &CollectionPath,
         query: &AggregationQuery,
         _transaction_id: Option<&TransactionId>,
-    ) -> Result<AggregateValue, CoreError> {
-        match &query.aggregation {
-            AggregationKind::Sum(_) | AggregationKind::Avg(_) => {
-                return Err(CoreError::FailedPrecondition(
-                    "SUM/AVG aggregation is not supported for backend_mode=agent in v1".into(),
-                ));
-            }
-            AggregationKind::Count => {}
+    ) -> Result<Vec<AggregateValue>, CoreError> {
+        // The agent's `RunAggregationQueryResponse` carries only `count`;
+        // SUM/AVG need an agent proto change (out of scope), so reject.
+        if query
+            .aggregations
+            .iter()
+            .any(|a| !matches!(a.kind, AggregationKind::Count(_)))
+        {
+            return Err(CoreError::FailedPrecondition(
+                "SUM/AVG aggregation is not supported for backend_mode=agent in v1".into(),
+            ));
         }
 
         use embyr_proto::agent::{
@@ -582,7 +585,16 @@ impl BackendAdapter for AgentBackendAdapter {
             .run_aggregation_query(req)
             .await
             .map_err(grpc_err)?;
-        Ok(AggregateValue::Count(resp.into_inner().count))
+        // One agent round trip serves every COUNT; each applies its own `up_to`.
+        let count = resp.into_inner().count;
+        Ok(query
+            .aggregations
+            .iter()
+            .map(|a| match a.kind {
+                AggregationKind::Count(Some(up_to)) => AggregateValue::Count(count.min(up_to)),
+                _ => AggregateValue::Count(count),
+            })
+            .collect())
     }
 
     /// agent-mode-list-collection-ids (Slice 01, US-01, ADR-059 § Decision

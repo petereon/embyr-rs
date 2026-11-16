@@ -234,6 +234,12 @@ pub struct SystemDb {
     rollup: std::sync::Arc<embyr_core::metrics_rollup::RollupBuffer>,
 }
 
+/// ADR-083 AC-DSS-15 "unconverted" predicate over a `projects` row: connection secrets still only
+/// under the legacy ECIES-to-API-key scheme. Shared by the gauge and by API-key rotation (ADR-085),
+/// which must refuse such rows because rotating strands those secrets.
+pub const UNCONVERTED_CONNECTION_SECRETS_SQL: &str = "((backend_mode = 'direct_pg' AND backend_pg_dsn_enc IS NULL) \
+     OR (backend_mode = 'agent' AND agent_tls_bundle_srv_enc IS NULL))";
+
 impl SystemDb {
     fn from_pool(pool: PgPool) -> Self {
         let rollup = std::sync::Arc::new(embyr_core::metrics_rollup::RollupBuffer::new(
@@ -351,11 +357,9 @@ impl SystemDb {
 
     /// ADR-083 / AC-DSS-15: non-deleted `direct_pg`/`agent` projects still lacking a server-store secret.
     pub async fn count_unconverted_connection_secrets(&self) -> Result<i64, CoreError> {
-        sqlx::query_scalar(
-            "SELECT count(*) FROM projects WHERE status <> 'deleted' AND \
-             ((backend_mode = 'direct_pg' AND backend_pg_dsn_enc IS NULL) \
-              OR (backend_mode = 'agent' AND agent_tls_bundle_srv_enc IS NULL))",
-        )
+        sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM projects WHERE status <> 'deleted' AND {UNCONVERTED_CONNECTION_SECRETS_SQL}"
+        ))
         .fetch_one(&self.pool)
         .await
         .map_err(|e| CoreError::BackendUnavailable(e.to_string()))

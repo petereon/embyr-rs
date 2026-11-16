@@ -12,7 +12,7 @@
 
 use axum::{
     extract::{ConnectInfo, Json, Path, State},
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use rand_core::{OsRng, RngCore};
@@ -69,8 +69,12 @@ where
 /// AC-ABI-15: per-source-IP limit before any Argon2 / DB work. Shares the
 /// signin limiter under a distinct `i:` key prefix (keeps within the
 /// `signin_rate_limits.source_key` VARCHAR(45) bound for IPv6).
-async fn throttle(state: &UserAdminState, peer: SocketAddr) -> Option<Response> {
-    let key = format!("i:{}", peer.ip());
+async fn throttle(
+    state: &UserAdminState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let key = format!("i:{}", state.signin_rate_limiter.source_ip(peer, headers));
     let retry_after_ms = state.signin_rate_limiter.check(&key).await.err()?;
     let mut response = message(
         StatusCode::TOO_MANY_REQUESTS,
@@ -316,9 +320,10 @@ const OPEN_INVITATION: &str = "token_hash = $1 AND accepted_at IS NULL \
 pub async fn accept_invitation(
     State(state): State<UserAdminState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<AcceptBody>,
 ) -> Response {
-    if let Some(throttled) = throttle(&state, peer).await {
+    if let Some(throttled) = throttle(&state, peer, &headers).await {
         return throttled;
     }
     let display_name = body.display_name.trim().to_string();
@@ -414,9 +419,10 @@ struct ConfirmResponse {
 pub async fn confirm_invitation(
     State(state): State<UserAdminState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<ConfirmBody>,
 ) -> Response {
-    if let Some(throttled) = throttle(&state, peer).await {
+    if let Some(throttled) = throttle(&state, peer, &headers).await {
         return throttled;
     }
     if !is_well_formed_token(&body.token) {
