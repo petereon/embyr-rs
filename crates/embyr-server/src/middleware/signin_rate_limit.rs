@@ -10,20 +10,32 @@
 
 use std::{
     collections::HashMap,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
 
+use axum::http::HeaderMap;
 use sqlx::PgPool;
 
 use super::rate_limit::TokenBucket;
 
 const SIGNIN_RATE_LIMIT_PG_TIMEOUT_MS: u64 = 20; // mirrors ADR-015's own bound
 
+/// In-process bucket-map size above which idle (fully refilled) buckets are
+/// evicted on the next new key — bounds memory against an attacker spraying
+/// unique keys (e.g. per-email REST throttles). A full bucket is equivalent
+/// to an absent one, so eviction never loosens a limit.
+// ponytail: O(n) sweep per new key while >MAX buckets are all still live;
+// bounded by request rate x refill window. Upgrade = periodic sweeper.
+const MAX_IN_PROCESS_BUCKETS: usize = 50_000;
+
 pub struct SigninRateLimiter {
     buckets: Mutex<HashMap<String, TokenBucket>>,
     capacity: f64,
     refill_rate: f64,
     pg_pool: Option<PgPool>,
+    /// `EMBYR_TRUSTED_PROXY_HOPS`; 0 = key on the TCP peer IP.
+    trusted_proxy_hops: usize,
 }
 
 impl SigninRateLimiter {
@@ -36,6 +48,7 @@ impl SigninRateLimiter {
             capacity,
             refill_rate,
             pg_pool: None,
+            trusted_proxy_hops: 0,
         })
     }
 
@@ -46,7 +59,30 @@ impl SigninRateLimiter {
             capacity,
             refill_rate,
             pg_pool: Some(pool),
+            trusted_proxy_hops: 0,
         })
+    }
+
+    /// Opt in to `X-Forwarded-For` client-IP resolution (see [`client_ip`]).
+    /// Only callable while the limiter is still uniquely owned (construction).
+    pub fn with_trusted_proxy_hops(mut self: Arc<Self>, hops: usize) -> Arc<Self> {
+        Arc::get_mut(&mut self)
+            .expect("with_trusted_proxy_hops is a construction-time call")
+            .trusted_proxy_hops = hops;
+        self
+    }
+
+    /// Client IP this limiter should key on for a request: the TCP peer, or
+    /// (when `EMBYR_TRUSTED_PROXY_HOPS` > 0) the Nth-from-right
+    /// `X-Forwarded-For` entry.
+    pub fn source_ip(&self, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
+        let forwarded_for = headers
+            .get_all("x-forwarded-for")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(",");
+        client_ip(peer.ip(), &forwarded_for, self.trusted_proxy_hops)
     }
 
     /// `Ok(())` if allowed; `Err(retry_after_ms)` if throttled.
@@ -143,6 +179,11 @@ impl SigninRateLimiter {
     fn check_in_process(&self, source_key: &str) -> Result<(), u64> {
         let (capacity, refill_rate) = (self.capacity, self.refill_rate);
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        if buckets.len() >= MAX_IN_PROCESS_BUCKETS && !buckets.contains_key(source_key) {
+            buckets.retain(|_, b| {
+                b.tokens + b.last_refill.elapsed().as_secs_f64() * refill_rate < capacity
+            });
+        }
         let bucket = buckets
             .entry(source_key.to_string())
             .or_insert_with(|| TokenBucket::new(capacity, refill_rate));
@@ -154,6 +195,75 @@ impl SigninRateLimiter {
         } else {
             Err(((1.0 - bucket.tokens.min(1.0)) / refill_rate * 1000.0) as u64)
         }
+    }
+}
+
+/// Resolve the real client IP behind `trusted_hops` trusted reverse proxies.
+/// Each trusted proxy appends the address it saw to `X-Forwarded-For`, so the
+/// client is the `trusted_hops`-th entry from the RIGHT; anything further left
+/// is attacker-controlled and ignored. Falls back to the TCP `peer` when
+/// `trusted_hops` is 0 or the header is missing, too short, or unparseable.
+pub fn client_ip(peer: IpAddr, forwarded_for: &str, trusted_hops: usize) -> IpAddr {
+    if trusted_hops == 0 {
+        return peer;
+    }
+    let entries: Vec<&str> = forwarded_for.split(',').map(str::trim).collect();
+    entries
+        .len()
+        .checked_sub(trusted_hops)
+        .and_then(|i| entries[i].parse().ok())
+        .unwrap_or(peer)
+}
+
+#[cfg(test)]
+mod client_ip_tests {
+    use super::*;
+
+    #[test]
+    fn client_ip_is_nth_from_right_and_ignores_spoofed_left_entries() {
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        // (X-Forwarded-For, trusted hops, expected)
+        let cases = [
+            ("", 0, "10.0.0.1"),                                  // opt-out: peer
+            ("1.1.1.1", 0, "10.0.0.1"),                           // opt-out ignores header
+            ("203.0.113.9", 1, "203.0.113.9"),                    // single LB
+            ("6.6.6.6, 203.0.113.9", 1, "203.0.113.9"),           // spoofed leftmost ignored
+            ("6.6.6.6, 203.0.113.9, 10.1.1.1", 2, "203.0.113.9"), // two hops
+            ("6.6.6.6, 7.7.7.7, 203.0.113.9", 1, "203.0.113.9"),  // many spoofed entries
+            ("2001:db8::1", 1, "2001:db8::1"),                    // IPv6
+            ("", 1, "10.0.0.1"),                                  // header missing
+            ("203.0.113.9", 2, "10.0.0.1"),                       // header shorter than hops
+            ("not-an-ip", 1, "10.0.0.1"),                         // unparseable entry
+        ];
+        for (header, hops, expected) in cases {
+            let expected: IpAddr = expected.parse().unwrap();
+            assert_eq!(client_ip(peer, header, hops), expected, "xff={header:?} hops={hops}");
+        }
+    }
+
+    #[test]
+    fn source_ip_joins_repeated_forwarded_for_headers() {
+        let limiter = SigninRateLimiter::new(1.0, 1.0).with_trusted_proxy_hops(1);
+        let mut headers = HeaderMap::new();
+        headers.append("x-forwarded-for", "6.6.6.6".parse().unwrap());
+        headers.append("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        let peer: SocketAddr = "10.0.0.1:4242".parse().unwrap();
+        assert_eq!(limiter.source_ip(peer, &headers), "203.0.113.9".parse::<IpAddr>().unwrap());
+        // default limiter ignores the header entirely
+        let default = SigninRateLimiter::new(1.0, 1.0);
+        assert_eq!(default.source_ip(peer, &headers), peer.ip());
+    }
+
+    #[test]
+    fn idle_buckets_are_evicted_once_map_is_full() {
+        let limiter = SigninRateLimiter::new(2.0, 1000.0);
+        for i in 0..MAX_IN_PROCESS_BUCKETS {
+            limiter.check_in_process(&format!("k{i}")).unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5)); // 1000/s refill -> all full again
+        limiter.check_in_process("fresh").unwrap();
+        let len = limiter.buckets.lock().unwrap().len();
+        assert_eq!(len, 1, "idle buckets must be evicted, only the new key remains");
     }
 }
 

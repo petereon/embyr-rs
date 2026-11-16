@@ -40,8 +40,8 @@ use serde::{Deserialize, Serialize};
 use crate::adapters::encryption::decrypt_hosted_signing_seed;
 use crate::adapters::project_auth::{resolve_customer_db_adapter, ProjectAuthError};
 use crate::rest::sign_up::{
-    hosted_identity_not_enabled, invalid_api_key, HostedIdentityState, SignUpQuery,
-    SignUpSuccessResponse, TOKEN_TTL_SECS,
+    hosted_identity_not_enabled, invalid_api_key, throttle_key, throttled, HostedIdentityState,
+    SignUpQuery, SignUpSuccessResponse, TOKEN_TTL_SECS,
 };
 
 #[derive(Deserialize)]
@@ -140,6 +140,17 @@ pub async fn sign_in_with_password(
     ) else {
         return invalid_credentials();
     };
+
+    // Per-account throttle (security finding X5): charged for every attempt,
+    // failed or successful, BEFORE the account lookup — so it behaves
+    // identically for unknown emails (no existence oracle).
+    if let Err(retry_after_ms) = state
+        .signin_throttle
+        .check(&throttle_key(&project_id, &email))
+        .await
+    {
+        return throttled(retry_after_ms);
+    }
 
     // AC-18-11: unknown email -> identical rejection to wrong password below.
     let row = match sqlx::query_as::<_, (uuid::Uuid, String)>(
