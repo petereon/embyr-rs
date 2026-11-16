@@ -13,6 +13,7 @@ use crate::adapters::{
     stripe_gateway::StripeGateway, system_db::SystemDb,
 };
 
+use super::handlers::account::delete_account;
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
 use super::handlers::auth::{oidc_callback, signin, signout};
 use super::handlers::invitations::{
@@ -69,6 +70,7 @@ use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
 use super::handlers::metrics::get_project_metrics;
+use super::handlers::api_key::{revoke_api_key, rotate_api_key};
 use super::handlers::connection::{get_connection, put_connection};
 use super::handlers::projects::{list_projects, patch_project};
 use super::handlers::prometheus_metrics::get_prometheus_metrics;
@@ -140,6 +142,8 @@ pub fn build_admin_router(
     // admin-signin-hardening (ADR-076): per-source-IP token bucket gating
     // POST /admin/v1/auth/signin — threaded into UserAdminState.
     signin_rate_limiter: Arc<SigninRateLimiter>,
+    // api-key-rotation (ADR-085): previous-key window applied by `.../api_key/rotate`.
+    api_key_rotation_window_secs: u32,
 ) -> Router {
     let operator_state = OperatorState {
         system_db: system_db.clone(),
@@ -192,6 +196,7 @@ pub fn build_admin_router(
         aws_secret_fetcher,
         gcp_secret_fetcher,
         signin_rate_limiter,
+        api_key_rotation_window_secs,
     };
 
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by
@@ -258,6 +263,9 @@ pub fn build_admin_router(
             "/admin/v1/projects/:project_id/connection",
             get(get_connection).put(put_connection),
         )
+        // api-key-rotation (ADR-085): Owner/Admin, gated in-handler.
+        .route("/admin/v1/projects/:project_id/api_key/rotate", post(rotate_api_key))
+        .route("/admin/v1/projects/:project_id/api_key/revoke", post(revoke_api_key))
         // client-auth (US-01/US-03/US-04, ADR-025): credential lifecycle.
         // Owner/Admin gate for register/rotate enforced inside the handlers
         // (in-handler role check); verify (debug
@@ -406,6 +414,8 @@ pub fn build_admin_router(
             "/admin/v1/projects/:project_id/query_logs",
             get(list_query_logs),
         )
+        // account-deletion: Owner-only, cookie session + password + TOTP re-entry.
+        .route("/admin/v1/account", delete(delete_account))
         // Members routes (step 05-02).
         .route("/admin/v1/members", get(list_members))
         .route("/admin/v1/members/invite", post(invite_member))
@@ -552,5 +562,6 @@ pub fn build_with_secret_fetchers(
         None,
         Arc::new(CapStatusCache::new()),
         signin_rate_limiter,
+        crate::config::DEFAULT_ROTATION_WINDOW_SECS,
     )
 }

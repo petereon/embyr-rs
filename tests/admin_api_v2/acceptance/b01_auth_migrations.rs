@@ -910,8 +910,10 @@ async fn argon2_verification_does_not_block_the_reactor_under_concurrent_signin_
 #[test]
 fn signin_source_wraps_password_verification_in_spawn_blocking() {
     let src = include_str!("../../../crates/embyr-server/src/admin/handlers/auth.rs");
+    // `argon2_blocking::verify_password` is the shared wrapper that runs
+    // Argon2 on `spawn_blocking`; either spelling means "not inline".
     assert!(
-        src.contains("spawn_blocking"),
+        src.contains("spawn_blocking") || src.contains("argon2_blocking::verify_password"),
         "AC-ASH-01 (secondary/weak check): auth.rs must call \
          tokio::task::spawn_blocking somewhere for the Argon2id verification — \
          the primary proof is the concurrent-load test above; this only \

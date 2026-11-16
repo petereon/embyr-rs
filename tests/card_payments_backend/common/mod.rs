@@ -253,6 +253,7 @@ impl CpbTestContext {
             Some(webhook_signing_secret.to_string()),
             cap_status_cache.clone(),
             SigninRateLimiter::new(150.0, 10.0 / 60.0),
+            86_400,
         );
 
         let _cap_usage_refresher = embyr_server::sweepers::cap_usage_refresher::spawn(
@@ -346,6 +347,7 @@ impl CpbTestContext {
             Some(webhook_signing_secret.to_string()),
             cap_status_cache.clone(),
             SigninRateLimiter::new(150.0, 10.0 / 60.0),
+            86_400,
         );
 
         let _cap_usage_refresher = embyr_server::sweepers::cap_usage_refresher::spawn(
