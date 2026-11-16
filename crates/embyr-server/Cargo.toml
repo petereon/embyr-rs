@@ -707,6 +707,11 @@ path = "../../tests/aggregation_queries/acceptance/sum_aggregation.rs"
 name = "aggregation_queries_avg_aggregation"
 path = "../../tests/aggregation_queries/acceptance/avg_aggregation.rs"
 
+# go-live P4 — several aggregations per request + Count.up_to.
+[[test]]
+name = "aggregation_queries_multi_aggregation"
+path = "../../tests/aggregation_queries/acceptance/multi_aggregation.rs"
+
 # batch-get-documents acceptance tests (Slice 01, LAST/ONLY slice, US-01,
 # ADR-042).
 [[test]]

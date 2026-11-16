@@ -16,8 +16,9 @@ use embyr_core::{
         field_value::FieldValue,
         project::CredentialCacheKey,
         query::{
-            validate_field_path, AggregateValue, AggregationKind, AggregationQuery, Cursor,
-            FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter, StructuredQuery,
+            resolve_aggregation_aliases, validate_field_path, AggregateValue, Aggregation,
+            AggregationKind, AggregationQuery, Cursor, FieldFilter, FilterOp, OrderBy,
+            OrderDirection, QueryFilter, StructuredQuery,
         },
         transaction::TransactionOptions,
     },
@@ -3639,52 +3640,44 @@ impl FirestoreService {
             None => return Err(Status::invalid_argument("query_type is required")),
         };
 
-        // v1 restriction (ADR-038): exactly one aggregation per request.
-        if saq.aggregations.len() != 1 {
-            return Err(Status::unimplemented(
-                "multiple aggregations per request are not yet supported",
-            ));
-        }
-        let agg_proto = &saq.aggregations[0];
-        let alias = if agg_proto.alias.is_empty() {
-            "field_0".to_string()
-        } else {
-            agg_proto.alias.clone()
-        };
-
-        let aggregation_kind = match &agg_proto.operator {
-            Some(AggregationOperator::Count(c)) => {
-                // v1 restriction (ADR-038): `Count.up_to` is not supported.
-                if c.up_to.is_some() {
-                    return Err(Status::unimplemented(
-                        "count up_to limiting is not yet supported",
-                    ));
+        // 1..=5 aggregations; empty aliases get `field_<n>`, duplicate
+        // explicit aliases are invalid (Firestore semantics).
+        let aliases = resolve_aggregation_aliases(
+            &saq.aggregations.iter().map(|a| a.alias.as_str()).collect::<Vec<_>>(),
+        )
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let mut aggregations = Vec::with_capacity(aliases.len());
+        for (agg_proto, alias) in saq.aggregations.iter().zip(aliases) {
+            let kind = match &agg_proto.operator {
+                Some(AggregationOperator::Count(c)) => match c.up_to {
+                    Some(n) if n <= 0 => {
+                        return Err(Status::invalid_argument("count up_to must be positive"))
+                    }
+                    up_to => AggregationKind::Count(up_to),
+                },
+                Some(AggregationOperator::Sum(s)) => {
+                    let field_path = s
+                        .field
+                        .as_ref()
+                        .map(|f| f.field_path.clone())
+                        .ok_or_else(|| Status::invalid_argument("sum aggregation requires a field"))?;
+                    // ADR-040: validated before reaching the SQL builder.
+                    validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    AggregationKind::Sum(field_path)
                 }
-                AggregationKind::Count
-            }
-            Some(AggregationOperator::Sum(s)) => {
-                let field_path = s
-                    .field
-                    .as_ref()
-                    .map(|f| f.field_path.clone())
-                    .ok_or_else(|| Status::invalid_argument("sum aggregation requires a field"))?;
-                // Field-path validation wired now (ADR-040) so Slices 03/04
-                // don't need to touch this handler again — not exercised by
-                // this slice's own COUNT-only scope.
-                validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
-                AggregationKind::Sum(field_path)
-            }
-            Some(AggregationOperator::Avg(a)) => {
-                let field_path = a
-                    .field
-                    .as_ref()
-                    .map(|f| f.field_path.clone())
-                    .ok_or_else(|| Status::invalid_argument("avg aggregation requires a field"))?;
-                validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
-                AggregationKind::Avg(field_path)
-            }
-            None => return Err(Status::invalid_argument("aggregation operator is required")),
-        };
+                Some(AggregationOperator::Avg(a)) => {
+                    let field_path = a
+                        .field
+                        .as_ref()
+                        .map(|f| f.field_path.clone())
+                        .ok_or_else(|| Status::invalid_argument("avg aggregation requires a field"))?;
+                    validate_field_path(&field_path).map_err(|e| Status::invalid_argument(e.to_string()))?;
+                    AggregationKind::Avg(field_path)
+                }
+                None => return Err(Status::invalid_argument("aggregation operator is required")),
+            };
+            aggregations.push(Aggregation { alias, kind });
+        }
 
         let sq_proto = match &saq.query_type {
             Some(StructuredAggQueryType::StructuredQuery(sq)) => sq,
@@ -3822,28 +3815,29 @@ impl FirestoreService {
 
         let agg_query = AggregationQuery {
             query: domain_query,
-            aggregation: aggregation_kind,
-            alias: alias.clone(),
+            aggregations,
         };
 
-        let value = adapter
+        let values = adapter
             .run_aggregation_query(&collection, &agg_query, None)
             .await
             .map_err(aggregation_error_to_status)?;
 
-        let value_proto = {
-            use embyr_proto::firestore::value::ValueType;
-            let vt = match value {
-                AggregateValue::Count(n) => ValueType::IntegerValue(n),
-                AggregateValue::Sum(d) => ValueType::DoubleValue(d),
-                AggregateValue::Avg(Some(d)) => ValueType::DoubleValue(d),
-                AggregateValue::Avg(None) => ValueType::NullValue(0),
-            };
-            embyr_proto::firestore::Value { value_type: Some(vt) }
-        };
-
-        let mut aggregate_fields = HashMap::new();
-        aggregate_fields.insert(alias, value_proto);
+        let aggregate_fields: HashMap<_, _> = agg_query
+            .aggregations
+            .into_iter()
+            .zip(values)
+            .map(|(agg, value)| {
+                use embyr_proto::firestore::value::ValueType;
+                let vt = match value {
+                    AggregateValue::Count(n) => ValueType::IntegerValue(n),
+                    AggregateValue::Sum(d) => ValueType::DoubleValue(d),
+                    AggregateValue::Avg(Some(d)) => ValueType::DoubleValue(d),
+                    AggregateValue::Avg(None) => ValueType::NullValue(0),
+                };
+                (agg.alias, embyr_proto::firestore::Value { value_type: Some(vt) })
+            })
+            .collect();
 
         // Response stream carries exactly one message, then closes — no
         // continuation/done-marker message (ADR-038: `RunAggregationQueryResponse`
