@@ -234,7 +234,16 @@ async fn direct_pg_orphaned_transaction_is_reclaimed_via_spawn_and_counter_incre
     handle.abort();
 
     assert_eq!(transaction_status(&cust_pool, txn_id).await, "expired");
-    let after = read_counter("embyr_transaction_sweeper_reclaimed_total");
+    // The row flips to 'expired' before the sweeper bumps the counter; poll
+    // instead of reading once so the assertion doesn't race the increment.
+    let mut after = read_counter("embyr_transaction_sweeper_reclaimed_total");
+    for _ in 0..100 {
+        if after >= before + 1.0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        after = read_counter("embyr_transaction_sweeper_reclaimed_total");
+    }
     assert!(
         after >= before + 1.0,
         "reclaimed_total must increase by at least 1: before={before}, after={after}"

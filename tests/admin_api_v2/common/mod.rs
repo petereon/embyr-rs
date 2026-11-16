@@ -30,8 +30,6 @@ pub mod universe {
     pub const ACCOUNT_LOCKED: &str = "auth.account_locked";
     pub const SESSION_ROW_EXPIRES: &str = "db.sessions.expires_at";
     pub const PROJECT_LIST_COUNT: &str = "response.projects.len";
-    pub const SDK_KEY_PLAINTEXT_IN_RESPONSE: &str = "response.sdk_key.key_present";
-    pub const SDK_KEY_HASH_IN_DB: &str = "db.sdk_api_keys.key_hash_stored";
     pub const MEMBER_COUNT: &str = "response.members.len";
     pub const INVITATION_ROW_CREATED: &str = "db.invitations.row_exists";
     pub const EMAIL_SENT_COUNT: &str = "fake_email_sender.sent_count";

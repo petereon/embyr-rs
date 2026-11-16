@@ -5,7 +5,7 @@
 
 use crate::model::{
     AdminKey, Card, Database, DbId, DbPatch, Invoice, KeyId, LogRetention, Member, OidcId,
-    OidcProvider, Plan, Role, SdkKey, ServiceAccount, ServiceAccountId, Subscription, Toast,
+    OidcProvider, Plan, ProjectApiKeyInfo, Role, ServiceAccount, ServiceAccountId, Subscription, Toast,
     ToastId, UpgradeModalStep, UserId,
 };
 
@@ -53,11 +53,9 @@ pub enum Msg {
     /// Apply a partial update to a database's backend config.
     PatchDb(DbId, DbPatch),
 
-    // ── US-006: SDK Keys ───────────────────────────────────────────────────
-    /// Append a new SDK key for the given database.
-    SdkKeyCreated { db_id: DbId, key: SdkKey },
-    /// Remove an SDK key by id (revoke).
-    RevokeSdkKey(DbId, KeyId),
+    // ── US-006: Project API key (api-key-rotation, ADR-085) ────────────────
+    /// Record the read-only rotation metadata of a database's API key.
+    ApiKeyInfoLoaded(DbId, ProjectApiKeyInfo),
 
     // ── US-007: Query Logs ─────────────────────────────────────────────────
     /// (No model-mutating msg needed beyond SetDbLogging; logs are read-only in V1.)
