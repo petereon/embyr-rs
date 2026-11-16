@@ -48,7 +48,9 @@ use std::collections::HashMap;
 /// NOT #[ignore] — this is the walking skeleton.
 #[tokio::test]
 async fn distributed_rate_limit_rejects_when_bucket_exhausted() {
-    let ctx = DrlTestContext::new(10.0).await;
+    // 2 rps: an empty bucket needs 500ms to earn a token, so a slow CI
+    // round-trip can't refill it before the request (10 rps gave 100ms).
+    let ctx = DrlTestContext::new(2.0).await;
     ctx.insert_project_with_bucket("proj-ws", "key-ws", 0.0).await;
     let (addr, _server) = start_distributed_grpc_server(&ctx).await;
     let ctx = ctx.with_grpc_addr(addr);
