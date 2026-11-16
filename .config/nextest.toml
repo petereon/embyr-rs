@@ -1,0 +1,13 @@
+# cargo-nextest config. CI runs `cargo nextest run --profile ci --partition count:N/6`
+# (see .github/workflows/ci.yml); local `cargo test` is unaffected.
+
+[profile.ci]
+# Report every failing test in a run, not just the first one.
+fail-fast = false
+# Two concurrent tests per shard: these tests start Postgres containers and some assert
+# on timing, so oversubscribing a 4-vCPU runner trades speed for flakes.
+test-threads = 2
+# No retries: a retry would mask exactly the flakes we are trying to find and fix.
+retries = 0
+# Flag slow tests early and kill a hung one instead of burning the job's whole timeout.
+slow-timeout = { period = "120s", terminate-after = 5 }
