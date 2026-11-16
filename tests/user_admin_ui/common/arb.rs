@@ -10,7 +10,7 @@
 
 use embyr_admin_ui::model::{
     AdminKey, AppModel, Database, DbBackendMode, DbId, DbStatus, KeyId, LogRetention, Member,
-    OidcId, OidcProvider, Role, SdkKey, ServiceAccount, ServiceAccountId, Toast, ToastId,
+    OidcId, OidcProvider, Role, ServiceAccount, ServiceAccountId, Toast, ToastId,
     ToastLevel, UserId,
 };
 use proptest::prelude::*;
@@ -150,22 +150,6 @@ prop_compose! {
 
 pub fn arb_member() -> impl Strategy<Value = Member> {
     arb_role().prop_flat_map(arb_member_with_role)
-}
-
-prop_compose! {
-    /// Generate an SdkKey for the given db_id.
-    pub fn arb_sdk_key(db_id: DbId)(
-        id in arb_key_id(),
-        name in "[a-z][a-z0-9-]{2,19}",
-    ) -> SdkKey {
-        SdkKey {
-            id,
-            db_id: db_id.clone(),
-            name,
-            prefix: "embyr_sd".to_string(),
-            created_at: None,
-        }
-    }
 }
 
 prop_compose! {

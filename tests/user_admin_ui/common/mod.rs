@@ -54,7 +54,6 @@ pub fn make_model_with_db() -> AppModel {
     model.authed = true;
     model.databases = vec![db];
     model.members = vec![owner, viewer];
-    model.sdk_keys.insert(db_id, vec![]);
     model
 }
 

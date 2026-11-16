@@ -98,7 +98,7 @@ pub fn bar_chart_points(ops: &[u16]) -> Vec<(f32, f32, f32)> {
 
 use crate::model::{
     AdminKey, Card, Database, DbBackendMode, DbId, DbStatus, Invoice, InvoiceId, InvoiceStatus,
-    KeyId, Member, OidcId, OidcProvider, Plan, Role, SdkKey, ServiceAccount, ServiceAccountId,
+    KeyId, Member, OidcId, OidcProvider, Plan, Role, ServiceAccount, ServiceAccountId,
     Subscription,
 };
 use chrono::{TimeZone, Utc};
@@ -153,11 +153,6 @@ pub mod mock {
 
     /// Return a mock list of members for the account.
     pub fn members() -> Vec<Member> {
-        Vec::new()
-    }
-
-    /// Return mock SDK keys for the given database.
-    pub fn sdk_keys(_db_id: &DbId) -> Vec<SdkKey> {
         Vec::new()
     }
 
