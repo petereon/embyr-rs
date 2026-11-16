@@ -196,6 +196,10 @@ path = "../../tests/dsn_single_store/acceptance/ds05_dsn_policy.rs"
 name = "admin_api_v2_account_bootstrap_invitations"
 path = "../../tests/admin_api_v2/acceptance/account_bootstrap_invitations.rs"
 
+[[test]]
+name = "admin_api_v2_account_deletion"
+path = "../../tests/admin_api_v2/acceptance/account_deletion.rs"
+
 # card-payments-backend acceptance tests (one file per slice, mirroring
 # admin-api-v2's bNN registration convention). Release grouping:
 #   Release 1 (Subscription & Payment Lifecycle): cpb01-cpb04

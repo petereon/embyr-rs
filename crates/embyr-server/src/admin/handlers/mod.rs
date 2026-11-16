@@ -1,4 +1,5 @@
 pub mod access_rules;
+pub mod account;
 pub mod admin_keys;
 // anonymous-sessions (US-01, ADR-043): admin enablement action.
 pub mod anonymous_identity;

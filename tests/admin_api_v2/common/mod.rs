@@ -137,6 +137,12 @@ impl AdminTestContext {
     ///   3. Seeding one account + user (Argon2id hash) + TOTP secret (AES-256-GCM) + recovery code.
     ///   4. Starting the Axum admin router on an ephemeral port.
     pub async fn new() -> Self {
+        Self::new_with_stripe_key("stripe-secret-key-not-configured").await
+    }
+
+    /// Same as `new()` with a caller-supplied Stripe key (account-deletion
+    /// scenarios that need a real test-mode gateway).
+    pub async fn new_with_stripe_key(stripe_key: &str) -> Self {
         // ── 1. Start Postgres container ───────────────────────────────────────
         let container = Postgres::default()
             .with_tag("15-alpine")
@@ -382,7 +388,7 @@ impl AdminTestContext {
         let prometheus_handle = embyr_server::observability::get_or_install_prometheus_handle();
         // admin_api_v2 predates card-payments-backend and never exercises
         // billing routes — placeholder StripeGateway (no I/O at construction).
-        let stripe_gateway = Arc::new(StripeGateway::new("stripe-secret-key-not-configured"));
+        let stripe_gateway = Arc::new(StripeGateway::new(stripe_key));
         let router = build_admin_router(
             system_db,
             "test-admin-key-from-env".to_string(),

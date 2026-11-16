@@ -105,7 +105,7 @@ fn build_session_cookie(token: &str) -> String {
 }
 
 /// Extract a named cookie value from the `Cookie` request header.
-fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie_header = headers.get("cookie")?.to_str().ok()?;
     for pair in cookie_header.split(';') {
         let pair = pair.trim();

@@ -13,6 +13,7 @@ use crate::adapters::{
     stripe_gateway::StripeGateway, system_db::SystemDb,
 };
 
+use super::handlers::account::delete_account;
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
 use super::handlers::auth::{oidc_callback, signin, signout};
 use super::handlers::invitations::{
@@ -415,6 +416,8 @@ pub fn build_admin_router(
             "/admin/v1/projects/:project_id/query_logs",
             get(list_query_logs),
         )
+        // account-deletion: Owner-only, cookie session + password + TOTP re-entry.
+        .route("/admin/v1/account", delete(delete_account))
         // Members routes (step 05-02).
         .route("/admin/v1/members", get(list_members))
         .route("/admin/v1/members/invite", post(invite_member))
