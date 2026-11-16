@@ -25,22 +25,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # toolchain: pinned to match rust-toolchain.toml exactly — see the
       # equivalent comment in ci.yml's `test` job for why drift here has
       # broken CI before.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: "1.95.0"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       # taiki-e/install-action downloads a prebuilt cargo-deny binary
       # instead of compiling from source — same choice ci.yml's old
       # lint-job step made, kept here for the same reason (fast, no
       # cross-run cache needed).
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-deny
 

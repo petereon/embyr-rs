@@ -44,14 +44,30 @@ Populate `/etc/embyr/embyr-server.env` (mode `0600`, owned by the service user) 
 minimum:
 
 ```
+# EMBYR_ENCRYPTION_KEY is exactly 64 hex chars.
+# No trailing `# comments` on a KEY=value line: `docker run --env-file` keeps them as part
+# of the value.
 DATABASE_URL=postgres://embyr:***@systemdb.internal:5432/embyr
 EMBYR_ADMIN_KEY=...
-EMBYR_ENCRYPTION_KEY=...   # 64 hex chars
+EMBYR_ENCRYPTION_KEY=...
 GRPC_PORT=8080
 REST_PORT=8081
 ADMIN_PORT=9090
 RUST_LOG=info
+# Password-reset and invitation emails. With EMBYR_REQUIRE_SMTP=true the server refuses to
+# start if SMTP is not configured, instead of warning and silently dropping the emails.
+EMBYR_SMTP_URL=smtps://user:***@smtp.example.com:465
+EMBYR_EMAIL_FROM=Embyr <no-reply@example.com>
+EMBYR_REQUIRE_SMTP=true
+# Origin of the customer-facing console, used for absolute links in emails (password reset)
+# and Stripe return URLs. No trailing slash.
+EMBYR_PUBLIC_BASE_URL=https://console.example.com
 ```
+
+The image sets `EMBYR_ADMIN_UI_DIR=/app/admin-ui`, so the admin console SPA is served by the
+admin listener at `/admin/` on `:9090`. That port is loopback-only here (see §2), so reach the
+console through an SSH port-forward to `127.0.0.1:9090`; its session cookie is `Secure`, which
+browsers accept on `localhost` but not on plain `http://` to another host.
 
 `DATABASE_URL` must point at a real, operator-managed Postgres instance — see
 `docs/operations/backup-disaster-recovery.md` for System DB backup/PITR requirements before
@@ -62,7 +78,7 @@ you'd rather source them from AWS/GCP Secrets Manager — see
 
 ## 2. systemd unit
 
-`embyr-server` ships only as a Docker image today (see "Open item" above) — the unit below
+`embyr-server` ships as a Docker image (see "Where the image comes from") — the unit below
 runs that image directly under systemd, which gives you `Restart=on-failure` and journald log
 capture without a separate container orchestrator.
 

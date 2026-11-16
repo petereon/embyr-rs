@@ -94,7 +94,9 @@ Rollback is **redeploying a previous immutable image** — no checkout, no rebui
    returns 200.
 4. Migrations are not rolled back by this procedure. If the regressed release shipped a
    migration, check that the older binary tolerates the newer schema before rolling back;
-   otherwise follow `backup-disaster-recovery.md`.
+   otherwise follow `backup-disaster-recovery.md`. See `migration-policy.md` (expand/contract
+   rule, and the known gap that an older binary currently refuses to start on a schema with
+   migrations it does not embed).
 5. Read the regressed version's `CHANGELOG.md` entry to narrow root-cause analysis before
    re-attempting the release.
 

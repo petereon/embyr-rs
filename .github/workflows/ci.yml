@@ -25,7 +25,7 @@ jobs:
     outputs:
       code: ${{ steps.diff.outputs.code }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - id: diff
@@ -99,7 +99,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # cargo test --workspace builds 7 crates + ~38 separate integration
       # test binaries with debug symbols, which reliably exceeds the
@@ -121,17 +121,18 @@ jobs:
       # requested here land on "stable"; the moment any cargo/rustc/trunk
       # command actually runs from inside the repo, rust-toolchain.toml's
       # own override silently switches to "1.95.0", which never received
-      # them. (Keep the action ref itself at @stable — that pins the
-      # ACTION's own code version, unrelated to which Rust channel it
-      # installs; the `toolchain:` input below controls that.)
-      - uses: dtolnay/rust-toolchain@stable
+      # them. (The action ref itself is pinned to a commit SHA of the
+      # action's `stable` branch — that pins the ACTION's own code version,
+      # unrelated to which Rust channel it installs; the `toolchain:` input
+      # below controls that.)
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: "1.95.0"
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      - uses: jetli/trunk-action@v0.5.0
+      - uses: jetli/trunk-action@69821d4eec12c308c4b811e459e37556cf920057 # v0.5.0
         with:
           version: "latest"
 
@@ -142,7 +143,7 @@ jobs:
         run: trunk build --release
         working-directory: crates/embyr-admin-ui
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: nextest
 
@@ -161,13 +162,13 @@ jobs:
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: "1.95.0"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test --workspace --doc
 
   # ─── test: the single required "Test" check, green iff every shard is green ────────────
@@ -193,22 +194,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       # toolchain: pinned to match rust-toolchain.toml exactly — see the
       # comment on the equivalent step in the `test` job above for why.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: "1.95.0"
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Clippy — deny all warnings
         run: cargo clippy --workspace -- -D warnings
+
+  # ─── migration-policy: no destructive SQL in newly added migrations ───────────────────
+  # Cheap shell lint (no Rust toolchain); a no-op when the PR adds no migrations/*.sql. See
+  # docs/operations/migration-policy.md (go-live assessment O2). Not a required check yet.
+  migration-policy:
+    name: Migration policy
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - run: scripts/check-migration-policy.sh "${{ github.event.pull_request.base.sha }}"
 
   # ─── docker: build the container image, push to ghcr.io on master (finding #42) ─
   # ghcr.io chosen over ECR/Docker Hub: zero new secrets (uses the workflow's own
@@ -228,9 +242,9 @@ jobs:
       SHOULD_PUSH: ${{ github.event_name == 'push' }} # master or a v* tag (see `on:`)
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # Tag scheme (docs/operations/release-process.md):
       #   every pushed build  -> `:sha-<short sha>`  (immutable; what you deploy
@@ -260,7 +274,7 @@ jobs:
 
       - name: Log in to GitHub Container Registry
         if: env.SHOULD_PUSH == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -273,13 +287,35 @@ jobs:
       # in GitHub's Actions cache across runs, so unchanged Cargo.toml/lock
       # layers are reused instead of recompiling every dependency every time.
       - name: Build (and push on master) Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: ${{ env.SHOULD_PUSH }}
           tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Vulnerability scan of the image CI just built (go-live assessment O7). Report-only for
+      # now (`exit-code: 0`): the first runs establish the baseline of HIGH/CRITICAL findings;
+      # flip to `exit-code: 1` once that baseline is triaged. Rebuilds with `load: true` (the
+      # step above never loads the image into the local daemon) straight from the GHA layer
+      # cache it just wrote, so this is a cache hit, not a second full compile.
+      - name: Build image for scanning (cache hit)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: embyr-server:scan
+          cache-from: type=gha
+
+      - name: Trivy image scan (HIGH,CRITICAL — report-only)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: embyr-server:scan
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          format: table
 
   # ─── agent: build + verify + package the embyr-agent static binary ───────────
   # Produces the artifact ADR-001 requires: a separately compiled,
@@ -297,7 +333,7 @@ jobs:
       SHOULD_PUSH: ${{ github.event_name == 'push' }} # master or a v* tag (see `on:`)
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install protoc + musl-tools
         run: |
@@ -310,12 +346,12 @@ jobs:
       # pinned toolchain install, not via a later `rustup target add` (which
       # would silently land on the wrong, stable-tracking toolchain once
       # rust-toolchain.toml's own override takes effect).
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: "1.95.0"
           targets: x86_64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       # Compiles the release embyr-agent binary for the musl target AND runs
       # the three acceptance tests already written for exactly this purpose
@@ -337,13 +373,13 @@ jobs:
           agent_exits_without_binding_port_when_storage_unreachable
 
       - name: Upload embyr-agent artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: embyr-agent-x86_64-unknown-linux-musl
           path: target/x86_64-unknown-linux-musl/release/embyr-agent
           if-no-files-found: error
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # Same tag scheme as the `docker` job above.
       - name: Compute image tags
@@ -366,7 +402,7 @@ jobs:
 
       - name: Log in to GitHub Container Registry
         if: env.SHOULD_PUSH == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -378,7 +414,7 @@ jobs:
       # discarded at job end). scope=agent keeps this job's GHA cache isolated
       # from the existing `docker` job's own cache (AC-EARP-04: no shared state).
       - name: Build (and push on master) embyr-agent container image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: crates/embyr-agent/Dockerfile
