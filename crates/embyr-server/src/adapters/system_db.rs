@@ -287,7 +287,12 @@ impl SystemDb {
 
     /// Run sqlx migrations from the `migrations/` directory (workspace root).
     pub async fn migrate(&self) -> Result<(), CoreError> {
-        sqlx::migrate!("../../migrations")
+        // ignore_missing: an older image started against a schema that a newer
+        // release already migrated must still boot (rollback = redeploy previous
+        // image; see docs/operations/migration-policy.md).
+        let mut migrator = sqlx::migrate!("../../migrations");
+        migrator.set_ignore_missing(true);
+        migrator
             .run(&self.pool)
             .await
             .map_err(|e| CoreError::BackendUnavailable(e.to_string()))
