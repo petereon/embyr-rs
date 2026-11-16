@@ -15,6 +15,9 @@ use crate::adapters::{
 
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
 use super::handlers::auth::{oidc_callback, signin, signout};
+use super::handlers::invitations::{
+    accept_invitation, confirm_invitation, create_account, revoke_invitation,
+};
 use super::handlers::billing::get_billing;
 use super::handlers::billing_metering::run_metering;
 use super::handlers::billing_subscription::{get_subscription, post_subscription};
@@ -227,6 +230,19 @@ pub fn build_admin_router(
         .route("/admin/v1/auth/signin", post(signin))
         .route("/admin/v1/auth/signout", post(signout))
         .route("/admin/v1/auth/oidc/callback", get(oidc_callback))
+        .route("/admin/v1/auth/invitations/accept", post(accept_invitation))
+        .route("/admin/v1/auth/invitations/confirm", post(confirm_invitation))
+        .with_state(user_state.clone());
+
+    // Account bootstrap: operator Bearer auth, but the handler needs the
+    // user-admin state (email sender, system DB), so the operator middleware
+    // is layered onto a UserAdminState router.
+    let bootstrap_router = Router::<UserAdminState>::new()
+        .route("/admin/v1/accounts", post(create_account))
+        .route_layer(axum::middleware::from_fn_with_state(
+            operator_state.clone(),
+            operator_auth_middleware,
+        ))
         .with_state(user_state.clone());
 
     // Session sub-router: session_auth_middleware guards all routes added in steps 01-04+.
@@ -394,6 +410,10 @@ pub fn build_admin_router(
         .route("/admin/v1/members", get(list_members))
         .route("/admin/v1/members/invite", post(invite_member))
         .route(
+            "/admin/v1/members/invitations/:invitation_id",
+            delete(revoke_invitation),
+        )
+        .route(
             "/admin/v1/members/:member_id/role",
             patch(change_member_role),
         )
@@ -439,6 +459,7 @@ pub fn build_admin_router(
         .merge(operator_router)
         .merge(dual_auth_router)
         .merge(public_router)
+        .merge(bootstrap_router)
         .merge(session_router);
     if let Some(webhook_router) = webhook_router {
         router = router.merge(webhook_router);

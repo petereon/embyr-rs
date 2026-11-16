@@ -12,6 +12,7 @@ pub mod composite_indexes;
 pub mod get_project;
 // client-auth-hosted-identity (US-01, ADR-036): admin enablement action.
 pub mod hosted_identity;
+pub mod invitations;
 pub mod lifecycle;
 pub mod members;
 pub mod metrics;
