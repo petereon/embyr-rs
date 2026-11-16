@@ -110,7 +110,7 @@ fn build_session_cookie(token: &str) -> String {
 }
 
 /// Extract a named cookie value from the `Cookie` request header.
-fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(crate) fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie_header = headers.get("cookie")?.to_str().ok()?;
     for pair in cookie_header.split(';') {
         let pair = pair.trim();
@@ -138,6 +138,201 @@ macro_rules! try_get_or_err {
     };
 }
 
+// ── Shared credential verification (signin + account deletion) ───────────────
+
+/// The `users` columns credential verification needs.
+pub(crate) struct UserSecrets {
+    id: Uuid,
+    password_hash: String,
+    totp_secret_enc: Option<Vec<u8>>,
+    failed_totp_attempts: i32,
+    locked_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl UserSecrets {
+    fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            password_hash: row.try_get("password_hash")?,
+            totp_secret_enc: row.try_get("totp_secret_enc")?,
+            failed_totp_attempts: row.try_get("failed_totp_attempts")?,
+            locked_until: row.try_get("locked_until")?,
+        })
+    }
+
+    /// Load by user id (re-authentication of an already-signed-in user).
+    pub(crate) async fn fetch_by_id(
+        pool: &sqlx::PgPool,
+        user_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query(
+            "SELECT id, password_hash, totp_secret_enc, failed_totp_attempts, locked_until \
+             FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+        .map(|r| Self::from_row(&r))
+        .transpose()
+    }
+}
+
+/// Signin steps 2-5, shared verbatim with account deletion so re-entry is never
+/// a weaker or lockout-bypassing path: lockout check (429), Argon2id password
+/// (401), TOTP / recovery code with attempt counting (401, lockout after 3),
+/// counter reset on success. `Err` carries the ready-made HTTP response.
+pub(crate) async fn verify_credentials(
+    state: &UserAdminState,
+    user: &UserSecrets,
+    password: &str,
+    totp_code: Option<&str>,
+    recovery_code: Option<&str>,
+) -> Result<(), Response> {
+    let pool = state.system_db.pool();
+    let user_id = user.id;
+
+    // ── 2. Lockout check ──────────────────────────────────────────────────────
+    // AC-5: fourth attempt after 3 consecutive TOTP failures returns 429.
+    if let Some(until) = user.locked_until {
+        if until > chrono::Utc::now() {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(ErrorBody {
+                    message: "Too many failed attempts — account locked for 15 minutes"
+                        .to_string(),
+                }),
+            )
+                .into_response());
+        }
+    }
+
+    // ── 3. Argon2id password verification ────────────────────────────────────
+    // AC-3: wrong password → identical 401 shape to unknown email (oracle protection).
+    // AC-ASH-01: runs on the blocking pool via `argon2_blocking`.
+    match crate::adapters::argon2_blocking::verify_password(
+        password.as_bytes(),
+        &user.password_hash,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => return Err(invalid_credentials()),
+        Err(e) => return Err(internal_err("verify password hash", e)),
+    }
+
+    // ── 4. TOTP / recovery-code check ────────────────────────────────────────
+    if let Some(recovery_code) = recovery_code {
+        // AC-6: valid one-time recovery code grants access; immediately invalidated.
+        let code_hash = blake3::hash(recovery_code.as_bytes()).as_bytes().to_vec();
+        let rc_id: Uuid = match sqlx::query_scalar(
+            "SELECT id FROM mfa_recovery_codes \
+             WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL \
+             LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(&code_hash)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(id)) => id,
+            Ok(None) => return Err(invalid_code()),
+            Err(e) => return Err(internal_err("DB error fetching recovery code", e)),
+        };
+
+        // Mark as used (AC-6: second use of same code → 401)
+        if let Err(e) = sqlx::query("UPDATE mfa_recovery_codes SET used_at = now() WHERE id = $1")
+            .bind(rc_id)
+            .execute(pool)
+            .await
+        {
+            return Err(internal_err("invalidate recovery code", e));
+        }
+    } else if let Some(totp_code) = totp_code {
+        // AC-4: wrong TOTP → 401; AC-5: three consecutive failures → lockout.
+        let Some(enc_bytes) = user.totp_secret_enc.as_deref() else {
+            return Err(invalid_code()); // NULL = not enrolled
+        };
+        if enc_bytes.len() < 12 {
+            tracing::error!(
+                "signin: totp_secret_enc malformed ({} bytes < 12)",
+                enc_bytes.len()
+            );
+            return Err(invalid_code());
+        }
+
+        // Decrypt AES-256-GCM, trying the current key then falling back to the
+        // previous key during a rotation window (ADR-018 §5).
+        let totp_secret_bytes = match decrypt_with_rotation(
+            &state.encryption_key,
+            state.encryption_key_previous.as_ref(),
+            enc_bytes,
+        ) {
+            Ok(p) => p,
+            Err(RotationDecryptError::Malformed) => {
+                tracing::error!("signin: totp_secret_enc malformed (< 12-byte nonce)");
+                return Err(invalid_code());
+            }
+            Err(RotationDecryptError::AuthenticationFailed) => {
+                tracing::error!(
+                    "signin: AES-GCM decryption of totp_secret_enc failed under all configured keys"
+                );
+                return Err(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+        };
+
+        let totp = match TOTP::new(
+            TotpAlgorithm::SHA1,
+            6,
+            1,
+            30,
+            totp_secret_bytes,
+            None,
+            String::new(),
+        ) {
+            Ok(t) => t,
+            Err(e) => return Err(internal_err("build TOTP struct", e)),
+        };
+
+        if !totp.check_current(totp_code).unwrap_or(false) {
+            let new_count = user.failed_totp_attempts + 1;
+            if new_count >= 3 {
+                // AC-5: set lockout; 429 fires on the NEXT attempt (this one returns 401).
+                let _ = sqlx::query(
+                    "UPDATE users SET failed_totp_attempts = $1, \
+                     locked_until = now() + interval '15 minutes' \
+                     WHERE id = $2",
+                )
+                .bind(new_count)
+                .bind(user_id)
+                .execute(pool)
+                .await;
+            } else {
+                let _ = sqlx::query("UPDATE users SET failed_totp_attempts = $1 WHERE id = $2")
+                    .bind(new_count)
+                    .bind(user_id)
+                    .execute(pool)
+                    .await;
+            }
+            return Err(invalid_code());
+        }
+    } else {
+        // Neither totp_code nor recovery_code provided.
+        return Err(invalid_code());
+    }
+
+    // ── 5. Reset TOTP failure counters on success ─────────────────────────────
+    if let Err(e) =
+        sqlx::query("UPDATE users SET failed_totp_attempts = 0, locked_until = NULL WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await
+    {
+        return Err(internal_err("reset TOTP failure counters", e));
+    }
+
+    Ok(())
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// POST /admin/v1/auth/signin
@@ -155,6 +350,7 @@ macro_rules! try_get_or_err {
 pub async fn signin(
     State(state): State<UserAdminState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<SigninRequest>,
 ) -> Response {
     let pool = state.system_db.pool();
@@ -163,17 +359,20 @@ pub async fn signin(
     // First statement — before the Step 1 DB lookup — so a throttled request
     // never reaches Argon2id or the DB. Keyed by peer.ip() only (not the
     // full SocketAddr: ephemeral source port varies per TCP connection from
-    // the same client).
-    let source_key = peer.ip().to_string();
+    // the same client). Behind a load balancer, `source_ip` resolves the real
+    // client from X-Forwarded-For when EMBYR_TRUSTED_PROXY_HOPS > 0.
+    let source_key = state.signin_rate_limiter.source_ip(peer, &headers).to_string();
     if let Err(retry_after_ms) = state.signin_rate_limiter.check(&source_key).await {
         return signin_throttled(retry_after_ms);
     }
 
     // ── 1. Fetch user by email ────────────────────────────────────────────────
+    // account-deletion: users of a soft-deleted account are unknown emails.
     let row = match sqlx::query(
-        "SELECT id, account_id, display_name, password_hash, totp_secret_enc, \
-         failed_totp_attempts, locked_until \
-         FROM users WHERE email = $1",
+        "SELECT u.id, u.account_id, u.display_name, u.password_hash, u.totp_secret_enc, \
+         u.failed_totp_attempts, u.locked_until \
+         FROM users u JOIN accounts a ON a.id = u.account_id \
+         WHERE u.email = $1 AND a.deleted_at IS NULL",
     )
     .bind(&body.email)
     .fetch_optional(pool)
@@ -184,176 +383,25 @@ pub async fn signin(
         Err(e) => return internal_err("DB error fetching user", e),
     };
 
-    let user_id: Uuid = try_get_or_err!(row, "id", "read user id");
     let account_id: Uuid = try_get_or_err!(row, "account_id", "read account_id");
     let display_name: String = try_get_or_err!(row, "display_name", "read display_name");
-    let password_hash: String = try_get_or_err!(row, "password_hash", "read password_hash");
-    let totp_secret_enc: Option<Vec<u8>> =
-        try_get_or_err!(row, "totp_secret_enc", "read totp_secret_enc");
-    let failed_totp_attempts: i32 =
-        try_get_or_err!(row, "failed_totp_attempts", "read failed_totp_attempts");
-    let locked_until: Option<chrono::DateTime<chrono::Utc>> =
-        try_get_or_err!(row, "locked_until", "read locked_until");
-
-    // ── 2. Lockout check ──────────────────────────────────────────────────────
-    // AC-5: fourth attempt after 3 consecutive TOTP failures returns 429.
-    if let Some(until) = locked_until {
-        if until > chrono::Utc::now() {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                axum::Json(ErrorBody {
-                    message: "Too many failed attempts — account locked for 15 minutes"
-                        .to_string(),
-                }),
-            )
-                .into_response();
-        }
-    }
-
-    // ── 3. Argon2id password verification ────────────────────────────────────
-    // AC-3: wrong password → identical 401 shape to unknown email (oracle protection).
-    // AC-ASH-01: runs off the async reactor's worker threads via spawn_blocking,
-    // per ADR-003's mandate — mirrors provision.rs:187 / sdk_keys.rs:162's own
-    // established shape, adapted to signin's own match-and-early-return idiom
-    // (signin returns Response directly, not Result<_, StatusCode>). Reuses
-    // embyr_core::auth::argon2::verify_password (ADR-036 Decision 8) instead of
-    // signin's own prior duplicate inline Argon2::new(...) call.
-    let password_owned = body.password.clone();
-    let hash_owned = password_hash.clone();
-    let verify_result = tokio::task::spawn_blocking(move || {
-        embyr_core::auth::argon2::verify_password(password_owned.as_bytes(), &hash_owned)
-    })
-    .await;
-
-    let password_matches = match verify_result {
-        Ok(Ok(matches)) => matches,
-        Ok(Err(e)) => return internal_err("verify password hash", e),
-        Err(e) => return internal_err("spawn_blocking join error (password verify)", e),
+    let user = match UserSecrets::from_row(&row) {
+        Ok(u) => u,
+        Err(e) => return internal_err("read user credentials", e),
     };
+    let user_id = user.id;
 
-    if !password_matches {
-        return invalid_credentials();
-    }
-
-    // ── 4. TOTP / recovery-code check ────────────────────────────────────────
-    if let Some(recovery_code) = &body.recovery_code {
-        // AC-6: valid one-time recovery code grants access; immediately invalidated.
-        let code_hash = blake3::hash(recovery_code.as_bytes()).as_bytes().to_vec();
-        let rc_row = match sqlx::query(
-            "SELECT id FROM mfa_recovery_codes \
-             WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL \
-             LIMIT 1",
-        )
-        .bind(user_id)
-        .bind(&code_hash)
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(Some(r)) => r,
-            Ok(None) => return invalid_code(),
-            Err(e) => return internal_err("DB error fetching recovery code", e),
-        };
-
-        let rc_id: Uuid = try_get_or_err!(rc_row, "id", "read recovery code id");
-
-        // Mark as used (AC-6: second use of same code → 401)
-        if let Err(e) = sqlx::query(
-            "UPDATE mfa_recovery_codes SET used_at = now() WHERE id = $1",
-        )
-        .bind(rc_id)
-        .execute(pool)
-        .await
-        {
-            return internal_err("invalidate recovery code", e);
-        }
-    } else if let Some(totp_code) = &body.totp_code {
-        // AC-4: wrong TOTP → 401; AC-5: three consecutive failures → lockout.
-        let enc_bytes = match totp_secret_enc {
-            Some(b) => b,
-            None => return invalid_code(), // NULL = not enrolled
-        };
-        if enc_bytes.len() < 12 {
-            tracing::error!(
-                "signin: totp_secret_enc malformed ({} bytes < 12)",
-                enc_bytes.len()
-            );
-            return invalid_code();
-        }
-
-        // Decrypt AES-256-GCM, trying the current key then falling back to the
-        // previous key during a rotation window (ADR-018 §5).
-        let totp_secret_bytes = match decrypt_with_rotation(
-            &state.encryption_key,
-            state.encryption_key_previous.as_ref(),
-            &enc_bytes,
-        ) {
-            Ok(p) => p,
-            Err(RotationDecryptError::Malformed) => {
-                tracing::error!(
-                    "signin: totp_secret_enc malformed (< 12-byte nonce)"
-                );
-                return invalid_code();
-            }
-            Err(RotationDecryptError::AuthenticationFailed) => {
-                tracing::error!(
-                    "signin: AES-GCM decryption of totp_secret_enc failed under all configured keys"
-                );
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
-
-        let totp = match TOTP::new(
-            TotpAlgorithm::SHA1,
-            6,
-            1,
-            30,
-            totp_secret_bytes,
-            None,
-            String::new(),
-        ) {
-            Ok(t) => t,
-            Err(e) => return internal_err("build TOTP struct", e),
-        };
-
-        let is_valid = totp.check_current(totp_code).unwrap_or(false);
-        if !is_valid {
-            let new_count = failed_totp_attempts + 1;
-            if new_count >= 3 {
-                // AC-5: set lockout; 429 fires on the NEXT attempt (this one returns 401).
-                let _ = sqlx::query(
-                    "UPDATE users SET failed_totp_attempts = $1, \
-                     locked_until = now() + interval '15 minutes' \
-                     WHERE id = $2",
-                )
-                .bind(new_count)
-                .bind(user_id)
-                .execute(pool)
-                .await;
-            } else {
-                let _ = sqlx::query(
-                    "UPDATE users SET failed_totp_attempts = $1 WHERE id = $2",
-                )
-                .bind(new_count)
-                .bind(user_id)
-                .execute(pool)
-                .await;
-            }
-            return invalid_code();
-        }
-    } else {
-        // Neither totp_code nor recovery_code provided.
-        return invalid_code();
-    }
-
-    // ── 5. Reset TOTP failure counters on success ─────────────────────────────
-    if let Err(e) = sqlx::query(
-        "UPDATE users SET failed_totp_attempts = 0, locked_until = NULL WHERE id = $1",
+    // ── 2-5. Lockout, password, second factor, counter reset ─────────────────
+    if let Err(response) = verify_credentials(
+        &state,
+        &user,
+        &body.password,
+        body.totp_code.as_deref(),
+        body.recovery_code.as_deref(),
     )
-    .bind(user_id)
-    .execute(pool)
     .await
     {
-        return internal_err("reset TOTP failure counters", e);
+        return response;
     }
 
     // ── 6. Fetch member role ──────────────────────────────────────────────────

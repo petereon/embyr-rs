@@ -135,7 +135,7 @@ impl FirestoreService {
     }
 
     /// Parse `DocumentPath` from a full Firestore resource name.
-    fn parse_document_path(
+    pub(crate) fn parse_document_path(
         name: &str,
     ) -> Result<embyr_core::domain::document::DocumentPath, Status> {
         let project_id_str = Self::extract_project_id(name)?;
@@ -1122,6 +1122,60 @@ impl FirestoreService {
                     ancestor_path_variable_values: &ancestor_bindings,
                     request_time: Some(&now_field),
                     cross_document_reads: &cross_document_reads,
+                },
+            ),
+            embyr_core::access_control::EvaluationOutcome::Allow
+        ))
+    }
+
+    /// `ListCollectionIds` gate (go-live X9): the parent DOCUMENT is the read
+    /// target, so sub-collection NAMES are only revealed to a caller its read
+    /// rule admits. Same rule sources as `ListDocuments`: the exact-match rule
+    /// for the parent's collection, else `pattern_read_allows` (no rule, or a
+    /// pattern with no read condition, is unrestricted). A missing parent
+    /// document evaluates against empty fields, never distinguishable from a
+    /// denied one by rule outcome. ponytail: one `get_document` per call even
+    /// for ungoverned projects; fetch lazily if that shows up in profiles.
+    async fn parent_read_allows(
+        system_db: &SystemDb,
+        adapter: &SharedBackendAdapter,
+        project_id: &str,
+        parent: &DocumentPath,
+        auth_ctx: Option<&embyr_core::access_control::AuthContext>,
+    ) -> Result<bool, Status> {
+        let rule_row = system_db
+            .get_access_rule(project_id, &parent.collection_path)
+            .await
+            .map_err(|e| sanitize_backend_error(e, "list_collection_ids: get_access_rule"))?;
+        let parent_doc = adapter.get_document(parent, None).await.map_err(core_error_to_status)?;
+        let empty_fields = std::collections::BTreeMap::new();
+        let resource_fields = parent_doc.as_ref().map(|d| &d.fields).unwrap_or(&empty_fields);
+        let Some(rule_row) = rule_row else {
+            return Self::pattern_read_allows(
+                system_db,
+                adapter,
+                project_id,
+                parent,
+                auth_ctx,
+                resource_fields,
+            )
+            .await;
+        };
+        let condition = embyr_core::access_control::parse_condition(&rule_row.condition_source)
+            .map_err(|e| Status::internal(format!("stored access rule failed to re-parse: {e:?}")))?;
+        let now = chrono::Utc::now();
+        let now_field = FieldValue::Timestamp(now.timestamp(), now.timestamp_subsec_nanos() as i32);
+        Ok(matches!(
+            embyr_core::access_control::evaluate(
+                &condition,
+                &embyr_core::access_control::EvalContext {
+                    auth: auth_ctx,
+                    resource_fields,
+                    request_resource_fields: &empty_fields,
+                    path_variable_value: Some(parent.document_id.as_str()),
+                    ancestor_path_variable_values: &std::collections::BTreeMap::new(),
+                    request_time: Some(&now_field),
+                    cross_document_reads: &std::collections::BTreeMap::new(),
                 },
             ),
             embyr_core::access_control::EvaluationOutcome::Allow
@@ -2722,10 +2776,9 @@ impl FirestoreService {
     }
 
     /// firestore-list-rpcs (Slice 02, US-02, ADR-051): `ListCollectionIds` —
-    /// same auth/rate-limit/suspension sequence as `handle_list_documents`,
-    /// no per-document access-rule evaluation (this RPC only exposes
-    /// collection NAMES, never document contents, so there is nothing for
-    /// `security-rules-query-path`'s own per-document rule engine to filter).
+    /// same auth/rate-limit/suspension sequence as `handle_list_documents`.
+    /// Collection NAMES leak structure, so a document parent is gated by that
+    /// document's read rule (`parent_read_allows`, go-live X9).
     /// Reuses the shared `list_collection_ids` primitive with the SAME
     /// fetch-one-extra-to-detect-more-pages pagination technique
     /// `handle_list_documents`/`run_query` already use.
@@ -2744,8 +2797,40 @@ impl FirestoreService {
             return Err(Status::permission_denied("project is suspended"));
         }
 
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        // X9: a document parent is gated like a read of that document. The
+        // database root (empty prefix) has no document and no rule target, so
+        // it stays unrestricted as before.
+        // ponytail: root collection names are not rule-filtered; add a
+        // per-collection filter if root names must be hidden too.
+        if let Some((collection_path, document_id)) = prefix.rsplit_once('/') {
+            let parent_doc = DocumentPath {
+                project_id: project_id.clone(),
+                collection_path: collection_path.to_string(),
+                document_id: document_id.to_string(),
+            };
+            let auth_ctx = verified_identity.as_ref().map(|v| embyr_core::access_control::AuthContext {
+                uid: v.end_user_id.clone(),
+                claims: v.claims.clone(),
+            });
+            if !Self::parent_read_allows(
+                &self.system_db,
+                &adapter,
+                &project_id_str,
+                &parent_doc,
+                auth_ctx.as_ref(),
+            )
+            .await?
+            {
+                return Err(Status::permission_denied("access denied by rule"));
+            }
+        }
 
         let page_size = if req.page_size <= 0 { 100i32 } else { req.page_size.min(100) };
         let offset = embyr_core::pagination::decode_page_token(&req.page_token)
@@ -3339,10 +3424,8 @@ impl FirestoreService {
             .map_err(Status::invalid_argument)?;
 
         // Translate proto order_by → domain OrderBy. Field paths are
-        // validated here (SPEC.md Invariant 6) — this is the only place
-        // order-by field paths enter the domain from proto; `Listen`'s own
-        // order_by is always empty (realtime/listen_handler.rs), so this
-        // single guard covers every order-by-carrying entry point.
+        // validated here (SPEC.md Invariant 6) — `Listen` translates its own
+        // order_by in realtime/listen_session.rs with the same guard.
         let order_by: Vec<OrderBy> = sq_proto
             .order_by
             .iter()
@@ -3462,11 +3545,9 @@ impl FirestoreService {
                 .as_ref()
                 .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    // custom-claims (ADR-034): out of THIS slice's scope
-                    // (write-path/RunQuery wiring is US-03/US-05's own job)
-                    // — empty map keeps this call site compiling against
-                    // AuthContext's new field with zero behavior change.
-                    claims: std::collections::BTreeMap::new(),
+                    // Verified claims only: no identity -> no AuthContext ->
+                    // `request.auth.token.<claim>` stays unmatched.
+                    claims: v.claims.clone(),
                 });
 
             // SAME check_query_compliance()/query_compliance_rejection()
@@ -3505,11 +3586,9 @@ impl FirestoreService {
                     .as_ref()
                     .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    // custom-claims (ADR-034): out of THIS slice's scope
-                    // (write-path/RunQuery wiring is US-03/US-05's own job)
-                    // — empty map keeps this call site compiling against
-                    // AuthContext's new field with zero behavior change.
-                    claims: std::collections::BTreeMap::new(),
+                    // Verified claims only: no identity -> no AuthContext ->
+                    // `request.auth.token.<claim>` stays unmatched.
+                    claims: v.claims.clone(),
                 });
 
                 // ADR-031 § OQ-SRQ-03 Resolution: compliance-checking runs
@@ -3751,7 +3830,7 @@ impl FirestoreService {
                 .as_ref()
                 .map(|v| embyr_core::access_control::AuthContext {
                     uid: v.end_user_id.clone(),
-                    claims: std::collections::BTreeMap::new(),
+                    claims: v.claims.clone(),
                 });
 
             match embyr_core::access_control::check_query_compliance(
@@ -3781,7 +3860,7 @@ impl FirestoreService {
                     .as_ref()
                     .map(|v| embyr_core::access_control::AuthContext {
                         uid: v.end_user_id.clone(),
-                        claims: std::collections::BTreeMap::new(),
+                        claims: v.claims.clone(),
                     });
 
                 match embyr_core::access_control::check_query_compliance(
@@ -3921,20 +4000,6 @@ impl FirestoreService {
             .attach_client_identity_if_present(&metadata_only_request, &project_id)
             .await;
 
-        // Extract resume token from AddTarget if present.
-        let resume_token: Option<Vec<u8>> = match &first_msg.target_change {
-            Some(embyr_proto::firestore::listen_request::TargetChange::AddTarget(t)) => {
-                use embyr_proto::firestore::target::ResumeType;
-                match &t.resume_type {
-                    Some(ResumeType::ResumeToken(bytes)) if !bytes.is_empty() => {
-                        Some(bytes.clone())
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-
         // Channel capacity 64 — matching the subscriber registry capacity.
         // When a slow consumer stops draining, try_send fails at 64 buffered
         // events → handler sends TargetChange(RESET).
@@ -3946,26 +4011,27 @@ impl FirestoreService {
         // `request`'s metadata is no longer needed beyond this point —
         // consume it into the owned `Streaming` body now, immediately
         // before the spawn that moves it in.
-        let mut in_stream = request.into_inner();
+        let in_stream = request.into_inner();
 
         tokio::spawn(async move {
-            if let Err(status) = crate::realtime::listen_handler::handle_add_target(
-                &first_msg,
+            // The session owns the request stream: AddTarget/RemoveTarget at
+            // any point, until the client goes away.
+            if let Err(status) = crate::realtime::listen_session::run_listen_session(
+                first_msg,
+                in_stream,
                 &adapter,
                 &system_db,
+                project_id,
                 verified_identity,
                 &tx,
                 keepalive,
                 registry,
                 &channel,
-                resume_token,
             )
             .await
             {
                 let _ = tx.send(Err(status)).await;
             }
-            // Drain remaining client messages (RemoveTarget etc.) for future steps.
-            while (in_stream.next().await).is_some() {}
         });
 
         let stream: tonic::codegen::BoxStream<ListenResponse> = Box::pin(

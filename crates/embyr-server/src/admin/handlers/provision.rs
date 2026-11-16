@@ -171,6 +171,14 @@ async fn insert_rate_bucket_in_tx(
     Ok(())
 }
 
+/// New project API key: 32 random bytes, base64url without padding (43 chars). Shared with
+/// `api_key::rotate_api_key` (ADR-085).
+pub(crate) fn generate_api_key() -> String {
+    let mut key_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut key_bytes);
+    URL_SAFE_NO_PAD.encode(key_bytes)
+}
+
 pub async fn provision(
     State(state): State<OperatorState>,
     Json(req): Json<ProvisionRequest>,
@@ -192,10 +200,7 @@ pub async fn provision(
         return Err(err(StatusCode::CONFLICT, "project_already_exists"));
     }
 
-    // Generate API key: 32 random bytes, base64url-encoded without padding
-    let mut key_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut key_bytes);
-    let api_key = URL_SAFE_NO_PAD.encode(key_bytes);
+    let api_key = generate_api_key();
 
     // Argon2id hash API key — offload to blocking thread (heavy CPU op)
     let api_key_for_hash = api_key.clone();
