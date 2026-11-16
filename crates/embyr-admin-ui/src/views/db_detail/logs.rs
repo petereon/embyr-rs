@@ -3,26 +3,40 @@
 #[cfg(feature = "csr")]
 use crate::components::Icon;
 #[cfg(feature = "csr")]
-use crate::model::Database;
+use crate::api::ApiCall;
+#[cfg(feature = "csr")]
+use crate::model::{AppModel, DbId};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
 use leptos::prelude::*;
 
+// Slice 09 replaces the placeholder table below with the real query-log list; here only the
+// "Enable logging" action is real (PATCH), so the tab never offers a local-only change.
 #[cfg(feature = "csr")]
 #[component]
-pub fn LogsView(db: Database) -> impl IntoView {
+pub fn LogsView(id: DbId) -> impl IntoView {
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
-    let logging = db.logging_enabled;
-    let db_id = db.id.clone();
+    let logging = Memo::new({
+        let id = id.clone();
+        move |_| model.with(|m| m.databases.iter().find(|d| d.id == id).is_some_and(|d| d.logging_enabled))
+    });
+    let can_enable = move || {
+        model.with(|m| {
+            m.can_manage_databases() && !m.pending.contains(&crate::api::CallKind::PatchProject)
+        })
+    };
+    let db_id = id;
 
     let filter = RwSignal::new(String::new());
 
     view! {
         <div class="fade-in" style="display:flex;flex-direction:column;gap:16px">
-            {if !logging {
+            {move || (!logging.get()).then(|| {
+                let db_id = db_id.clone();
                 // ── Logging off — enable panel ────────────────────────────────
-                Some(view! {
+                view! {
                     <div class="card" style="padding:40px 20px;display:flex;flex-direction:column;\
                                              align-items:center;gap:16px;text-align:center">
                         <div style="width:46px;height:46px;border-radius:12px;background:var(--surface-2);\
@@ -39,20 +53,23 @@ pub fn LogsView(db: Database) -> impl IntoView {
                         <button
                             class="btn btn-primary"
                             type="button"
+                            disabled=move || !can_enable()
                             on:click=move |_| {
-                                dispatch.run(Msg::SetDbLogging(db_id.clone(), true));
+                                dispatch.run(Msg::Request(ApiCall::SetLogging {
+                                    id: db_id.clone(),
+                                    enabled: true,
+                                    retention: None,
+                                }));
                             }
                         >
                             <Icon name="log" size=15/>
                             "Enable query logging"
                         </button>
                     </div>
-                })
-            } else {
-                None
-            }}
+                }
+            })}
 
-            {move || logging.then(|| view! {
+            {move || logging.get().then(|| view! {
                 // ── Filter + controls row ─────────────────────────────────────
                 <div class="row" style="gap:8px">
                     <div style="position:relative;flex:1">

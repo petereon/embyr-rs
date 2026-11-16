@@ -5,6 +5,8 @@
 #[cfg(feature = "csr")]
 pub mod primitives;
 #[cfg(feature = "csr")]
+pub mod secret_modal;
+#[cfg(feature = "csr")]
 pub mod sidebar;
 #[cfg(feature = "csr")]
 pub mod suspension_banner;
@@ -19,6 +21,8 @@ pub mod icons;
 
 #[cfg(feature = "csr")]
 pub use primitives::{Badge, Button, Card, Menu};
+#[cfg(feature = "csr")]
+pub use secret_modal::{copy_to_clipboard, SecretModal};
 #[cfg(feature = "csr")]
 pub use sidebar::Sidebar;
 #[cfg(feature = "csr")]

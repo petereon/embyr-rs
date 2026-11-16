@@ -59,6 +59,10 @@ name = "admin_ui_wiring_ui_auth"
 path = "../../tests/admin_ui_wiring/ui_auth.rs"
 
 [[test]]
+name = "admin_ui_wiring_ui_db_detail"
+path = "../../tests/admin_ui_wiring/ui_db_detail.rs"
+
+[[test]]
 name = "card_payments_walking_skeleton"
 path = "../../tests/card_payments/acceptance/walking_skeleton.rs"
 

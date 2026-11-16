@@ -1,13 +1,17 @@
-//! Keys tab — read-only "Project API key" panel (api-key-rotation, ADR-085).
+//! Keys tab — the project API key panel (api-key-rotation, ADR-085).
 //!
-//! Shows when the key was last rotated and until when the previous key is
-//! still accepted. Rotate / Revoke now are present but disabled until the
-//! server endpoints land (slice 4).
+//! Rotate issues a new key (shown once in the reveal modal); the previous key keeps working for the
+//! server's rotation window. Revoke now is the same operation with no window and asks for a
+//! confirmation first. Both are Owner/Admin only (the server enforces it; Viewers see disabled buttons).
 //!
 //! Gated behind #[cfg(feature = "csr")].
 
 #[cfg(feature = "csr")]
-use crate::model::{AppModel, Database};
+use crate::api::{ApiCall, CallKind};
+#[cfg(feature = "csr")]
+use crate::model::{AppModel, DbId};
+#[cfg(feature = "csr")]
+use crate::msg::Msg;
 #[cfg(feature = "csr")]
 use leptos::prelude::*;
 
@@ -20,12 +24,20 @@ fn fmt_ts(ts: Option<chrono::DateTime<chrono::Utc>>, none: &str) -> String {
 /// Project API key panel for the Keys tab.
 #[cfg(feature = "csr")]
 #[component]
-pub fn KeysView(db: Database) -> impl IntoView {
+pub fn KeysView(id: DbId) -> impl IntoView {
     let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
-    let db_id = db.id.clone();
-    let info = Memo::new(move |_| {
-        model.with(|m| m.api_key_info.get(&db_id).cloned().unwrap_or_default())
+    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
+
+    let info = Memo::new({
+        let id = id.clone();
+        move |_| model.with(|m| m.api_key_info.get(&id).cloned().unwrap_or_default())
     });
+    let disabled =
+        move || model.with(|m| !m.can_manage_databases() || m.pending.contains(&CallKind::ApiKey));
+    let confirm_revoke = RwSignal::new(false);
+
+    let rotate_id = id.clone();
+    let revoke_id = id.clone();
 
     view! {
         <div class="keys-panel fade-in">
@@ -45,11 +57,58 @@ pub fn KeysView(db: Database) -> impl IntoView {
                     <dd>{move || fmt_ts(info.get().previous_expires_at, "—")}</dd>
                 </dl>
                 <div class="row modal-footer">
-                    <button class="btn btn-primary" type="button" disabled=true>"Rotate"</button>
-                    <button class="btn btn-danger" type="button" disabled=true>"Revoke now"</button>
+                    <button
+                        class="btn btn-primary"
+                        type="button"
+                        disabled=disabled
+                        on:click=move |_| dispatch.run(Msg::Request(ApiCall::RotateApiKey(rotate_id.clone())))
+                    >"Rotate"</button>
+                    <button
+                        class="btn btn-danger"
+                        type="button"
+                        disabled=disabled
+                        on:click=move |_| confirm_revoke.set(true)
+                    >"Revoke now"</button>
                 </div>
-                <p class="sub">"Rotate and Revoke now are coming soon."</p>
+                <p class="sub">
+                    "Rotate issues a new key and keeps the previous one working for a grace period. \
+                     Revoke now issues a new key and stops the previous one immediately."
+                </p>
             </div>
+
+            {move || confirm_revoke.get().then(|| {
+                let revoke_id = revoke_id.clone();
+                view! {
+                    <div class="modal-backdrop" on:click=move |_| confirm_revoke.set(false)>
+                        <div class="modal" on:click=|e| e.stop_propagation()>
+                            <div class="modal-head">
+                                <span class="modal-title">"Revoke the current key now?"</span>
+                            </div>
+                            <div class="modal-body">
+                                <p style="color:var(--text-2);font-size:14px;line-height:1.55">
+                                    "Every client still using the current key will stop working immediately. \
+                                     A new key is issued and shown once."
+                                </p>
+                                <div class="row modal-footer" style="justify-content:flex-end">
+                                    <button
+                                        class="btn btn-ghost"
+                                        type="button"
+                                        on:click=move |_| confirm_revoke.set(false)
+                                    >"Cancel"</button>
+                                    <button
+                                        class="btn btn-danger"
+                                        type="button"
+                                        on:click=move |_| {
+                                            confirm_revoke.set(false);
+                                            dispatch.run(Msg::Request(ApiCall::RevokeApiKey(revoke_id.clone())));
+                                        }
+                                    >"Revoke now"</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+            })}
         </div>
     }
 }
