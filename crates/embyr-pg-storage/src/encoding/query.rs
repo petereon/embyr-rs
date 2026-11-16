@@ -361,45 +361,49 @@ fn push_array_contains(qb: &mut QueryBuilder<Postgres>, field_path: &str, target
 /// already covers all of them.
 fn push_value_equality(qb: &mut QueryBuilder<Postgres>, field_path: &str, target: &FieldValue, negate: bool) {
     let op = if negate { "!=" } else { "=" };
-    qb.push(format!("fields->'{field_path}' {op} "));
+    qb.push(format!("{} {op} ", equality_key_expr(field_path)));
     qb.push_bind(field_value_to_json(target));
     qb.push("::jsonb");
 }
 
-/// Return a raw SQL ORDER BY expression for a single `OrderBy` clause.
-///
-/// This string is pushed as raw SQL (no bind parameter), since ORDER BY
-/// expressions cannot be parameterised in Postgres.
-///
-/// typed-order-by (P11): a two-level key, every column carrying the clause's
-/// direction. (1) type rank per Firestore's cross-type order — null < boolean
-/// < NaN < numbers (integer + double together) < timestamp < string < bytes <
-/// reference < array < map; (2) one typed value column per type family, each
-/// `NULL` outside its own type so only the column of the rank group's own
-/// type discriminates. Same type classes/casts as `push_scalar_comparison`,
-/// so ORDER BY, cursors and range filters share one total order.
-///
-/// `__name__` orders by document id (byte order) — it is not a stored field.
-///
-/// ponytail: array/map fall back to jsonb's own stable ordering, not
-/// Firestore's element-wise rule; numbers go through float8 (exact to 2^53).
-pub fn order_by_expr(ob: &OrderBy) -> String {
-    // field-path-defense-in-depth (finding #26): see `append_field_filter`'s
-    // own identical guard comment for the full rationale.
-    if let Err(e) = validate_field_path(&ob.field_path) {
+/// Key expression `push_value_equality` compares for an equality filter on
+/// `field_path` (the whole stored `{"t":..,"v":..}` jsonb value). Shared with
+/// the composite-index DDL so an index's equality columns are the exact
+/// expression queries filter on.
+pub fn equality_key_expr(field_path: &str) -> String {
+    if let Err(e) = validate_field_path(field_path) {
         panic!("invalid field path reached SQL builder: {e}");
     }
-    let dir = match ob.direction {
-        OrderDirection::Ascending => "ASC",
-        OrderDirection::Descending => "DESC",
-    };
-    if ob.field_path == "__name__" {
-        return format!("document_id COLLATE \"C\" {dir}");
+    format!("fields->'{field_path}'")
+}
+
+/// Direction-less key expressions of the typed ORDER BY for `field_path`
+/// (typed-order-by, P11): (1) type rank per Firestore's cross-type order —
+/// null < boolean < NaN < numbers (integer + double together) < timestamp <
+/// string < bytes < reference < array < map; (2) one typed value column per
+/// type family, each `NULL` outside its own type so only the column of the
+/// rank group's own type discriminates. `__name__` orders by document id
+/// (byte order) — it is not a stored field.
+///
+/// Single source of truth: `order_by_expr` appends the direction to each key
+/// for queries, and the composite-index DDL wraps each key as an index
+/// expression, so index and ORDER BY can never drift apart. Every function
+/// and cast used is IMMUTABLE (jsonb operators, `float8`/`boolean` text
+/// input, jsonb->bigint/int, `decode`, `COLLATE "C"`), as index expressions
+/// require.
+pub fn order_key_exprs(field_path: &str) -> Vec<String> {
+    // field-path-defense-in-depth (finding #26): see `append_field_filter`'s
+    // own identical guard comment for the full rationale.
+    if let Err(e) = validate_field_path(field_path) {
+        panic!("invalid field path reached SQL builder: {e}");
     }
-    let fp = &ob.field_path;
+    if field_path == "__name__" {
+        return vec!["document_id COLLATE \"C\"".to_string()];
+    }
+    let fp = field_path;
     let t = format!("fields->'{fp}'->>'t'");
     let v = format!("fields->'{fp}'->>'v'");
-    [
+    vec![
         format!(
             "CASE {t} WHEN 'N' THEN 0 WHEN 'B' THEN 1 \
              WHEN 'D' THEN CASE WHEN {v} = 'NaN' THEN 2 ELSE 3 END WHEN 'I' THEN 3 \
@@ -414,8 +418,28 @@ pub fn order_by_expr(ob: &OrderBy) -> String {
         format!("CASE WHEN {t} = 'BY' THEN decode({v}, 'base64') END"),
         format!("CASE WHEN {t} IN ('A','M') THEN fields->'{fp}'->'v' END"),
     ]
-    .map(|k| format!("{k} {dir}"))
-    .join(", ")
+}
+
+/// Return a raw SQL ORDER BY expression for a single `OrderBy` clause: every
+/// `order_key_exprs` key carrying the clause's direction.
+///
+/// This string is pushed as raw SQL (no bind parameter), since ORDER BY
+/// expressions cannot be parameterised in Postgres. Same type classes/casts
+/// as `push_scalar_comparison`, so ORDER BY, cursors and range filters share
+/// one total order.
+///
+/// ponytail: array/map fall back to jsonb's own stable ordering, not
+/// Firestore's element-wise rule; numbers go through float8 (exact to 2^53).
+pub fn order_by_expr(ob: &OrderBy) -> String {
+    let dir = match ob.direction {
+        OrderDirection::Ascending => "ASC",
+        OrderDirection::Descending => "DESC",
+    };
+    order_key_exprs(&ob.field_path)
+        .into_iter()
+        .map(|k| format!("{k} {dir}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// WHERE predicate for an `OrderBy` clause: Firestore excludes documents that

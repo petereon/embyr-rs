@@ -222,7 +222,9 @@ pub async fn explain_category_equal_electronics_order_by_score_desc(
 ) -> Vec<String> {
     use embyr_core::domain::field_value::FieldValue;
     use embyr_core::domain::query::{FieldFilter, FilterOp, OrderBy, OrderDirection, QueryFilter};
-    use embyr_pg_storage::encoding::query::{append_filter, order_by_expr};
+    use embyr_pg_storage::encoding::query::{
+        append_filter, order_by_expr, order_by_presence_predicate,
+    };
     use sqlx::{Postgres, QueryBuilder};
 
     // A fresh testcontainers Postgres has no autovacuum-driven ANALYZE run
@@ -254,6 +256,12 @@ pub async fn explain_category_equal_electronics_order_by_score_desc(
     qb.push_bind(collection_path.to_string());
     qb.push(" AND NOT deleted AND ");
     append_filter(&mut qb, &filter);
+    // Exactly what `run_query` adds: the "ordered field must exist" predicate,
+    // then the typed (multi-key) ORDER BY the composite index is built on.
+    if let Some(pred) = order_by_presence_predicate(&order_by) {
+        qb.push(" AND ");
+        qb.push(pred);
+    }
     qb.push(format!(" ORDER BY {}", order_by_expr(&order_by)));
 
     let rows: Vec<(String,)> = qb
