@@ -23,7 +23,7 @@ use crate::components::Icon;
 #[cfg(feature = "csr")]
 use crate::data::display_stats;
 #[cfg(feature = "csr")]
-use crate::model::{AppModel, DbBackendMode, DbPatch, DbStatus, DbTab, Section};
+use crate::model::{AppModel, DbPatch, DbStatus, DbTab, Section};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -73,10 +73,7 @@ pub fn DbDetailView() -> impl IntoView {
                         DbStatus::Deleted   => ("badge badge-neutral", "Deleted"),
                     };
 
-                    let backend_label = match db.backend_mode {
-                        DbBackendMode::DirectPg  => "direct_pg",
-                        DbBackendMode::AgentMode => "agent_mode",
-                    };
+                    let backend_label = db.backend_mode.api_value();
 
                     let created = stats.created;
                     let region  = stats.region;
@@ -180,12 +177,7 @@ pub fn DbDetailView() -> impl IntoView {
                                                             border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);\
                                                             min-width:180px;padding:4px">
                                                     <button
-                                                        style="display:flex;align-items:center;gap:8px;width:100%;\
-                                                               padding:8px 12px;font-size:13px;background:none;border:none;\
-                                                               color:var(--text);cursor:pointer;border-radius:5px;\
-                                                               text-align:left"
-                                                        onmouseenter="this.style.background='var(--surface-2)'"
-                                                        onmouseleave="this.style.background='none'"
+                                                        class="more-menu-btn"
                                                         on:click=move |_| {
                                                             // V1: just toggle the "copied" indicator
                                                             let _ = db_id_copy.0.to_string();
@@ -197,12 +189,7 @@ pub fn DbDetailView() -> impl IntoView {
                                                     </button>
                                                     <div style="height:1px;background:var(--border);margin:4px 0"/>
                                                     <button
-                                                        style="display:flex;align-items:center;gap:8px;width:100%;\
-                                                               padding:8px 12px;font-size:13px;background:none;border:none;\
-                                                               color:var(--red);cursor:pointer;border-radius:5px;\
-                                                               text-align:left"
-                                                        onmouseenter="this.style.background='color-mix(in oklab,var(--red) 10%,transparent)'"
-                                                        onmouseleave="this.style.background='none'"
+                                                        class="more-menu-btn more-menu-btn-danger"
                                                         on:click=move |_| {
                                                             show_more.set(false);
                                                             show_del.set(true);

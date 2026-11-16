@@ -31,16 +31,6 @@ use common::{assert_owner_invariant, make_model_with_db};
 // ── US-001: Authentication ────────────────────────────────────────────────
 
 proptest! {
-    /// AC-001-02 / AC-001-08: SignIn sets authed=true (V1 mock: always).
-    #[test]
-    fn sign_in_sets_authed(model in arb_authed_model().prop_map(|mut m| { m.authed = false; m })) {
-        let mut m = model;
-        update(&mut m, Msg::SignIn);
-        prop_assert!(m.authed, "SignIn must set model.authed = true");
-    }
-}
-
-proptest! {
     /// AC-001-10: SignOut resets authed=false and clears session state.
     #[test]
     fn sign_out_clears_authed(model in arb_authed_model()) {
@@ -49,35 +39,6 @@ proptest! {
         prop_assert!(!m.authed, "SignOut must set model.authed = false");
         prop_assert!(m.toasts.is_empty(), "SignOut must clear toasts");
     }
-}
-
-// ── US-001 Error paths ─────────────────────────────────────────────────────
-
-/// AC-001-03 / AC-001-04: Three TOTP failures lock the account.
-#[test]
-fn three_totp_failures_lock_account() {
-    let mut m = AppModel::default();
-    m.authed = false;
-    m.totp_failures = 0;
-
-    update(&mut m, Msg::TotpFailure);
-    update(&mut m, Msg::TotpFailure);
-    assert!(!m.account_locked, "account must not be locked after 2 failures");
-
-    update(&mut m, Msg::TotpFailure);
-    assert!(m.account_locked, "account must be locked after 3 consecutive TOTP failures");
-    assert!(!m.authed, "authed must remain false after lockout");
-}
-
-/// AC-001-05: Successful TOTP resets failure counter.
-#[test]
-fn totp_success_resets_failure_counter() {
-    let mut m = AppModel::default();
-    m.totp_failures = 2;
-
-    update(&mut m, Msg::TotpSuccess);
-    assert_eq!(m.totp_failures, 0, "TotpSuccess must reset failure counter to 0");
-    assert!(!m.account_locked, "TotpSuccess must clear account lock");
 }
 
 // ── US-002: Dashboard ─────────────────────────────────────────────────────
@@ -105,7 +66,7 @@ fn set_databases_excludes_deleted() {
     let mut m = AppModel::default();
     m.authed = true;
     let active = Database {
-        id: DbId(uuid::Uuid::new_v4()),
+        id: DbId(uuid::Uuid::new_v4().to_string()),
         name: "active-db".to_string(),
         status: DbStatus::Active,
         backend_mode: DbBackendMode::DirectPg,
@@ -115,7 +76,7 @@ fn set_databases_excludes_deleted() {
         usage: Default::default(),
     };
     let deleted = Database {
-        id: DbId(uuid::Uuid::new_v4()),
+        id: DbId(uuid::Uuid::new_v4().to_string()),
         name: "deleted-db".to_string(),
         status: DbStatus::Deleted,
         backend_mode: DbBackendMode::DirectPg,
@@ -202,7 +163,7 @@ proptest! {
 #[test]
 fn set_db_status_missing_id_is_noop() {
     let mut m = make_model_with_db();
-    let phantom_id = DbId(uuid::Uuid::new_v4());
+    let phantom_id = DbId(uuid::Uuid::new_v4().to_string());
     let db_count_before = m.databases.len();
 
     update(&mut m, Msg::SetDbStatus(phantom_id, DbStatus::Suspended));
@@ -252,7 +213,7 @@ proptest! {
 #[test]
 fn set_db_logging_wrong_id_is_noop() {
     let mut m = make_model_with_db();
-    let wrong_id = DbId(uuid::Uuid::new_v4());
+    let wrong_id = DbId(uuid::Uuid::new_v4().to_string());
     let logging_before: Vec<bool> = m.databases.iter().map(|d| d.logging_enabled).collect();
 
     update(&mut m, Msg::SetDbLogging(wrong_id, true));
@@ -290,7 +251,7 @@ fn patch_db_missing_id_is_noop() {
     use embyr_admin_ui::model::DbPatch;
 
     let mut m = make_model_with_db();
-    let phantom_id = DbId(uuid::Uuid::new_v4());
+    let phantom_id = DbId(uuid::Uuid::new_v4().to_string());
     let db_count_before = m.databases.len();
 
     update(&mut m, Msg::PatchDb(phantom_id, DbPatch::Dsn("postgres://x/y".to_string())));
@@ -313,7 +274,7 @@ proptest! {
         update(&mut m, Msg::ApiKeyInfoLoaded(db_id.clone(), info.clone()));
         prop_assert_eq!(m.api_key_info.get(&db_id), Some(&info));
 
-        let phantom = DbId(uuid::Uuid::new_v4());
+        let phantom = DbId(uuid::Uuid::new_v4().to_string());
         update(&mut m, Msg::ApiKeyInfoLoaded(phantom.clone(), info));
         prop_assert!(!m.api_key_info.contains_key(&phantom));
     }

@@ -81,7 +81,7 @@ pub fn database_with_daily_usage(
     storage_gb: f64,
 ) -> Database {
     Database {
-        id: DbId(Uuid::new_v4()),
+        id: DbId(Uuid::new_v4().to_string()),
         name: name.to_string(),
         status: DbStatus::Active,
         backend_mode: DbBackendMode::DirectPg,

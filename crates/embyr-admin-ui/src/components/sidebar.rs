@@ -3,6 +3,8 @@
 #[cfg(feature = "csr")]
 use leptos::prelude::*;
 #[cfg(feature = "csr")]
+use crate::api::{ApiCall, CallKind};
+#[cfg(feature = "csr")]
 use crate::model::{AppModel, Section};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
@@ -15,6 +17,11 @@ pub fn Sidebar() -> impl IntoView {
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
     let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
     let db_count = move || model.with(|m| m.databases.len());
+    let account_name =
+        move || model.with(|m| m.current_user.as_ref().map(|u| u.account_name.clone()).unwrap_or_default());
+    let account_initial = move || account_name().chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+    let role_label = move || model.with(|m| m.current_user.as_ref().map(|u| format!("{:?}", u.role)).unwrap_or_default());
+    let signing_out = move || model.with(|m| m.pending.contains(&CallKind::SignOut));
 
     struct NavItem {
         section: Section,
@@ -43,14 +50,13 @@ pub fn Sidebar() -> impl IntoView {
                 <span class="brand-word">"embyr"</span>
             </div>
 
-            // Account badge (simplified — no dropdown in V1)
+            // Account badge: real account name and the signed-in user's role (plan returns with billing, slice 13)
             <div class="acct-switch" style="cursor:default">
-                <span class="acct-badge">"P"</span>
+                <span class="acct-badge">{account_initial}</span>
                 <span class="acct-meta">
-                    <span class="acct-name">"Personal"</span>
-                    <span class="acct-plan">"Pro plan"</span>
+                    <span class="acct-name">{account_name}</span>
+                    <span class="acct-plan">{role_label}</span>
                 </span>
-                <Icon name="chevrons-ud" size=15/>
             </div>
 
             // Main nav
@@ -98,7 +104,8 @@ pub fn Sidebar() -> impl IntoView {
                 <div style="height:1px;background:var(--border);margin:6px 0"/>
                 <button
                     class="nav-item"
-                    on:click=move |_| dispatch_signout.run(Msg::SignOut)
+                    disabled=signing_out
+                    on:click=move |_| dispatch_signout.run(Msg::Request(ApiCall::SignOut))
                 >
                     <Icon name="logout" size=17/>
                     "Sign out"

@@ -11,13 +11,14 @@ license.workspace = true
 
 [features]
 default = []
-csr = ["dep:leptos", "dep:wasm-bindgen", "dep:web-sys", "dep:js-sys", "dep:console_error_panic_hook", "uuid/js"]
+csr = ["dep:leptos", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys", "dep:js-sys", "dep:console_error_panic_hook", "uuid/js"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4" }
 thiserror = "2"
+serde_json.workspace = true
 
 [dependencies.leptos]
 version = "0.8"
@@ -31,7 +32,11 @@ optional = true
 [dependencies.web-sys]
 version = "0.3"
 optional = true
-features = ["Window", "Document", "Element", "MouseEvent", "KeyboardEvent", "Navigator", "Clipboard"]
+features = ["Window", "Document", "Element", "MouseEvent", "KeyboardEvent", "Navigator", "Clipboard", "Request", "RequestInit", "Response", "Headers"]
+
+[dependencies.wasm-bindgen-futures]
+version = "0.4"
+optional = true
 
 [dependencies.js-sys]
 version = "0.3"
@@ -48,6 +53,10 @@ path = "../../tests/user_admin_ui/acceptance/walking_skeleton.rs"
 [[test]]
 name = "user_admin_ui_tea_state"
 path = "../../tests/user_admin_ui/user_admin_ui.rs"
+
+[[test]]
+name = "admin_ui_wiring_ui_auth"
+path = "../../tests/admin_ui_wiring/ui_auth.rs"
 
 [[test]]
 name = "card_payments_walking_skeleton"

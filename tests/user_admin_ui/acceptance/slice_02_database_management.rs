@@ -26,7 +26,7 @@ fn new_database_appears_in_list_after_creation() {
     let count_before = m.databases.len();
 
     let new_db = Database {
-        id: DbId(Uuid::new_v4()),
+        id: DbId(Uuid::new_v4().to_string()),
         name: "new-db".to_string(),
         status: DbStatus::Active,
         backend_mode: DbBackendMode::DirectPg,
@@ -100,7 +100,7 @@ fn delete_database_removes_it_from_list() {
 fn delete_nonexistent_database_is_noop() {
     let mut m = make_model_with_db();
     let count_before = m.databases.len();
-    let phantom = DbId(Uuid::new_v4());
+    let phantom = DbId(Uuid::new_v4().to_string());
 
     update(&mut m, Msg::DeleteDatabase(phantom));
 
@@ -161,7 +161,7 @@ fn set_log_retention_stores_period() {
 #[test]
 fn enable_logging_wrong_id_is_noop() {
     let mut m = make_model_with_db();
-    let phantom = DbId(Uuid::new_v4());
+    let phantom = DbId(Uuid::new_v4().to_string());
     let state_before: Vec<bool> = m.databases.iter().map(|d| d.logging_enabled).collect();
 
     update(&mut m, Msg::SetDbLogging(phantom, true));

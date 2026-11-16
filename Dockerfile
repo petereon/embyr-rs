@@ -4,7 +4,9 @@
 #   1. chef    — install cargo-chef for dependency layer caching
 #   2. planner — generate recipe.json from Cargo manifests
 #   3. builder — cook deps (cached layer) + compile embyr-server release binary
-#   4. runtime — minimal debian:bookworm-slim image, non-root user, 3 exposed ports
+#   3b. ui     — trunk-build the admin SPA (wasm32) into dist/ (ADR-082)
+#   4. runtime — minimal debian:bookworm-slim image, non-root user, 3 exposed ports,
+#                admin SPA served from /app/admin-ui via EMBYR_ADMIN_UI_DIR
 #
 # sqlx::migrate!("../../migrations") embeds migration SQL at compile time —
 # no runtime COPY of migrations/ is needed.
@@ -65,6 +67,24 @@ COPY . .
 # validated via the cached .sqlx/ directory already committed to the repo.
 RUN SQLX_OFFLINE=true cargo build --release --bin embyr-server
 
+# ─── Stage 3b: build the admin SPA (admin-ui-api-wiring, ADR-082) ─────────────
+# Same toolchain pin as the chef stage. trunk is pinned to the version used for local
+# development; it downloads the wasm-bindgen CLI matching Cargo.lock at build time.
+FROM rust:1.95-slim-bookworm AS ui
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN rustup target add wasm32-unknown-unknown \
+    && cargo install trunk --locked --version 0.21.14
+WORKDIR /app
+# rust-toolchain.toml deliberately not copied: the image's own 1.95 toolchain already has the
+# wasm32 target added above (a pinned 1.95.0 would be installed without it).
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+WORKDIR /app/crates/embyr-admin-ui
+RUN trunk build --release
+
 # ─── Stage 4: minimal runtime image ──────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
@@ -80,6 +100,10 @@ WORKDIR /app
 
 # Copy the compiled binary from the builder stage.
 COPY --from=builder --chown=embyr:embyr /app/target/release/embyr-server /app/embyr-server
+
+# The built admin SPA; embyr-server probes it at startup and serves it under /admin.
+COPY --from=ui --chown=embyr:embyr /app/crates/embyr-admin-ui/dist /app/admin-ui
+ENV EMBYR_ADMIN_UI_DIR=/app/admin-ui
 
 # Run as non-root.
 USER embyr

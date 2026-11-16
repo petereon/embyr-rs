@@ -3,6 +3,7 @@
 //! Host-target (`cargo test`) compiles the pure TEA layer (model + msg + update + data)
 //! without leptos or wasm-bindgen. The `csr` feature gates the browser-specific code.
 
+pub mod api;
 pub mod model;
 pub mod msg;
 pub mod update;

@@ -1758,11 +1758,13 @@ dependencies = [
  "proptest-derive",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tower-http 0.5.2",
  "uuid",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

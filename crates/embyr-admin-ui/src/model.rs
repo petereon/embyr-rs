@@ -4,14 +4,16 @@
 //! mutates it only via `update(&mut AppModel, Msg)` (see `update.rs`); all
 //! other reads flow through the pure projection methods below.
 
+use crate::api::CallKind;
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 // ── Newtype identifiers ─────────────────────────────────────────────────────
 
+/// API project ids are operator-chosen strings, not UUIDs (G-05).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct DbId(pub Uuid);
+pub struct DbId(pub String);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct UserId(pub Uuid);
@@ -49,6 +51,21 @@ pub enum DbBackendMode {
     #[default]
     DirectPg,
     AgentMode,
+    /// Secret-manager modes are display-only: the create form offers `direct_pg` and `agent` (G-06).
+    AwsSecret,
+    GcpSecret,
+}
+
+impl DbBackendMode {
+    /// The value the API uses for this mode.
+    pub fn api_value(&self) -> &'static str {
+        match self {
+            DbBackendMode::DirectPg => "direct_pg",
+            DbBackendMode::AgentMode => "agent",
+            DbBackendMode::AwsSecret => "aws_secret",
+            DbBackendMode::GcpSecret => "gcp_secret",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -223,6 +240,17 @@ pub struct OidcProvider {
     pub enabled: bool,
 }
 
+/// The signed-in person, as reported by `GET /auth/session`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CurrentUser {
+    pub user_id: String,
+    pub account_id: String,
+    pub account_name: String,
+    pub email: String,
+    pub display_name: String,
+    pub role: Role,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Toast {
     pub id: ToastId,
@@ -385,10 +413,20 @@ pub struct AppModel {
     pub toasts: Vec<Toast>,
     /// Current navigation state.
     pub nav: NavState,
-    /// TOTP failure counter (resets on success).
-    pub totp_failures: u8,
-    /// Whether the account is temporarily locked.
+    /// The server reported the account locked (429 without `retry-after-ms`); the server owns the counter.
     pub account_locked: bool,
+    /// Boot session check still in flight: show a splash, not the sign-in form (AC-AUW-14).
+    pub booting: bool,
+    /// Boot session check could not reach the server: show "cannot reach server" + Retry (AC-AUW-14).
+    pub server_unreachable: bool,
+    /// Who is signed in (set with `authed`).
+    pub current_user: Option<CurrentUser>,
+    /// Message shown on the sign-in view (server text, throttle, or "session expired").
+    pub sign_in_error: Option<String>,
+    /// API calls in flight; drives disabled buttons and loading states (AC-AUW-16).
+    pub pending: HashSet<CallKind>,
+    /// Monotonic counter minting deterministic toast ids inside the pure `update`.
+    pub toast_seq: u64,
     /// Plan/card/renewal snapshot.
     pub subscription: Subscription,
     /// card-payments: invoice history (persists across plan changes, AC-107-04).
@@ -418,8 +456,13 @@ impl AppModel {
             oidc_providers: mock::oidc_providers(),
             toasts: Vec::new(),
             nav: NavState::default(),
-            totp_failures: 0,
             account_locked: false,
+            booting: false,
+            server_unreachable: false,
+            current_user: None,
+            sign_in_error: None,
+            pending: HashSet::new(),
+            toast_seq: 0,
             // card-payments: demo account is Pro-plan with a card on file and
             // invoice history, to showcase the billing views' full feature set.
             subscription: mock::subscription(

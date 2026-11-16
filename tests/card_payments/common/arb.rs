@@ -75,7 +75,7 @@ prop_compose! {
         usage in arb_usage_stats(),
     ) -> Database {
         Database {
-            id: DbId(Uuid::new_v4()),
+            id: DbId(Uuid::new_v4().to_string()),
             name,
             status: DbStatus::Active,
             backend_mode: DbBackendMode::DirectPg,

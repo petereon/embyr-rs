@@ -3,8 +3,9 @@
 //! Every user interaction and async data arrival dispatches one of these variants.
 //! `update(&mut AppModel, Msg)` handles all variants with an exhaustive match.
 
+use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
-    AdminKey, Card, Database, DbId, DbPatch, Invoice, KeyId, LogRetention, Member, OidcId,
+    AdminKey, Card, CurrentUser, Database, DbId, DbPatch, Invoice, KeyId, LogRetention, Member, OidcId,
     OidcProvider, Plan, ProjectApiKeyInfo, Role, ServiceAccount, ServiceAccountId, Subscription, Toast,
     ToastId, UpgradeModalStep, UserId,
 };
@@ -15,15 +16,19 @@ use crate::model::{
 /// `Clone` is required: Leptos `Callback<Msg>` clones the value on dispatch.
 #[derive(Clone, Debug)]
 pub enum Msg {
-    // ── US-001: Authentication ─────────────────────────────────────────────
-    /// User submitted the sign-in form (V1 mock: any non-empty credentials succeed).
-    SignIn,
-    /// User clicked "Sign Out"; session should be cleared.
+    // ── US-001: Authentication / server calls (ADR-082) ────────────────────
+    /// App start: check for an existing session (also the "Retry" after an unreachable server).
+    Boot,
+    /// A user intent that needs the server. `update` marks it pending and returns the effect.
+    Request(ApiCall),
+    /// A call finished (any outcome): no longer in flight.
+    Settled(CallKind),
+    /// A call failed. Loaded data is kept; `update` decides between a toast and sign-in.
+    ApiFailed { call: CallKind, error: ApiError },
+    /// `GET /auth/session` succeeded: the shell can be shown.
+    SessionEstablished(CurrentUser),
+    /// Server confirmed sign-out; reset the whole model to its empty default.
     SignOut,
-    /// Increment TOTP failure counter; lock if threshold reached.
-    TotpFailure,
-    /// Reset TOTP failure counter on success.
-    TotpSuccess,
 
     // ── US-002: Dashboard ──────────────────────────────────────────────────
     /// Async data load: replace database list.
@@ -128,4 +133,11 @@ pub enum Msg {
     CloseUpgradeModal,
     /// Drive the UpgradeModal's compare → confirm-downgrade step transition.
     SetUpgradeModalStep(UpgradeModalStep),
+}
+
+/// A side effect requested by `update`, executed by the runtime (`app.rs`, `csr` only).
+/// Plain data: `update` stays pure and deterministic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Effect {
+    Http(ApiCall),
 }

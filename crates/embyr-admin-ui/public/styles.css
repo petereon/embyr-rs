@@ -443,3 +443,10 @@ textarea.input { height: auto; padding: 9px 11px; resize: vertical; line-height:
 .modal-select { appearance: none; height: 36px; padding: 0 11px; border-radius: var(--r-sm); border: 1px solid var(--border-2);
   background: var(--bg-elev); color: var(--text); font-size: 13.5px; font-family: inherit; width: 100%; }
 .modal-close { margin-left: auto; background: none; border: none; color: var(--text-2); cursor: pointer; padding: 2px; }
+
+/* db-detail "more" menu items (CSS :hover replaces inline handlers, blocked by the admin CSP) */
+.more-menu-btn { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 12px; font-size: 13px;
+  background: none; border: none; color: var(--text); cursor: pointer; border-radius: 5px; text-align: left; }
+.more-menu-btn:hover { background: var(--surface-2); }
+.more-menu-btn-danger { color: var(--red); }
+.more-menu-btn-danger:hover { background: color-mix(in oklab, var(--red) 10%, transparent); }

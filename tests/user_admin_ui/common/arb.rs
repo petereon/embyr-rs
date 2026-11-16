@@ -21,7 +21,7 @@ use uuid::Uuid;
 prop_compose! {
     /// Generate an arbitrary DbId.
     pub fn arb_db_id()(bytes in any::<[u8; 16]>()) -> DbId {
-        DbId(Uuid::from_bytes(bytes))
+        DbId(Uuid::from_bytes(bytes).to_string())
     }
 }
 

@@ -53,7 +53,7 @@ fn patch_db_updates_agent_endpoint() {
 fn patch_db_unknown_id_is_noop() {
     let mut m = make_model_with_db();
     let count_before = m.databases.len();
-    let phantom = DbId(Uuid::new_v4());
+    let phantom = DbId(Uuid::new_v4().to_string());
 
     update(&mut m, Msg::PatchDb(phantom, DbPatch::Dsn("postgres://x/y".to_string())));
 
@@ -99,7 +99,7 @@ fn delete_database_drops_api_key_info() {
 #[test]
 fn api_key_info_for_unknown_db_is_noop() {
     let mut m = make_model_with_db();
-    let phantom_db = DbId(Uuid::new_v4());
+    let phantom_db = DbId(Uuid::new_v4().to_string());
 
     update(&mut m, Msg::ApiKeyInfoLoaded(phantom_db.clone(), rotated_info()));
 

@@ -172,6 +172,11 @@ pub struct ServerConfig {
     /// process exits and drops them. Default 25 (under Docker/K8s' usual
     /// 30s SIGKILL window).
     pub shutdown_grace_secs: u64,
+    /// `EMBYR_ADMIN_UI_DIR` — optional path to a Trunk `dist/` directory served
+    /// under `/admin` on the admin listener (admin-ui-api-wiring, ADR-082).
+    /// Unset/empty = API-only (today's behaviour). Validated at startup by
+    /// `admin::static_ui::static_ui_router`, which refuses a missing or partial dir.
+    pub admin_ui_dir: Option<std::path::PathBuf>,
     /// `EMBYR_API_KEY_ROTATION_WINDOW_SECS` — how long the previous project API key keeps
     /// authenticating after a rotate (ADR-085). Default 24 h; valid `1..=2592000` (30 d).
     pub api_key_rotation_window_secs: u32,
@@ -473,6 +478,10 @@ impl ServerConfig {
                 .map_err(|_| ConfigError::InvalidCorsOrigin { value: origin.clone() })?;
         }
 
+        let admin_ui_dir = std::env::var("EMBYR_ADMIN_UI_DIR")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(std::path::PathBuf::from);
         let api_key_rotation_window_secs = parse_rotation_window_secs()?;
 
         Ok(ServerConfig {
@@ -505,6 +514,7 @@ impl ServerConfig {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             shutdown_grace_secs,
+            admin_ui_dir,
             api_key_rotation_window_secs,
             trusted_proxy_hops,
         })

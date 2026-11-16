@@ -348,6 +348,18 @@ async fn main() {
     )
     .merge(healthz_app);
 
+    // admin-ui-api-wiring (ADR-082): wire -> probe -> use. `static_ui_router`
+    // refuses a missing/partial UI dir before any listener starts serving.
+    let admin_app = match &cfg.admin_ui_dir {
+        Some(dir) => {
+            let ui = embyr_server::admin::static_ui::static_ui_router(dir)
+                .unwrap_or_else(|e| fail_startup(e, "admin UI directory rejected"));
+            tracing::info!(dir = %dir.display(), "serving admin UI under /admin");
+            admin_app.merge(ui)
+        }
+        None => admin_app,
+    };
+
     // card-payments-backend (ADR-020): background cap-check refresher. Only
     // meaningful once STRIPE_SECRET_KEY is configured (Free-plan accounts
     // need a real `subscriptions` row to exist, seeded via US-201) — spawned

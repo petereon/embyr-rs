@@ -25,7 +25,7 @@ hyper-util.workspace = true
 http-body-util.workspace = true
 http.workspace = true
 tower.workspace = true
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "set-header"] }
 bytes.workspace = true
 prost.workspace = true
 prost-types.workspace = true
@@ -74,6 +74,9 @@ ed25519-dalek = { workspace = true }
 # just test fixtures (mirrors ed25519-dalek's own documented promotion above).
 rustls-pemfile.workspace = true
 x509-parser.workspace = true
+# admin-ui-api-wiring (ADR-082): promoted from dev-dependencies -- static_ui hashes the
+# Trunk bootstrap script for the CSP in PRODUCTION code.
+sha2.workspace = true
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls", "hostname"] }
 
 [[test]]
@@ -1293,7 +1296,6 @@ totp-rs = { workspace = true }
 jsonwebtoken = { workspace = true }
 rsa = { version = "0.9", features = ["sha2"] }
 hmac = { workspace = true }
-sha2 = { workspace = true }
 hex = { workspace = true }
 # client-auth (DISTILL): mints real Ed25519-signed test tokens simulating a
 # customer's own backend (Trailmark) — see tests/client_auth/common/mod.rs.
@@ -1302,6 +1304,15 @@ ed25519-dalek = { workspace = true }
 # (AC-SBM-03 proof) — see tests/sanitize_backend_error_messages/common/mod.rs.
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# admin-ui-api-wiring (ADR-082): static serving of the built SPA (no Postgres).
+[[test]]
+name = "admin_ui_wiring_static_ui"
+path = "../../tests/admin_ui_wiring/static_ui.rs"
+
+[[test]]
+name = "admin_ui_wiring_session"
+path = "../../tests/admin_ui_wiring/session.rs"
 
 # protocol-correctness (go-live review P6/P7/P8): cursor/filter never silently
 # dropped, composite-index gate code, document size/nesting limits.
