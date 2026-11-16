@@ -161,24 +161,70 @@ pub struct StructuredQuery {
 pub struct ResumeToken(pub Vec<u8>);
 
 /// The aggregation operator requested by an `AggregationQuery` (aggregation-queries,
-/// ADR-038). `Sum`/`Avg` carry the field path to aggregate over; only `Count`
-/// is functional in Slice 01 — the Postgres adapter's `Sum`/`Avg` branches
-/// return `CoreError::FailedPrecondition` until Slices 03/04.
+/// ADR-038). `Sum`/`Avg` carry the field path to aggregate over; `Count`
+/// carries an optional `up_to` cap (result = `min(count, up_to)`, always > 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AggregationKind {
-    Count,
+    Count(Option<i64>),
     Sum(String),
     Avg(String),
 }
 
-/// A `StructuredQuery` paired with a single aggregation to compute over its
-/// result set, plus the caller-supplied (or server-synthesized) alias for the
-/// result. Mirrors real Firestore's `StructuredAggregationQuery` (ADR-038).
+/// One aggregation of an `AggregationQuery` with its resolved (non-empty,
+/// unique) result alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Aggregation {
+    pub alias: String,
+    pub kind: AggregationKind,
+}
+
+/// A `StructuredQuery` paired with the aggregations to compute over its
+/// result set in ONE pass. Mirrors real Firestore's
+/// `StructuredAggregationQuery` (ADR-038). Adapters return one
+/// `AggregateValue` per entry of `aggregations`, in the same order.
 #[derive(Debug, Clone)]
 pub struct AggregationQuery {
     pub query: StructuredQuery,
-    pub aggregation: AggregationKind,
-    pub alias: String,
+    pub aggregations: Vec<Aggregation>,
+}
+
+/// Firestore allows at most 5 aggregations per request.
+pub const MAX_AGGREGATIONS: usize = 5;
+
+/// Resolve the result aliases of a request's aggregations (client aliases in
+/// request order; `None`/empty = unset). Firestore semantics: empty aliases
+/// get `field_<n>` with `n` counting only the generated ones, from 1
+/// (skipping any name an explicit alias already took); duplicate explicit
+/// aliases, zero aggregations, or more than `MAX_AGGREGATIONS` are invalid.
+pub fn resolve_aggregation_aliases(requested: &[&str]) -> Result<Vec<String>, CoreError> {
+    if requested.is_empty() || requested.len() > MAX_AGGREGATIONS {
+        return Err(CoreError::InvalidArgument(format!(
+            "between 1 and {MAX_AGGREGATIONS} aggregations are required, got {}",
+            requested.len()
+        )));
+    }
+    let mut taken = std::collections::HashSet::new();
+    for alias in requested.iter().filter(|a| !a.is_empty()) {
+        if !taken.insert(*alias) {
+            return Err(CoreError::InvalidArgument(format!("duplicate aggregation alias: {alias}")));
+        }
+    }
+    let mut next = 1;
+    Ok(requested
+        .iter()
+        .map(|alias| {
+            if !alias.is_empty() {
+                return alias.to_string();
+            }
+            loop {
+                let generated = format!("field_{next}");
+                next += 1;
+                if !taken.contains(generated.as_str()) {
+                    return generated;
+                }
+            }
+        })
+        .collect())
 }
 
 /// The computed result of an `AggregationQuery` (ADR-040 § Response value
@@ -189,4 +235,36 @@ pub enum AggregateValue {
     Count(i64),
     Sum(f64),
     Avg(Option<f64>),
+}
+
+#[cfg(test)]
+mod aggregation_alias_tests {
+    use super::*;
+
+    #[test]
+    fn empty_aliases_get_field_n_counting_only_generated_ones_from_one() {
+        let got = resolve_aggregation_aliases(&["total", "", "n", ""]).unwrap();
+        assert_eq!(got, ["total", "field_1", "n", "field_2"]);
+    }
+
+    #[test]
+    fn generated_alias_skips_a_name_an_explicit_alias_already_took() {
+        let got = resolve_aggregation_aliases(&["", "field_1"]).unwrap();
+        assert_eq!(got, ["field_2", "field_1"]);
+    }
+
+    #[test]
+    fn duplicate_explicit_alias_zero_or_too_many_aggregations_are_invalid() {
+        for bad in [vec![], vec!["a", "a"], vec!["a", "b", "c", "d", "e", "f"]] {
+            assert!(
+                matches!(resolve_aggregation_aliases(&bad), Err(CoreError::InvalidArgument(_))),
+                "expected InvalidArgument for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn several_empty_aliases_are_not_duplicates() {
+        assert_eq!(resolve_aggregation_aliases(&["", ""]).unwrap(), ["field_1", "field_2"]);
+    }
 }

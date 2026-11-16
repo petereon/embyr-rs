@@ -1270,7 +1270,7 @@ use embyr_core::domain::document::CollectionPath;
 use embyr_core::domain::field_value::FieldValue as DomainFieldValue;
 use embyr_core::domain::project::ProjectId;
 use embyr_core::domain::query::{
-    AggregationKind, AggregationQuery, FieldFilter, FilterOp, QueryFilter, StructuredQuery,
+    Aggregation, AggregationKind, AggregationQuery, FieldFilter, FilterOp, QueryFilter, StructuredQuery,
 };
 use embyr_core::error::CoreError;
 use embyr_core::storage::backend_adapter::BackendAdapter;
@@ -1579,8 +1579,8 @@ async fn agent_mode_count_aggregation_returns_exact_count() {
     let result = response.result.expect("response must carry an AggregationResult");
     let value = result
         .aggregate_fields
-        .get("field_0")
-        .expect("expected default-synthesized alias field_0");
+        .get("field_1")
+        .expect("expected default-synthesized alias field_1");
     let count = match &value.value_type {
         Some(ValueType::IntegerValue(n)) => *n,
         other => panic!("expected IntegerValue for a COUNT result, got {other:?}"),
@@ -1756,8 +1756,10 @@ async fn agent_mode_unreachable_agent_produces_backend_unavailable_error() {
             end_at: None,
             since_update_time: None,
         },
-        aggregation: AggregationKind::Count,
-        alias: "field_0".to_string(),
+        aggregations: vec![Aggregation {
+            alias: "field_1".to_string(),
+            kind: AggregationKind::Count(None),
+        }],
     };
 
     let result = adapter.run_aggregation_query(&collection, &query, None).await;

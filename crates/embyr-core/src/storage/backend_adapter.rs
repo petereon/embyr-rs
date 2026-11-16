@@ -146,7 +146,8 @@ pub trait BackendAdapter: Send + Sync {
         transaction_id: Option<&TransactionId>,
     ) -> Result<Vec<FirestoreDocument>, CoreError>;
 
-    /// Runs an aggregation query (COUNT/SUM/AVG) against this backend.
+    /// Runs an aggregation query (COUNT/SUM/AVG) against this backend,
+    /// returning one value per `query.aggregations` entry, in order.
     ///
     /// Default-provided body (ADR-041): implementors that have not yet added
     /// real aggregation support (`AgentBackendAdapter` until Slice 02)
@@ -159,7 +160,7 @@ pub trait BackendAdapter: Send + Sync {
         _collection: &CollectionPath,
         _query: &AggregationQuery,
         _transaction_id: Option<&TransactionId>,
-    ) -> Result<AggregateValue, CoreError> {
+    ) -> Result<Vec<AggregateValue>, CoreError> {
         Err(CoreError::FailedPrecondition(
             "aggregation queries are not supported by this backend".into(),
         ))
