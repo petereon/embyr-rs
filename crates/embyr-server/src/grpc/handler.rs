@@ -134,7 +134,7 @@ impl FirestoreService {
     }
 
     /// Parse `DocumentPath` from a full Firestore resource name.
-    fn parse_document_path(
+    pub(crate) fn parse_document_path(
         name: &str,
     ) -> Result<embyr_core::domain::document::DocumentPath, Status> {
         let project_id_str = Self::extract_project_id(name)?;
@@ -3346,10 +3346,8 @@ impl FirestoreService {
             .map_err(Status::invalid_argument)?;
 
         // Translate proto order_by → domain OrderBy. Field paths are
-        // validated here (SPEC.md Invariant 6) — this is the only place
-        // order-by field paths enter the domain from proto; `Listen`'s own
-        // order_by is always empty (realtime/listen_handler.rs), so this
-        // single guard covers every order-by-carrying entry point.
+        // validated here (SPEC.md Invariant 6) — `Listen` translates its own
+        // order_by in realtime/listen_session.rs with the same guard.
         let order_by: Vec<OrderBy> = sq_proto
             .order_by
             .iter()
@@ -3935,20 +3933,6 @@ impl FirestoreService {
             .attach_client_identity_if_present(&metadata_only_request, &project_id)
             .await;
 
-        // Extract resume token from AddTarget if present.
-        let resume_token: Option<Vec<u8>> = match &first_msg.target_change {
-            Some(embyr_proto::firestore::listen_request::TargetChange::AddTarget(t)) => {
-                use embyr_proto::firestore::target::ResumeType;
-                match &t.resume_type {
-                    Some(ResumeType::ResumeToken(bytes)) if !bytes.is_empty() => {
-                        Some(bytes.clone())
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-
         // Channel capacity 64 — matching the subscriber registry capacity.
         // When a slow consumer stops draining, try_send fails at 64 buffered
         // events → handler sends TargetChange(RESET).
@@ -3960,26 +3944,27 @@ impl FirestoreService {
         // `request`'s metadata is no longer needed beyond this point —
         // consume it into the owned `Streaming` body now, immediately
         // before the spawn that moves it in.
-        let mut in_stream = request.into_inner();
+        let in_stream = request.into_inner();
 
         tokio::spawn(async move {
-            if let Err(status) = crate::realtime::listen_handler::handle_add_target(
-                &first_msg,
+            // The session owns the request stream: AddTarget/RemoveTarget at
+            // any point, until the client goes away.
+            if let Err(status) = crate::realtime::listen_session::run_listen_session(
+                first_msg,
+                in_stream,
                 &adapter,
                 &system_db,
+                project_id,
                 verified_identity,
                 &tx,
                 keepalive,
                 registry,
                 &channel,
-                resume_token,
             )
             .await
             {
                 let _ = tx.send(Err(status)).await;
             }
-            // Drain remaining client messages (RemoveTarget etc.) for future steps.
-            while (in_stream.next().await).is_some() {}
         });
 
         let stream: tonic::codegen::BoxStream<ListenResponse> = Box::pin(
