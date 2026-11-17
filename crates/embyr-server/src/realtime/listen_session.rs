@@ -146,9 +146,9 @@ struct Session<'a> {
 // One call site (grpc/handler.rs); each parameter is a distinct dependency of
 // the stream — see the same note on the single-target handler this replaces.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_listen_session(
+pub async fn run_listen_session<S>(
     first_msg: ListenRequest,
-    mut in_stream: tonic::Streaming<ListenRequest>,
+    mut in_stream: S,
     adapter: &SharedBackendAdapter,
     system_db: &Arc<SystemDb>,
     project_id: String,
@@ -157,7 +157,10 @@ pub async fn run_listen_session(
     keepalive: Duration,
     registry: Arc<ListenRegistry>,
     channel: &str,
-) -> Result<(), Status> {
+) -> Result<(), Status>
+where
+    S: tokio_stream::Stream<Item = Result<ListenRequest, Status>> + Unpin,
+{
     if !matches!(first_msg.target_change, Some(listen_request::TargetChange::AddTarget(_))) {
         return Err(Status::invalid_argument("first message must be AddTarget"));
     }

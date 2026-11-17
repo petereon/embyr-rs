@@ -3915,10 +3915,15 @@ impl FirestoreService {
         Ok(response)
     }
 
-    async fn handle_listen(
+    // Generic over the request stream so BrowserChannel (rest/browser_channel.rs)
+    // drives the SAME auth / rate-limit / rules / session code as native gRPC.
+    pub(crate) async fn handle_listen<S>(
         &self,
-        mut request: Request<tonic::Streaming<ListenRequest>>,
-    ) -> Result<Response<tonic::codegen::BoxStream<ListenResponse>>, Status> {
+        mut request: Request<S>,
+    ) -> Result<Response<tonic::codegen::BoxStream<ListenResponse>>, Status>
+    where
+        S: tokio_stream::Stream<Item = Result<ListenRequest, Status>> + Unpin + Send + 'static,
+    {
         let api_key = Self::extract_api_key(&request)?;
 
         // Read first message to get the AddTarget + project_id for auth.
@@ -4038,10 +4043,13 @@ impl FirestoreService {
     /// once (AC-01-05/06), then hand the owned stream + response sender to
     /// `write_stream::run_write_session`, which owns all further session
     /// state (stream_id/stream_token generation, the receive-and-reply loop).
-    async fn handle_write(
+    pub(crate) async fn handle_write<S>(
         &self,
-        mut request: Request<tonic::Streaming<WriteRequest>>,
-    ) -> Result<Response<tonic::codegen::BoxStream<WriteResponse>>, Status> {
+        mut request: Request<S>,
+    ) -> Result<Response<tonic::codegen::BoxStream<WriteResponse>>, Status>
+    where
+        S: tokio_stream::Stream<Item = Result<WriteRequest, Status>> + Unpin + Send + 'static,
+    {
         let api_key = Self::extract_api_key(&request)?;
 
         let first_msg = request

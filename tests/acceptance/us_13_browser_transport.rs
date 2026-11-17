@@ -4,8 +4,7 @@
 //! As Alex, I want to use the Firebase JS web SDK in a browser application against
 //! embyr, so that browser-based apps have the same capabilities as Node.js apps.
 //!
-//! Driving port: REST / gRPC-Web port (:8081) — Content-Type grpc-web+proto and
-//!               BrowserChannel long-poll at /channel path
+//! Driving port: REST / gRPC-Web port (:8081) — Content-Type grpc-web+proto
 //! Red classification: MISSING_FUNCTIONALITY
 
 use embyr_core::auth::{argon2, ecies};
@@ -215,136 +214,9 @@ async fn grpc_web_client_reads_and_writes_documents() {
     );
 }
 
-// ── AC-13b ───────────────────────────────────────────────────────────────────
-
-/// AC-13b: BrowserChannel delivers initial snapshot and live changes
-///
-/// Given:  a BrowserChannel session is established with a valid SID
-/// And:    a Listen AddTarget message is sent via the forward channel
-/// When:   a document is written to the project
-/// Then:   the back-channel poll delivers the document in the initial snapshot
-/// And:    subsequent writes appear as live change events on the back channel
-#[tokio::test]
-async fn browser_channel_delivers_snapshot_and_live_changes() {
-    let env = setup().await;
-    let rest_base = format!("http://{}", env.server.rest_addr);
-
-    let client = reqwest::Client::new();
-
-    // Step 1: Create a BrowserChannel session.
-    let create_resp = client
-        .post(format!("{rest_base}/channel"))
-        .send()
-        .await
-        .expect("POST /channel to create session");
-
-    assert_eq!(
-        create_resp.status(),
-        200,
-        "session creation must return 200"
-    );
-
-    let body: serde_json::Value = create_resp
-        .json()
-        .await
-        .expect("session creation response must be JSON");
-    let sid = body["sid"]
-        .as_str()
-        .expect("response must contain 'sid' string field")
-        .to_string();
-
-    assert!(!sid.is_empty(), "SID must not be empty");
-
-    // Step 2: Forward channel — send a small message to the session.
-    let payload = b"hello-browser-channel".to_vec();
-    let forward_resp = client
-        .post(format!("{rest_base}/channel?SID={sid}"))
-        .body(payload.clone())
-        .send()
-        .await
-        .expect("POST /channel?SID=... forward channel");
-
-    assert_eq!(
-        forward_resp.status(),
-        200,
-        "forward channel must return 200"
-    );
-
-    // Step 3: Back channel — poll for events; should receive the forwarded message.
-    let back_resp = client
-        .get(format!("{rest_base}/channel?SID={sid}"))
-        .send()
-        .await
-        .expect("GET /channel?SID=... back channel");
-
-    assert_eq!(
-        back_resp.status(),
-        200,
-        "back channel must return 200"
-    );
-
-    let response_bytes = back_resp
-        .bytes()
-        .await
-        .expect("back channel response must have body");
-
-    // The response is length-prefixed frames: 5 header bytes + payload.
-    assert!(
-        response_bytes.len() >= 5,
-        "back channel response must contain at least one 5-byte frame header"
-    );
-
-    // Verify first frame contains our forwarded message.
-    let frame_header = &response_bytes[..5];
-    let _compressed_flag = frame_header[0]; // should be 0x00
-    let msg_len = u32::from_be_bytes([
-        frame_header[1],
-        frame_header[2],
-        frame_header[3],
-        frame_header[4],
-    ]) as usize;
-
-    assert_eq!(
-        msg_len,
-        payload.len(),
-        "back channel frame must carry the forwarded message"
-    );
-
-    let frame_payload = &response_bytes[5..5 + msg_len];
-    assert_eq!(
-        frame_payload,
-        payload.as_slice(),
-        "back channel frame payload must match what was forwarded"
-    );
-}
-
-// ── AC-13c ───────────────────────────────────────────────────────────────────
-
-/// AC-13c (error path): requests without SID after session creation return 400
-///
-/// Given:  a BrowserChannel session was created and a SID was assigned
-/// When:   a subsequent back-channel request is made without the SID cookie/parameter
-/// Then:   the response status is 400 Bad Request
-#[tokio::test]
-async fn browser_channel_request_without_sid_returns_400() {
-    let env = setup().await;
-    let rest_base = format!("http://{}", env.server.rest_addr);
-
-    let client = reqwest::Client::new();
-
-    // GET /channel without any SID parameter must return 400.
-    let resp = client
-        .get(format!("{rest_base}/channel"))
-        .send()
-        .await
-        .expect("GET /channel (no SID) must not error at transport level");
-
-    assert_eq!(
-        resp.status(),
-        400,
-        "GET /channel without SID must return 400 Bad Request"
-    );
-}
+// AC-13b / AC-13c (BrowserChannel long-polling for Listen and Write) moved to
+// tests/browser_channel/acceptance/bc_long_polling.rs, which drives the real
+// WebChannel protocol (the old /channel stub no longer exists).
 
 // ── AC-13d ───────────────────────────────────────────────────────────────────
 

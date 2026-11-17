@@ -369,14 +369,11 @@ pub fn spawn_all_servers(
         .route("/healthz", axum::routing::get(grpc::healthz::healthz_handler))
         .with_state(readyz_state);
 
-    let bc_state = rest::browser_channel::BrowserChannelState::new();
-    let axum_app = axum::Router::new()
-        .route(
-            "/channel",
-            axum::routing::get(rest::browser_channel::browser_channel_get)
-                .post(rest::browser_channel::browser_channel_post),
-        )
-        .with_state(bc_state);
+    // browser-channel: long-polling fallback for Listen/Write, backed by the
+    // same handlers as native gRPC.
+    let axum_app = rest::browser_channel::router(rest::browser_channel::BrowserChannelState::new(
+        Arc::new(service_for_rest.clone()),
+    ));
     let axum_app = axum_app.merge(healthz_app);
 
     // client-auth (US-02, ADR-026) + client-auth-hosted-identity (US-02,
@@ -468,6 +465,8 @@ pub fn spawn_all_servers(
         .allow_origin(tower_http::cors::AllowOrigin::list(cors_origins))
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::OPTIONS])
         .allow_headers([axum::http::header::CONTENT_TYPE])
+        // browser-channel: the web SDK reads the gsessionid from this response header.
+        .expose_headers([axum::http::HeaderName::from_static("x-http-session-id")])
         .allow_credentials(false);
     // request-body-size-limits (finding #24, ADR-081): explicit 2 MiB
     // ceiling on the whole merged :8081 REST router — matches today's
