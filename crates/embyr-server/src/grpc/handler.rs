@@ -3473,7 +3473,7 @@ impl FirestoreService {
             // structural (not conventional) mechanism behind AC-17-89/90/91.
             let group_rule_row = self
                 .system_db
-                .get_group_access_rule(&project_id_str, &collection.collection_path)
+                .get_group_access_rule(project_id_str, &collection.collection_path)
                 .await
                 .map_err(|e| sanitize_backend_error(e, "run_query: get_group_access_rule (collection group)"))?;
 
@@ -3522,7 +3522,7 @@ impl FirestoreService {
             // collection-group-rules code path (AC-17-90 regression proof).
             let rule_row = self
                 .system_db
-                .get_access_rule(&project_id_str, &collection.collection_path)
+                .get_access_rule(project_id_str, &collection.collection_path)
                 .await
                 .map_err(|e| sanitize_backend_error(e, "run_query: get_access_rule (collection group)"))?;
 
@@ -3560,7 +3560,7 @@ impl FirestoreService {
                 // No EXACT-MATCH rule: pattern rules gate the query too.
                 Self::check_pattern_query_compliance(
                     &self.system_db,
-                    &project_id_str,
+                    project_id_str,
                     &collection.collection_path,
                     domain_query.filter.as_ref(),
                     verified_identity.as_ref(),
@@ -3577,7 +3577,7 @@ impl FirestoreService {
                 .index_manager
                 // Keyed by the bare collection id (unchanged): composite
                 // indexes are registered per collection id, not per parent.
-                .is_index_ready(&project_id_str, &collection_id)
+                .is_index_ready(project_id_str, &collection_id)
                 .await
         {
             // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
