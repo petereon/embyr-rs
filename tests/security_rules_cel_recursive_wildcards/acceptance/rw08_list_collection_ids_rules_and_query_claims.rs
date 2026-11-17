@@ -322,12 +322,26 @@ async fn list_collection_ids_without_a_governing_rule_or_at_the_root_stays_unres
     assert!(f.collection_ids("", None).await.unwrap().contains(&"plain".to_string()));
 }
 
+/// Root collections `SecurityRulesFullContext::new` seeds, which no rule governs.
+fn ungoverned(extra: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = ["app_config", "journal_entries", "trail_guides"]
+        .iter()
+        .chain(extra)
+        .map(|s| s.to_string())
+        .collect();
+    v.sort();
+    v
+}
+
 /// Journey:
 ///   Given: `members_only` requires a signed-in caller, `profiles` is
-///          owner-only (undecidable without a filter), `plain` has no rule
+///          owner-only (undecidable without a filter), `plain` has no rule;
+///          the harness also seeds the ungoverned `app_config`,
+///          `journal_entries` and `trail_guides` collections
 ///   When:  an anonymous caller, then a signed-in caller, list the root
-///   Then:  anonymous sees only `plain`; signed-in sees `members_only` and
-///          `plain`; `profiles` is never named
+///   Then:  anonymous sees every ungoverned collection but not
+///          `members_only`; signed-in also sees `members_only`;
+///          `profiles` is never named
 ///
 /// @error @driving_port @real-io
 #[tokio::test]
@@ -342,14 +356,15 @@ async fn root_list_collection_ids_hides_names_the_callers_rules_deny() {
 
     let mut anon = f.collection_ids("", None).await.unwrap();
     anon.sort();
-    assert_eq!(anon, vec!["plain".to_string()]);
+    assert_eq!(anon, ungoverned(&["plain"]));
     let mut signed_in = f.collection_ids("", Some(&marias)).await.unwrap();
     signed_in.sort();
-    assert_eq!(signed_in, vec!["members_only".to_string(), "plain".to_string()]);
+    assert_eq!(signed_in, ungoverned(&["members_only", "plain"]));
 }
 
 /// Journey:
-///   Given: the only root collection, `profiles`, is owner-only
+///   Given: every root collection (the harness's seeded `app_config`,
+///          `journal_entries`, `trail_guides` plus `profiles`) has a deny rule
 ///   When:  an anonymous caller lists the root
 ///   Then:  PermissionDenied, not an empty list that confirms nothing is there
 ///
@@ -357,7 +372,9 @@ async fn root_list_collection_ids_hides_names_the_callers_rules_deny() {
 #[tokio::test]
 async fn root_list_collection_ids_is_denied_when_every_name_is_hidden() {
     let f = Fixture::new("trailmark-prod-rw08-root-denied").await;
-    f.ctx.seed_access_rule("profiles", "request.auth.uid == resource.data.owner_id").await;
+    for collection in ["app_config", "journal_entries", "trail_guides", "profiles"] {
+        f.ctx.seed_access_rule(collection, "false").await;
+    }
     f.set_doc("profiles/p1", ("owner_id", "maria-santos"), None).await;
 
     assert_denied(f.collection_ids("", None).await, "anonymous root listing");
