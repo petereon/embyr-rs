@@ -544,10 +544,14 @@ pub async fn start_distributed_grpc_server_with_pool(
     pg_pool: sqlx::PgPool,
 ) -> (std::net::SocketAddr, embyr_server::TestServer) {
     let system_db = Arc::clone(&ctx.system_db);
-    let server = embyr_server::start_test_server_with_distributed_rate_limit(
+    // Near-zero refill: these fail-open tests assert "N allowed, then exhausted" and must not
+    // earn tokens mid-sequence on a slow runner (capacity stays `rate_limit_rps`).
+    let server = embyr_server::start_test_server_with_distributed_rate_limit_full(
         system_db,
         ctx.rate_limit_rps,
+        ctx.rate_limit_rps / 600.0,
         pg_pool,
+        None,
     )
     .await;
     let addr = server.grpc_addr;

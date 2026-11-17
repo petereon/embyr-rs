@@ -1051,12 +1051,28 @@ pub async fn start_test_server_with_distributed_rate_limit_and_pg_timeout(
     pg_pool: sqlx::PgPool,
     pg_timeout_ms: Option<u64>,
 ) -> TestServer {
+    start_test_server_with_distributed_rate_limit_full(
+        system_db, capacity, capacity, pg_pool, pg_timeout_ms,
+    )
+    .await
+}
+
+/// Same with an explicit refill rate (tokens/s), decoupled from `capacity`. Tests that assert
+/// "N allowed, then exhausted" use a near-zero refill so a slow CI runner cannot earn tokens
+/// mid-sequence.
+pub async fn start_test_server_with_distributed_rate_limit_full(
+    system_db: Arc<SystemDb>,
+    capacity: f64,
+    refill_rate: f64,
+    pg_pool: sqlx::PgPool,
+    pg_timeout_ms: Option<u64>,
+) -> TestServer {
     let c = alloc_test_components(&system_db).await;
     let listen_registry_ret = Arc::clone(&c.listen_registry);
 
     let rate_limiter = match pg_timeout_ms {
-        Some(ms) => RateLimiter::with_pg_timeout(capacity, capacity, pg_pool, ms),
-        None => RateLimiter::with_pg(capacity, capacity, pg_pool),
+        Some(ms) => RateLimiter::with_pg_timeout(capacity, refill_rate, pg_pool, ms),
+        None => RateLimiter::with_pg(capacity, refill_rate, pg_pool),
     };
     let rate_limiter_ret = Arc::clone(&rate_limiter);
 
