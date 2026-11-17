@@ -15,11 +15,13 @@ Listen (real-time) for `backend_mode=agent` projects.
 
 ## Proto
 
-Zero changes. The agent's `Subscribe` rejects an empty `collection_path` and filters by substring match against the full document name, so the server subscribes with `projects/{pid}/databases/(default)/documents/`, which matches every document of the project. Works with already-deployed agents.
+Initially zero changes: the agent's `Subscribe` rejects an empty `collection_path` and filters by substring match against the full document name, so the server subscribes with `projects/{pid}/databases/(default)/documents/`, which matches every document of the project. Works with already-deployed agents.
+
+Later, one additive field: `DocChange.old_fields` (tag 5, `map<string, Value>`). The agent fills it on DELETE from the soft-deleted row (deletes keep `fields`; the agent's NOTIFY translation no longer filters `NOT deleted`, so no extra query). The server maps it to `ChangeEvent::Deleted { old_fields }` -> `ListenEvent::Removed { fields }`, so a rule that reads the document is evaluated on the old document. Interop: an old agent omits the field (empty = unknown) and keeps the fail-closed behaviour (rule-gated deletes withheld); an old server ignores the unknown field. A row already purged by the sweeper, or any value the server cannot convert, also yields empty (fail closed).
 
 ## Known gaps
 
-- Deletes carry no pre-delete snapshot (`DocChange` has no old fields; agent `get_document` hides soft-deleted rows). `Removed` is delivered with empty fields: delivered when the collection's rule does not read the document, withheld (fail closed) when it does. Fix: additive `old_fields` on `DocChange`.
+- Deletes from an agent that predates `DocChange.old_fields` (or whose row was already purged) carry no pre-delete snapshot: delivered when the collection's rule does not read the document, withheld (fail closed) when it does. Upgrade the agent to close this.
 - A Listen client sees RESET after any agent-stream reconnect (correct, but noisier than the Postgres path).
 - Agent-side `AgentNotifyBridge` still has no reconnect of its own: on a `PgListener` error it ends the stream and the server reconnects (new bridge connection). Fine, but each server reconnect opens a fresh agent-side PG connection.
 - The Docker-backed acceptance test (`tests/agent_mode_listen`) was only compiled locally (`--no-run`); first run is in CI.

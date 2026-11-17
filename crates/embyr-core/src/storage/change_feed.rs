@@ -5,19 +5,26 @@
 //! exposes its own change stream through `BackendAdapter::open_change_feed`.
 //! Pure trait + value types: no IO.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 
-use crate::{domain::document::DocumentPath, error::CoreError};
+use crate::{
+    domain::{document::DocumentPath, field_value::FieldValue},
+    error::CoreError,
+};
 
 /// One change notification. Carries the document identity only: the server
 /// re-fetches the document through `BackendAdapter::get_document`, exactly as
 /// the direct-Postgres listener does after a `NOTIFY`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ChangeEvent {
     /// The document was created, updated or (possibly) deleted: re-fetch it.
     Changed(DocumentPath),
-    /// The document was deleted.
-    Deleted(DocumentPath),
+    /// The document was deleted. `old_fields`: its fields just before the
+    /// delete, when the source could capture them; EMPTY means unknown (the
+    /// server then fails closed for rule-gated collections).
+    Deleted { path: DocumentPath, old_fields: BTreeMap<String, FieldValue> },
     /// The source lost events (overflow, malformed message): subscribers
     /// must resync from a fresh snapshot.
     Reset,

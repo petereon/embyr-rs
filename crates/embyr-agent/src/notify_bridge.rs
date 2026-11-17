@@ -115,15 +115,16 @@ async fn translate_payload(payload: &str, project_id: &str, pool: &PgPool) -> Do
         "projects/{project_id}/databases/(default)/documents/{collection_path}/{document_id}"
     );
 
-    // Query the document to determine kind, generation, and fields.
+    // Query the document to determine kind, generation, and fields. A delete
+    // is a soft delete that keeps `fields` (so the server can evaluate a read
+    // rule on the old document): select the row whether or not it is deleted.
     use sqlx::Row;
     let row_opt = sqlx::query(
-        "SELECT fields, version \
+        "SELECT fields, version, deleted \
          FROM documents \
          WHERE project_id = $1 \
            AND collection_path = $2 \
-           AND document_id = $3 \
-           AND NOT deleted",
+           AND document_id = $3",
     )
     .bind(project_id)
     .bind(&collection_path)
@@ -134,21 +135,14 @@ async fn translate_payload(payload: &str, project_id: &str, pool: &PgPool) -> Do
     match row_opt {
         Ok(Some(row)) => {
             let version: i64 = row.try_get("version").unwrap_or(0);
+            let deleted: bool = row.try_get("deleted").unwrap_or(false);
             let fields_json: serde_json::Value = row
                 .try_get("fields")
                 .unwrap_or(serde_json::Value::Object(Default::default()));
-
-            let proto_fields = json_fields_to_proto(&fields_json);
-
-            DocChange {
-                kind: DocChangeKind::Upsert as i32,
-                document_name,
-                generation: version,
-                fields: proto_fields,
-            }
+            doc_change_for_row(document_name, version, deleted, &fields_json)
         }
         _ => {
-            // Document not found (deleted) or query error — emit DELETE.
+            // Row absent (purged) or query error — DELETE with unknown old fields.
             DocChange {
                 kind: DocChangeKind::Delete as i32,
                 document_name,
@@ -158,56 +152,81 @@ async fn translate_payload(payload: &str, project_id: &str, pool: &PgPool) -> Do
     }
 }
 
-/// Convert a JSON fields object (as stored in the `documents` table) to a
-/// proto `map<string, Value>` compatible with DocChange.fields.
+/// The DocChange for a document row: UPSERT with its fields, or, for a
+/// soft-deleted row, DELETE carrying the pre-delete fields as `old_fields`.
+fn doc_change_for_row(
+    document_name: String,
+    version: i64,
+    deleted: bool,
+    fields_json: &serde_json::Value,
+) -> DocChange {
+    let proto_fields = json_fields_to_proto(fields_json);
+    if deleted {
+        DocChange {
+            kind: DocChangeKind::Delete as i32,
+            document_name,
+            old_fields: proto_fields,
+            ..Default::default()
+        }
+    } else {
+        DocChange {
+            kind: DocChangeKind::Upsert as i32,
+            document_name,
+            generation: version,
+            fields: proto_fields,
+            ..Default::default()
+        }
+    }
+}
+
+/// Convert a stored `fields` JSON object to a proto `map<string, Value>`.
+///
+/// The `documents.fields` column holds the storage crate's discriminated-union
+/// encoding (`{"t":"S","v":"x"}`), so decode it with the storage crate's own
+/// decoder (the one `get_document` uses) and translate the domain values. A
+/// shape that does not decode yields an EMPTY map (unknown), never a guess:
+/// the server treats empty `old_fields` as "unknown" and fails closed.
 fn json_fields_to_proto(
     fields_json: &serde_json::Value,
 ) -> std::collections::HashMap<String, embyr_proto::agent::Value> {
-    use embyr_proto::agent::{value::ValueType, ArrayValue, MapValue, NullValue, Value};
-    use serde_json::Value as Json;
+    embyr_pg_storage::encoding::field_value::json_to_fields(fields_json)
+        .unwrap_or_default()
+        .iter()
+        .map(|(k, v)| (k.clone(), crate::encoding::field_value_to_proto(v)))
+        .collect()
+}
 
-    fn convert(v: &Json) -> Value {
-        match v {
-            Json::Null => Value {
-                value_type: Some(ValueType::NullValue(NullValue::NullValue as i32)),
-            },
-            Json::Bool(b) => Value {
-                value_type: Some(ValueType::BooleanValue(*b)),
-            },
-            Json::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Value {
-                        value_type: Some(ValueType::IntegerValue(i)),
-                    }
-                } else {
-                    Value {
-                        value_type: Some(ValueType::DoubleValue(n.as_f64().unwrap_or(0.0))),
-                    }
-                }
-            }
-            Json::String(s) => Value {
-                value_type: Some(ValueType::StringValue(s.clone())),
-            },
-            Json::Array(arr) => {
-                let values = arr.iter().map(convert).collect();
-                Value {
-                    value_type: Some(ValueType::ArrayValue(ArrayValue { values })),
-                }
-            }
-            Json::Object(obj) => {
-                let fields = obj
-                    .iter()
-                    .map(|(k, v)| (k.clone(), convert(v)))
-                    .collect();
-                Value {
-                    value_type: Some(ValueType::MapValue(MapValue { fields })),
-                }
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_row_is_an_upsert_with_fields_and_generation() {
+        let c = doc_change_for_row("d".into(), 4, false, &serde_json::json!({"n": {"t": "I", "v": 1}}));
+        assert_eq!(c.kind, DocChangeKind::Upsert as i32);
+        assert_eq!(c.generation, 4);
+        assert_eq!(c.fields.len(), 1);
+        assert!(c.old_fields.is_empty());
     }
 
-    match fields_json.as_object() {
-        Some(obj) => obj.iter().map(|(k, v)| (k.clone(), convert(v))).collect(),
-        None => Default::default(),
+    #[test]
+    fn soft_deleted_row_is_a_delete_carrying_its_pre_delete_fields() {
+        // Stored shape: the storage crate's discriminated union, not plain JSON.
+        let stored = serde_json::json!({"owner": {"t": "S", "v": "u1"}});
+        let c = doc_change_for_row("d".into(), 5, true, &stored);
+        assert_eq!(c.kind, DocChangeKind::Delete as i32);
+        assert!(c.fields.is_empty(), "fields stays empty for a delete");
+        let owner = c.old_fields.get("owner").expect("owner");
+        assert_eq!(
+            owner.value_type,
+            Some(embyr_proto::agent::value::ValueType::StringValue("u1".into())),
+            "decoded to a string value, not a nested map of the storage tags"
+        );
+    }
+
+    #[test]
+    fn undecodable_stored_fields_are_unknown_not_guessed() {
+        let c = doc_change_for_row("d".into(), 5, true, &serde_json::json!({"owner": "plain"}));
+        assert!(c.old_fields.is_empty());
     }
 }
