@@ -60,6 +60,8 @@ pub struct AgentModeWriteStreamingContext {
     _agent_container: ContainerAsync<Postgres>,
     pub server: embyr_server::TestServer,
     pub agent_pool: sqlx::PgPool,
+    /// embyr-server's own system DB (access rules, project registry).
+    pub sys_pool: sqlx::PgPool,
     pub api_key: String,
     pub project_id: String,
 }
@@ -81,6 +83,7 @@ impl AgentModeWriteStreamingContext {
         let sys_url = format!("postgres://postgres:postgres@127.0.0.1:{sys_port}/postgres");
         let system_db = Arc::new(SystemDb::new(&sys_url).await.expect("SystemDb::new"));
         system_db.migrate().await.expect("system db migrate");
+        let sys_pool = sqlx::PgPool::connect(&sys_url).await.expect("connect system postgres");
 
         // The agent's own customer-VPC-style Postgres (real, separate from
         // the system DB — mirrors `start_test_agent`'s own composition).
@@ -156,6 +159,7 @@ impl AgentModeWriteStreamingContext {
             _agent_container: agent_container,
             server,
             agent_pool,
+            sys_pool,
             api_key,
             project_id: project_id.to_string(),
         }

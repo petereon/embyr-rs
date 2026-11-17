@@ -12,6 +12,16 @@
 //! pre-multiplexing behaviour). The stream stays open until the client goes
 //! away, including after the client half-closes its request side.
 //!
+//! Resume (a target added with `resume_token` / `read_time`): the client keeps
+//! its cached documents for the target, so the server must not just resend
+//! documents. A whole-collection target with a fresh token gets only the
+//! documents changed since it, then an `ExistenceFilter` carrying the true
+//! match count — the client compares it to its own count and, if a deletion
+//! happened while it was away, drops the token and re-listens. Everything
+//! else (windowed, Documents, stale/malformed token) gets `TargetChange(RESET)`
+//! (the client discards its cached documents for the target) and the full
+//! result. No change log is kept: see `plan_resume`.
+//!
 //! Rules (ADR-033/063/064) are resolved per target at add time by the same
 //! logic the single-target handler used, and re-checked per delivered change.
 
@@ -36,8 +46,8 @@ use embyr_core::{
         field_value::FieldValue,
         project::ProjectId,
         query::{
-            validate_field_path, OrderBy, OrderDirection, QueryFilter,
-            StructuredQuery as DomainQuery,
+            validate_field_path, AggregateValue, Aggregation, AggregationKind, AggregationQuery,
+            OrderBy, OrderDirection, QueryFilter, StructuredQuery as DomainQuery,
         },
     },
     realtime::listen_targets::{diff_window, TargetIdError, TargetIds, TargetScope},
@@ -47,8 +57,8 @@ use embyr_proto::firestore::{
     structured_query::Direction,
     target::{query_target::QueryType, DocumentsTarget, QueryTarget, ResumeType, TargetType},
     target_change::TargetChangeType,
-    DocumentChange, DocumentDelete, DocumentRemove, ListenRequest, ListenResponse, Target,
-    TargetChange,
+    DocumentChange, DocumentDelete, DocumentRemove, ExistenceFilter, ListenRequest,
+    ListenResponse, Target, TargetChange,
 };
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -59,7 +69,9 @@ use crate::{
         credential_cache::SharedBackendAdapter, index_manager::IndexManager, system_db::SystemDb,
     },
     encoding::firestore_proto::document_to_proto,
-    grpc::handler::{query_compliance_rejection, sanitize_backend_error, FirestoreService},
+    grpc::handler::{
+        query_compliance_rejection, sanitize_backend_error, translate_cursor, FirestoreService,
+    },
     realtime::{
         listen_handler::{
             collection_id_from_query_target, filter_from_query_target, project_id_from_parent,
@@ -119,8 +131,23 @@ struct ActiveTarget {
     rules: BTreeMap<String, Rule>,
 }
 
+/// What the client's `resume_token` / `read_time` means for this add.
+#[derive(Debug, PartialEq, Eq)]
+enum Resume {
+    /// No resume requested: the snapshot is the full, initial result.
+    Fresh,
+    /// Only documents changed after the instant are sent; the client's
+    /// cached documents are kept, so an `ExistenceFilter` follows.
+    Delta(DateTime<Utc>),
+    /// The client's cached documents are unusable: RESET, then the full result.
+    Reset,
+}
+
 struct Snapshot {
     target: ActiveTarget,
+    resume: Resume,
+    /// Delta only: the target's total match count, for the `ExistenceFilter`.
+    existence_count: Option<i32>,
     docs: Vec<FirestoreDocument>,
     /// Resume-token anchor: `now + 1s`, taken before the query ran so every
     /// snapshot document is at or before it.
@@ -253,8 +280,11 @@ impl Session<'_> {
             }
         })?;
         match self.ctx.snapshot(&target).await {
-            Ok(Snapshot { target, docs, token_ts }) => {
-                self.ctx.announce(id, docs, token_ts).await?;
+            Ok(snapshot) => {
+                let Snapshot { target, resume, existence_count, docs, token_ts } = snapshot;
+                self.ctx
+                    .announce(id, docs, token_ts, matches!(resume, Resume::Reset), existence_count)
+                    .await?;
                 self.targets.insert(id, target);
                 Ok(())
             }
@@ -299,19 +329,27 @@ impl Ctx<'_> {
         self.tx.send(Ok(response)).await.map_err(|_| Fail::Gone)
     }
 
-    /// ADD, one DocumentChange per snapshot document, CURRENT, then NO_CHANGE
-    /// carrying a fresh resume token. The token encodes `token_ts`, so on
-    /// reconnect the delta filter `update_time > token_ts` excludes every
-    /// initial-snapshot document.
+    /// ADD, [RESET], one DocumentChange per snapshot document, [ExistenceFilter],
+    /// CURRENT, then NO_CHANGE carrying a fresh resume token. The token
+    /// encodes `token_ts`, so on reconnect the delta filter
+    /// `update_time > token_ts` excludes every initial-snapshot document.
     async fn announce(
         &self,
         id: i32,
         docs: Vec<FirestoreDocument>,
         token_ts: DateTime<Utc>,
+        reset: bool,
+        existence_count: Option<i32>,
     ) -> Result<(), Fail> {
         self.send(target_change(TargetChangeType::Add, vec![id], vec![])).await?;
+        if reset {
+            self.send(target_change(TargetChangeType::Reset, vec![id], vec![])).await?;
+        }
         for doc in docs {
             self.send(document_change(doc, id)).await?;
+        }
+        if let Some(count) = existence_count {
+            self.send(existence_filter(id, count)).await?;
         }
         self.send(target_change(TargetChangeType::Current, vec![id], vec![])).await?;
         self.send(target_change(TargetChangeType::NoChange, vec![], rt::encode(token_ts))).await
@@ -320,7 +358,7 @@ impl Ctx<'_> {
     async fn snapshot(&self, target: &Target) -> Result<Snapshot, Status> {
         match &target.target_type {
             Some(TargetType::Query(qt)) => self.query_snapshot(target, qt).await,
-            Some(TargetType::Documents(dt)) => self.documents_snapshot(dt).await,
+            Some(TargetType::Documents(dt)) => self.documents_snapshot(target, dt).await,
             None => Err(Status::invalid_argument("target must have a Query or Documents target type")),
         }
     }
@@ -342,8 +380,10 @@ impl Ctx<'_> {
             return Err(Status::internal("QueryTarget has no query_type"));
         };
         let order_by = order_by_from_query(sq)?;
-        let limit = sq.limit;
-        let offset = (sq.offset > 0).then_some(sq.offset);
+        // Cursors go through RunQuery's own translation and SQL (typed
+        // comparison), so Listen and RunQuery cannot disagree on a bound.
+        let start_at = translate_cursor("start_at", sq.start_at.as_ref())?;
+        let end_at = translate_cursor("end_at", sq.end_at.as_ref())?;
 
         let collection = CollectionPath {
             project_id: ProjectId::new(&self.project_id)
@@ -354,28 +394,22 @@ impl Ctx<'_> {
         // compliance gate runs BEFORE any row is read for the snapshot.
         let rule = self.resolve_rule(&collection.collection_path, filter.as_ref(), true).await?;
 
-        let windowed =
-            filter.is_some() || !order_by.is_empty() || limit.is_some() || offset.is_some();
-        // Resume-token delta delivery only for whole-collection targets.
-        // ponytail: a windowed target ignores its resume token and re-sends
-        // the full window — a delta of a limit window can't tell which
-        // documents left it while the client was away. Add if reconnect cost matters.
-        let since_update_time = if windowed {
-            None
-        } else {
-            resume_token_ts(target)
-        };
-        let query = DomainQuery {
+        let mut query = DomainQuery {
             collection_id: collection.collection_path.clone(),
             all_descendants: false,
             filter,
             order_by,
-            limit,
-            offset,
-            start_at: None,
-            end_at: None,
-            since_update_time,
+            limit: sq.limit,
+            offset: (sq.offset > 0).then_some(sq.offset),
+            start_at,
+            end_at,
+            since_update_time: None,
         };
+        let windowed = is_windowed(&query);
+        let resume = plan_resume(target, !windowed);
+        if let Resume::Delta(ts) = resume {
+            query.since_update_time = Some(ts);
+        }
 
         // Same composite-index gate as RunQuery (audit #68), after the
         // compliance gate above so a denied caller never learns whether the
@@ -396,6 +430,15 @@ impl Ctx<'_> {
             .await
             .map_err(|e| sanitize_backend_error(e, "handle_listen: initial snapshot run_query"))?;
 
+        // The client keeps its cached documents across a delta resume; the
+        // true match count lets it notice documents deleted while it was away.
+        let existence_count = if matches!(resume, Resume::Delta(_)) {
+            query.since_update_time = None;
+            Some(self.count_matches(&collection, &query).await?)
+        } else {
+            None
+        };
+
         let scope = TargetScope::Collection(collection.collection_path.clone());
         let delivery = if windowed {
             let members = docs.iter().map(|d| (d.path.document_id.clone(), d.version)).collect();
@@ -404,10 +447,32 @@ impl Ctx<'_> {
             Delivery::Plain
         };
         let rules = BTreeMap::from([(collection.collection_path, rule)]);
-        Ok(Snapshot { target: ActiveTarget { scope, delivery, rules }, docs, token_ts })
+        Ok(Snapshot {
+            target: ActiveTarget { scope, delivery, rules },
+            resume,
+            existence_count,
+            docs,
+            token_ts,
+        })
     }
 
-    async fn documents_snapshot(&self, dt: &DocumentsTarget) -> Result<Snapshot, Status> {
+    async fn count_matches(&self, collection: &CollectionPath, query: &DomainQuery) -> Result<i32, Status> {
+        let agg = AggregationQuery {
+            query: query.clone(),
+            aggregations: vec![Aggregation { alias: "n".into(), kind: AggregationKind::Count(None) }],
+        };
+        let values = self
+            .adapter
+            .run_aggregation_query(collection, &agg, None)
+            .await
+            .map_err(|e| sanitize_backend_error(e, "handle_listen: resume existence count"))?;
+        match values.first() {
+            Some(AggregateValue::Count(n)) => Ok(i32::try_from(*n).unwrap_or(i32::MAX)),
+            _ => Err(Status::internal("count aggregation returned no count")),
+        }
+    }
+
+    async fn documents_snapshot(&self, target: &Target, dt: &DocumentsTarget) -> Result<Snapshot, Status> {
         if dt.documents.is_empty() {
             return Err(Status::invalid_argument("Documents target names no documents"));
         }
@@ -456,6 +521,9 @@ impl Ctx<'_> {
         );
         Ok(Snapshot {
             target: ActiveTarget { scope, delivery: Delivery::Documents, rules },
+            // Deletions while the client was away are invisible to a delta.
+            resume: plan_resume(target, false),
+            existence_count: None,
             docs,
             token_ts,
         })
@@ -666,14 +734,39 @@ fn parse_pattern_condition(source: &str) -> Result<Condition, Status> {
     })
 }
 
-/// Fresh (<=24h) resume tokens enable delta delivery.
-fn resume_token_ts(target: &Target) -> Option<DateTime<Utc>> {
-    match &target.resume_type {
-        Some(ResumeType::ResumeToken(bytes)) => Some(bytes.as_slice()),
-        _ => None,
+/// The result depends on more than collection membership.
+fn is_windowed(q: &DomainQuery) -> bool {
+    q.filter.is_some()
+        || !q.order_by.is_empty()
+        || q.limit.is_some()
+        || q.offset.is_some()
+        || q.start_at.is_some()
+        || q.end_at.is_some()
+}
+
+/// Decide how to answer a resume request. Delta needs `delta_capable` (a
+/// whole-collection target: for a filter/limit/cursor window a delta cannot
+/// tell which documents left it) and a fresh (<=24h), decodable token or
+/// `read_time`. Anything else the client asked to resume gets RESET + the full
+/// result — never a silent full resend over the client's stale cache.
+// ponytail: no change log, so a deletion while the client was away is found by
+// the client's ExistenceFilter count check (it then re-listens without the
+// token). Add a tombstone log only if reconnect cost of deletes shows up.
+fn plan_resume(target: &Target, delta_capable: bool) -> Resume {
+    let ts = match &target.resume_type {
+        Some(ResumeType::ResumeToken(t)) if !t.is_empty() => {
+            rt::decode_ts(t).filter(|_| !rt::is_stale(t))
+        }
+        Some(ResumeType::ReadTime(t)) => u32::try_from(t.nanos)
+            .ok()
+            .and_then(|nanos| DateTime::from_timestamp(t.seconds, nanos))
+            .filter(|ts| !rt::is_stale_ts(*ts)),
+        _ => return Resume::Fresh,
+    };
+    match ts {
+        Some(ts) if delta_capable => Resume::Delta(ts),
+        _ => Resume::Reset,
     }
-    .filter(|t| !t.is_empty() && !rt::is_stale(t))
-    .and_then(rt::decode_ts)
 }
 
 /// Order-by field paths are validated (SPEC.md Invariant 6): they are
@@ -728,6 +821,12 @@ fn document_change(doc: FirestoreDocument, target_id: i32) -> ListenResponse {
     }
 }
 
+fn existence_filter(target_id: i32, count: i32) -> ListenResponse {
+    ListenResponse {
+        response_type: Some(listen_response::ResponseType::Filter(ExistenceFilter { target_id, count })),
+    }
+}
+
 /// The document was deleted.
 fn document_delete(path: &DocumentPath, target_id: i32) -> ListenResponse {
     ListenResponse {
@@ -747,5 +846,83 @@ fn document_remove(path: &DocumentPath, target_id: i32) -> ListenResponse {
             removed_target_ids: vec![target_id],
             read_time: None,
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embyr_core::domain::query::Cursor;
+    use prost_types::Timestamp;
+
+    fn token_target(ts: DateTime<Utc>) -> Target {
+        Target { resume_type: Some(ResumeType::ResumeToken(rt::encode(ts))), ..Default::default() }
+    }
+
+    fn read_time_target(seconds: i64) -> Target {
+        Target {
+            resume_type: Some(ResumeType::ReadTime(Timestamp { seconds, nanos: 0 })),
+            ..Default::default()
+        }
+    }
+
+    fn base_query() -> DomainQuery {
+        DomainQuery {
+            collection_id: "c".into(),
+            all_descendants: false,
+            filter: None,
+            order_by: vec![],
+            limit: None,
+            offset: None,
+            start_at: None,
+            end_at: None,
+            since_update_time: None,
+        }
+    }
+
+    #[test]
+    fn no_or_empty_resume_is_a_fresh_snapshot() {
+        assert_eq!(plan_resume(&Target::default(), true), Resume::Fresh);
+        let empty = Target { resume_type: Some(ResumeType::ResumeToken(vec![])), ..Default::default() };
+        assert_eq!(plan_resume(&empty, true), Resume::Fresh);
+    }
+
+    #[test]
+    fn fresh_token_on_whole_collection_is_a_delta() {
+        let ts = DateTime::from_timestamp(Utc::now().timestamp() - 60, 0).unwrap();
+        assert_eq!(plan_resume(&token_target(ts), true), Resume::Delta(ts));
+    }
+
+    #[test]
+    fn fresh_token_on_a_window_or_documents_target_resets() {
+        let ts = Utc::now() - ChronoDuration::seconds(60);
+        assert_eq!(plan_resume(&token_target(ts), false), Resume::Reset);
+    }
+
+    #[test]
+    fn stale_or_malformed_token_resets_instead_of_resending_over_the_cache() {
+        let stale = Utc::now() - ChronoDuration::hours(25);
+        assert_eq!(plan_resume(&token_target(stale), true), Resume::Reset);
+        let junk = Target { resume_type: Some(ResumeType::ResumeToken(vec![1, 2, 3])), ..Default::default() };
+        assert_eq!(plan_resume(&junk, true), Resume::Reset);
+    }
+
+    #[test]
+    fn read_time_resumes_like_a_token() {
+        let at = Utc::now().timestamp() - 30;
+        let expected = DateTime::from_timestamp(at, 0).unwrap();
+        assert_eq!(plan_resume(&read_time_target(at), true), Resume::Delta(expected));
+        assert_eq!(plan_resume(&read_time_target(at), false), Resume::Reset);
+        assert_eq!(plan_resume(&read_time_target(at - 90_000), true), Resume::Reset);
+    }
+
+    #[test]
+    fn any_filter_order_window_or_cursor_makes_a_target_windowed() {
+        assert!(!is_windowed(&base_query()));
+        let cursor = Cursor { values: vec![FieldValue::Integer(1)], before: true };
+        assert!(is_windowed(&DomainQuery { start_at: Some(cursor.clone()), ..base_query() }));
+        assert!(is_windowed(&DomainQuery { end_at: Some(cursor), ..base_query() }));
+        assert!(is_windowed(&DomainQuery { limit: Some(1), ..base_query() }));
+        assert!(is_windowed(&DomainQuery { offset: Some(1), ..base_query() }));
     }
 }

@@ -17,7 +17,7 @@ use embyr_proto::firestore::{
     target::{self, query_target},
     target_change::TargetChangeType,
     value::ValueType,
-    CreateDocumentRequest, Document, ListenRequest, ListenResponse, StructuredQuery, Target, Value,
+    CreateDocumentRequest, DeleteDocumentRequest, Document, ListenRequest, ListenResponse, StructuredQuery, Target, Value,
 };
 use tokio_stream::StreamExt;
 
@@ -126,5 +126,86 @@ async fn listen_delivers_live_changes_for_an_agent_mode_project() {
             assert_eq!(dc.target_ids, vec![1]);
         }
         other => panic!("expected DocumentChange, got {other:?}"),
+    }
+}
+
+/// A delete of a document whose read rule READS the document is delivered:
+/// the agent captures the pre-delete fields (`DocChange.old_fields`), so the
+/// server can evaluate the rule on the old document instead of withholding it.
+#[tokio::test]
+async fn rule_gated_delete_is_delivered_using_the_agents_pre_delete_fields() {
+    let ctx = AgentModeWriteStreamingContext::new("al02-agent-listen-gated-delete").await;
+    sqlx::query(
+        "INSERT INTO access_rules (project_id, collection_path, condition_source) VALUES ($1, $2, $3)",
+    )
+    .bind(&ctx.project_id)
+    .bind("patients")
+    .bind("resource.data.status == \"admitted\"")
+    .execute(&ctx.sys_pool)
+    .await
+    .expect("seed access rule");
+
+    let docs_root = format!("projects/{}/databases/(default)/documents", ctx.project_id);
+    let doc_name = format!("{docs_root}/patients/p-1");
+    client(&ctx)
+        .create_document(authed(
+            &ctx,
+            CreateDocumentRequest {
+                parent: docs_root.clone(),
+                collection_id: "patients".into(),
+                document_id: "p-1".into(),
+                document: Some(Document {
+                    fields: HashMap::from([(
+                        "status".to_string(),
+                        Value { value_type: Some(ValueType::StringValue("admitted".into())) },
+                    )]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ))
+        .await
+        .expect("create_document");
+
+    // A Documents target: the rule is evaluated per document (no query gate).
+    let first = ListenRequest {
+        database: format!("projects/{}/databases/(default)", ctx.project_id),
+        target_change: Some(listen_request::TargetChange::AddTarget(Target {
+            target_id: 1,
+            target_type: Some(target::TargetType::Documents(target::DocumentsTarget {
+                documents: vec![doc_name.clone()],
+            })),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let (request_tx, request_rx) = tokio::sync::mpsc::channel(4);
+    request_tx.send(first).await.unwrap();
+    let mut stream = client(&ctx)
+        .listen(authed(&ctx, tokio_stream::wrappers::ReceiverStream::new(request_rx)))
+        .await
+        .expect("Listen must open for an agent-mode project")
+        .into_inner();
+    assert!(matches!(
+        next(&mut stream).await,
+        listen_response::ResponseType::TargetChange(tc) if tc.target_change_type == TargetChangeType::Add as i32
+    ));
+    assert!(matches!(next(&mut stream).await, listen_response::ResponseType::DocumentChange(_)));
+    assert!(matches!(
+        next(&mut stream).await,
+        listen_response::ResponseType::TargetChange(tc) if tc.target_change_type == TargetChangeType::Current as i32
+    ));
+
+    client(&ctx)
+        .delete_document(authed(&ctx, DeleteDocumentRequest { name: doc_name.clone(), ..Default::default() }))
+        .await
+        .expect("delete_document");
+
+    match next(&mut stream).await {
+        listen_response::ResponseType::DocumentDelete(dd) => {
+            assert_eq!(dd.document, doc_name);
+            assert_eq!(dd.removed_target_ids, vec![1]);
+        }
+        other => panic!("expected DocumentDelete, got {other:?}"),
     }
 }

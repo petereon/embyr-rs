@@ -398,7 +398,15 @@ pub fn order_key_exprs(field_path: &str) -> Vec<String> {
         panic!("invalid field path reached SQL builder: {e}");
     }
     if field_path == "__name__" {
-        return vec!["document_id COLLATE \"C\"".to_string()];
+        // partition-query: the full document name, ordered by
+        // `(collection_path, document_id)` bytewise. For a single collection
+        // `collection_path` is constant, so this is plain document-id order;
+        // for a collection group it makes the order total, which
+        // `push_name_comparison` (cursors) relies on.
+        return vec![
+            "collection_path COLLATE \"C\"".to_string(),
+            "document_id COLLATE \"C\"".to_string(),
+        ];
     }
     let fp = field_path;
     let t = format!("fields->'{fp}'->>'t'");
@@ -418,6 +426,37 @@ pub fn order_key_exprs(field_path: &str) -> Vec<String> {
         format!("CASE WHEN {t} = 'BY' THEN decode({v}, 'base64') END"),
         format!("CASE WHEN {t} IN ('A','M') THEN fields->'{fp}'->'v' END"),
     ]
+}
+
+/// Split a Firestore reference value (`projects/p/databases/d/documents/c/id`)
+/// into the stored `(collection_path, document_id)` pair; a name without the
+/// `/databases/<db>/documents/` root is taken as already relative. `None` if
+/// there is no collection part.
+pub fn split_document_reference(reference: &str) -> Option<(&str, &str)> {
+    let rel = reference
+        .split_once("/databases/")
+        .and_then(|(_, t)| t.split_once("/documents/"))
+        .map_or(reference, |(_, p)| p);
+    rel.rsplit_once('/').filter(|(c, id)| !c.is_empty() && !id.is_empty())
+}
+
+/// Cursor bound on `__name__`: compares `(collection_path, document_id)`
+/// bytewise, the exact order `order_key_exprs("__name__")` sorts by.
+/// `None` when `reference` is not a document name.
+pub fn push_name_comparison(
+    qb: &mut QueryBuilder<Postgres>,
+    op: &str,
+    reference: &str,
+) -> Option<()> {
+    let (collection_path, document_id) = split_document_reference(reference)?;
+    qb.push(format!(
+        "ROW(collection_path COLLATE \"C\", document_id COLLATE \"C\") {op} ROW("
+    ));
+    qb.push_bind(collection_path.to_string());
+    qb.push(", ");
+    qb.push_bind(document_id.to_string());
+    qb.push(")");
+    Some(())
 }
 
 /// Return a raw SQL ORDER BY expression for a single `OrderBy` clause: every
@@ -931,8 +970,27 @@ mod tests {
     #[test]
     fn order_by_name_sorts_by_document_id_and_is_never_excluded() {
         let o = ob("__name__", OrderDirection::Ascending);
-        assert_eq!(order_by_expr(&o), "document_id COLLATE \"C\" ASC");
+        assert_eq!(
+            order_by_expr(&o),
+            "collection_path COLLATE \"C\" ASC, document_id COLLATE \"C\" ASC"
+        );
         assert_eq!(order_by_presence_predicate(&o), None);
+    }
+
+    #[test]
+    fn split_document_reference_handles_full_and_relative_names() {
+        for (r, want) in [
+            ("projects/p/databases/(default)/documents/c/id", Some(("c", "id"))),
+            ("projects/p/databases/(default)/documents/users/u1/posts/p9", Some(("users/u1/posts", "p9"))),
+            // A project literally named like a path marker must not confuse the root strip.
+            ("projects/documents/databases/(default)/documents/c/id", Some(("c", "id"))),
+            ("projects/databases/databases/(default)/documents/c/id", Some(("c", "id"))),
+            ("c/id", Some(("c", "id"))),
+            ("id", None),
+            ("projects/p/databases/(default)/documents/c/", None),
+        ] {
+            assert_eq!(split_document_reference(r), want, "{r}");
+        }
     }
 
     #[test]

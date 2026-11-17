@@ -232,8 +232,9 @@ commented `EmbyrReadinessFailing` rule) `probe_success == 0` for 2m.
 Listen works in agent mode via the agent's `Subscribe` stream (see
 `docs/feature/agent-mode-listen/feature-delta.md`). Three caveats:
 
-- A delete reaches clients only where the collection's rule does not read the document
-  (the event carries no pre-delete fields; rule-gated deletes are withheld, fail closed).
+- With an agent that predates `DocChange.old_fields`, a delete reaches clients only where the
+  collection's rule does not read the document (rule-gated deletes are withheld, fail closed).
+  Current agents send the pre-delete fields, so rule-gated deletes are delivered.
 - Clients see a RESET after any agent-stream reconnect.
 - `AgentNotifyBridge` has no reconnect of its own: after a stream drop the server
   reconnects and the agent opens a fresh Postgres connection.

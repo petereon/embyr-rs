@@ -59,7 +59,7 @@ pub fn domain_doc_to_proto(doc: FirestoreDocument) -> Document {
     }
 }
 
-fn field_value_to_proto(fv: &FieldValue) -> Value {
+pub(crate) fn field_value_to_proto(fv: &FieldValue) -> Value {
     let vt = match fv {
         FieldValue::Null => ValueType::NullValue(0),
         FieldValue::Boolean(b) => ValueType::BooleanValue(*b),

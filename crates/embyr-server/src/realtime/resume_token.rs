@@ -16,7 +16,7 @@
 /// self-inflicted-only) worst case.
 ///
 /// On reconnect with a token <= 24h old: query only docs with update_time > decoded_ts (delta only).
-/// Token > 24h or malformed: full re-snapshot (no error).
+/// Token > 24h or malformed: RESET + full re-snapshot (no error). See `listen_session::plan_resume`.
 use chrono::{DateTime, Duration, Utc};
 
 /// Encode a resume token from a timestamp.
@@ -39,10 +39,13 @@ pub fn decode_ts(token: &[u8]) -> Option<DateTime<Utc>> {
 
 /// Returns true if the resume token is older than 24 hours or malformed.
 pub fn is_stale(token: &[u8]) -> bool {
-    match decode_ts(token) {
-        Some(ts) => Utc::now() - ts > Duration::hours(24),
-        None => true,
-    }
+    decode_ts(token).is_none_or(is_stale_ts)
+}
+
+/// Returns true if `ts` (a token's or a client `read_time`'s instant) is
+/// older than the 24h resume window.
+pub fn is_stale_ts(ts: DateTime<Utc>) -> bool {
+    Utc::now() - ts > Duration::hours(24)
 }
 
 #[cfg(test)]
