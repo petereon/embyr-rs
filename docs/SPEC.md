@@ -679,6 +679,21 @@ Each item in the stream is one of:
 
 A `from` clause with `all_descendants: true` performs a collection group query across all nested collections with the given name. A `from` clause with multiple selectors returns `Unimplemented`.
 
+#### PartitionQuery
+
+**Inputs**: `parent` (required), `structured_query` (required, `from` as for RunQuery; optional filter; optional `order_by` of exactly `__name__` ascending), `partition_count` (required, >= 1), `page_size` (optional, 0 = all), `page_token` (optional)
+**Outputs**: unary `PartitionQueryResponse{partitions: [Cursor], next_page_token}` (unary, as in Firestore)
+
+Returns up to `partition_count - 1` split points as `Cursor{values: [reference_value], before: true}` on `__name__`, ascending. Running the same query with `startAt(split_k)` / `endBefore(split_k+1)` (first run without a start bound, last without an end bound) yields disjoint runs whose concatenation is the whole result. `partition_count == 1` returns no cursors; asking for more partitions than there are documents returns one split per document after the first.
+
+Admission is identical to RunQuery: same authentication, rate limiting, security-rule compliance (exact, group and pattern rules, read access to the whole query) and composite-index check (shared `prepare_gated_query`).
+
+`__name__` order is `(collection_path, document_id)` bytewise, also used by `ORDER BY __name__` and `__name__` cursors on RunQuery.
+
+**Errors**: `InvalidArgument` (`partition_count` < 1, negative `page_size`, bad `page_token`, a limit/offset/cursor or an `order_by` other than `__name__` ascending on the query), `FailedPrecondition` (query needs a composite index; or matches more than 50,000 documents), `PermissionDenied` (rules).
+
+**Limits**: the matching document names are scanned in memory, capped at `MAX_PARTITION_SCAN_DOCS` (50,000); a larger result is rejected rather than partitioned from a truncated scan. `page_token` is a stateless offset into the recomputed split list, so writes between pages can shift it. `read_time` is ignored (as in RunQuery). In `backend_mode=agent` the agent does not order or apply cursors, so partition cursors are computed (the scan is sorted server-side) but RunQuery cannot honour `__name__` bounds there.
+
 #### RunAggregationQuery
 
 **Inputs**: `parent` (required), `structured_aggregation_query` (required)
@@ -984,18 +999,21 @@ For `query` targets: pages through the query (default page size 300 or the expli
 
 ### Delta Delivery (Resume-Token Reconnect)
 
-On `addTarget` with a valid resume token **and** a query target:
+No tombstone / change log is kept (decision: a log is the only way to report deletes exactly, and its cost is not justified yet). Instead the server answers a resume (`resumeToken` or `readTime`) in one of two protocol-correct ways, so the client's cached documents are never silently left stale:
 
-1. Decode the token to obtain `sinceTime`.
-2. Retrieve all documents in (parent, collectionID) with `updated_at > sinceTime`.
-3. Retrieve all tombstones in (parent, collectionID) with `deleted_at > sinceTime`.
-4. Send `targetChange{ADD, [targetId]}`.
-5. For each updated document matching the query filter: send `documentChange`.
-6. For each deleted path: send `documentDelete`.
-7. Send `targetChange{CURRENT, [targetId], resumeToken=<now>}`.
-8. Send `targetChange{NO_CHANGE, resumeToken=<now>}`.
+**A. Whole-collection query target (no filter, orderBy, limit, offset or cursor) with a decodable token/readTime <= 24h old: delta.**
 
-If the token is malformed, or the target is a documents target: fall back to full snapshot.
+1. `targetChange{ADD}`
+2. `documentChange` for every document with `update_time > sinceTime`.
+3. `existenceFilter{targetId, count}` where `count` is the true number of documents now in the collection. The SDK compares it to its own cached count after applying the delta; on mismatch (a document was deleted while it was away) it drops the token and re-adds the target, which gets a full snapshot.
+4. `targetChange{CURRENT}`, then `targetChange{NO_CHANGE, resumeToken=<now+1s>}`.
+
+**B. Everything else that presents a resume token/readTime (windowed query, `documents` target, stale >24h, malformed): RESET + full result.**
+
+1. `targetChange{ADD}`, `targetChange{RESET, [targetId]}` (the client discards its cached documents for the target)
+2. `documentChange` for every document of the full result, then CURRENT and NO_CHANGE with a fresh token.
+
+A delta of a windowed query cannot tell which documents left the window while the client was away, hence RESET rather than a delta. An empty resume token means no resume.
 
 ### Live Changes
 

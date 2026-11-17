@@ -76,6 +76,12 @@ message DocChange {
   int64 generation = 3;
   // The document's fields at the time of the change (empty for delete/reset).
   map<string, Value> fields = 4;
+  // DELETE only: the document's fields as they were just before the delete,
+  // so the server can evaluate a read rule on the deleted document. Empty means
+  // "unknown" (an agent that predates this field, or a row already purged): the
+  // server then treats the delete as unreadable and withholds it where the
+  // collection's rule reads the document (fail closed). Additive field.
+  map<string, Value> old_fields = 5;
 }
 
 // A ping request (no fields needed).

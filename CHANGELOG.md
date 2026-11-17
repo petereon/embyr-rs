@@ -7,6 +7,9 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- `PartitionQuery` RPC (go-live P5): split cursors on `__name__` for parallel reads, gated exactly like
+  `RunQuery`; scan capped at 50,000 documents. RunQuery now honours `__name__` cursors and orders `__name__`
+  by full document name (`collection_path`, `document_id`).
 - Customer connection secrets now live in one server-key-encrypted store (ADR-083): migration
   0039 adds `agent_tls_bundle_srv_enc`; legacy ECIES rows convert lazily on their next
   authenticated request. New `GET`/`PUT /admin/v1/projects/:id/connection` (probe before save,

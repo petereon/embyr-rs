@@ -240,7 +240,17 @@ fn doc_change_to_event(change: &DocChange) -> ChangeEvent {
     };
     match (kind, path()) {
         (DocChangeKind::Upsert, Some(p)) => ChangeEvent::Changed(p),
-        (DocChangeKind::Delete, Some(p)) => ChangeEvent::Deleted(p),
+        (DocChangeKind::Delete, Some(path)) => {
+            // An unconvertible value makes the whole snapshot unknown: empty
+            // fields fail closed, a partial map could let a rule pass wrongly.
+            let old_fields = change
+                .old_fields
+                .iter()
+                .map(|(k, v)| agent_value_to_field_value(v).map(|fv| (k.clone(), fv)))
+                .collect::<Option<_>>()
+                .unwrap_or_default();
+            ChangeEvent::Deleted { path, old_fields }
+        }
         _ => ChangeEvent::Reset,
     }
 }
@@ -1010,10 +1020,31 @@ mod tests {
             document_id: "o1".into(),
         };
         assert_eq!(doc_change_to_event(&change(DocChangeKind::Upsert, name)), ChangeEvent::Changed(path.clone()));
-        assert_eq!(doc_change_to_event(&change(DocChangeKind::Delete, name)), ChangeEvent::Deleted(path));
+        assert_eq!(
+            doc_change_to_event(&change(DocChangeKind::Delete, name)),
+            ChangeEvent::Deleted { path, old_fields: Default::default() },
+            "an old agent omits old_fields: unknown, not an error"
+        );
         assert_eq!(doc_change_to_event(&change(DocChangeKind::Reset, "")), ChangeEvent::Reset);
         // Unintelligible input must resync, never be dropped.
         assert_eq!(doc_change_to_event(&change(DocChangeKind::Upsert, "garbage")), ChangeEvent::Reset);
         assert_eq!(doc_change_to_event(&change(DocChangeKind::Unspecified, name)), ChangeEvent::Reset);
+    }
+
+    #[test]
+    fn delete_carries_old_fields_and_an_unconvertible_value_fails_closed() {
+        let name = "projects/p1/databases/(default)/documents/orders/o1";
+        let s = |v: &str| AgentValue {
+            value_type: Some(embyr_proto::agent::value::ValueType::StringValue(v.into())),
+        };
+        let mut c = change(DocChangeKind::Delete, name);
+        c.old_fields.insert("owner".into(), s("u1"));
+        let ChangeEvent::Deleted { old_fields, .. } = doc_change_to_event(&c) else { panic!("Deleted") };
+        assert_eq!(old_fields.get("owner"), Some(&FieldValue::String("u1".into())));
+
+        // One value with no type: the whole snapshot is unknown (empty), not partial.
+        c.old_fields.insert("bad".into(), AgentValue { value_type: None });
+        let ChangeEvent::Deleted { old_fields, .. } = doc_change_to_event(&c) else { panic!("Deleted") };
+        assert!(old_fields.is_empty());
     }
 }

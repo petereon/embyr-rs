@@ -20,6 +20,7 @@ pub const METHOD_ROLLBACK: &str = "Rollback";
 pub const METHOD_WRITE: &str = "Write";
 pub const METHOD_RUN_QUERY: &str = "RunQuery";
 pub const METHOD_RUN_AGGREGATION_QUERY: &str = "RunAggregationQuery";
+pub const METHOD_PARTITION_QUERY: &str = "PartitionQuery";
 pub const METHOD_LISTEN: &str = "Listen";
 
 // ── Status label mapping (AC-OBS-02-03) ───────────────────────────────────
