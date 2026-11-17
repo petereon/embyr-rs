@@ -19,7 +19,7 @@ Security findings are agent-reported (code-read, not exercised) except where not
 | P2 | Blocker | **Listen: one collection-Query target per stream.** Documents targets rejected (`onSnapshot(doc)`); later Add/RemoveTarget ignored (multiple listeners break); orderBy/limit/offset dropped. |
 | P3 | Blocker (web) | **BrowserChannel is a stub** (`rest/browser_channel.rs`, 118 lines) — web SDK fallback gets no real-time. |
 | P4 | High | Aggregations: one per request, no `count up_to`; agent mode rejects SUM/AVG/OR/unary. |
-| P5 | High | No PartitionQuery, vector search, TTL; `read_time`/`new_transaction` handling unclear. |
+| P5 | High | No vector search or TTL (PartitionQuery implemented); `read_time`/`new_transaction` handling unclear. |
 | P6 | High | Cursor values that fail conversion silently drop pagination (`handler.rs:3080-3090`); `panic!`s remain in `encoding/query.rs`, `write_stream.rs:209`. |
 | P7 | Medium | No 1 MiB document / nesting-depth limits. |
 | P8 | Medium | Composite-index gate maps FailedPrecondition → `unimplemented` (`handler.rs:4227`), breaking SDK index hints; ListDocuments pages in memory by offset. |
@@ -77,7 +77,7 @@ Verified OK: operator/session middleware (constant-time compare), RBAC on sessio
 
 Fixed and merged: X1 X2 X3 X4 X5 X6 X8 X9 X10 X12, P1 P2 P4 P6 P7 P8 P10 P11, S1 S2 S3/S4 (UI skeleton + db detail, keys, create/delete in flight), S5 S6 S7 (password reset API + screens), S8 (Stripe checkout/portal, account deletion, hourly metrics), O1 O2 (policy + lint) O3 O6 O7 (pinned actions, report-only scan) O8, CI sharding (~25 min wall).
 In review: P3 BrowserChannel (#57), UI slice 05 (#56).
-Open: UI slices 09-17, P5 (PartitionQuery/vector/TTL, deferred), agent-mode SUM/AVG, customer-DB migrator `ignore_missing`, X13 lows, audit #64/#66-71.
+Open: UI slices 09-17, P5 (vector/TTL, deferred; PartitionQuery done), agent-mode SUM/AVG, customer-DB migrator `ignore_missing`, X13 lows, audit #64/#66-71.
 Needs the owner: Stripe Pro product tax code (test + live), first git tag, ghcr visibility, ToS/privacy/support pages, hosting topology + load test + SLO (O4/O5), Free-plan project-count rule.
 
 ## Path to launch
@@ -93,7 +93,7 @@ Needs the owner: Stripe Pro product tax code (test + live), first git tag, ghcr 
 
 **GA / self-serve paying** adds: P2 (full multiplexed Listen), P3, P4–P6; S1–S4 (bootstrap, UI wiring slices 1–6, serve SPA); Stripe Checkout; password reset; migration policy (O2); hosting topology + load test + SLO (O4/O5).
 
-**Defer:** SSO, hourly metrics, self-service account deletion (handle manually), `dsn-single-store` beyond the SSRF stopgap, vector search/PartitionQuery/TTL unless a customer needs them.
+**Defer:** SSO, hourly metrics, self-service account deletion (handle manually), `dsn-single-store` beyond the SSRF stopgap, vector search/TTL unless a customer needs them.
 
 ## Suggested delivery order
 0. X1, X3, X4, X6 (security; X3 is a small change) →

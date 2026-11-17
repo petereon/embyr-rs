@@ -889,7 +889,7 @@ impl BackendAdapter for PostgresBackendAdapter {
         use sqlx::QueryBuilder;
         use crate::encoding::query::{
             append_filter, order_by_expr, order_by_presence_predicate,
-            push_all_descendants_predicate, push_scalar_comparison,
+            push_all_descendants_predicate,
         };
 
         let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
@@ -951,7 +951,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                 // Boolean/Timestamp/Bytes/Reference. Array/Map/Null are
                 // rejected upstream in handler.rs before reaching here.
                 qb.push(" AND ");
-                push_scalar_comparison(&mut qb, &ob.field_path, op, &cursor.values[0]);
+                push_cursor_bound(&mut qb, &ob.field_path, op, &cursor.values[0])?;
             }
         }
 
@@ -970,7 +970,7 @@ impl BackendAdapter for PostgresBackendAdapter {
                 // finding #44 (timestamp-cursor-pagination): see the
                 // startAt/startAfter block above — identical reasoning.
                 qb.push(" AND ");
-                push_scalar_comparison(&mut qb, &ob.field_path, op, &cursor.values[0]);
+                push_cursor_bound(&mut qb, &ob.field_path, op, &cursor.values[0])?;
             }
         }
 
@@ -1589,6 +1589,28 @@ impl BackendAdapter for PostgresBackendAdapter {
         }
         Ok(())
     }
+}
+
+/// Push one cursor bound: `__name__` compares the document name
+/// (partition-query), every other field its typed value.
+fn push_cursor_bound(
+    qb: &mut sqlx::QueryBuilder<sqlx::Postgres>,
+    field_path: &str,
+    op: &str,
+    value: &FieldValue,
+) -> Result<(), CoreError> {
+    use crate::encoding::query::{push_name_comparison, push_scalar_comparison};
+    if field_path == "__name__" {
+        return match value {
+            FieldValue::Reference(r) => push_name_comparison(qb, op, r),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            CoreError::InvalidArgument("a __name__ cursor must be a document reference".into())
+        });
+    }
+    push_scalar_comparison(qb, field_path, op, value);
+    Ok(())
 }
 
 /// Resolve the SQL comparison operator for a cursor bound

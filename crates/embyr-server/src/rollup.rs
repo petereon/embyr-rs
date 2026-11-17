@@ -67,7 +67,9 @@ pub fn op_for_method(method: &str) -> Option<Op> {
         | obs::METHOD_COMMIT
         | obs::METHOD_BATCH_WRITE => Some(Op::Write),
         obs::METHOD_DELETE_DOCUMENT => Some(Op::Delete),
-        obs::METHOD_RUN_QUERY | obs::METHOD_RUN_AGGREGATION_QUERY => Some(Op::RunQuery),
+        obs::METHOD_RUN_QUERY
+        | obs::METHOD_RUN_AGGREGATION_QUERY
+        | obs::METHOD_PARTITION_QUERY => Some(Op::RunQuery),
         _ => None,
     }
 }

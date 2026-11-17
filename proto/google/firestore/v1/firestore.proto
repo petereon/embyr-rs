@@ -60,6 +60,11 @@ service Firestore {
   // Runs an aggregation query.
   rpc RunAggregationQuery(RunAggregationQueryRequest) returns (stream RunAggregationQueryResponse);
 
+  // Partitions a query by returning partition cursors that can be used to run
+  // the query in parallel. The returned partition cursors are split points that
+  // can be used by RunQuery as starting/end points for the query results.
+  rpc PartitionQuery(PartitionQueryRequest) returns (PartitionQueryResponse);
+
   // Listens to changes. This method is only available via gRPC or WebChannel
   // (not REST).
   rpc Listen(stream ListenRequest) returns (stream ListenResponse);
@@ -236,6 +241,47 @@ message RunQueryRequest {
     // Reads documents as they were at the given time.
     google.protobuf.Timestamp read_time = 7;
   }
+}
+
+// The request for [Firestore.PartitionQuery][google.firestore.v1.Firestore.PartitionQuery].
+message PartitionQueryRequest {
+  // Required. The parent resource name.
+  string parent = 1;
+
+  oneof query_type {
+    // A structured query. Query must specify collection with all descendants
+    // and be ordered by name ascending.
+    StructuredQuery structured_query = 2;
+  }
+
+  // The desired maximum number of partition points. The partitions may be
+  // returned across multiple pages of results. The number must be positive.
+  int64 partition_count = 3;
+
+  // The `next_page_token` value returned from a previous call to
+  // PartitionQuery that may be used to get an additional set of results.
+  string page_token = 4;
+
+  // The maximum number of partitions to return in this call, subject to
+  // `partition_count`.
+  int32 page_size = 5;
+
+  oneof consistency_selector {
+    // Reads documents as they were at the given time.
+    google.protobuf.Timestamp read_time = 6;
+  }
+}
+
+// The response for [Firestore.PartitionQuery][google.firestore.v1.Firestore.PartitionQuery].
+message PartitionQueryResponse {
+  // Partition results. Each partition is a split point that can be used by
+  // RunQuery as a starting or end point for the query results.
+  repeated Cursor partitions = 1;
+
+  // A page token that may be used to request an additional set of results, up
+  // to the number specified by `partition_count` in the PartitionQuery request.
+  // If blank, there are no more results.
+  string next_page_token = 2;
 }
 
 // The response for [Firestore.RunQuery][google.firestore.v1.Firestore.RunQuery].

@@ -33,11 +33,13 @@ use embyr_proto::firestore::{
     CreateDocumentRequest, DeleteDocumentRequest, Document, GetDocumentRequest,
     ListCollectionIdsRequest, ListCollectionIdsResponse,
     ListDocumentsRequest, ListDocumentsResponse, ListenRequest,
-    ListenResponse, RollbackRequest, RunAggregationQueryRequest, RunAggregationQueryResponse,
+    ListenResponse, PartitionQueryRequest, PartitionQueryResponse, RollbackRequest,
+    RunAggregationQueryRequest, RunAggregationQueryResponse,
     RunQueryRequest, RunQueryResponse, UpdateDocumentRequest, WriteRequest, WriteResponse,
     batch_get_documents_request::ConsistencySelector as BatchGetConsistencySelector,
     get_document_request::ConsistencySelector as GetDocConsistencySelector,
     run_aggregation_query_request::QueryType as AggregationQueryType,
+    partition_query_request::QueryType as PartitionQueryType,
     run_query_request::{ConsistencySelector as RunQueryConsistencySelector, QueryType},
     structured_aggregation_query::{aggregation::Operator as AggregationOperator, QueryType as StructuredAggQueryType},
     structured_query::{
@@ -3367,51 +3369,18 @@ impl FirestoreService {
         Ok(response)
     }
 
-    async fn handle_run_query(
+    /// Translate a proto `StructuredQuery` and apply every gate `RunQuery`
+    /// applies before reading: security-rule compliance (exact, group and
+    /// pattern rules) and the composite-index check. Shared by `RunQuery` and
+    /// `PartitionQuery` so a partitioned query is admitted iff the same query
+    /// run directly would be.
+    async fn prepare_gated_query(
         &self,
-        request: Request<RunQueryRequest>,
-    ) -> Result<Response<tonic::codegen::BoxStream<RunQueryResponse>>, Status> {
-        let req = request.get_ref();
-
-        // Extract project_id from parent: "projects/{pid}/databases/(default)/documents"
-        let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
-        let api_key = Self::extract_api_key(&request)?;
-
-        // firestore-transaction-read-consistency (Slice 02, AC-TRC-06/08): a
-        // `transaction` consistency-selector registers every document THIS
-        // query returns in that transaction's own read set, re-validated at
-        // `Commit`. `ReadTime` is out of scope (§ Out of Scope) — unset,
-        // unread, unaffected. Mirrors `handle_get_document`'s own Slice 01
-        // wiring exactly.
-        let txn_id = match req.consistency_selector {
-            Some(RunQueryConsistencySelector::Transaction(ref bytes)) => {
-                Some(embyr_core::domain::transaction::TransactionId(bytes.clone()))
-            }
-            _ => None,
-        };
-
-        let ((adapter, status_str, _dsn), rate_info) = self
-            .authenticate_and_rate_limit(&project_id_str, &api_key)
-            .await?;
-        if status_str == "suspended" {
-            return Err(Status::permission_denied("project is suspended"));
-        }
-
-        // security-rules-query-path (ADR-031 § Decision — Composition, step
-        // 1): identical call shape to `handle_get_document`'s own
-        // `attach_client_identity_if_present` placement — the function
-        // itself is unchanged, this is a new consumer of its existing
-        // return value.
-        let verified_identity = self
-            .attach_client_identity_if_present(&request, &project_id_str)
-            .await;
-
-        // Extract the structured query from the request
-        let sq_proto = match &req.query_type {
-            Some(QueryType::StructuredQuery(sq)) => sq,
-            None => return Err(Status::invalid_argument("query_type is required")),
-        };
-
+        parent: &str,
+        sq_proto: &embyr_proto::firestore::StructuredQuery,
+        project_id_str: &str,
+        verified_identity: &Option<embyr_core::client_identity::VerifiedEndUserIdentity>,
+    ) -> Result<(CollectionPath, StructuredQuery), Status> {
         // Parse collection from from[0]
         let collection_id = sq_proto
             .from
@@ -3462,7 +3431,7 @@ impl FirestoreService {
         let start_at = translate_cursor("start_at", sq_proto.start_at.as_ref())?;
         let end_at = translate_cursor("end_at", sq_proto.end_at.as_ref())?;
 
-        let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
+        let project_id = embyr_core::domain::project::ProjectId::new(project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         // A single-collection query is scoped to the parent's own
@@ -3476,7 +3445,7 @@ impl FirestoreService {
             collection_path: if all_descendants {
                 collection_id.clone()
             } else {
-                Self::collection_path_under_parent(&req.parent, &collection_id)?
+                Self::collection_path_under_parent(parent, &collection_id)?
             },
         };
 
@@ -3504,7 +3473,7 @@ impl FirestoreService {
             // structural (not conventional) mechanism behind AC-17-89/90/91.
             let group_rule_row = self
                 .system_db
-                .get_group_access_rule(&project_id_str, &collection.collection_path)
+                .get_group_access_rule(project_id_str, &collection.collection_path)
                 .await
                 .map_err(|e| sanitize_backend_error(e, "run_query: get_group_access_rule (collection group)"))?;
 
@@ -3553,7 +3522,7 @@ impl FirestoreService {
             // collection-group-rules code path (AC-17-90 regression proof).
             let rule_row = self
                 .system_db
-                .get_access_rule(&project_id_str, &collection.collection_path)
+                .get_access_rule(project_id_str, &collection.collection_path)
                 .await
                 .map_err(|e| sanitize_backend_error(e, "run_query: get_access_rule (collection group)"))?;
 
@@ -3591,7 +3560,7 @@ impl FirestoreService {
                 // No EXACT-MATCH rule: pattern rules gate the query too.
                 Self::check_pattern_query_compliance(
                     &self.system_db,
-                    &project_id_str,
+                    project_id_str,
                     &collection.collection_path,
                     domain_query.filter.as_ref(),
                     verified_identity.as_ref(),
@@ -3608,7 +3577,7 @@ impl FirestoreService {
                 .index_manager
                 // Keyed by the bare collection id (unchanged): composite
                 // indexes are registered per collection id, not per parent.
-                .is_index_ready(&project_id_str, &collection_id)
+                .is_index_ready(project_id_str, &collection_id)
                 .await
         {
             // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
@@ -3628,6 +3597,184 @@ impl FirestoreService {
                 collection_id, fields_json
             )));
         }
+
+        Ok((collection, domain_query))
+    }
+
+    /// `PartitionQuery`: split points for running a query in parallel.
+    ///
+    /// Gating is `prepare_gated_query` (the same one `RunQuery` uses), so the
+    /// caller needs the same read access and index as for the query itself.
+    /// Names are scanned in memory (cap `MAX_PARTITION_SCAN_DOCS`) and cut
+    /// into `partition_count` runs; each cursor is a `__name__` reference with
+    /// `before = true` (`startAt`). `page_token` is a stateless offset into
+    /// that recomputed list, so concurrent writes between pages can shift it.
+    /// `read_time` is ignored, as in `RunQuery`.
+    async fn handle_partition_query(
+        &self,
+        request: Request<PartitionQueryRequest>,
+    ) -> Result<Response<PartitionQueryResponse>, Status> {
+        let req = request.get_ref();
+        let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        let ((adapter, status_str, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
+        if status_str == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
+        if req.partition_count < 1 {
+            return Err(Status::invalid_argument("partition_count must be positive"));
+        }
+        if req.page_size < 0 {
+            return Err(Status::invalid_argument("page_size must not be negative"));
+        }
+        let offset = embyr_core::pagination::decode_page_token(&req.page_token)
+            .map_err(core_error_to_status)? as usize;
+
+        let Some(PartitionQueryType::StructuredQuery(sq)) = &req.query_type else {
+            return Err(Status::invalid_argument("query_type is required"));
+        };
+        // Real Firestore partitions the whole result set by name: no bounds,
+        // limit or other ordering.
+        let by_name_asc = |o: &embyr_proto::firestore::structured_query::Order| {
+            o.field.as_ref().is_some_and(|f| f.field_path == "__name__")
+                && Direction::try_from(o.direction).unwrap_or(Direction::Unspecified)
+                    != Direction::Descending
+        };
+        if sq.limit.is_some()
+            || sq.offset != 0
+            || sq.start_at.is_some()
+            || sq.end_at.is_some()
+            || !sq.order_by.iter().all(by_name_asc)
+            || sq.order_by.len() > 1
+        {
+            return Err(Status::invalid_argument(
+                "PartitionQuery supports only a filter, ordered by __name__ ascending, \
+                 without limit, offset or cursors",
+            ));
+        }
+        let mut sq = sq.clone();
+        if sq.order_by.is_empty() {
+            sq.order_by.push(embyr_proto::firestore::structured_query::Order {
+                field: Some(embyr_proto::firestore::structured_query::FieldReference {
+                    field_path: "__name__".to_string(),
+                }),
+                direction: Direction::Ascending as i32,
+            });
+        }
+
+        let (collection, scan_query) = self
+            .prepare_gated_query(&req.parent, &sq, &project_id_str, &verified_identity)
+            .await?;
+
+        let max = crate::grpc::partition::MAX_PARTITION_SCAN_DOCS;
+        let splits = if req.partition_count == 1 {
+            Vec::new()
+        } else {
+            let docs = adapter
+                .run_query(
+                    &collection,
+                    &StructuredQuery { limit: Some(max as i32 + 1), ..scan_query },
+                    None,
+                )
+                .await
+                .map_err(core_error_to_status)?;
+            if docs.len() > max {
+                return Err(Status::failed_precondition(format!(
+                    "query matches more than {max} documents; PartitionQuery cannot partition it"
+                )));
+            }
+            let names = docs
+                .into_iter()
+                .map(|d| (d.path.collection_path, d.path.document_id))
+                .collect();
+            crate::grpc::partition::split_points(
+                names,
+                usize::try_from(req.partition_count).unwrap_or(usize::MAX),
+            )
+        };
+
+        let page_size = if req.page_size == 0 { usize::MAX } else { req.page_size as usize };
+        let end = offset.saturating_add(page_size).min(splits.len());
+        let next_page_token = if end < splits.len() {
+            embyr_core::pagination::encode_page_token(end as u32)
+        } else {
+            String::new()
+        };
+        // `parent` is `.../documents[/...]`; cursor values are full names under that root.
+        let root = req
+            .parent
+            .find("/documents")
+            .map_or(req.parent.as_str(), |i| &req.parent[..i + "/documents".len()]);
+        let partitions = splits[offset.min(end)..end]
+            .iter()
+            .map(|(collection_path, document_id)| embyr_proto::firestore::Cursor {
+                values: vec![field_value_to_proto(&FieldValue::Reference(format!(
+                    "{root}/{collection_path}/{document_id}"
+                )))],
+                before: true,
+            })
+            .collect();
+
+        let mut response = Response::new(PartitionQueryResponse { partitions, next_page_token });
+        Self::attach_rate_limit_headers(response.metadata_mut(), &rate_info);
+        Ok(response)
+    }
+
+    async fn handle_run_query(
+        &self,
+        request: Request<RunQueryRequest>,
+    ) -> Result<Response<tonic::codegen::BoxStream<RunQueryResponse>>, Status> {
+        let req = request.get_ref();
+
+        // Extract project_id from parent: "projects/{pid}/databases/(default)/documents"
+        let project_id_str = Self::extract_project_id(&req.parent)?.to_string();
+        let api_key = Self::extract_api_key(&request)?;
+
+        // firestore-transaction-read-consistency (Slice 02, AC-TRC-06/08): a
+        // `transaction` consistency-selector registers every document THIS
+        // query returns in that transaction's own read set, re-validated at
+        // `Commit`. `ReadTime` is out of scope (§ Out of Scope) — unset,
+        // unread, unaffected. Mirrors `handle_get_document`'s own Slice 01
+        // wiring exactly.
+        let txn_id = match req.consistency_selector {
+            Some(RunQueryConsistencySelector::Transaction(ref bytes)) => {
+                Some(embyr_core::domain::transaction::TransactionId(bytes.clone()))
+            }
+            _ => None,
+        };
+
+        let ((adapter, status_str, _dsn), rate_info) = self
+            .authenticate_and_rate_limit(&project_id_str, &api_key)
+            .await?;
+        if status_str == "suspended" {
+            return Err(Status::permission_denied("project is suspended"));
+        }
+
+        // security-rules-query-path (ADR-031 § Decision — Composition, step
+        // 1): identical call shape to `handle_get_document`'s own
+        // `attach_client_identity_if_present` placement — the function
+        // itself is unchanged, this is a new consumer of its existing
+        // return value.
+        let verified_identity = self
+            .attach_client_identity_if_present(&request, &project_id_str)
+            .await;
+
+        // Extract the structured query from the request
+        let sq_proto = match &req.query_type {
+            Some(QueryType::StructuredQuery(sq)) => sq,
+            None => return Err(Status::invalid_argument("query_type is required")),
+        };
+
+        let (collection, domain_query) = self
+            .prepare_gated_query(&req.parent, sq_proto, &project_id_str, &verified_identity)
+            .await?;
 
         let docs = adapter
             .run_query(&collection, &domain_query, txn_id.as_ref())
@@ -4332,6 +4479,21 @@ impl Firestore for FirestoreService {
             &result,
             obs_start,
         );
+        result
+    }
+
+    async fn partition_query(
+        &self,
+        request: Request<PartitionQueryRequest>,
+    ) -> Result<Response<PartitionQueryResponse>, Status> {
+        let obs_start = std::time::Instant::now();
+        let result = crate::rollup::observe(
+            self.system_db.rollup(),
+            obs_helpers::METHOD_PARTITION_QUERY,
+            self.handle_partition_query(request),
+        )
+        .await;
+        obs_helpers::record_grpc_call(obs_helpers::METHOD_PARTITION_QUERY, &result, obs_start);
         result
     }
 

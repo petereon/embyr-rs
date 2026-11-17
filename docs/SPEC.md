@@ -679,6 +679,21 @@ Each item in the stream is one of:
 
 A `from` clause with `all_descendants: true` performs a collection group query across all nested collections with the given name. A `from` clause with multiple selectors returns `Unimplemented`.
 
+#### PartitionQuery
+
+**Inputs**: `parent` (required), `structured_query` (required, `from` as for RunQuery; optional filter; optional `order_by` of exactly `__name__` ascending), `partition_count` (required, >= 1), `page_size` (optional, 0 = all), `page_token` (optional)
+**Outputs**: unary `PartitionQueryResponse{partitions: [Cursor], next_page_token}` (unary, as in Firestore)
+
+Returns up to `partition_count - 1` split points as `Cursor{values: [reference_value], before: true}` on `__name__`, ascending. Running the same query with `startAt(split_k)` / `endBefore(split_k+1)` (first run without a start bound, last without an end bound) yields disjoint runs whose concatenation is the whole result. `partition_count == 1` returns no cursors; asking for more partitions than there are documents returns one split per document after the first.
+
+Admission is identical to RunQuery: same authentication, rate limiting, security-rule compliance (exact, group and pattern rules, read access to the whole query) and composite-index check (shared `prepare_gated_query`).
+
+`__name__` order is `(collection_path, document_id)` bytewise, also used by `ORDER BY __name__` and `__name__` cursors on RunQuery.
+
+**Errors**: `InvalidArgument` (`partition_count` < 1, negative `page_size`, bad `page_token`, a limit/offset/cursor or an `order_by` other than `__name__` ascending on the query), `FailedPrecondition` (query needs a composite index; or matches more than 50,000 documents), `PermissionDenied` (rules).
+
+**Limits**: the matching document names are scanned in memory, capped at `MAX_PARTITION_SCAN_DOCS` (50,000); a larger result is rejected rather than partitioned from a truncated scan. `page_token` is a stateless offset into the recomputed split list, so writes between pages can shift it. `read_time` is ignored (as in RunQuery). In `backend_mode=agent` the agent does not order or apply cursors, so partition cursors are computed (the scan is sorted server-side) but RunQuery cannot honour `__name__` bounds there.
+
 #### RunAggregationQuery
 
 **Inputs**: `parent` (required), `structured_aggregation_query` (required)
