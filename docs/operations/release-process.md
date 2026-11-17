@@ -93,10 +93,10 @@ Rollback is **redeploying a previous immutable image** — no checkout, no rebui
 3. Confirm: the startup log line (below) shows the expected version and `GET :8081/healthz`
    returns 200.
 4. Migrations are not rolled back by this procedure. If the regressed release shipped a
-   migration, check that the older binary tolerates the newer schema before rolling back;
-   otherwise follow `backup-disaster-recovery.md`. See `migration-policy.md` (expand/contract
-   rule, and the known gap that an older binary currently refuses to start on a schema with
-   migrations it does not embed).
+   migration, check that the older binary tolerates the newer schema before rolling back
+   (the migrators ignore applied-but-unknown migrations, so it boots; the expand/contract rule
+   is what keeps it working); otherwise follow `backup-disaster-recovery.md`. See
+   `migration-policy.md`.
 5. Read the regressed version's `CHANGELOG.md` entry to narrow root-cause analysis before
    re-attempting the release.
 
