@@ -5,6 +5,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use embyr_core::{
+    admin::account::Role,
     auth::argon2,
     domain::{project::ProjectId, schema_readiness::SchemaReadiness},
 };
@@ -18,11 +19,18 @@ use crate::adapters::{
     gcp_secret_fetcher::GcpSecretError,
     postgres_backend::PostgresBackendAdapter,
 };
-use crate::admin::state::OperatorState;
+use crate::admin::extractors::dual_auth_principal::AuthPrincipal;
+use crate::admin::handlers::shared::account_on_billing_hold;
+use crate::admin::state::UserAdminState;
+use uuid::Uuid;
 
 #[derive(Deserialize)]
 pub struct ProvisionRequest {
     pub project_id: String,
+    /// Optional display name (1-100 chars after trimming). `account_id` is never
+    /// read from the body: a session caller's project belongs to the session's account.
+    #[serde(default)]
+    pub name: Option<String>,
     /// Customer DB DSN — required for backend_mode=direct_pg, absent for backend_mode=agent.
     #[serde(default)]
     pub dsn: Option<String>,
@@ -179,11 +187,48 @@ pub(crate) fn generate_api_key() -> String {
     URL_SAFE_NO_PAD.encode(key_bytes)
 }
 
+/// POST /admin/v1/projects -- dual-auth (operator Bearer OR session cookie).
+///
+/// Operator: unscoped, the project gets no `account_id` (unchanged).
+/// Session: Owner/Admin only; the project is created under the caller's account
+/// (`account_id` comes from the session, never the body) and is refused while
+/// the account is on a billing hold (`past_due` / `free_cap_exceeded`).
+/// There is no project-count cap in the codebase: the Free-plan cap is
+/// usage-based and already surfaces as that billing hold.
 pub async fn provision(
-    State(state): State<OperatorState>,
+    State(state): State<UserAdminState>,
+    principal: AuthPrincipal,
     Json(req): Json<ProvisionRequest>,
 ) -> ApiResult<(StatusCode, Json<ProvisionResponse>)> {
-    // Auth is enforced by operator_auth_middleware applied at the router layer.
+    let account_id = match principal {
+        AuthPrincipal::Operator => None,
+        AuthPrincipal::User { account_id, role, .. } => {
+            if role < Role::Admin {
+                return Err(err(StatusCode::FORBIDDEN, "forbidden"));
+            }
+            if account_on_billing_hold(state.system_db.pool(), account_id)
+                .await
+                .map_err(|c| err(c, "billing_hold_check_failed"))?
+            {
+                return Err(err(StatusCode::CONFLICT, "account_billing_hold"));
+            }
+            Some(account_id)
+        }
+    };
+    provision_core(&state, req, account_id).await
+}
+
+/// Shared provisioning core for the operator and session callers.
+async fn provision_core(
+    state: &UserAdminState,
+    req: ProvisionRequest,
+    account_id: Option<Uuid>,
+) -> ApiResult<(StatusCode, Json<ProvisionResponse>)> {
+    let name: Option<String> = match req.name.as_deref().map(str::trim) {
+        None => None,
+        Some(n) if (1..=100).contains(&n.chars().count()) => Some(n.to_string()),
+        Some(_) => return Err(err(StatusCode::BAD_REQUEST, "invalid_name")),
+    };
 
     // Validate project_id using the domain rule (same regex as ProjectId::new).
     if ProjectId::new(&req.project_id).is_err() {
@@ -249,12 +294,14 @@ pub async fn provision(
 
         sqlx::query(
             "INSERT INTO projects \
-             (id, status, backend_mode, api_key_hash_current, backend_secret_arn) \
-             VALUES ($1, 'active', 'aws_secret', $2, $3)",
+             (id, status, backend_mode, api_key_hash_current, backend_secret_arn, account_id, name) \
+             VALUES ($1, 'active', 'aws_secret', $2, $3, $4, $5)",
         )
         .bind(&req.project_id)
         .bind(&hash)
         .bind(arn)
+        .bind(account_id)
+        .bind(&name)
         .execute(&mut *tx)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -301,12 +348,14 @@ pub async fn provision(
 
         sqlx::query(
             "INSERT INTO projects \
-             (id, status, backend_mode, api_key_hash_current, backend_secret_gcp) \
-             VALUES ($1, 'active', 'gcp_secret', $2, $3)",
+             (id, status, backend_mode, api_key_hash_current, backend_secret_gcp, account_id, name) \
+             VALUES ($1, 'active', 'gcp_secret', $2, $3, $4, $5)",
         )
         .bind(&req.project_id)
         .bind(&hash)
         .bind(resource_name)
+        .bind(account_id)
+        .bind(&name)
         .execute(&mut *tx)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -359,13 +408,15 @@ pub async fn provision(
         sqlx::query(
             "INSERT INTO projects \
              (id, status, backend_mode, api_key_hash_current, \
-              backend_agent_endpoint, agent_tls_bundle_srv_enc) \
-             VALUES ($1, 'active', 'agent', $2, $3, $4)",
+              backend_agent_endpoint, agent_tls_bundle_srv_enc, account_id, name) \
+             VALUES ($1, 'active', 'agent', $2, $3, $4, $5, $6)",
         )
         .bind(&req.project_id)
         .bind(&hash)
         .bind(endpoint)
         .bind(&encrypted_bundle)
+        .bind(account_id)
+        .bind(&name)
         .execute(&mut *tx)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -410,13 +461,15 @@ pub async fn provision(
 
         sqlx::query(
             "INSERT INTO projects \
-             (id, status, backend_mode, api_key_hash_current, backend_pg_dsn_enc) \
-             VALUES ($1, 'active', $2, $3, $4)",
+             (id, status, backend_mode, api_key_hash_current, backend_pg_dsn_enc, account_id, name) \
+             VALUES ($1, 'active', $2, $3, $4, $5, $6)",
         )
         .bind(&req.project_id)
         .bind(&req.backend_mode)
         .bind(&hash)
         .bind(&encrypted_dsn)
+        .bind(account_id)
+        .bind(&name)
         .execute(&mut *tx)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;

@@ -96,6 +96,11 @@ pub struct UserAdminState {
     /// `EMBYR_API_KEY_ROTATION_WINDOW_SECS` (ADR-085): how long a rotated-out project API key
     /// keeps authenticating.
     pub api_key_rotation_window_secs: u32,
+    /// Session-authed `POST /projects` shares the provisioning core with the operator
+    /// route: connection secrets are encrypted under the server key and each new project
+    /// starts with a full `rate_buckets` row.
+    pub server_keys: crate::adapters::connection_secrets::ServerKeys,
+    pub rate_limit_capacity: f64,
 }
 
 /// State for the Stripe webhook sub-router (US-203). No session/operator

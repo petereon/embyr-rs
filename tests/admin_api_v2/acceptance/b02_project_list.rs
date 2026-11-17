@@ -306,13 +306,12 @@ async fn operator_bearer_route_must_reject_session_cookie_auth() {
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_and_get_cookie(&ctx).await;
 
-    // Send session cookie to the operator-only provision route (POST /admin/v1/projects).
-    // The operator route must not accept session cookies — only Bearer EMBYR_ADMIN_KEY.
+    // Send session cookie to an operator-only route (POST .../suspend). (POST /projects itself is
+    // dual-auth since admin-ui-api-wiring slice 05.) Only Bearer EMBYR_ADMIN_KEY is accepted.
     let resp = ctx
         .client
-        .post(ctx.url("/admin/v1/projects"))
+        .post(ctx.url("/admin/v1/projects/wont-reach-handler/suspend"))
         .header("Cookie", &session_cookie)
-        .json(&serde_json::json!({"project_id": "wont-reach-handler", "backend_mode": "direct_pg"}))
         .send()
         .await
         .expect("request failed");
