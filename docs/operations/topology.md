@@ -65,31 +65,30 @@ never behind the public LB (`network-topology.md` §2).
   **(code)**; keep LB body limits at least that large and idle timeouts above the BrowserChannel
   long-poll and gRPC keepalive intervals (**guess**: >= 120 s).
 
-### BrowserChannel stickiness: the documented recipe does not work
+### BrowserChannel stickiness
 
-`network-topology.md` §3 (and ADR-001) say to route on the `SID` query parameter, e.g. nginx
-`hash $arg_SID consistent`. Reading the implementation shows why that cannot work with more than
-one replica **(code, `rest/browser_channel.rs`)**:
+Routing on the `SID` query parameter (nginx `hash $arg_SID consistent`) cannot work with more
+than one replica **(code, `rest/browser_channel.rs`)**: the handshake request carries no `SID`;
+the replica that handles it mints a random UUID, keeps the session in its own memory and returns
+the `SID` in the body, so a hash of it picks an unrelated replica. A misrouted request already
+gets `400 Unknown SID`, which the web SDK treats as "session gone" and answers by recreating the
+stream, so the failure mode is degraded reconnects, not a hang.
 
-- The first request (handshake) carries **no `SID`**. The replica that handles it generates a
-  random UUID `SID`, stores the session in its own memory, and returns the `SID` in the body.
-- Every later request carries that `SID`. A hash of the `SID` picks a replica unrelated to the
-  one that created the session, so with N > 1 most follow-ups land on a replica that answers
-  `400 Unknown SID`; the SDK reconnects and the cycle repeats.
+A server-set affinity cookie was evaluated and **not** built: the SDK sends cookies cross-origin
+only with `withCredentials`, which needs `Access-Control-Allow-Credentials` with an exact origin
+(currently off) and `SameSite=None` cookies are blocked in third-party contexts.
 
-Options **(decide)**, cheapest first:
-1. **Route the BrowserChannel paths to a single dedicated replica.** Path-route
-   `/google.firestore.v1.Firestore/Listen/channel` and `/google.firestore.v1.Firestore/Write/channel`
-   to a one-replica target group. Trivial, no code change, a known SPOF and ceiling for web
-   realtime; fine for a beta.
-2. **LB-inserted cookie stickiness** (HAProxy `cookie ... insert`, Envoy stateful session, nginx
-   `sticky`) on those two paths. Works only if the web SDK sends cookies on those requests
-   (cross-origin XHR does not by default). Test with the real SDK before relying on it.
-3. **Make the `SID` routable** (code change: prefix the `SID` with a per-replica tag, route on the
-   prefix with `map`/Envoy `hash_policy`). The correct fix; not built.
+Options **(decide)**, cheapest first (full detail in `network-topology.md` section 3):
+1. **Route the two BrowserChannel paths to one dedicated replica**
+   (`/google.firestore.v1.Firestore/Listen/channel`, `.../Write/channel`). No code change; a
+   known SPOF and ceiling for web realtime; fine for a beta.
+2. **LB-inserted cookie stickiness** on those paths (same-origin deployments only; test with the
+   real SDK).
+3. **Accept degraded reconnects** with N > 1 replicas.
+4. **Routable `SID`** (prefix with a per-replica tag, route on the prefix): the proper fix, not
+   built.
 
-Also note the `:9090`/native-gRPC paths are unaffected; this only concerns the browser fallback
-transport (go-live finding P3, BrowserChannel, was in review when this was written).
+Native gRPC and `:9090` are unaffected; this only concerns the browser fallback transport.
 
 ## 3. Postgres
 
@@ -217,32 +216,32 @@ IP, N keys on the Nth entry from the right of `X-Forwarded-For`.
 What the process does on SIGTERM/Ctrl-C **(code, `main.rs`, `lib.rs`, `grpc/healthz.rs`)**:
 
 1. `/healthz` flips to 503 `{"status":"draining"}` immediately.
-2. **At the same instant** it stops accepting new connections on all three listeners and asks
-   open HTTP/1 and HTTP/2 connections to finish (graceful shutdown).
-3. It waits up to `EMBYR_SHUTDOWN_GRACE_SECS` (default 25) for in-flight requests; long-lived
+2. After `EMBYR_SHUTDOWN_DELAY_SECS` (default 0 = immediately; valid 0-300) it stops accepting
+   new connections on all three listeners and asks open HTTP/1 and HTTP/2 connections to finish
+   (graceful shutdown). During the delay the process keeps serving while `/healthz` already
+   reports draining.
+3. It waits up to `EMBYR_SHUTDOWN_GRACE_SECS` (default 25, counted from the end of the delay) for in-flight requests; long-lived
    gRPC `Listen` streams and BrowserChannel sessions never finish on their own and are cut at the
    deadline or at exit. Clients reconnect (SDKs handle it).
 4. It flushes buffered metric rollups and exits.
 
-Consequence: because step 2 does not wait for the LB to notice step 1, a health-check-driven
-deregistration sends new requests to a closed port for roughly
-`health_check_interval x unhealthy_threshold` seconds. Close that gap on the platform side, so
-the LB stops routing **before** SIGTERM:
+With the default delay of 0, step 2 does not wait for the LB to notice step 1, so a
+health-check-driven deregistration sends new requests to a closed port for roughly
+`health_check_interval x unhealthy_threshold` seconds. Close that gap with
+`EMBYR_SHUTDOWN_DELAY_SECS` (set it at least that long) and/or a platform `preStop` sleep:
 
 | Setting | Recommended (guess) | Why |
 |---|---|---|
-| Kubernetes `preStop` | `sleep 15` (the runtime image is `debian:bookworm-slim`, `sleep` exists) | endpoint removal and LB deregistration propagate before SIGTERM |
-| `terminationGracePeriodSeconds` | `>= preStop + EMBYR_SHUTDOWN_GRACE_SECS + 5` = 45 | otherwise SIGKILL cuts the drain |
-| `EMBYR_SHUTDOWN_GRACE_SECS` | 25 (default) | leaves the margin above inside a 45 s window |
+| `EMBYR_SHUTDOWN_DELAY_SECS` | 10 | `>=` LB health-check interval x unhealthy threshold; keeps serving until the LB has stopped routing |
+| Kubernetes `preStop` | optional once the delay above is set (`sleep 15` is the platform-side alternative; the runtime image is `debian:bookworm-slim`, `sleep` exists) | endpoint removal and LB deregistration propagate before SIGTERM |
+| `terminationGracePeriodSeconds` | `>= EMBYR_SHUTDOWN_DELAY_SECS + EMBYR_SHUTDOWN_GRACE_SECS + 5` = 40 (add preStop if used) | otherwise SIGKILL cuts the drain |
+| `EMBYR_SHUTDOWN_GRACE_SECS` | 25 (default) | leaves the margin above inside a 40 s window |
 | Readiness probe | `GET :8081/healthz`, period 5 s, failure 2 | |
 | Liveness probe | `GET :8081/livez`, period 10 s, failure 3 | never use `/healthz`: a DB outage would restart every pod |
 | Startup probe | `GET :8081/livez`, period 5 s, failure 30 | migrations run before listeners open; do not let liveness kill a slow migration |
 | ALB/NLB deregistration delay | 30 s | in-flight requests finish; keep < the grace window used above |
 | LB health check | interval 5-10 s, unhealthy threshold 2 | |
 | Rolling update | `maxUnavailable: 0`, `maxSurge: 1`, one replica at a time | migrations take an advisory lock and run on each start; see `migration-policy.md` |
-
-A code-side improvement would remove the platform workaround: delay step 2 by a configurable
-`EMBYR_DRAIN_DELAY_SECS` after step 1. Not built.
 
 ## 8. Secrets and configuration
 
@@ -268,6 +267,7 @@ Per replica: **2 vCPU / 2 GiB** (`resource-sizing.md` "moderate" tier, limit sid
 | `EMBYR_LISTENER_DB_MAX_CONNECTIONS` | 2 (default) | |
 | `EMBYR_RATE_LIMIT_RPS` | per product tier | per **project**, default 1000 |
 | System DB | managed Multi-AZ, >= 2 vCPU / 8 GiB, `max_connections` >= 100 | |
+| `EMBYR_SHUTDOWN_DELAY_SECS` | 10 | see section 7 |
 | `EMBYR_SHUTDOWN_GRACE_SECS` | 25 | see section 7 |
 
 **CPU is dominated by Argon2, and it scales with active API keys, not request rate** (code:
