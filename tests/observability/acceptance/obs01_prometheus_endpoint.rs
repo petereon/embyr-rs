@@ -11,10 +11,8 @@
 //! Driving port: Admin HTTP port (:9090) — reqwest::Client → GET /metrics.
 //! Assertion level: real Postgres container (testcontainers-rs) + in-process axum admin server.
 //!
-//! Implemented 2026-11-13 (formerly `todo!()` scaffolds). One test is kept
-//! `#[ignore]`d as a documented REAL GAP: the product never registers metric
-//! descriptions (`describe_*!`), so the exporter emits `# TYPE` but no `# HELP`
-//! lines — see `docs/product/ignored-test-triage-2026-11-13.md`.
+//! Implemented 2026-11-13 (formerly `todo!()` scaffolds). Metric descriptions
+//! (`describe_*!`, audit #69) are registered in `observability.rs`, so `# HELP` is emitted.
 //!
 //! The data-port check targets the REST port (:8081): the gRPC port is
 //! HTTP/2-only tonic, where a plain GET is not meaningful.
@@ -60,7 +58,6 @@ async fn metrics_endpoint_returns_200_with_prometheus_content_type() {
 ///
 /// @US-OBS-01 @driving_port @real-io @happy
 #[tokio::test]
-#[ignore = "REAL GAP: no describe_*!() calls anywhere, so /metrics has # TYPE but no # HELP lines (AC-OBS-01-01) — see docs/product/ignored-test-triage-2026-11-13.md"]
 async fn metrics_response_contains_help_and_type_lines() {
     let ctx = ObsTestContext::start().await;
 
