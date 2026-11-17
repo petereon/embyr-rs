@@ -1,36 +1,28 @@
-//! SettingsView — OIDC providers + Danger Zone.
+//! SettingsView — read-only account details + Danger Zone.
 //!
 //! Gated behind #[cfg(feature = "csr")].
 //!
-//! AC-011-02: OIDC providers list with enabled Toggle per provider.
-//! AC-011-02: Add OIDC provider form dispatches OidcProviderAdded + PushToast on success.
-//! AC-011-04: Toggle dispatches Msg::ToggleOidc(id).
-//! AC-011-05: Danger Zone section visible only to Owner role.
+//! The account card shows what `GET /auth/session` reports (account, signed-in user, role); it is
+//! all any role can see here. The Danger Zone follows `AppModel::can_delete_account()` (Owner only)
+//! and deletes the account through `DELETE /account`.
 //!
-//! The Danger Zone is live: it follows `AppModel::can_delete_account()` (the signed-in user's role)
-//! and deletes the account through `DELETE /account`. The OIDC section is still the V1 mock
-//! (slice 12) and infers its role from the members list.
+//! There is no sign-in provider section: the OIDC callback is disabled server-side (audit #58), so
+//! configuring providers would configure nothing. It returns with `admin-oidc-sso`.
 
 #[cfg(feature = "csr")]
-use crate::components::primitives::{Modal, Toggle};
+use crate::components::primitives::Modal;
 #[cfg(feature = "csr")]
 use crate::api::{ApiCall, CallKind, SignInCode};
 #[cfg(feature = "csr")]
-use crate::model::{confirms_account_delete, AppModel, OidcId, OidcProvider, Role, Toast, ToastId, ToastLevel};
+use crate::model::{confirms_account_delete, AppModel};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
 use leptos::prelude::*;
-#[cfg(feature = "csr")]
-use uuid::Uuid;
 
 // ── SettingsView ─────────────────────────────────────────────────────────────
 
-/// Account settings page — OIDC providers and Danger Zone.
-///
-/// Reads `model.oidc_providers` for the OIDC list.
-/// Dispatches `Msg::OidcProviderAdded`, `Msg::ToggleOidc`, `Msg::PushToast`.
-/// Danger Zone gated to Owner role.
+/// Account settings page.
 #[cfg(feature = "csr")]
 #[component]
 pub fn SettingsView() -> impl IntoView {
@@ -38,15 +30,36 @@ pub fn SettingsView() -> impl IntoView {
 
     // The Danger Zone follows the signed-in user's real role (the server enforces it too).
     let can_delete_account = move || model.with(|m| m.can_delete_account());
+    let me = move || model.with(|m| m.current_user.clone()).unwrap_or_default();
 
     view! {
         <div class="page">
             <div class="page-head">
                 <h1 class="page-title">"Account Settings"</h1>
-                <p class="page-sub">"Manage account identity, authentication, and security"</p>
+                <p class="page-sub">"Your account and sign-in"</p>
             </div>
 
-            <OidcSection />
+            <div class="card" style="margin-bottom: 18px">
+                <div class="card-head">
+                    <div class="col" style="gap: 2px">
+                        <h3>"Account"</h3>
+                        <span class="sub">"As reported by the server for this session"</span>
+                    </div>
+                </div>
+                <div class="card-pad">
+                    <dl>
+                        <dt>"Account"</dt>
+                        <dd>{move || me().account_name}</dd>
+                        <dt>"Signed in as"</dt>
+                        <dd>{move || {
+                            let u = me();
+                            format!("{} ({})", u.display_name, u.email)
+                        }}</dd>
+                        <dt>"Role"</dt>
+                        <dd>{move || format!("{:?}", me().role)}</dd>
+                    </dl>
+                </div>
+            </div>
 
             <Show when=can_delete_account fallback=|| ()>
                 <DangerZoneSection />
@@ -55,186 +68,6 @@ pub fn SettingsView() -> impl IntoView {
     }
 }
 
-// ── OidcSection ──────────────────────────────────────────────────────────────
-
-/// OIDC providers section.
-///
-/// Owner view: list of providers with Toggle + "Add OIDC Provider" form.
-/// Admin/Viewer view: read-only list (no Toggle, no Add form).
-#[cfg(feature = "csr")]
-#[component]
-fn OidcSection() -> impl IntoView {
-    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
-    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
-
-    // V1 role inference — same as SettingsView.
-    let is_owner =
-        move || model.with(|m| m.members.iter().any(|member| member.role == Role::Owner));
-
-    // Local form state for the Add OIDC Provider form.
-    let form_issuer = RwSignal::new(String::new());
-    let form_client_id = RwSignal::new(String::new());
-    let form_open = RwSignal::new(false);
-
-    let on_add_submit = move |_| {
-        let issuer = form_issuer.get();
-        let client_id = form_client_id.get();
-        if issuer.trim().is_empty() || client_id.trim().is_empty() {
-            return;
-        }
-        let provider = OidcProvider {
-            id: OidcId(Uuid::new_v4()),
-            issuer: issuer.trim().to_string(),
-            client_id: client_id.trim().to_string(),
-            enabled: true,
-        };
-        dispatch.run(Msg::OidcProviderAdded(provider));
-        dispatch.run(Msg::PushToast(Toast {
-            id: ToastId(Uuid::new_v4()),
-            message: "OIDC provider added".to_string(),
-            level: ToastLevel::Info,
-        }));
-        form_open.set(false);
-        form_issuer.set(String::new());
-        form_client_id.set(String::new());
-    };
-
-    view! {
-        <div class="card" style="margin-bottom: 18px">
-            <div class="card-head">
-                <div class="col" style="gap: 2px">
-                    <h3>"OIDC Providers"</h3>
-                    <span class="sub">"Single sign-on via trusted identity providers"</span>
-                </div>
-                <Show when=is_owner fallback=|| ()>
-                    <button
-                        class="btn btn-primary"
-                        type="button"
-                        on:click=move |_| form_open.set(true)
-                    >
-                        "Add OIDC Provider"
-                    </button>
-                </Show>
-            </div>
-
-            <div class="card-pad">
-                {move || {
-                    let providers = model.with(|m| m.oidc_providers.clone());
-                    let owner = is_owner();
-                    if providers.is_empty() {
-                        view! {
-                            <p class="empty-state">"No OIDC providers configured."</p>
-                        }.into_any()
-                    } else {
-                        providers
-                            .into_iter()
-                            .map(|p| render_oidc_row(p, owner, dispatch))
-                            .collect_view()
-                            .into_any()
-                    }
-                }}
-            </div>
-        </div>
-
-        <Show when=move || form_open.get() fallback=|| ()>
-            <Modal
-                title="Add OIDC Provider"
-                on_close=Callback::new(move |_| form_open.set(false))
-            >
-                <div class="modal-field">
-                    <label class="modal-label">"Issuer URL"</label>
-                    <input
-                        class="modal-input"
-                        type="url"
-                        placeholder="https://accounts.example.com"
-                        prop:value=form_issuer
-                        on:input=move |e| form_issuer.set(event_target_value(&e))
-                    />
-                </div>
-                <div class="modal-field">
-                    <label class="modal-label">"Client ID"</label>
-                    <input
-                        class="modal-input"
-                        type="text"
-                        placeholder="client-abc-123"
-                        prop:value=form_client_id
-                        on:input=move |e| form_client_id.set(event_target_value(&e))
-                    />
-                </div>
-                <div class="modal-footer">
-                    <button
-                        class="btn btn-ghost"
-                        type="button"
-                        on:click=move |_| form_open.set(false)
-                    >
-                        "Cancel"
-                    </button>
-                    <button
-                        class="btn btn-primary"
-                        type="button"
-                        on:click=on_add_submit
-                    >
-                        "Add provider"
-                    </button>
-                </div>
-            </Modal>
-        </Show>
-    }
-}
-
-/// Render a single OIDC provider row.
-///
-/// Owner: shows Toggle that dispatches `Msg::ToggleOidc(id)`.
-/// Admin/Viewer: shows read-only enabled/disabled badge.
-///
-/// `is_owner` is a plain bool resolved once at render time. Since the
-/// members list rarely changes, a full re-render of the OIDC list handles
-/// any role change correctly.
-#[cfg(feature = "csr")]
-fn render_oidc_row(
-    provider: OidcProvider,
-    is_owner: bool,
-    dispatch: Callback<Msg>,
-) -> impl IntoView {
-    let enabled = provider.enabled;
-    let issuer = provider.issuer.clone();
-    let client_id = provider.client_id.clone();
-    let enabled_label = if enabled { "enabled" } else { "disabled" };
-
-    // Resolve the toggle/badge widget outside the reactive closure to avoid
-    // moving `provider.id` into a `move ||` that would become `FnOnce`.
-    let action_widget = if is_owner {
-        let toggle_id = provider.id.clone();
-        view! {
-            <Toggle
-                checked=enabled
-                on_change=Callback::new(move |_| {
-                    dispatch.run(Msg::ToggleOidc(toggle_id.clone()))
-                })
-            />
-        }
-        .into_any()
-    } else {
-        view! {
-            <span class="badge">{enabled_label}</span>
-        }
-        .into_any()
-    };
-
-    view! {
-        <div class="row" style="padding: 11px 0; border-top: 1px solid var(--border); gap: 12px; align-items: center">
-            <div class="col" style="gap: 1px; flex: 1">
-                <span class="mono" style="font-size: 13px; font-weight: 530">
-                    {client_id}
-                </span>
-                <span class="mono" style="font-size: 11px; color: var(--text-3)">
-                    {issuer}
-                </span>
-            </div>
-            {action_widget}
-        </div>
-    }
-}
 
 // ── DangerZoneSection ────────────────────────────────────────────────────────
 

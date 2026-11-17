@@ -118,7 +118,7 @@ fn free_plan_over_its_limit_shows_the_server_status_caps_and_an_upgrade_banner()
     assert_eq!((caps[0].dimension.as_str(), caps[0].used, caps[0].cap, caps[0].pct), ("reads", 2_100_000, 2_000_000, 105));
     assert_eq!(model.effective_status(), EffectiveStatus::FreeCapExceeded);
     let banner = model.suspension_banner_view().expect("billing-hold banner");
-    assert!(banner.cta_opens_upgrade_modal, "a Free-plan limit is resolved by upgrading");
+    assert!(banner.cta_starts_checkout, "a Free-plan limit is resolved by upgrading");
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn past_due_shows_the_payment_banner_that_leads_to_the_portal() {
     assert_eq!(model.subscription.plan, Plan::Pro);
     assert!(model.billing.cap_status.is_none());
     let banner = model.suspension_banner_view().expect("banner");
-    assert!(!banner.cta_opens_upgrade_modal);
+    assert!(!banner.cta_starts_checkout);
 }
 
 #[test]

@@ -7,14 +7,10 @@
 //! and the payment method live in Stripe's billing portal, reached with "Manage billing".
 
 #[cfg(feature = "csr")]
-pub mod modals;
-#[cfg(feature = "csr")]
 pub mod overview;
 #[cfg(feature = "csr")]
 pub mod usage;
 
-#[cfg(feature = "csr")]
-pub use modals::{CardModal, UpgradeModal};
 #[cfg(feature = "csr")]
 pub use overview::BillingOverviewTab;
 #[cfg(feature = "csr")]

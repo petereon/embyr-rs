@@ -224,33 +224,3 @@ fn pinned_example_single_dimension_at_cap_is_sufficient() {
 
     assert!(model.cap_exceeded(), "AC-108-06 pinned example: one dimension at cap is sufficient");
 }
-
-// ── Mutation-killing: AppModel::from_mock() demo billing state ─────────────
-
-/// Kills `AppModel::from_mock -> Self with Default::default()` and the
-/// `mock::databases`/`mock::subscription`/`mock::invoices` empty/default
-/// mutants — no existing test previously called `from_mock()` directly
-/// (all other tests build via `model_on_plan`/struct-literal helpers per
-/// common/mod.rs's documented convention), so its billing-demo content
-/// (Pro plan, card on file, invoice history) was entirely uncovered.
-#[test]
-fn from_mock_populates_pro_plan_demo_billing_state() {
-    let model = AppModel::from_mock();
-
-    assert_eq!(model.databases.len(), 2, "from_mock must populate 2 demo databases");
-    let names: Vec<&str> = model.databases.iter().map(|d| d.name.as_str()).collect();
-    assert!(names.contains(&"production"), "from_mock must include the 'production' database");
-    assert!(names.contains(&"staging"), "from_mock must include the 'staging' database");
-
-    assert_eq!(model.subscription.plan, Plan::Pro, "from_mock demos a Pro-plan account");
-    assert_eq!(
-        model.subscription.stripe_customer_id, "cus_pro_example",
-        "from_mock's Pro subscription must carry the mock Pro stripe_customer_id"
-    );
-    assert!(model.subscription.card.is_some(), "from_mock demos an account with a card on file");
-    assert!(!model.subscription.payment_failure, "from_mock demos a healthy, non-failed payment state");
-
-    assert_eq!(model.invoices.len(), 3, "from_mock must populate 3 demo invoices (2 paid + 1 upcoming)");
-    let paid_count = model.invoices.iter().filter(|inv| inv.status == InvoiceStatus::Paid).count();
-    assert_eq!(paid_count, 2, "from_mock's invoice history must include exactly 2 paid invoices");
-}

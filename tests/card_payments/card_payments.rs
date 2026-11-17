@@ -32,9 +32,6 @@ mod slice_03_invoice_forecast_usage_breakdown;
 #[path = "acceptance/slice_04_payment_method_capture.rs"]
 mod slice_04_payment_method_capture;
 
-#[path = "acceptance/slice_05_plan_change.rs"]
-mod slice_05_plan_change;
-
 #[path = "acceptance/slice_06_invoice_history.rs"]
 mod slice_06_invoice_history;
 

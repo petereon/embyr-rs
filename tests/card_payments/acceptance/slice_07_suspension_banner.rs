@@ -40,7 +40,7 @@ fn cap_exceeded_shows_amber_banner_with_upgrade_cta() {
         "AC-108-02: status must be FreeCapExceeded"
     );
     assert!(
-        banner.cta_opens_upgrade_modal,
+        banner.cta_starts_checkout,
         "AC-108-02: CTA must open the Upgrade modal"
     );
     assert_eq!(
@@ -67,7 +67,7 @@ fn payment_failed_shows_red_banner_with_payment_cta() {
         "AC-108-03: status must be PastDue"
     );
     assert!(
-        !banner.cta_opens_upgrade_modal,
+        !banner.cta_starts_checkout,
         "AC-108-03: CTA must open the Card modal, not Upgrade"
     );
     assert_eq!(
@@ -117,45 +117,6 @@ fn banner_visible_regardless_of_active_section() {
     assert!(
         model.suspension_banner_view().is_some(),
         "AC-108-04: banner must remain visible after navigating away from Billing"
-    );
-}
-
-/// AC-108-05: clicking the banner's "Upgrade to Pro" CTA opens the Upgrade
-/// modal directly.
-#[test]
-fn clicking_upgrade_cta_opens_upgrade_modal() {
-    // Given: Solstice Analytics is suspended with status
-    // "free_cap_exceeded".
-    let mut model = model_on_plan(Plan::Free);
-    model.databases = vec![database_with_daily_usage(
-        "db-1", 500_000, 100_000, 20_000, 50.0,
-    )];
-
-    // When: Priya clicks "Upgrade to Pro" on the banner.
-    update(&mut model, Msg::OpenUpgradeModal);
-
-    // Then: the Upgrade modal opens directly (US-106) — no intermediate
-    // navigation to Billing required.
-    assert!(
-        model.upgrade_modal_open,
-        "AC-108-05: banner CTA must open the Upgrade modal directly"
-    );
-}
-
-/// AC-108-05: clicking a `past_due` banner's "Update payment method" CTA
-/// opens the Card modal instead.
-#[test]
-fn clicking_payment_cta_opens_card_modal() {
-    // Given: an account is suspended with status "past_due".
-    let mut model = model_with_payment_failure(Plan::Pro);
-
-    // When: the admin clicks "Update payment method" on the banner.
-    update(&mut model, Msg::OpenCardModal);
-
-    // Then: the Card modal opens directly (US-105).
-    assert!(
-        model.card_modal_open,
-        "AC-108-05: past_due banner CTA must open the Card modal directly"
     );
 }
 

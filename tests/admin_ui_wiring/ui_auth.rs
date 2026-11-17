@@ -365,3 +365,17 @@ fn shipped_ui_code_has_no_mock_references() {
         }
     }
 }
+
+/// The whole crate source, not just the views: the fixture constructor, the fixture module, the
+/// unreachable billing modals and the OIDC mock are gone and must not come back.
+#[test]
+fn no_fixture_constructor_dead_modal_or_oidc_mock_remains_in_src() {
+    let mut files = Vec::new();
+    rust_sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for needle in ["from_mock", "pub mod mock", "CardModal", "UpgradeModal", "OidcProvider", "oidc_providers"] {
+            assert!(!text.contains(needle), "{} must not reference {needle}", file.display());
+        }
+    }
+}

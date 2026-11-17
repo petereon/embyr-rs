@@ -29,8 +29,6 @@
 
 use embyr_admin_ui::data;
 use embyr_admin_ui::model::{Plan, UsageTotals};
-use embyr_admin_ui::msg::Msg;
-use embyr_admin_ui::update::update;
 
 #[path = "../common/mod.rs"]
 mod common;
@@ -118,42 +116,6 @@ fn priya_with_no_card_sees_add_card_cta() {
     // an "Add card" CTA (not "Update").
     assert_eq!(summary.card, None, "AC-101-05: no card on file");
     assert!(!summary.on_file, "AC-101-05: on_file must be false so the view renders 'Add card'");
-}
-
-/// AC-101-06 (partial — modal shells only; sub-tab navigation is
-/// view-local Leptos RwSignal state, untestable at the TEA model layer,
-/// same class as `db_detail`'s own `active_tab` in user-admin-ui): Chris
-/// can open both the Card modal shell (activity C) and the Upgrade modal
-/// shell (activity D) directly from the Overview page — this is the
-/// cross-cutting global-state wiring ADR-019 exists to guarantee (proven
-/// here at Slice 01, exercised again by SuspensionBanner in Slice 07).
-// @walking_skeleton @driving_port @AC-101-06
-#[test]
-fn chris_can_open_card_modal_and_upgrade_modal_from_overview() {
-    // Given: Chris Okafor's account "Aperture Labs" is on the Free plan,
-    // Billing → Overview is showing, and neither modal is open.
-    let mut model = model_on_plan(Plan::Free);
-    assert!(!model.card_modal_open);
-    assert!(!model.upgrade_modal_open);
-
-    // When: Chris clicks "Add card" on the Payment Method card.
-    update(&mut model, Msg::OpenCardModal);
-
-    // Then: the Card modal shell is open (ADR-019 global state).
-    assert!(model.card_modal_open, "AC-101-06: Card modal must be open-able from Overview");
-
-    // When: Chris closes the Card modal and clicks "Upgrade to Pro" on the
-    // Plan card instead.
-    update(&mut model, Msg::CloseCardModal);
-    update(&mut model, Msg::OpenUpgradeModal);
-
-    // Then: the Upgrade modal shell is open, defaulted to the Compare step.
-    assert!(model.upgrade_modal_open, "AC-101-06: Upgrade modal must be open-able from Overview");
-    assert_eq!(
-        model.upgrade_modal_step,
-        embyr_admin_ui::model::UpgradeModalStep::Compare,
-        "Opening the Upgrade modal must reset to the Compare step"
-    );
 }
 
 /// AC-107-03: activity E stub touch — a Free-plan account with no billing
