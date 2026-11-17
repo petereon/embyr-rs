@@ -41,3 +41,18 @@ Derived from `migrations/` and `.env.example` on master, 2026-11-17:
   confirm with `docs/operations/backup-disaster-recovery.md` once hosting is chosen.
 - **Trademark:** "Firestore" and "Google" belong to Google. The terms state the service is
   independent and API-compatible only. Check your use of the name in marketing.
+
+## Slovakia-specific notes (sole trader, not legal advice)
+
+- **Provider identification.** A Slovak online service provider must publish identifying
+  details (name, address, IČO, trade-register entry, contact). The drafts' header and the
+  site footer need them; a PO box or virtual office address is acceptable only if it is a
+  valid address for service — confirm with your accountant. Do not publish these (or register
+  as a trader) until you decide to; see the cost discussion in the project notes.
+- **B2B only.** The terms restrict the service to businesses and professionals, which keeps
+  consumer-protection rules (withdrawal rights, ODR/alternative dispute resolution notices)
+  out of scope. Keep the sign-up flow consistent with that (a checkbox confirming
+  professional use is a cheap way to back it).
+- **Supervisory authority** for privacy complaints: Úrad na ochranu osobných údajov SR.
+- **Before charging anyone:** trade licence (živnosť) or company, VAT position, Stripe account
+  in the right name, and updated `[FULL NAME]`/IČO in these documents.
