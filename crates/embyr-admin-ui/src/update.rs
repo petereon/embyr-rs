@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
-    AppModel, AuthScreen, Database, DbPatch, DbStatus, Member, MetricsWindow, Role, Section, Toast, ToastId, ToastLevel,
+    AppModel, AuthScreen, Database, DbPatch, DbStatus, InviteStep, Member, MetricsWindow, Role, Section, Toast,
+    ToastId, ToastLevel,
 };
 use crate::msg::{Effect, Msg};
 
@@ -19,6 +20,7 @@ const SESSION_EXPIRED: &str = "Session expired - please sign in again";
 const ACCOUNT_LOCKED: &str = "Account locked - try again in 15 minutes";
 const RESET_LINK_SENT: &str = "If that address belongs to an account, a reset link is on its way. It expires in 1 hour.";
 const PASSWORD_UPDATED: &str = "Password updated. Sign in with your new password.";
+const ACCOUNT_CREATED: &str = "Your account is ready. Sign in with your password and an authenticator code.";
 /// G-11: the session cookie is `Secure`, so a plain-HTTP non-localhost origin silently drops it.
 const COOKIE_REJECTED: &str =
     "Signed in, but the browser did not keep the session. The console needs HTTPS or localhost.";
@@ -42,10 +44,14 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
                     model.sign_in_error = None;
                     model.account_locked = false;
                 }
-                ApiCall::RequestPasswordReset { .. } | ApiCall::ConfirmPasswordReset { .. } => {
+                ApiCall::RequestPasswordReset { .. }
+                | ApiCall::ConfirmPasswordReset { .. }
+                | ApiCall::AcceptInvitation { .. }
+                | ApiCall::ConfirmInvitation { .. } => {
                     model.reset_error = None;
                     model.auth_notice = None;
                 }
+                ApiCall::DeleteAccount { .. } => model.account_delete_error = None,
                 _ => {}
             }
             effects.extend(begin(model, call));
@@ -61,15 +67,45 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
             model.sign_in_error = None;
             model.account_locked = false;
             model.current_user = Some(user);
-            if model.nav.section == Section::Login {
+            // Coming back from Stripe: land on Billing, where the outcome is shown.
+            if model.checkout_return.is_some() {
+                model.nav.section = Section::Billing;
+            } else if model.nav.section == Section::Login {
                 model.nav.section = Section::Dashboard;
             }
             effects.extend(section_loads(model));
+            // The billing-hold banner shows on every screen, so the status loads once at sign-in.
+            effects.extend(begin(model, ApiCall::LoadSubscription));
         }
         Msg::ShowAuth(screen) => {
             model.auth_screen = screen;
             model.reset_error = None;
             model.auth_notice = None;
+            // Leaving the invitation screen forgets the authenticator secret and recovery codes.
+            model.invite_step = InviteStep::Details;
+        }
+        Msg::InviteAccepted(enrolment) => model.invite_step = InviteStep::Enrol(enrolment),
+        Msg::InviteConfirmed(codes) => model.invite_step = InviteStep::Codes(codes),
+        Msg::InviteFinished => {
+            model.invite_step = InviteStep::Details;
+            model.auth_screen = AuthScreen::SignIn;
+            model.auth_notice = Some(ACCOUNT_CREATED.into());
+        }
+        Msg::OpenDeleteAccount => {
+            model.delete_account_modal_open = model.can_delete_account();
+            model.account_delete_error = None;
+        }
+        Msg::CloseDeleteAccount => {
+            model.delete_account_modal_open = false;
+            model.account_delete_error = None;
+        }
+        // The server already cleared the cookie; start over from an empty model.
+        Msg::AccountDeleted(purge_after) => {
+            *model = AppModel::default();
+            model.auth_notice = Some(format!(
+                "Your account is scheduled for deletion. Its data is permanently removed after {}. Sign-in is disabled meanwhile.",
+                purge_after.format("%Y-%m-%d")
+            ));
         }
         Msg::PasswordResetRequested => model.auth_notice = Some(RESET_LINK_SENT.into()),
         Msg::PasswordResetDone => {
@@ -274,6 +310,15 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
         Msg::SetSubscription(sub) => {
             model.subscription = sub;
         }
+        Msg::SetBilling { status, cap_status } => {
+            model.billing.status = Some(status);
+            model.billing.cap_status = cap_status;
+            model.billing.unavailable = false;
+        }
+        Msg::SetUsage(rows) => model.billing.usage = Some(rows),
+        Msg::RedirectToHosted(url) => effects.push(Effect::Redirect(url)),
+        Msg::CheckoutReturned(outcome) => model.checkout_return = Some(outcome),
+        Msg::DismissCheckoutNotice => model.checkout_return = None,
         Msg::SetInvoices(invoices) => {
             model.invoices = invoices;
         }
@@ -318,6 +363,7 @@ fn section_loads(model: &mut AppModel) -> Vec<Effect> {
     let calls = match model.nav.section.clone() {
         Section::Dashboard => vec![ApiCall::LoadProjects, ApiCall::LoadMetricsSummary],
         Section::Databases => vec![ApiCall::LoadProjects],
+        Section::Billing => vec![ApiCall::LoadSubscription, ApiCall::LoadUsage],
         Section::DbDetail(id) => vec![
             ApiCall::LoadProject(id.clone()),
             ApiCall::LoadDbMetrics { id: id.clone(), window: MetricsWindow::default() },
@@ -340,7 +386,13 @@ fn api_failed(model: &mut AppModel, call: CallKind, error: ApiError) {
             model.sign_in_error = Some(if unauthorized { COOKIE_REJECTED.into() } else { error.to_string() });
         }
         CallKind::SignIn => sign_in_failed(model, error),
-        CallKind::ResetRequest | CallKind::ResetConfirm => reset_failed(model, error),
+        CallKind::ResetRequest | CallKind::ResetConfirm | CallKind::InviteAccept | CallKind::InviteConfirm => {
+            reset_failed(model, error)
+        }
+        CallKind::DeleteAccount => account_delete_failed(model, error),
+        // G-52: without a Stripe key the first call answers 502. Say so on the Billing screen, no toast
+        // (it also runs at every sign-in).
+        CallKind::Subscription if matches!(error, ApiError::Upstream) => model.billing.unavailable = true,
         _ if unauthorized => {
             *model = AppModel::default();
             model.sign_in_error = Some(SESSION_EXPIRED.into());
@@ -365,6 +417,17 @@ fn sign_in_failed(model: &mut AppModel, error: ApiError) {
 /// A wrong second factor is a 401 here, not an expired session: stay on the form and show the message.
 fn reset_failed(model: &mut AppModel, error: ApiError) {
     model.reset_error = Some(match error {
+        ApiError::Throttled { retry_after_ms: Some(ms) } => {
+            format!("Too many attempts, retry in {} s", ms.div_ceil(1000))
+        }
+        ApiError::Throttled { retry_after_ms: None } => ACCOUNT_LOCKED.into(),
+        other => other.to_string(),
+    });
+}
+
+/// A wrong password or second factor is a 401 here, not an expired session: the modal stays open.
+fn account_delete_failed(model: &mut AppModel, error: ApiError) {
+    model.account_delete_error = Some(match error {
         ApiError::Throttled { retry_after_ms: Some(ms) } => {
             format!("Too many attempts, retry in {} s", ms.div_ceil(1000))
         }

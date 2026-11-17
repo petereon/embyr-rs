@@ -7,19 +7,16 @@
 //! AC-011-04: Toggle dispatches Msg::ToggleOidc(id).
 //! AC-011-05: Danger Zone section visible only to Owner role.
 //!
-//! Role gating:
-//!   Owner  — full edit UI (Add form, Toggles, Danger Zone).
-//!   Admin/Viewer — read-only OIDC list; no Add form, no Toggles, no Danger Zone.
-//!
-//! V1 note: There is no current_user field in AppModel. The role is inferred
-//! from the presence of at least one Owner member in the list (V1 simplification).
-//! A real implementation would carry current_user_id in AppModel and look up the
-//! member by id.
+//! The Danger Zone is live: it follows `AppModel::can_delete_account()` (the signed-in user's role)
+//! and deletes the account through `DELETE /account`. The OIDC section is still the V1 mock
+//! (slice 12) and infers its role from the members list.
 
 #[cfg(feature = "csr")]
 use crate::components::primitives::{Modal, Toggle};
 #[cfg(feature = "csr")]
-use crate::model::{AppModel, OidcId, OidcProvider, Role, Toast, ToastId, ToastLevel};
+use crate::api::{ApiCall, CallKind, SignInCode};
+#[cfg(feature = "csr")]
+use crate::model::{confirms_account_delete, AppModel, OidcId, OidcProvider, Role, Toast, ToastId, ToastLevel};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -39,9 +36,8 @@ use uuid::Uuid;
 pub fn SettingsView() -> impl IntoView {
     let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
 
-    // V1 role inference: treat as Owner when at least one Owner member exists.
-    let is_owner =
-        move || model.with(|m| m.members.iter().any(|member| member.role == Role::Owner));
+    // The Danger Zone follows the signed-in user's real role (the server enforces it too).
+    let can_delete_account = move || model.with(|m| m.can_delete_account());
 
     view! {
         <div class="page">
@@ -52,7 +48,7 @@ pub fn SettingsView() -> impl IntoView {
 
             <OidcSection />
 
-            <Show when=is_owner fallback=|| ()>
+            <Show when=can_delete_account fallback=|| ()>
                 <DangerZoneSection />
             </Show>
         </div>
@@ -242,36 +238,13 @@ fn render_oidc_row(
 
 // ── DangerZoneSection ────────────────────────────────────────────────────────
 
-/// Danger Zone — Owner only.
-///
-/// Renders "Transfer Ownership" and "Delete Account" actions with confirmation
-/// modals. V1: both show placeholder modals that dispatch PushToast.
+/// Danger Zone — Owner only (`SettingsView` mounts it only then). Account deletion re-authenticates
+/// with password + second factor and the typed account name (`DELETE /account`). Transfer ownership
+/// has no endpoint: promote another member to Owner, then demote yourself in Members (G-45).
 #[cfg(feature = "csr")]
 #[component]
 fn DangerZoneSection() -> impl IntoView {
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
-
-    let transfer_open = RwSignal::new(false);
-    let delete_open = RwSignal::new(false);
-    let delete_confirm_text = RwSignal::new(String::new());
-
-    let on_transfer = move |_| {
-        transfer_open.set(false);
-        dispatch.run(Msg::PushToast(Toast {
-            id: ToastId(Uuid::new_v4()),
-            message: "Ownership transfer initiated (V1 mock)".to_string(),
-            level: ToastLevel::Warning,
-        }));
-    };
-
-    let on_delete = move |_| {
-        delete_open.set(false);
-        dispatch.run(Msg::PushToast(Toast {
-            id: ToastId(Uuid::new_v4()),
-            message: "Account deletion is disabled in this demo".to_string(),
-            level: ToastLevel::Error,
-        }));
-    };
 
     view! {
         <div class="card" style="border-color: color-mix(in oklab, var(--red, #e11d48) 30%, var(--border))">
@@ -282,100 +255,121 @@ fn DangerZoneSection() -> impl IntoView {
                 </div>
             </div>
 
-            <div style="display: flex; flex-direction: column">
-                <div class="row" style="padding: 15px 20px; border-bottom: 1px solid var(--border); gap: 12px; align-items: flex-start">
-                    <div class="col" style="gap: 2px; flex: 1">
-                        <span style="font-weight: 550; font-size: 13.5px">"Transfer ownership"</span>
-                        <span style="font-size: 12px; color: var(--text-3)">"Hand the Owner role to another member."</span>
-                    </div>
-                    <button
-                        class="btn btn-ghost"
-                        type="button"
-                        on:click=move |_| transfer_open.set(true)
-                    >
-                        "Transfer"
-                    </button>
+            <div class="row" style="padding: 15px 20px; gap: 12px; align-items: flex-start">
+                <div class="col" style="gap: 2px; flex: 1">
+                    <span style="font-weight: 550; font-size: 13.5px">"Delete account"</span>
+                    <span style="font-size: 12px; color: var(--text-3)">
+                        "Cancels the subscription and schedules the account and all its databases for permanent deletion."
+                    </span>
                 </div>
-
-                <div class="row" style="padding: 15px 20px; gap: 12px; align-items: flex-start">
-                    <div class="col" style="gap: 2px; flex: 1">
-                        <span style="font-weight: 550; font-size: 13.5px">"Delete account"</span>
-                        <span style="font-size: 12px; color: var(--text-3)">"Permanently delete this account and all databases."</span>
-                    </div>
-                    <button
-                        class="btn btn-ghost"
-                        type="button"
-                        style="color: var(--red, #e11d48)"
-                        on:click=move |_| {
-                            delete_open.set(true);
-                            delete_confirm_text.set(String::new());
-                        }
-                    >
-                        "Delete account"
-                    </button>
-                </div>
+                <button
+                    class="btn btn-ghost"
+                    type="button"
+                    style="color: var(--red, #e11d48)"
+                    on:click=move |_| dispatch.run(Msg::OpenDeleteAccount)
+                >
+                    "Delete account"
+                </button>
             </div>
         </div>
 
-        <Show when=move || transfer_open.get() fallback=|| ()>
-            <Modal
-                title="Transfer Ownership"
-                on_close=Callback::new(move |_| transfer_open.set(false))
-            >
-                <p style="font-size: 13px; color: var(--text-2)">"Select a member to become the new Owner. This action cannot be undone."</p>
-                <div class="modal-footer">
-                    <button
-                        class="btn btn-ghost"
-                        type="button"
-                        on:click=move |_| transfer_open.set(false)
-                    >
-                        "Cancel"
-                    </button>
-                    <button
-                        class="btn btn-primary"
-                        type="button"
-                        on:click=on_transfer
-                    >
-                        "Transfer (V1 mock)"
-                    </button>
-                </div>
-            </Modal>
-        </Show>
+        <DeleteAccountModal />
+    }
+}
 
-        <Show when=move || delete_open.get() fallback=|| ()>
-            <Modal
-                title="Delete Account?"
-                on_close=Callback::new(move |_| delete_open.set(false))
-            >
-                <p style="font-size: 13px; color: var(--text-2)">"This permanently deletes the account, every database, and all keys. There is no recovery."</p>
-                <div class="modal-field">
-                    <label class="modal-label">"Type the account name to confirm"</label>
-                    <input
-                        class="modal-input"
-                        type="text"
-                        placeholder="account name"
-                        prop:value=delete_confirm_text
-                        on:input=move |e| delete_confirm_text.set(event_target_value(&e))
-                    />
-                </div>
-                <div class="modal-footer">
-                    <button
-                        class="btn btn-ghost"
-                        type="button"
-                        on:click=move |_| delete_open.set(false)
-                    >
-                        "Cancel"
-                    </button>
-                    <button
-                        class="btn btn-ghost"
-                        type="button"
-                        style="color: var(--red, #e11d48)"
-                        on:click=on_delete
-                    >
-                        "Delete forever (V1 mock)"
-                    </button>
-                </div>
-            </Modal>
+/// Open state is `model.delete_account_modal_open`; the form (and the password / code typed into it)
+/// unmounts with it, so none of it outlives the modal.
+#[cfg(feature = "csr")]
+#[component]
+fn DeleteAccountModal() -> impl IntoView {
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+    let is_open = move || model.with(|m| m.delete_account_modal_open);
+
+    view! {
+        <Show when=is_open fallback=|| ()>
+            <DeleteAccountForm />
         </Show>
     }
 }
+
+#[cfg(feature = "csr")]
+#[component]
+fn DeleteAccountForm() -> impl IntoView {
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
+
+    let typed = RwSignal::new(String::new());
+    let password = RwSignal::new(String::new());
+    let code = RwSignal::new(String::new());
+    let use_recovery = RwSignal::new(false);
+
+    let account_name = move || model.with(|m| m.current_user.as_ref().map(|u| u.account_name.clone()).unwrap_or_default());
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::DeleteAccount));
+    let error = move || model.with(|m| m.account_delete_error.clone());
+    let ready = move || {
+        confirms_account_delete(&typed.get(), &account_name())
+            && !password.get().is_empty()
+            && !code.get().trim().is_empty()
+            && !busy()
+    };
+
+    let submit = move |_| {
+        let code_value = code.get().trim().to_string();
+        let code = if use_recovery.get() { SignInCode::Recovery(code_value) } else { SignInCode::Totp(code_value) };
+        dispatch.run(Msg::Request(ApiCall::DeleteAccount {
+            password: password.get(),
+            code,
+            confirm_account_name: typed.get(),
+        }));
+    };
+
+    view! {
+        <Modal title="Delete account?" on_close=Callback::new(move |_| dispatch.run(Msg::CloseDeleteAccount))>
+            <p style="font-size: 13px; color: var(--text-2)">
+                "This cancels your subscription, signs everyone out, disables every API key and deletes every database. \
+                 The data is permanently purged after a grace period."
+            </p>
+            <div class="modal-field">
+                <label class="modal-label">{move || format!("Type \"{}\" to confirm", account_name())}</label>
+                <input class="modal-input" type="text" autocomplete="off"
+                    prop:value=move || typed.get()
+                    on:input=move |e| typed.set(event_target_value(&e))/>
+            </div>
+            <div class="modal-field">
+                <label class="modal-label">"Your password"</label>
+                <input class="modal-input" type="password" autocomplete="current-password"
+                    prop:value=move || password.get()
+                    on:input=move |e| password.set(event_target_value(&e))/>
+            </div>
+            <div class="modal-field">
+                <label class="modal-label">
+                    {move || if use_recovery.get() { "Recovery code" } else { "Authenticator code" }}
+                </label>
+                <input class="modal-input" type="text" autocomplete="one-time-code"
+                    prop:value=move || code.get()
+                    on:input=move |e| code.set(event_target_value(&e))/>
+                <button class="btn btn-ghost" type="button" on:click=move |_| use_recovery.update(|v| *v = !*v)>
+                    {move || if use_recovery.get() { "Use authenticator code" } else { "Use a recovery code" }}
+                </button>
+            </div>
+            <Show when=move || error().is_some()>
+                <span class="field-err" role="alert">{move || error().unwrap_or_default()}</span>
+            </Show>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" type="button" on:click=move |_| dispatch.run(Msg::CloseDeleteAccount)>
+                    "Cancel"
+                </button>
+                <button
+                    class="btn btn-ghost"
+                    type="button"
+                    style="color: var(--red, #e11d48)"
+                    disabled=move || !ready()
+                    on:click=submit
+                >
+                    {move || if busy() { "Deleting…" } else { "Delete account" }}
+                </button>
+            </div>
+        </Modal>
+    }
+}
+

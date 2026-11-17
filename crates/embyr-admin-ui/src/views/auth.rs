@@ -5,7 +5,7 @@ use crate::components::Icon;
 #[cfg(feature = "csr")]
 use crate::api::{ApiCall, CallKind, SignInCode};
 #[cfg(feature = "csr")]
-use crate::model::{AppModel, AuthScreen};
+use crate::model::{AppModel, AuthScreen, Enrolment, InviteStep, RecoveryCodes};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -267,5 +267,165 @@ pub fn ResetPasswordView(token: RwSignal<Option<String>>) -> impl IntoView {
                 </button>
             </form>
         </AuthFrame>
+    }
+}
+
+/// `?invite=<token>` landing: redeem an emailed invitation in three steps (details, authenticator
+/// enrolment, recovery codes). The token lives only in this component's props (never in the model or
+/// the URL bar); the authenticator secret and recovery codes sit in `model.invite_step`, which `update`
+/// drops when the screen is left.
+#[cfg(feature = "csr")]
+#[component]
+pub fn AcceptInviteView(token: RwSignal<Option<String>>) -> impl IntoView {
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+    let step = move || model.with(|m| m.invite_step.clone());
+
+    view! {
+        <AuthFrame>
+            {move || match step() {
+                InviteStep::Details => view! { <InviteDetailsForm token=token /> }.into_any(),
+                InviteStep::Enrol(enrolment) => view! { <InviteEnrolForm token=token enrolment=enrolment /> }.into_any(),
+                InviteStep::Codes(codes) => view! { <InviteCodes codes=codes /> }.into_any(),
+            }}
+        </AuthFrame>
+    }
+}
+
+#[cfg(feature = "csr")]
+#[component]
+fn InviteDetailsForm(token: RwSignal<Option<String>>) -> impl IntoView {
+    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+
+    let display_name = RwSignal::new(String::new());
+    let password = RwSignal::new(String::new());
+    let confirm = RwSignal::new(String::new());
+    let mismatch = RwSignal::new(false);
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::InviteAccept));
+    let error = move || model.with(|m| m.reset_error.clone());
+
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let Some(token) = token.get_untracked() else { return };
+        if password.get() != confirm.get() {
+            mismatch.set(true);
+            return;
+        }
+        mismatch.set(false);
+        dispatch.run(Msg::Request(ApiCall::AcceptInvitation {
+            token,
+            display_name: display_name.get().trim().to_string(),
+            password: password.get(),
+        }));
+    };
+
+    view! {
+        <h1 style="font-size:23px;font-weight:620;letter-spacing:-0.02em;margin:0 0 6px">"Accept your invitation"</h1>
+        <p style="color:var(--text-2);font-size:13.5px;margin:0 0 24px">
+            "Choose how you appear and set a password. Next you will enrol an authenticator app."
+        </p>
+        <form class="col" style="gap:14px" on:submit=submit>
+            <div class="field">
+                <label class="field-label">"Display name"</label>
+                <input class="input" type="text" name="display-name" autocomplete="name" maxlength="100"
+                    bind:value=display_name/>
+            </div>
+            <div class="field">
+                <label class="field-label">"Password"</label>
+                <input class="input" type="password" name="new-password" autocomplete="new-password"
+                    minlength="12" placeholder="At least 12 characters" bind:value=password/>
+            </div>
+            <div class="field">
+                <label class="field-label">"Confirm password"</label>
+                <input class="input" type="password" name="confirm-password" autocomplete="new-password"
+                    bind:value=confirm/>
+            </div>
+            <Show when=move || mismatch.get()>
+                <span class="field-err" role="alert">"Passwords do not match"</span>
+            </Show>
+            <Show when=move || error().is_some()>
+                <span class="field-err" role="alert">{move || error().unwrap_or_default()}</span>
+            </Show>
+            <button class="btn btn-primary btn-block btn-lg" type="submit" disabled=busy>
+                {move || if busy() { "Continuing…" } else { "Continue" }}
+            </button>
+            <button class="btn btn-ghost" type="button"
+                on:click=move |_| dispatch.run(Msg::ShowAuth(AuthScreen::SignIn))>
+                "Back to sign in"
+            </button>
+        </form>
+    }
+}
+
+#[cfg(feature = "csr")]
+#[component]
+fn InviteEnrolForm(token: RwSignal<Option<String>>, enrolment: Enrolment) -> impl IntoView {
+    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+
+    let code = RwSignal::new(String::new());
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::InviteConfirm));
+    let error = move || model.with(|m| m.reset_error.clone());
+
+    let submit = move |ev: leptos::ev::SubmitEvent| {
+        ev.prevent_default();
+        let Some(token) = token.get_untracked() else { return };
+        dispatch.run(Msg::Request(ApiCall::ConfirmInvitation { token, totp_code: code.get().trim().to_string() }));
+    };
+    let secret = enrolment.totp_secret.clone();
+
+    view! {
+        <h1 style="font-size:23px;font-weight:620;letter-spacing:-0.02em;margin:0 0 6px">"Set up your authenticator"</h1>
+        <p style="color:var(--text-2);font-size:13.5px;margin:0 0 18px">
+            "Add this account to an authenticator app, then enter the 6-digit code it shows. "
+            "Open the link on your phone, or type the key by hand."
+        </p>
+        <div class="field" style="margin-bottom:14px">
+            <label class="field-label">"Key"</label>
+            <input class="input mono" type="text" readonly=true prop:value=enrolment.totp_secret/>
+            <div class="row" style="gap:8px">
+                <button class="btn btn-ghost" type="button"
+                    on:click=move |_| crate::components::copy_to_clipboard(&secret)>"Copy key"</button>
+                <a class="btn btn-ghost" href=enrolment.otpauth_uri>"Open in authenticator app"</a>
+            </div>
+        </div>
+        <form class="col" style="gap:14px" on:submit=submit>
+            <div class="field">
+                <label class="field-label">"Authenticator code"</label>
+                <input class="input" type="text" name="code" autocomplete="one-time-code" inputmode="numeric"
+                    bind:value=code/>
+            </div>
+            <Show when=move || error().is_some()>
+                <span class="field-err" role="alert">{move || error().unwrap_or_default()}</span>
+            </Show>
+            <button class="btn btn-primary btn-block btn-lg" type="submit" disabled=busy>
+                {move || if busy() { "Verifying…" } else { "Verify and create account" }}
+            </button>
+            <button class="btn btn-ghost" type="button"
+                on:click=move |_| dispatch.run(Msg::ShowAuth(AuthScreen::AcceptInvite))>
+                "Back"
+            </button>
+        </form>
+    }
+}
+
+#[cfg(feature = "csr")]
+#[component]
+fn InviteCodes(codes: RecoveryCodes) -> impl IntoView {
+    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
+    let joined = codes.0.join("\n");
+
+    view! {
+        <h1 style="font-size:23px;font-weight:620;letter-spacing:-0.02em;margin:0 0 6px">"Save your recovery codes"</h1>
+        <p style="color:var(--text-2);font-size:13.5px;margin:0 0 18px">
+            "Each code works once if you lose your authenticator. They are shown only now: store them somewhere safe."
+        </p>
+        <pre class="input mono" style="white-space:pre;margin:0 0 14px">{codes.0.join("\n")}</pre>
+        <div class="row" style="gap:8px">
+            <button class="btn btn-ghost" type="button"
+                on:click=move |_| crate::components::copy_to_clipboard(&joined)>"Copy codes"</button>
+            <button class="btn btn-primary" type="button"
+                on:click=move |_| dispatch.run(Msg::InviteFinished)>"I have stored them"</button>
+        </div>
     }
 }

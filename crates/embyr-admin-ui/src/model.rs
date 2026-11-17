@@ -14,6 +14,12 @@ pub fn confirms_delete(typed: &str, id: &DbId) -> bool {
     typed.trim() == id.0
 }
 
+/// Account-delete confirmation: the typed text must be exactly the account name (the server compares
+/// byte for byte, so no trimming).
+pub fn confirms_account_delete(typed: &str, account_name: &str) -> bool {
+    !account_name.is_empty() && typed == account_name
+}
+
 // ── Newtype identifiers ─────────────────────────────────────────────────────
 
 /// API project ids are operator-chosen strings, not UUIDs (G-05).
@@ -104,6 +110,8 @@ pub enum AuthScreen {
     ForgotPassword,
     /// Choose a new password (reached from the emailed `?reset=` link; the token never enters the model).
     ResetPassword,
+    /// Redeem an invitation (reached from the emailed `?invite=` link; the token never enters the model).
+    AcceptInvite,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -217,6 +225,90 @@ pub enum EffectiveStatus {
     Active,
     FreeCapExceeded,
     PastDue,
+}
+
+/// The server's own subscription status (`GET /billing/subscription`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionStatus {
+    Active,
+    PastDue,
+    FreeCapExceeded,
+    Canceled,
+}
+
+impl SubscriptionStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SubscriptionStatus::Active => "Active",
+            SubscriptionStatus::PastDue => "Past due",
+            SubscriptionStatus::FreeCapExceeded => "Free limit reached",
+            SubscriptionStatus::Canceled => "Canceled",
+        }
+    }
+}
+
+/// One Free-plan cap dimension as the server reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapUsage {
+    pub dimension: String,
+    pub used: u64,
+    pub cap: u64,
+    pub pct: u64,
+}
+
+/// Why the browser came back from Stripe Checkout (`?checkout=`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckoutReturn {
+    Success,
+    Cancelled,
+}
+
+/// Server-owned billing state. Everything here comes from the API; nothing is derived from usage mocks.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BillingState {
+    /// `None` until `GET /billing/subscription` has answered.
+    pub status: Option<SubscriptionStatus>,
+    /// Free plan only; `None` when the server has no figures yet.
+    pub cap_status: Option<Vec<CapUsage>>,
+    /// The server answered 502: Stripe is not configured or not reachable (G-52).
+    pub unavailable: bool,
+    /// Month-to-date usage per database (`GET /billing?range=month`); `None` until loaded.
+    pub usage: Option<Vec<UsageTableRow>>,
+}
+
+/// TOTP enrolment secret issued by `invitations/accept`. `Debug` redacts it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Enrolment {
+    /// Base32 secret for manual entry.
+    pub totp_secret: String,
+    /// `otpauth://` URI for authenticator apps.
+    pub otpauth_uri: String,
+}
+
+/// One-time recovery codes issued by `invitations/confirm`. `Debug` redacts them.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RecoveryCodes(pub Vec<String>);
+
+impl std::fmt::Debug for Enrolment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Enrolment(<redacted>)")
+    }
+}
+
+impl std::fmt::Debug for RecoveryCodes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RecoveryCodes(<{} redacted>)", self.0.len())
+    }
+}
+
+/// Where the invitation screen is: details form, then authenticator enrolment, then recovery codes.
+/// Dropped whenever the screen is left (`ShowAuth`), on sign-out and on session expiry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum InviteStep {
+    #[default]
+    Details,
+    Enrol(Enrolment),
+    Codes(RecoveryCodes),
 }
 
 // ── DbPatch — partial update to database backend config ────────────────────
@@ -632,6 +724,16 @@ pub struct AppModel {
     pub create_db_modal_open: bool,
     /// card-payments: drives UpgradeModal's compare → confirm-downgrade step.
     pub upgrade_modal_step: UpgradeModalStep,
+    /// Server-owned subscription status, caps and month usage.
+    pub billing: BillingState,
+    /// The browser just came back from Stripe Checkout: shown once on the Billing screen.
+    pub checkout_return: Option<CheckoutReturn>,
+    /// Which step of the invitation screen is showing.
+    pub invite_step: InviteStep,
+    /// Delete-account modal is open (the password / code fields are view-local; secrets never enter the model).
+    pub delete_account_modal_open: bool,
+    /// Error inside the delete-account modal (a wrong password is not a session expiry).
+    pub account_delete_error: Option<String>,
 }
 
 impl AppModel {
@@ -682,6 +784,11 @@ impl AppModel {
             upgrade_modal_open: false,
             create_db_modal_open: false,
             upgrade_modal_step: UpgradeModalStep::default(),
+            billing: BillingState::default(),
+            checkout_return: None,
+            invite_step: InviteStep::default(),
+            delete_account_modal_open: false,
+            account_delete_error: None,
         }
     }
 }
@@ -696,6 +803,16 @@ impl AppModel {
     /// Only the account Owner may delete a database (the server enforces the same rule).
     pub fn can_delete_databases(&self) -> bool {
         self.current_user.as_ref().is_some_and(|u| u.role == Role::Owner)
+    }
+
+    /// Only the account Owner may start Checkout or open the billing portal (the server enforces the same rule).
+    pub fn can_manage_billing(&self) -> bool {
+        self.current_user.as_ref().is_some_and(|u| u.role == Role::Owner)
+    }
+
+    /// Only the account Owner may delete the account (the server enforces the same rule).
+    pub fn can_delete_account(&self) -> bool {
+        self.can_manage_billing()
     }
 
     /// Dashboard totals from `GET /metrics/summary`; `None` until it has loaded.
@@ -762,6 +879,14 @@ impl AppModel {
     /// AC-108-06: `cap_exceeded()` → FreeCapExceeded; else `payment_failure`
     /// → PastDue; else Active. Single-sourced D-6/D-12 hard-stop logic.
     pub fn effective_status(&self) -> EffectiveStatus {
+        // Once the server has answered, its status is authoritative (G-48).
+        if let Some(status) = self.billing.status {
+            return match status {
+                SubscriptionStatus::FreeCapExceeded => EffectiveStatus::FreeCapExceeded,
+                SubscriptionStatus::PastDue => EffectiveStatus::PastDue,
+                SubscriptionStatus::Active | SubscriptionStatus::Canceled => EffectiveStatus::Active,
+            };
+        }
         if self.cap_exceeded() {
             EffectiveStatus::FreeCapExceeded
         } else if self.subscription.payment_failure {
@@ -806,6 +931,9 @@ impl AppModel {
 
     /// AC-104-01/02/03: per-database Usage tab table rows.
     pub fn usage_table_rows(&self) -> Vec<UsageTableRow> {
+        if let Some(rows) = &self.billing.usage {
+            return rows.clone();
+        }
         self.databases
             .iter()
             .map(|db| UsageTableRow {

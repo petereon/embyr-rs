@@ -1,27 +1,18 @@
-//! BillingOverviewTab — Plan card + Payment Method card.
+//! BillingOverviewTab — Plan card + Billing card + Free-plan cap bars, all from the server.
 //!
 //! Gated behind #[cfg(feature = "csr")].
 //!
-//! AC-101-01/02/03: PlanCard renders a Free badge + included volume per
-//! dimension (sourced from `AppModel::plan_summary()`), or a Pro badge +
-//! base price + renewal date.
-//! AC-101-04/05/07: PaymentMethodCard renders brand/last4/expiry + "On
-//! file" badge when a card is present, or "No card on file" + Add card CTA
-//! when absent, plus the `stripeCustomerId`.
-//! AC-101-06: clicking the trigger buttons dispatches `Msg::OpenUpgradeModal`
-//! / `Msg::OpenCardModal` (ADR-019 global modal state).
-//!
-//! AC-102-01/02/03: CapUsageCard renders 4 per-dimension bars (reads/writes/
-//! deletes/storage) sourced from `AppModel::cap_ratios()`, colored via
-//! `data::bar_color()` (accent/amber/red thresholds).
-//!
-//! NextInvoiceCard / TestClockCard (Slices 03/08) are not part of this
-//! slice — see feature-delta.md Component Decomposition.
+//! The plan, status and caps come from `GET /billing/subscription` (`model.subscription`,
+//! `model.billing`); nothing is derived from usage mocks (G-48). Card data never touches this app:
+//! "Upgrade to Pro" sends the Owner to Stripe-hosted Checkout and "Manage billing" to the Stripe
+//! billing portal (payment method, invoices, cancel), both via a session URL the server mints.
 
+#[cfg(feature = "csr")]
+use crate::api::{ApiCall, CallKind};
 #[cfg(feature = "csr")]
 use crate::data::{self, BarColor};
 #[cfg(feature = "csr")]
-use crate::model::{AppModel, Plan};
+use crate::model::{AppModel, CapUsage, Plan};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -34,168 +25,151 @@ pub fn BillingOverviewTab() -> impl IntoView {
     view! {
         <div class="billing-overview-grid">
             <PlanCard/>
-            <PaymentMethodCard/>
+            <PortalCard/>
             <CapUsageCard/>
         </div>
     }
 }
 
-/// Cap Usage card: reads/writes/deletes/storage bars as % of `FREE_CAPS`,
-/// single-sourced from `AppModel::cap_ratios()` (AC-102-01/02/03).
+/// Free plan: the server's cap figures per dimension. Pro has no caps.
 #[cfg(feature = "csr")]
 #[component]
 fn CapUsageCard() -> impl IntoView {
     let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
-    let ratios = move || model.with(|m| m.cap_ratios());
 
     view! {
         <div class="card billing-card">
             <h3 class="card-title">"Usage this month"</h3>
             <div class="billing-card-body">
-                <CapUsageBar label="Reads" ratio=Signal::derive(move || ratios().reads)/>
-                <CapUsageBar label="Writes" ratio=Signal::derive(move || ratios().writes)/>
-                <CapUsageBar label="Deletes" ratio=Signal::derive(move || ratios().deletes)/>
-                <CapUsageBar label="Storage" ratio=Signal::derive(move || ratios().storage_gb)/>
+                {move || {
+                    let (plan, caps) = model.with(|m| (m.subscription.plan.clone(), m.billing.cap_status.clone()));
+                    match (plan, caps) {
+                        (Plan::Pro, _) => view! {
+                            <p class="card-sub">"The Pro plan has no usage caps. See the Usage tab for totals."</p>
+                        }.into_any(),
+                        (Plan::Free, Some(caps)) if !caps.is_empty() => {
+                            caps.into_iter().map(|c| view! { <CapUsageBar cap=c/> }).collect_view().into_any()
+                        }
+                        (Plan::Free, _) => view! {
+                            <p class="card-sub">"Usage figures are not available yet."</p>
+                        }.into_any(),
+                    }
+                }}
             </div>
         </div>
     }
 }
 
-/// A single cap-usage bar: label, percentage label, and a colored fill
-/// track (AC-102-02: accent <80%, amber 80-99%, red >=100%, via
-/// `data::bar_color()` — the single-sourced threshold logic).
+/// One cap bar: label, used / cap, and a colored fill (accent <80%, amber 80-99%, red >=100%,
+/// via `data::bar_color()`).
 #[cfg(feature = "csr")]
 #[component]
-fn CapUsageBar(label: &'static str, ratio: Signal<f64>) -> impl IntoView {
-    let color_var = move || match data::bar_color(ratio.get()) {
+fn CapUsageBar(cap: CapUsage) -> impl IntoView {
+    let ratio = if cap.cap == 0 { 0.0 } else { cap.used as f64 / cap.cap as f64 };
+    let color_var = match data::bar_color(ratio) {
         BarColor::Accent => "var(--accent)",
         BarColor::Amber => "var(--amber)",
         BarColor::Red => "var(--red)",
     };
-    let fill_pct = move || (ratio.get() * 100.0).clamp(0.0, 100.0);
-    let pct_label = move || format!("{:.0}%", ratio.get() * 100.0);
+    let fill_pct = (ratio * 100.0).clamp(0.0, 100.0);
+    let label = {
+        let mut chars = cap.dimension.chars();
+        chars.next().map(|c| c.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
+    };
 
     view! {
         <div style="margin-top:10px">
             <div class="row" style="justify-content:space-between">
                 <span class="card-sub">{label}</span>
-                <span class="card-sub mono">{pct_label}</span>
+                <span class="card-sub mono">
+                    {format!("{} / {} ({}%)", data::fmt_num(cap.used), data::fmt_num(cap.cap), cap.pct)}
+                </span>
             </div>
             <div style="height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden;margin-top:4px">
-                <div style=move || format!(
-                    "height:100%;border-radius:3px;width:{:.1}%;background:{}",
-                    fill_pct(), color_var()
+                <div style=format!(
+                    "height:100%;border-radius:3px;width:{fill_pct:.1}%;background:{color_var}"
                 )></div>
             </div>
         </div>
     }
 }
 
-/// Plan card: Free included-volume summary, or Pro base price + renewal.
+/// Plan card: plan + server status badges, period end, and the Owner's Upgrade / Manage billing buttons.
 #[cfg(feature = "csr")]
 #[component]
 fn PlanCard() -> impl IntoView {
     let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
 
-    let summary = move || model.with(|m| m.plan_summary());
+    let plan = move || model.with(|m| m.subscription.plan.clone());
+    let status = move || model.with(|m| m.billing.status);
+    let period_end = move || model.with(|m| m.subscription.current_period_end);
+    let is_owner = move || model.with(|m| m.can_manage_billing());
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::BillingRedirect));
 
     view! {
         <div class="card billing-card">
             <div class="row" style="justify-content:space-between;align-items:center">
                 <h3 class="card-title">"Plan"</h3>
-                {move || {
-                    let is_pro = summary().plan == Plan::Pro;
-                    view! {
-                        <span class=if is_pro { "badge badge-accent" } else { "badge badge-neutral" }>
-                            {if is_pro { "Pro" } else { "Free" }}
-                        </span>
-                    }
-                }}
+                <span class="row" style="gap:6px">
+                    <span class=move || if plan() == Plan::Pro { "badge badge-accent" } else { "badge badge-neutral" }>
+                        {move || if plan() == Plan::Pro { "Pro" } else { "Free" }}
+                    </span>
+                    {move || status().map(|s| view! { <span class="badge">{s.label()}</span> })}
+                </span>
             </div>
 
-            {move || {
-                let s = summary();
-                match s.included {
-                    Some(included) => view! {
-                        <div class="billing-card-body">
-                            <p class="card-sub">"Included volume this month"</p>
-                            <ul class="billing-included-list">
-                                <li>"Reads: " {included.reads}</li>
-                                <li>"Writes: " {included.writes}</li>
-                                <li>"Deletes: " {included.deletes}</li>
-                                <li>"Storage: " {format!("{:.1} GB", included.storage_gb)}</li>
-                            </ul>
-                        </div>
-                    }.into_any(),
-                    None => view! {
-                        <div class="billing-card-body">
-                            {s.base_price.map(|price| view! {
-                                <p class="card-sub mono">{format!("${price:.2}/mo")}</p>
-                            })}
-                            {s.renews_at.map(|renews| view! {
-                                <p class="card-sub">{format!("Renews {}", renews.format("%Y-%m-%d"))}</p>
-                            })}
-                        </div>
-                    }.into_any(),
-                }
-            }}
-
-            <div class="row" style="justify-content:flex-end;margin-top:12px">
-                <button
-                    class="btn btn-secondary btn-sm"
-                    type="button"
-                    on:click=move |_| dispatch.run(Msg::OpenUpgradeModal)
-                >
-                    {move || if summary().plan == Plan::Pro { "Change plan" } else { "Upgrade to Pro" }}
-                </button>
+            <div class="billing-card-body">
+                {move || period_end().map(|end| view! {
+                    <p class="card-sub">{format!("Current period ends {}", end.format("%Y-%m-%d"))}</p>
+                })}
             </div>
+
+            <Show
+                when=is_owner
+                fallback=|| view! { <p class="card-sub" style="margin-top:12px">"Only the account Owner can change the plan."</p> }
+            >
+                <div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px">
+                    <Show when=move || plan() == Plan::Free fallback=|| ()>
+                        <button
+                            class="btn btn-primary btn-sm"
+                            type="button"
+                            disabled=busy
+                            on:click=move |_| dispatch.run(Msg::Request(ApiCall::StartCheckout))
+                        >
+                            "Upgrade to Pro"
+                        </button>
+                    </Show>
+                    <button
+                        class="btn btn-secondary btn-sm"
+                        type="button"
+                        disabled=busy
+                        on:click=move |_| dispatch.run(Msg::Request(ApiCall::OpenPortal))
+                    >
+                        "Manage billing"
+                    </button>
+                </div>
+            </Show>
         </div>
     }
 }
 
-/// Payment Method card: card summary + "On file" badge, or "Add card" CTA.
+/// Where payment method and invoices live: Stripe's portal. We only show the customer id.
 #[cfg(feature = "csr")]
 #[component]
-fn PaymentMethodCard() -> impl IntoView {
+fn PortalCard() -> impl IntoView {
     let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
-    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
-
-    let summary = move || model.with(|m| m.payment_method_summary());
+    let customer = move || model.with(|m| m.subscription.stripe_customer_id.clone());
 
     view! {
         <div class="card billing-card">
-            <div class="row" style="justify-content:space-between;align-items:center">
-                <h3 class="card-title">"Payment method"</h3>
-                {move || summary().on_file.then(|| view! {
-                    <span class="badge badge-green">"On file"</span>
-                })}
-            </div>
-
+            <h3 class="card-title">"Payment method and invoices"</h3>
             <div class="billing-card-body">
-                {move || match summary().card {
-                    Some(card) => view! {
-                        <p class="mono">
-                            {format!("{:?} •••• {} — {:02}/{}", card.brand, card.last4, card.exp_month, card.exp_year)}
-                        </p>
-                    }.into_any(),
-                    None => view! {
-                        <p class="card-sub">"No card on file"</p>
-                    }.into_any(),
-                }}
-                <p class="card-sub mono" style="margin-top:6px;font-size:11px">
-                    {move || summary().stripe_customer_id}
+                <p class="card-sub">
+                    "Cards and invoices are handled by Stripe. Use Manage billing to update your payment method, \
+                     download invoices or cancel."
                 </p>
-            </div>
-
-            <div class="row" style="justify-content:flex-end;margin-top:12px">
-                <button
-                    class="btn btn-secondary btn-sm"
-                    type="button"
-                    on:click=move |_| dispatch.run(Msg::OpenCardModal)
-                >
-                    {move || if summary().on_file { "Update" } else { "Add card" }}
-                </button>
+                <p class="card-sub mono" style="margin-top:6px;font-size:11px">{customer}</p>
             </div>
         </div>
     }

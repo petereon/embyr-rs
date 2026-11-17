@@ -9,11 +9,11 @@ mod inner {
         decode, decode_network_failure, to_request, HttpRequest, HttpResponse, Method,
     };
     use crate::components::ToastStack;
-    use crate::api::reset_token_from_query;
-    use crate::model::{AppModel, AuthScreen};
+    use crate::api::{checkout_return_from_query, invite_token_from_query, reset_token_from_query};
+    use crate::model::{AppModel, AuthScreen, CheckoutReturn};
     use crate::msg::{Effect, Msg};
     use crate::update::update as tea_update;
-    use crate::views::{AuthView, ForgotPasswordView, ResetPasswordView, ShellView};
+    use crate::views::{AcceptInviteView, AuthView, ForgotPasswordView, ResetPasswordView, ShellView};
     use leptos::prelude::*;
     use leptos::task::spawn_local;
     use wasm_bindgen::{JsCast, JsValue};
@@ -23,16 +23,23 @@ mod inner {
     /// as further messages.
     fn dispatch(model: RwSignal<AppModel>, msg: Msg) {
         let effects = model.try_update(|m| tea_update(m, msg)).unwrap_or_default();
-        for Effect::Http(call) in effects {
-            spawn_local(async move {
-                let msgs = match fetch(to_request(&call)).await {
-                    Ok(response) => decode(&call, response),
-                    Err(reason) => decode_network_failure(&call, reason),
-                };
-                for msg in msgs {
-                    dispatch(model, msg);
+        for effect in effects {
+            match effect {
+                Effect::Http(call) => spawn_local(async move {
+                    let msgs = match fetch(to_request(&call)).await {
+                        Ok(response) => decode(&call, response),
+                        Err(reason) => decode_network_failure(&call, reason),
+                    };
+                    for msg in msgs {
+                        dispatch(model, msg);
+                    }
+                }),
+                Effect::Redirect(url) => {
+                    if let Some(window) = web_sys::window() {
+                        let _ = window.location().set_href(&url);
+                    }
                 }
-            });
+            }
         }
     }
 
@@ -85,19 +92,36 @@ mod inner {
         SignIn,
         Forgot,
         Reset,
+        Invite,
     }
 
-    /// Read the emailed `?reset=<token>` and, if present, replace the URL with the bare path right
-    /// away so the token cannot linger in the address bar, history, or a later Referer.
-    fn take_reset_token() -> Option<String> {
-        let window = web_sys::window()?;
+    /// Link parameters the SPA consumes at start: the emailed `?reset=` / `?invite=` tokens and
+    /// Stripe's `?checkout=` return.
+    struct UrlParams {
+        reset: Option<String>,
+        invite: Option<String>,
+        checkout: Option<CheckoutReturn>,
+    }
+
+    /// Read the link parameters and, if any is present, replace the URL with the bare path right
+    /// away so a token cannot linger in the address bar, history, or a later Referer.
+    fn take_url_params() -> UrlParams {
+        let none = UrlParams { reset: None, invite: None, checkout: None };
+        let Some(window) = web_sys::window() else { return none };
         let location = window.location();
-        let token = reset_token_from_query(&location.search().ok()?)?;
-        let path = location.pathname().unwrap_or_else(|_| "/".into());
-        if let Ok(history) = window.history() {
-            let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&path));
+        let search = location.search().unwrap_or_default();
+        let params = UrlParams {
+            reset: reset_token_from_query(&search),
+            invite: invite_token_from_query(&search),
+            checkout: checkout_return_from_query(&search),
+        };
+        if params.reset.is_some() || params.invite.is_some() || params.checkout.is_some() {
+            let path = location.pathname().unwrap_or_else(|_| "/".into());
+            if let Ok(history) = window.history() {
+                let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&path));
+            }
         }
-        Some(token)
+        params
     }
 
     /// Root application component.
@@ -112,8 +136,16 @@ mod inner {
 
         provide_context(model);
         provide_context(dispatcher);
-        let reset_token = RwSignal::new(take_reset_token());
-        if reset_token.get_untracked().is_some() {
+        let params = take_url_params();
+        let reset_token = RwSignal::new(params.reset);
+        let invite_token = RwSignal::new(params.invite);
+        if let Some(outcome) = params.checkout {
+            dispatch(model, Msg::CheckoutReturned(outcome));
+        }
+        // An invitation outranks a reset link if both are somehow present.
+        if invite_token.get_untracked().is_some() {
+            dispatch(model, Msg::ShowAuth(AuthScreen::AcceptInvite));
+        } else if reset_token.get_untracked().is_some() {
             dispatch(model, Msg::ShowAuth(AuthScreen::ResetPassword));
         }
         dispatch(model, Msg::Boot);
@@ -131,14 +163,21 @@ mod inner {
                         AuthScreen::SignIn => Screen::SignIn,
                         AuthScreen::ForgotPassword => Screen::Forgot,
                         AuthScreen::ResetPassword => Screen::Reset,
+                        AuthScreen::AcceptInvite => Screen::Invite,
                     }
                 }
             })
         });
-        // The token is single-use: forget it as soon as the reset screen is left.
+        // Tokens are single-use: forget each as soon as its screen is left. Booting and Unreachable
+        // are not "left" (the boot check runs before the screen shows), or the token would be
+        // dropped before first render.
         leptos::prelude::Effect::new(move |_| {
-            if screen.get() != Screen::Reset {
+            let settled = !matches!(screen.get(), Screen::Booting | Screen::Unreachable);
+            if settled && screen.get() != Screen::Reset {
                 reset_token.set(None);
+            }
+            if settled && screen.get() != Screen::Invite {
+                invite_token.set(None);
             }
         });
 
@@ -162,6 +201,7 @@ mod inner {
                 Screen::SignIn => view! { <AuthView /> }.into_any(),
                 Screen::Forgot => view! { <ForgotPasswordView /> }.into_any(),
                 Screen::Reset => view! { <ResetPasswordView token=reset_token /> }.into_any(),
+                Screen::Invite => view! { <AcceptInviteView token=invite_token /> }.into_any(),
             }}
         }
     }

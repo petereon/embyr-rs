@@ -16,6 +16,9 @@ use embyr_admin_ui::update::update;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+/// What `GET /billing/subscription` answers once a session is established.
+const SUBSCRIPTION_JSON: &str = r#"{"plan":"free","status":"active","stripe_customer_id":"cus_1","current_period_end":null,"card":null}"#;
+
 fn response(status: u16, body: &str) -> HttpResponse {
     HttpResponse { status, retry_after_ms: None, body: body.to_string() }
 }
@@ -48,7 +51,8 @@ fn user() -> CurrentUser {
 fn drive(model: &mut AppModel, msg: Msg, server: &dyn Fn(&HttpRequest) -> HttpResponse) {
     let mut queue = vec![msg];
     while let Some(msg) = queue.pop() {
-        for Effect::Http(call) in update(model, msg) {
+        for effect in update(model, msg) {
+            let Effect::Http(call) = effect else { continue };
             let mut results = decode(&call, server(&to_request(&call)));
             results.reverse();
             queue.extend(results);
@@ -60,6 +64,7 @@ fn signed_in_model() -> AppModel {
     let mut model = AppModel::default();
     drive(&mut model, Msg::SessionEstablished(user()), &|req| match req.path.as_str() {
         "/admin/v1/metrics/summary" => response(200, "[]"),
+        "/admin/v1/billing/subscription" => response(200, SUBSCRIPTION_JSON),
         _ => response(200, PROJECTS_JSON),
     });
     model
@@ -200,6 +205,7 @@ fn full_sign_in_reaches_the_shell_with_the_users_projects() {
         "/admin/v1/auth/session" => response(200, SESSION_JSON),
         "/admin/v1/projects" => response(200, PROJECTS_JSON),
         "/admin/v1/metrics/summary" => response(200, "[]"),
+        "/admin/v1/billing/subscription" => response(200, SUBSCRIPTION_JSON),
         other => panic!("unexpected call {other}"),
     };
     let mut model = AppModel { booting: false, ..AppModel::default() };
@@ -327,7 +333,10 @@ fn opening_a_section_loads_its_data() {
         update(&mut model, Msg::NavigateTo(Section::Databases)),
         vec![Effect::Http(ApiCall::LoadProjects)]
     );
-    assert!(update(&mut model, Msg::NavigateTo(Section::Billing)).is_empty(), "no loads wired for Billing yet");
+    assert_eq!(
+        update(&mut model, Msg::NavigateTo(Section::Billing)),
+        vec![Effect::Http(ApiCall::LoadSubscription), Effect::Http(ApiCall::LoadUsage)]
+    );
 }
 
 // ── AC-AUW-18: shipped UI code never reaches for mock data ───────────────────
