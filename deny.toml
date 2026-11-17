@@ -27,6 +27,11 @@ ignore = [
     # the production binary. Crate is archived/unmaintained with no safe
     # upgrade; real fix is testcontainers migrating off it upstream.
     "RUSTSEC-2025-0111",
+    # chrono 0.4.x unmaintained (RUSTSEC-2026-0543, informational: no vulnerability,
+    # no safe upgrade — all versions affected). chrono is used throughout the
+    # server and sqlx; migrating to jiff/time is a separate, large change.
+    # Re-evaluate when the advisory gains a patched/replacement path.
+    "RUSTSEC-2026-0543",
 ]
 
 # ---------------------------------------------------------------------------

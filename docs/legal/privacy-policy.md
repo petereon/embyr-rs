@@ -2,7 +2,7 @@
 
 > Draft for lawyer review. Not legal advice. Fill every `[BRACKETED]` item first.
 
-**Effective date:** [DATE]  ·  **Controller:** [COMPANY], [ADDRESS]  ·  **Contact:** [PRIVACY_EMAIL]
+**Effective date:** [DATE]  ·  **Controller:** [FULL NAME], sole trader, [ADDRESS], Slovakia, IČO [ICO]  ·  **Contact:** [PRIVACY_EMAIL]
 
 ## 1. Who this covers and our two roles
 
@@ -80,7 +80,7 @@ Depending on where you live (for example under the GDPR/UK GDPR), you may ask us
 correct, delete or export your personal data, to restrict or object to certain processing, and
 to withdraw consent where we rely on it. You can delete your account in the console, or write to
 [PRIVACY_EMAIL]; we respond within one month. You may also lodge a complaint with your data
-protection authority. If you are an end user of one of our customers, contact that customer
+protection authority; in Slovakia that is the Office for Personal Data Protection of the Slovak Republic (Úrad na ochranu osobných údajov SR, dataprotection.gov.sk). If you are an end user of one of our customers, contact that customer
 first; we assist them in responding.
 
 ## 9. Children
@@ -95,5 +95,5 @@ they take effect.
 
 ## 11. Contact
 
-[COMPANY] · [ADDRESS] · [PRIVACY_EMAIL]
+[FULL NAME] · [ADDRESS] · IČO [ICO] · [PRIVACY_EMAIL]
 Data protection officer / EU/UK representative (if required): [NAME / ADDRESS]

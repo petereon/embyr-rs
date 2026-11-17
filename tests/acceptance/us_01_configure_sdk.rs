@@ -195,7 +195,8 @@ async fn incorrect_host_causes_transport_error_not_crash() {
 /// Given:  an embyr server is running
 /// When:   a client sends GET /healthz to the REST port
 /// Then:   the response status is 200 OK
-/// And:    the response arrives within 100 milliseconds
+/// And:    the response arrives within a second (a liveness probe, not a latency SLO;
+///         the old 100 ms budget flaked on loaded CI runners)
 #[tokio::test]
 async fn healthz_returns_200_while_server_healthy() {
     let (_sc, _cc, _sdb, _pid, _key, server) = setup_test_environment().await;
@@ -204,7 +205,7 @@ async fn healthz_returns_200_while_server_healthy() {
     let start = std::time::Instant::now();
     let resp = client
         .get(format!("http://{}/healthz", server.rest_addr))
-        .timeout(std::time::Duration::from_millis(200))
+        .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
         .expect("healthz request must succeed");
@@ -212,8 +213,8 @@ async fn healthz_returns_200_while_server_healthy() {
 
     assert_eq!(resp.status(), 200, "expected 200 OK");
     assert!(
-        elapsed.as_millis() < 100,
-        "healthz must respond within 100ms, took {}ms",
+        elapsed.as_millis() < 1000,
+        "healthz must respond within 1s, took {}ms",
         elapsed.as_millis()
     );
 }

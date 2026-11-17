@@ -434,7 +434,8 @@ impl StorageAgent for MockAgentServer {
             .iter()
             .filter(|d| query_doc_matches_filter(d, &filter))
             .count() as i64;
-        Ok(Response::new(RunAggregationQueryResponse { count }))
+        // Deliberately an "old agent": COUNT only, never fills `results`.
+        Ok(Response::new(RunAggregationQueryResponse { count, ..Default::default() }))
     }
 
     async fn list_documents(
@@ -1937,4 +1938,77 @@ async fn put_connection_switches_direct_pg_project_to_agent() {
     let stored = dsn_common::column_bytes(pool, "dss-switch", "agent_tls_bundle_srv_enc").await.unwrap();
     assert_eq!(dsn_common::keys().decrypt(&stored).as_deref(), Some(bundle_json(&certs).as_str()));
     assert!(request_reaches_agent(&env, &calls, "dss-switch", "k-switch").await);
+}
+
+/// agent-mode-sum-avg compatibility: MockAgentServer behaves like an agent
+/// that predates SUM/AVG (ignores `aggregations`, answers `count` only). The
+/// server must detect that and keep returning Unimplemented, never a wrong
+/// number.
+///
+/// Tags: @real_io @adapter_integration
+#[tokio::test]
+async fn agent_mode_sum_against_agent_without_sum_support_is_unimplemented() {
+    install_ring_provider();
+
+    let env = setup_test_env().await;
+    let certs = generate_mtls_cert_set();
+
+    use testcontainers_modules::testcontainers::ImageExt;
+    let agent_pg = Postgres::default()
+        .with_tag("15-alpine")
+        .start()
+        .await
+        .expect("start agent postgres");
+    let agent_pg_port = agent_pg.get_host_port_ipv4(5432).await.expect("get agent pg port");
+    let agent_pg_url = format!("postgres://postgres:postgres@127.0.0.1:{}/postgres", agent_pg_port);
+    let agent_pool = PgPool::connect(&agent_pg_url).await.expect("connect agent pool");
+
+    let (_calls, _query_docs, mock_port, _shutdown_tx) =
+        start_mock_agent_server(&certs, agent_pool).await;
+    let agent_endpoint = format!("127.0.0.1:{}", mock_port);
+    let api_key = provision_agent_project(&env, "agg-agent-sum-old-proj", &certs, &agent_endpoint).await;
+
+    use embyr_proto::firestore::{
+        firestore_client::FirestoreClient,
+        run_aggregation_query_request::QueryType as AggregationQueryType,
+        structured_aggregation_query::{
+            aggregation::{Operator as AggregationOperator, Sum},
+            Aggregation, QueryType as StructuredAggQueryType,
+        },
+        structured_query::{CollectionSelector, FieldReference},
+        RunAggregationQueryRequest as FsRunAggregationQueryRequest, StructuredAggregationQuery,
+        StructuredQuery as FsStructuredQuery,
+    };
+    use tonic::metadata::MetadataValue;
+
+    let mut firestore_client = FirestoreClient::connect(format!("http://{}", env.server.grpc_addr))
+        .await
+        .expect("connect to firestore gRPC");
+    let sq = FsStructuredQuery {
+        from: vec![CollectionSelector { collection_id: "widgets".to_string(), all_descendants: false }],
+        ..Default::default()
+    };
+    let saq = StructuredAggregationQuery {
+        query_type: Some(StructuredAggQueryType::StructuredQuery(sq)),
+        aggregations: vec![Aggregation {
+            operator: Some(AggregationOperator::Sum(Sum {
+                field: Some(FieldReference { field_path: "price".to_string() }),
+            })),
+            alias: String::new(),
+        }],
+    };
+    let mut request = tonic::Request::new(FsRunAggregationQueryRequest {
+        parent: "projects/agg-agent-sum-old-proj/databases/(default)/documents".to_string(),
+        query_type: Some(AggregationQueryType::StructuredAggregationQuery(saq)),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "authorization",
+        MetadataValue::try_from(format!("Bearer {}", api_key)).unwrap(),
+    );
+    let err = firestore_client
+        .run_aggregation_query(request)
+        .await
+        .expect_err("SUM against an agent without SUM support must fail");
+    assert_eq!(err.code(), tonic::Code::Unimplemented, "got {:?}: {}", err.code(), err.message());
 }

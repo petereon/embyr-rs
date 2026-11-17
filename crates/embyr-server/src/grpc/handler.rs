@@ -688,6 +688,40 @@ impl FirestoreService {
         }
     }
 
+    /// Composite-index gate shared by RunQuery and Listen (audit #68): if the
+    /// query needs a composite index and none is READY for the collection,
+    /// FAILED_PRECONDITION naming the missing index.
+    pub(crate) async fn require_composite_index_ready(
+        index_manager: &IndexManager,
+        project_id: &str,
+        collection_id: &str,
+        query: &StructuredQuery,
+    ) -> Result<(), Status> {
+        if !Self::requires_composite_index(query)
+            // Keyed by the bare collection id (unchanged): composite
+            // indexes are registered per collection id, not per parent.
+            || index_manager.is_index_ready(project_id, collection_id).await
+        {
+            return Ok(());
+        }
+        // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
+        // names the specific missing index (collection_path + fields)
+        // instead of a generic message — reuses the SAME `fields` JSON
+        // shape `POST /admin/v1/projects/:project_id/indexes`
+        // (firestore-composite-indexes-admin-api) expects, so Alex can
+        // copy it directly into a `CreateIndex` call.
+        let missing_fields = Self::missing_index_fields(query);
+        let fields_json =
+            serde_json::to_string(&missing_fields).unwrap_or_else(|_| "[]".to_string());
+        // The leading sentence is Firestore's own wording: SDKs key off
+        // FAILED_PRECONDITION and clients/tools grep for it.
+        Err(Status::failed_precondition(format!(
+            "The query requires an index. query requires a composite index on collection \
+             '{}' with fields {}; create it via POST /admin/v1/projects/{{project_id}}/indexes",
+            collection_id, fields_json
+        )))
+    }
+
     /// Return `true` if the query requires a composite index.
     ///
     /// A composite index is required when there is at least one field filter
@@ -1134,6 +1168,44 @@ impl FirestoreService {
             ),
             embyr_core::access_control::EvaluationOutcome::Allow
         ))
+    }
+
+    /// `ListCollectionIds` at the database ROOT: may this caller see the
+    /// NAME of top-level collection `collection_path`? Same bar as an
+    /// unfiltered list query over it (Firestore's `allow list`): every
+    /// governing read rule (exact-match, else patterns) must admit a
+    /// filter-less query for this caller. No governing rule = visible, so a
+    /// rule-less project behaves exactly as before. Undecidable rule shapes
+    /// hide the name (fail closed), as `check_query_compliance` does.
+    async fn collection_name_visible(
+        system_db: &SystemDb,
+        project_id: &str,
+        collection_path: &str,
+        auth_ctx: Option<&embyr_core::access_control::AuthContext>,
+    ) -> Result<bool, Status> {
+        let reparse = |src: &str| {
+            embyr_core::access_control::parse_condition(src)
+                .map_err(|e| Status::internal(format!("stored access rule failed to re-parse: {e:?}")))
+        };
+        let governing = match system_db
+            .get_access_rule(project_id, collection_path)
+            .await
+            .map_err(|e| sanitize_backend_error(e, "list_collection_ids: get_access_rule"))?
+        {
+            Some(row) => vec![(reparse(&row.condition_source)?, std::collections::BTreeMap::new())],
+            None => {
+                let mut v = Vec::new();
+                for (row, bindings) in
+                    Self::resolve_collection_read_patterns(system_db, project_id, collection_path).await?
+                {
+                    if let Some(src) = row.read_condition {
+                        v.push((reparse(&src)?, bindings));
+                    }
+                }
+                v
+            }
+        };
+        Ok(unfiltered_list_admitted(&governing, auth_ctx))
     }
 
     /// `ListCollectionIds` gate (go-live X9): the parent DOCUMENT is the read
@@ -2815,21 +2887,20 @@ impl FirestoreService {
         let project_id = embyr_core::domain::project::ProjectId::new(&project_id_str)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
+        let auth_ctx = verified_identity.as_ref().map(|v| embyr_core::access_control::AuthContext {
+            uid: v.end_user_id.clone(),
+            claims: v.claims.clone(),
+        });
         // X9: a document parent is gated like a read of that document. The
-        // database root (empty prefix) has no document and no rule target, so
-        // it stays unrestricted as before.
-        // ponytail: root collection names are not rule-filtered; add a
-        // per-collection filter if root names must be hidden too.
+        // database root (empty prefix) has no document, so each root
+        // collection NAME is instead filtered by `collection_name_visible`
+        // below (root-audit follow-up).
         if let Some((collection_path, document_id)) = prefix.rsplit_once('/') {
             let parent_doc = DocumentPath {
                 project_id: project_id.clone(),
                 collection_path: collection_path.to_string(),
                 document_id: document_id.to_string(),
             };
-            let auth_ctx = verified_identity.as_ref().map(|v| embyr_core::access_control::AuthContext {
-                uid: v.end_user_id.clone(),
-                claims: v.claims.clone(),
-            });
             if !Self::parent_read_allows(
                 &self.system_db,
                 &adapter,
@@ -2847,15 +2918,39 @@ impl FirestoreService {
         let offset = embyr_core::pagination::decode_page_token(&req.page_token)
             .map_err(core_error_to_status)?;
 
+        let is_root = prefix.is_empty();
         let parent = CollectionPath { project_id, collection_path: prefix };
 
         // Fetch-one-extra-to-detect-more-pages, same technique `run_query`'s
         // own LIMIT/OFFSET provides — `list_collection_ids`'s own SQL
         // (ADR-051 § Decision 2) already applies LIMIT/OFFSET server-side.
-        let mut ids = adapter
-            .list_collection_ids(&parent, page_size + 1, offset as i32)
-            .await
-            .map_err(core_error_to_status)?;
+        let mut ids = if is_root {
+            // Root names are rule-filtered, so page AFTER filtering: read all
+            // root names (few), keep the visible ones, slice in memory.
+            // ponytail: one rule lookup per root collection; cache if profiled.
+            let all = adapter
+                .list_collection_ids(&parent, i32::MAX, 0)
+                .await
+                .map_err(core_error_to_status)?;
+            let total = all.len();
+            let mut visible = Vec::with_capacity(total);
+            for id in all {
+                if Self::collection_name_visible(&self.system_db, &project_id_str, &id, auth_ctx.as_ref())
+                    .await?
+                {
+                    visible.push(id);
+                }
+            }
+            if visible.is_empty() && total > 0 {
+                return Err(Status::permission_denied("access denied by rule"));
+            }
+            visible.into_iter().skip(offset as usize).take(page_size as usize + 1).collect()
+        } else {
+            adapter
+                .list_collection_ids(&parent, page_size + 1, offset as i32)
+                .await
+                .map_err(core_error_to_status)?
+        };
 
         let has_more = ids.len() > page_size as usize;
         if has_more {
@@ -3571,32 +3666,13 @@ impl FirestoreService {
 
         // Composite index check: filter on field X + orderBy field Y (where Y != X)
         // requires a READY composite index in the system DB.
-        let requires_index = Self::requires_composite_index(&domain_query);
-        if requires_index
-            && !self
-                .index_manager
-                // Keyed by the bare collection id (unchanged): composite
-                // indexes are registered per collection id, not per parent.
-                .is_index_ready(project_id_str, &collection_id)
-                .await
-        {
-            // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
-            // names the specific missing index (collection_path + fields)
-            // instead of a generic message — reuses the SAME `fields` JSON
-            // shape `POST /admin/v1/projects/:project_id/indexes`
-            // (firestore-composite-indexes-admin-api) expects, so Alex can
-            // copy it directly into a `CreateIndex` call.
-            let missing_fields = Self::missing_index_fields(&domain_query);
-            let fields_json = serde_json::to_string(&missing_fields)
-                .unwrap_or_else(|_| "[]".to_string());
-            // The leading sentence is Firestore's own wording: SDKs key off
-            // FAILED_PRECONDITION and clients/tools grep for it.
-            return Err(Status::failed_precondition(format!(
-                "The query requires an index. query requires a composite index on collection \
-                 '{}' with fields {}; create it via POST /admin/v1/projects/{{project_id}}/indexes",
-                collection_id, fields_json
-            )));
-        }
+        Self::require_composite_index_ready(
+            &self.index_manager,
+            project_id_str,
+            &collection_id,
+            &domain_query,
+        )
+        .await?;
 
         Ok((collection, domain_query))
     }
@@ -4165,6 +4241,7 @@ impl FirestoreService {
         let keepalive = self.keepalive_interval;
         let registry = Arc::clone(&self.listen_registry);
         let system_db = Arc::clone(&self.system_db);
+        let index_manager = Arc::clone(&self.index_manager);
 
         // `request`'s metadata is no longer needed beyond this point —
         // consume it into the owned `Streaming` body now, immediately
@@ -4179,6 +4256,7 @@ impl FirestoreService {
                 in_stream,
                 &adapter,
                 &system_db,
+                &index_manager,
                 project_id,
                 verified_identity,
                 &tx,
@@ -5501,5 +5579,67 @@ mod dropped_filter_tests {
         };
         let result = translate_filter(&and).expect("Some");
         assert!(result.is_err());
+    }
+}
+
+/// Pure decision behind root `ListCollectionIds` visibility: a collection
+/// name is visible iff EVERY governing read rule admits a filter-less query
+/// for this caller (`check_query_compliance` with no filter). No governing
+/// rule = visible.
+pub(crate) fn unfiltered_list_admitted(
+    governing: &[(
+        embyr_core::access_control::Condition,
+        std::collections::BTreeMap<String, String>,
+    )],
+    auth: Option<&embyr_core::access_control::AuthContext>,
+) -> bool {
+    governing.iter().all(|(cond, bindings)| {
+        matches!(
+            embyr_core::access_control::check_query_compliance_with_ancestor_bindings(
+                cond, None, auth, bindings,
+            ),
+            embyr_core::access_control::QueryComplianceOutcome::Admitted
+        )
+    })
+}
+
+#[cfg(test)]
+mod root_collection_visibility_tests {
+    use super::unfiltered_list_admitted;
+    use embyr_core::access_control::{parse_condition, AuthContext};
+    use std::collections::BTreeMap;
+
+    fn rule(src: &str) -> Vec<(embyr_core::access_control::Condition, BTreeMap<String, String>)> {
+        vec![(parse_condition(src).expect("parse"), BTreeMap::new())]
+    }
+
+    fn user() -> AuthContext {
+        AuthContext { uid: "u1".into(), claims: BTreeMap::new() }
+    }
+
+    #[test]
+    fn no_governing_rule_is_visible_to_anyone() {
+        assert!(unfiltered_list_admitted(&[], None));
+    }
+
+    #[test]
+    fn auth_required_rule_hides_from_identityless_and_admits_signed_in() {
+        let r = rule("request.auth != null");
+        assert!(!unfiltered_list_admitted(&r, None));
+        assert!(unfiltered_list_admitted(&r, Some(&user())));
+    }
+
+    #[test]
+    fn deny_all_and_per_document_rules_hide_even_from_signed_in() {
+        assert!(!unfiltered_list_admitted(&rule("false"), Some(&user())));
+        assert!(!unfiltered_list_admitted(
+            &rule("resource.data.owner == request.auth.uid"),
+            Some(&user())
+        ));
+    }
+
+    #[test]
+    fn open_rule_is_visible() {
+        assert!(unfiltered_list_admitted(&rule("true"), None));
     }
 }
