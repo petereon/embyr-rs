@@ -115,15 +115,16 @@ async fn translate_payload(payload: &str, project_id: &str, pool: &PgPool) -> Do
         "projects/{project_id}/databases/(default)/documents/{collection_path}/{document_id}"
     );
 
-    // Query the document to determine kind, generation, and fields.
+    // Query the document to determine kind, generation, and fields. A delete
+    // is a soft delete that keeps `fields` (so the server can evaluate a read
+    // rule on the old document): select the row whether or not it is deleted.
     use sqlx::Row;
     let row_opt = sqlx::query(
-        "SELECT fields, version \
+        "SELECT fields, version, deleted \
          FROM documents \
          WHERE project_id = $1 \
            AND collection_path = $2 \
-           AND document_id = $3 \
-           AND NOT deleted",
+           AND document_id = $3",
     )
     .bind(project_id)
     .bind(&collection_path)
@@ -134,26 +135,46 @@ async fn translate_payload(payload: &str, project_id: &str, pool: &PgPool) -> Do
     match row_opt {
         Ok(Some(row)) => {
             let version: i64 = row.try_get("version").unwrap_or(0);
+            let deleted: bool = row.try_get("deleted").unwrap_or(false);
             let fields_json: serde_json::Value = row
                 .try_get("fields")
                 .unwrap_or(serde_json::Value::Object(Default::default()));
-
-            let proto_fields = json_fields_to_proto(&fields_json);
-
-            DocChange {
-                kind: DocChangeKind::Upsert as i32,
-                document_name,
-                generation: version,
-                fields: proto_fields,
-            }
+            doc_change_for_row(document_name, version, deleted, &fields_json)
         }
         _ => {
-            // Document not found (deleted) or query error — emit DELETE.
+            // Row absent (purged) or query error — DELETE with unknown old fields.
             DocChange {
                 kind: DocChangeKind::Delete as i32,
                 document_name,
                 ..Default::default()
             }
+        }
+    }
+}
+
+/// The DocChange for a document row: UPSERT with its fields, or, for a
+/// soft-deleted row, DELETE carrying the pre-delete fields as `old_fields`.
+fn doc_change_for_row(
+    document_name: String,
+    version: i64,
+    deleted: bool,
+    fields_json: &serde_json::Value,
+) -> DocChange {
+    let proto_fields = json_fields_to_proto(fields_json);
+    if deleted {
+        DocChange {
+            kind: DocChangeKind::Delete as i32,
+            document_name,
+            old_fields: proto_fields,
+            ..Default::default()
+        }
+    } else {
+        DocChange {
+            kind: DocChangeKind::Upsert as i32,
+            document_name,
+            generation: version,
+            fields: proto_fields,
+            ..Default::default()
         }
     }
 }
@@ -209,5 +230,27 @@ fn json_fields_to_proto(
     match fields_json.as_object() {
         Some(obj) => obj.iter().map(|(k, v)| (k.clone(), convert(v))).collect(),
         None => Default::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_row_is_an_upsert_with_fields_and_generation() {
+        let c = doc_change_for_row("d".into(), 4, false, &serde_json::json!({"n": 1}));
+        assert_eq!(c.kind, DocChangeKind::Upsert as i32);
+        assert_eq!(c.generation, 4);
+        assert_eq!(c.fields.len(), 1);
+        assert!(c.old_fields.is_empty());
+    }
+
+    #[test]
+    fn soft_deleted_row_is_a_delete_carrying_its_pre_delete_fields() {
+        let c = doc_change_for_row("d".into(), 5, true, &serde_json::json!({"owner": "u1"}));
+        assert_eq!(c.kind, DocChangeKind::Delete as i32);
+        assert!(c.fields.is_empty(), "fields stays empty for a delete");
+        assert!(c.old_fields.contains_key("owner"));
     }
 }

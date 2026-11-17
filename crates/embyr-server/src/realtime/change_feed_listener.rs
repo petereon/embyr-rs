@@ -84,7 +84,9 @@ async fn run(
                 };
                 registry.fan_out(&channel, event).await;
             }
-            Ok(ChangeEvent::Deleted(path)) => registry.fan_out(&channel, removed(path)).await,
+            Ok(ChangeEvent::Deleted { path, old_fields }) => {
+                registry.fan_out(&channel, ListenEvent::Removed { path, fields: old_fields }).await
+            }
             Ok(ChangeEvent::Reset) => registry.reset(&channel).await,
             Err(e) => {
                 tracing::warn!(project_id = %project_id, error = %e, "change_feed_recv_error");
@@ -95,10 +97,10 @@ async fn run(
     }
 }
 
-// ponytail: the agent's DocChange carries no pre-delete snapshot, so `fields`
-// is empty. A delete is delivered only where the collection's rule does not
-// depend on the deleted document's data (open rule); rule-gated deletes are
-// withheld (fail closed). Upgrade path: additive `old_fields` on DocChange.
+// A delete whose pre-delete fields are unknown (`Changed` that re-fetched to
+// nothing, or an agent that predates `DocChange.old_fields`) carries empty
+// `fields`: delivered only where the collection's rule does not depend on the
+// deleted document's data; rule-gated deletes are withheld (fail closed).
 fn removed(path: DocumentPath) -> ListenEvent {
     ListenEvent::Removed { path, fields: BTreeMap::new() }
 }
@@ -257,7 +259,11 @@ mod tests {
             vec![Ok(vec![
                 Ok(ChangeEvent::Changed(path("a"))),
                 Ok(ChangeEvent::Changed(path("gone"))),
-                Ok(ChangeEvent::Deleted(path("b"))),
+                Ok(ChangeEvent::Deleted { path: path("b"), old_fields: BTreeMap::new() }),
+                Ok(ChangeEvent::Deleted {
+                    path: path("c"),
+                    old_fields: BTreeMap::from([("n".to_string(), FieldValue::Integer(7))]),
+                }),
             ])],
             &["a"],
         );
@@ -269,11 +275,12 @@ mod tests {
             ListenEvent::Changed(d) => assert_eq!((d.path.document_id.as_str(), d.version), ("a", 3)),
             e => panic!("expected Changed, got {e:?}"),
         }
-        for want in ["gone", "b"] {
+        // `gone` and `b`: pre-delete fields unknown. `c`: the agent supplied them.
+        for (want, old_n) in [("gone", None), ("b", None), ("c", Some(7))] {
             match next(&mut sub.event_rx).await {
                 ListenEvent::Removed { path, fields } => {
                     assert_eq!(path.document_id, want);
-                    assert!(fields.is_empty());
+                    assert_eq!(fields.get("n"), old_n.map(FieldValue::Integer).as_ref());
                 }
                 e => panic!("expected Removed, got {e:?}"),
             }
