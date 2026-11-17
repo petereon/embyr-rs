@@ -1,17 +1,16 @@
-//! UsageTab — per-database usage breakdown table.
+//! UsageTab — month-to-date usage per database, from `GET /billing?range=month`.
 //!
 //! Gated behind #[cfg(feature = "csr")].
 //!
-//! AC-104-01/02/03: renders `AppModel::usage_table_rows()` as a table with
-//! Database/Reads/Writes/Deletes/Storage columns, single-sourced from the
-//! model — no per-view recomputation of usage figures.
+//! Renders `AppModel::usage_table_rows()`. There is no storage column (G-49): the server has no
+//! storage source, so showing one would show a made-up zero.
 
 #[cfg(feature = "csr")]
 use crate::model::AppModel;
 #[cfg(feature = "csr")]
 use leptos::prelude::*;
 
-/// Usage tab content — per-database reads/writes/deletes/storage table.
+/// Usage tab content — per-database reads/writes/deletes for the month so far.
 #[cfg(feature = "csr")]
 #[component]
 pub fn UsageTab() -> impl IntoView {
@@ -27,7 +26,6 @@ pub fn UsageTab() -> impl IntoView {
                         <th>"Reads"</th>
                         <th>"Writes"</th>
                         <th>"Deletes"</th>
-                        <th>"Storage"</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -41,7 +39,6 @@ pub fn UsageTab() -> impl IntoView {
                                         <td class="mono">{row.usage.reads}</td>
                                         <td class="mono">{row.usage.writes}</td>
                                         <td class="mono">{row.usage.deletes}</td>
-                                        <td class="mono">{format!("{:.1} GB", row.usage.storage_gb)}</td>
                                     </tr>
                                 }
                             })

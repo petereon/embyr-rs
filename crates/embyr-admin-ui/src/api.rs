@@ -8,8 +8,9 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::model::{
-    Connection, ConnectionSummary, CurrentUser, Database, DbBackendMode, DbId, DbMetrics, DbStatus, LatencyStats,
-    LogRetention, MetricsSummaryRow, MetricsWindow, ProjectApiKeyInfo, RevealedSecret, Role, SeriesPoint,
+    CapUsage, CheckoutReturn, Connection, ConnectionSummary, CurrentUser, Database, DbBackendMode, DbId, DbMetrics,
+    DbStatus, Enrolment, LatencyStats, LogRetention, MetricsSummaryRow, MetricsWindow, Plan, ProjectApiKeyInfo,
+    RecoveryCodes, RevealedSecret, Role, SeriesPoint, Subscription, SubscriptionStatus, UsageStats, UsageTableRow,
 };
 use crate::msg::Msg;
 
@@ -32,6 +33,13 @@ pub enum CallKind {
     DeleteProject,
     /// Rotate and revoke share a kind: one key operation at a time.
     ApiKey,
+    Subscription,
+    Usage,
+    /// Checkout and portal share a kind: one hosted-billing redirect at a time.
+    BillingRedirect,
+    DeleteAccount,
+    InviteAccept,
+    InviteConfirm,
 }
 
 /// How the second factor was supplied. Exactly one reaches the server.
@@ -130,6 +138,20 @@ pub enum ApiCall {
     SetLogging { id: DbId, enabled: bool, retention: Option<LogRetention> },
     RotateApiKey(DbId),
     RevokeApiKey(DbId),
+    /// `GET /billing/subscription`: plan, server status, Free-plan caps.
+    LoadSubscription,
+    /// `GET /billing?range=month`: month-to-date usage per database.
+    LoadUsage,
+    /// `POST /billing/checkout_session` (Owner): answers the hosted Stripe Checkout URL for Pro.
+    StartCheckout,
+    /// `POST /billing/portal_session` (Owner): answers the hosted Stripe billing portal URL.
+    OpenPortal,
+    /// `DELETE /account` (Owner): re-authenticates with password + second factor and the typed account name.
+    DeleteAccount { password: String, code: SignInCode, confirm_account_name: String },
+    /// `POST /auth/invitations/accept`: step 1 of redeeming an emailed invitation.
+    AcceptInvitation { token: String, display_name: String, password: String },
+    /// `POST /auth/invitations/confirm`: step 2, proves the authenticator is enrolled.
+    ConfirmInvitation { token: String, totp_code: String },
 }
 
 impl ApiCall {
@@ -150,6 +172,12 @@ impl ApiCall {
             ApiCall::CreateProject(_) => CallKind::CreateProject,
             ApiCall::DeleteProject(_) => CallKind::DeleteProject,
             ApiCall::RotateApiKey(_) | ApiCall::RevokeApiKey(_) => CallKind::ApiKey,
+            ApiCall::LoadSubscription => CallKind::Subscription,
+            ApiCall::LoadUsage => CallKind::Usage,
+            ApiCall::StartCheckout | ApiCall::OpenPortal => CallKind::BillingRedirect,
+            ApiCall::DeleteAccount { .. } => CallKind::DeleteAccount,
+            ApiCall::AcceptInvitation { .. } => CallKind::InviteAccept,
+            ApiCall::ConfirmInvitation { .. } => CallKind::InviteConfirm,
         }
     }
 
@@ -207,6 +235,27 @@ impl std::fmt::Debug for ApiCall {
             }
             ApiCall::RotateApiKey(id) => write!(f, "RotateApiKey({})", id.0),
             ApiCall::RevokeApiKey(id) => write!(f, "RevokeApiKey({})", id.0),
+            ApiCall::LoadSubscription => f.write_str("LoadSubscription"),
+            ApiCall::LoadUsage => f.write_str("LoadUsage"),
+            ApiCall::StartCheckout => f.write_str("StartCheckout"),
+            ApiCall::OpenPortal => f.write_str("OpenPortal"),
+            ApiCall::DeleteAccount { confirm_account_name, .. } => f
+                .debug_struct("DeleteAccount")
+                .field("confirm_account_name", confirm_account_name)
+                .field("password", &"<redacted>")
+                .field("code", &"<redacted>")
+                .finish(),
+            ApiCall::AcceptInvitation { display_name, .. } => f
+                .debug_struct("AcceptInvitation")
+                .field("token", &"<redacted>")
+                .field("display_name", display_name)
+                .field("password", &"<redacted>")
+                .finish(),
+            ApiCall::ConfirmInvitation { .. } => f
+                .debug_struct("ConfirmInvitation")
+                .field("token", &"<redacted>")
+                .field("totp_code", &"<redacted>")
+                .finish(),
         }
     }
 }
@@ -329,6 +378,32 @@ pub fn to_request(call: &ApiCall) -> HttpRequest {
         }
         ApiCall::RotateApiKey(id) => post(project(id, "/api_key/rotate")),
         ApiCall::RevokeApiKey(id) => post(project(id, "/api_key/revoke")),
+        ApiCall::LoadSubscription => get("/admin/v1/billing/subscription"),
+        ApiCall::LoadUsage => get("/admin/v1/billing?range=month"),
+        ApiCall::StartCheckout => HttpRequest {
+            method: Method::Post,
+            path: "/admin/v1/billing/checkout_session".into(),
+            body: Some(serde_json::json!({ "plan": "pro" })),
+        },
+        ApiCall::OpenPortal => post("/admin/v1/billing/portal_session".into()),
+        ApiCall::DeleteAccount { password, code, confirm_account_name } => {
+            let mut body = serde_json::json!({ "password": password, "confirm_account_name": confirm_account_name });
+            match code {
+                SignInCode::Totp(c) => body["totp_code"] = c.as_str().into(),
+                SignInCode::Recovery(c) => body["recovery_code"] = c.as_str().into(),
+            }
+            HttpRequest { method: Method::Delete, path: "/admin/v1/account".into(), body: Some(body) }
+        }
+        ApiCall::AcceptInvitation { token, display_name, password } => HttpRequest {
+            method: Method::Post,
+            path: "/admin/v1/auth/invitations/accept".into(),
+            body: Some(serde_json::json!({ "token": token, "display_name": display_name, "password": password })),
+        },
+        ApiCall::ConfirmInvitation { token, totp_code } => HttpRequest {
+            method: Method::Post,
+            path: "/admin/v1/auth/invitations/confirm".into(),
+            body: Some(serde_json::json!({ "token": token, "totp_code": totp_code })),
+        },
     }
 }
 
@@ -427,6 +502,56 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
                 Msg::SecretRevealed(RevealedSecret { db: id.clone(), secret: dto.api_key }),
             ])
         }
+        ApiCall::LoadSubscription => {
+            let dto: SubscriptionDto = parse(body)?;
+            let status = parse_subscription_status(&dto.status)?;
+            let subscription = Subscription {
+                plan: parse_plan(&dto.plan)?,
+                stripe_customer_id: dto.stripe_customer_id,
+                current_period_end: parse_opt_ts("current_period_end", dto.current_period_end.as_deref())?,
+                card: None,
+                payment_failure: status == SubscriptionStatus::PastDue,
+            };
+            let cap_status = dto.cap_status.map(|caps| {
+                caps.into_iter()
+                    .map(|c| CapUsage { dimension: c.dimension, used: c.used, cap: c.cap, pct: c.pct })
+                    .collect()
+            });
+            Ok(vec![Msg::SetSubscription(subscription), Msg::SetBilling { status, cap_status }])
+        }
+        ApiCall::LoadUsage => {
+            let dto: UsageDto = parse(body)?;
+            let rows = dto
+                .databases
+                .into_iter()
+                .map(|d| UsageTableRow {
+                    name: d.name.filter(|n| !n.is_empty()).unwrap_or_else(|| d.id.clone()),
+                    db_id: DbId(d.id),
+                    usage: UsageStats { reads: d.reads, writes: d.writes, deletes: d.deletes, storage_gb: 0.0 },
+                })
+                .collect();
+            Ok(vec![Msg::SetUsage(rows)])
+        }
+        // Only follow a Stripe-hosted https link: never navigate to whatever the body says.
+        ApiCall::StartCheckout | ApiCall::OpenPortal => {
+            let dto: SessionUrlDto = parse(body)?;
+            if !dto.url.starts_with("https://") {
+                return Err(ApiError::Decode("billing link is not an https URL".into()));
+            }
+            Ok(vec![Msg::RedirectToHosted(dto.url)])
+        }
+        ApiCall::DeleteAccount { .. } => {
+            let dto: DeletedAccountDto = parse(body)?;
+            Ok(vec![Msg::AccountDeleted(parse_ts("purge_after", &dto.purge_after)?)])
+        }
+        ApiCall::AcceptInvitation { .. } => {
+            let dto: AcceptedInvitationDto = parse(body)?;
+            Ok(vec![Msg::InviteAccepted(Enrolment { totp_secret: dto.totp_secret, otpauth_uri: dto.otpauth_uri })])
+        }
+        ApiCall::ConfirmInvitation { .. } => {
+            let dto: ConfirmedInvitationDto = parse(body)?;
+            Ok(vec![Msg::InviteConfirmed(RecoveryCodes(dto.recovery_codes))])
+        }
     }
 }
 
@@ -457,6 +582,28 @@ fn refine(call: &ApiCall, error: ApiError, body: &str) -> ApiError {
         (ApiCall::ConfirmPasswordReset { .. }, ApiError::Invalid(_)) => {
             ApiError::Invalid("Password must be at least 12 characters".into())
         }
+        (ApiCall::StartCheckout | ApiCall::OpenPortal, ApiError::Server(503)) => {
+            ApiError::Invalid("Billing is not configured on this server".into())
+        }
+        (ApiCall::StartCheckout, ApiError::Conflict(_)) => ApiError::Conflict(
+            "This account already has an active subscription. Use Manage billing to change it.".into(),
+        ),
+        (ApiCall::OpenPortal, ApiError::Conflict(_)) => {
+            ApiError::Conflict("No billing account exists yet. Reload the page and try again.".into())
+        }
+        (ApiCall::DeleteAccount { .. }, ApiError::Upstream) => ApiError::Invalid(
+            "Could not cancel the subscription with Stripe, so nothing was deleted. Try again.".into(),
+        ),
+        (ApiCall::AcceptInvitation { .. }, ApiError::NotFound) => ApiError::Invalid(
+            "This invitation link is invalid or has expired. Ask an admin to send a new one.".into(),
+        ),
+        // 12 = embyr_core::admin::invitation::MIN_PASSWORD_CHARS; 100 = the server's display-name limit.
+        (ApiCall::AcceptInvitation { .. }, ApiError::Invalid(_)) => ApiError::Invalid(
+            "Enter a display name (up to 100 characters) and a password of at least 12 characters".into(),
+        ),
+        (ApiCall::ConfirmInvitation { .. }, ApiError::NotFound) => ApiError::Invalid(
+            "Enrolment expired or was reset after too many wrong codes. Go back and set your password again.".into(),
+        ),
         _ => error,
     }
 }
@@ -498,11 +645,29 @@ fn create_message(code: &str, detail: Option<&str>) -> String {
 /// The `reset` token of a `?reset=<token>` query string, if present and non-empty.
 /// The token is base64url, so no percent-decoding is needed.
 pub fn reset_token_from_query(search: &str) -> Option<String> {
+    query_param(search, "reset")
+}
+
+/// The `invite` token of a `?invite=<token>` query string, if present and non-empty (base64url).
+pub fn invite_token_from_query(search: &str) -> Option<String> {
+    query_param(search, "invite")
+}
+
+/// Stripe's return from Checkout: `?checkout=success` or `?checkout=cancelled`; anything else is ignored.
+pub fn checkout_return_from_query(search: &str) -> Option<CheckoutReturn> {
+    match query_param(search, "checkout")?.as_str() {
+        "success" => Some(CheckoutReturn::Success),
+        "cancelled" => Some(CheckoutReturn::Cancelled),
+        _ => None,
+    }
+}
+
+fn query_param(search: &str, key: &str) -> Option<String> {
     search
         .trim_start_matches('?')
         .split('&')
-        .find_map(|pair| pair.strip_prefix("reset="))
-        .filter(|t| !t.is_empty())
+        .find_map(|pair| pair.strip_prefix(key).and_then(|rest| rest.strip_prefix('=')))
+        .filter(|v| !v.is_empty())
         .map(str::to_string)
 }
 
@@ -578,6 +743,24 @@ fn parse_role(value: &str) -> Result<Role, ApiError> {
         "Admin" => Ok(Role::Admin),
         "Viewer" => Ok(Role::Viewer),
         other => Err(ApiError::Decode(format!("unknown role '{other}'"))),
+    }
+}
+
+fn parse_plan(value: &str) -> Result<Plan, ApiError> {
+    match value {
+        "free" => Ok(Plan::Free),
+        "pro" => Ok(Plan::Pro),
+        other => Err(ApiError::Decode(format!("unknown plan '{other}'"))),
+    }
+}
+
+fn parse_subscription_status(value: &str) -> Result<SubscriptionStatus, ApiError> {
+    match value {
+        "active" => Ok(SubscriptionStatus::Active),
+        "past_due" => Ok(SubscriptionStatus::PastDue),
+        "free_cap_exceeded" => Ok(SubscriptionStatus::FreeCapExceeded),
+        "canceled" => Ok(SubscriptionStatus::Canceled),
+        other => Err(ApiError::Decode(format!("unknown subscription status '{other}'"))),
     }
 }
 
@@ -778,6 +961,60 @@ impl ConnectionDto {
 struct ProvisionedDto {
     project_id: String,
     api_key: String,
+}
+
+#[derive(Deserialize)]
+struct CapStatusDto {
+    dimension: String,
+    used: u64,
+    cap: u64,
+    pct: u64,
+}
+
+#[derive(Deserialize)]
+struct SubscriptionDto {
+    plan: String,
+    status: String,
+    stripe_customer_id: String,
+    current_period_end: Option<String>,
+    /// Present only for Free-plan accounts.
+    #[serde(default)]
+    cap_status: Option<Vec<CapStatusDto>>,
+}
+
+#[derive(Deserialize)]
+struct UsageEntryDto {
+    id: String,
+    name: Option<String>,
+    reads: u64,
+    writes: u64,
+    deletes: u64,
+}
+
+#[derive(Deserialize)]
+struct UsageDto {
+    databases: Vec<UsageEntryDto>,
+}
+
+#[derive(Deserialize)]
+struct SessionUrlDto {
+    url: String,
+}
+
+#[derive(Deserialize)]
+struct DeletedAccountDto {
+    purge_after: String,
+}
+
+#[derive(Deserialize)]
+struct AcceptedInvitationDto {
+    otpauth_uri: String,
+    totp_secret: String,
+}
+
+#[derive(Deserialize)]
+struct ConfirmedInvitationDto {
+    recovery_codes: Vec<String>,
 }
 
 #[derive(Deserialize)]

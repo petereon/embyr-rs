@@ -71,6 +71,10 @@ name = "admin_ui_wiring_ui_password_reset"
 path = "../../tests/admin_ui_wiring/ui_password_reset.rs"
 
 [[test]]
+name = "admin_ui_wiring_ui_billing_account"
+path = "../../tests/admin_ui_wiring/ui_billing_account.rs"
+
+[[test]]
 name = "card_payments_walking_skeleton"
 path = "../../tests/card_payments/acceptance/walking_skeleton.rs"
 

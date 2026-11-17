@@ -1,11 +1,13 @@
-//! SuspensionBanner — cross-cutting read-only banner (ADR-019, D-6).
+//! SuspensionBanner — cross-cutting billing-hold banner (ADR-019, D-6).
 //!
-//! Peer of `Sidebar`/`Topbar` (mounted once in `ShellView`, above the routed
-//! content), not nested under `views/billing/`. Reads
-//! `AppModel::suspension_banner_view()` via context and renders nothing
-//! when `None`. The CTA dispatches `Msg::OpenUpgradeModal` or
-//! `Msg::OpenCardModal` directly — no intermediate navigation to Billing.
+//! Peer of `Sidebar`/`Topbar` (mounted once in `ShellView`, above the routed content). Reads
+//! `AppModel::suspension_banner_view()`, which follows the server's subscription status, and renders
+//! nothing when `None`. The CTA goes straight to Stripe: Checkout for a Free-plan limit, the billing
+//! portal for a failed payment. Only the Owner may do either, so everyone else gets a pointer instead
+//! of a button.
 
+#[cfg(feature = "csr")]
+use crate::api::{ApiCall, CallKind};
 #[cfg(feature = "csr")]
 use crate::model::AppModel;
 #[cfg(feature = "csr")]
@@ -26,21 +28,30 @@ pub fn SuspensionBanner() -> impl IntoView {
             } else {
                 "suspension-banner suspension-banner-red"
             };
+            let is_owner = model.with(|m| m.can_manage_billing());
+            let busy = move || model.with(|m| m.pending.contains(&CallKind::BillingRedirect));
             view! {
-                <div class=css_class>
+                <div class=css_class role="alert">
                     <span class="suspension-banner-message">{banner.message}</span>
-                    <button
-                        class="suspension-banner-cta"
-                        on:click=move |_| {
-                            if banner.cta_opens_upgrade_modal {
-                                dispatch.run(Msg::OpenUpgradeModal);
-                            } else {
-                                dispatch.run(Msg::OpenCardModal);
-                            }
-                        }
-                    >
-                        {banner.cta_label}
-                    </button>
+                    {if is_owner {
+                        view! {
+                            <button
+                                class="suspension-banner-cta"
+                                disabled=busy
+                                on:click=move |_| {
+                                    dispatch.run(Msg::Request(if banner.cta_opens_upgrade_modal {
+                                        ApiCall::StartCheckout
+                                    } else {
+                                        ApiCall::OpenPortal
+                                    }));
+                                }
+                            >
+                                {banner.cta_label}
+                            </button>
+                        }.into_any()
+                    } else {
+                        view! { <span class="suspension-banner-message">"Ask your account Owner to resolve this."</span> }.into_any()
+                    }}
                 </div>
             }
         })}

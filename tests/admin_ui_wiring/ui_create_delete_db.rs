@@ -17,6 +17,9 @@ use embyr_admin_ui::update::update;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+/// What `GET /billing/subscription` answers once a session is established.
+const SUBSCRIPTION_JSON: &str = r#"{"plan":"free","status":"active","stripe_customer_id":"cus_1","current_period_end":null,"card":null}"#;
+
 fn response(status: u16, body: &str) -> HttpResponse {
     HttpResponse { status, retry_after_ms: None, body: body.to_string() }
 }
@@ -51,7 +54,8 @@ fn user(role: Role) -> CurrentUser {
 fn drive(model: &mut AppModel, msg: Msg, server: &dyn Fn(&HttpRequest) -> HttpResponse) {
     let mut queue = vec![msg];
     while let Some(msg) = queue.pop() {
-        for Effect::Http(call) in update(model, msg) {
+        for effect in update(model, msg) {
+            let Effect::Http(call) = effect else { continue };
             let mut results = decode(&call, server(&to_request(&call)));
             results.reverse();
             queue.extend(results);
@@ -63,6 +67,7 @@ fn signed_in(role: Role) -> AppModel {
     let mut model = AppModel::default();
     drive(&mut model, Msg::SessionEstablished(user(role)), &|req| match req.path.as_str() {
         "/admin/v1/metrics/summary" => response(200, "[]"),
+        "/admin/v1/billing/subscription" => response(200, SUBSCRIPTION_JSON),
         _ => response(200, LIST_JSON),
     });
     model

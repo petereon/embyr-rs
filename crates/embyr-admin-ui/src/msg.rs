@@ -3,11 +3,14 @@
 //! Every user interaction and async data arrival dispatches one of these variants.
 //! `update(&mut AppModel, Msg)` handles all variants with an exhaustive match.
 
+use chrono::{DateTime, Utc};
+
 use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
-    AdminKey, Card, Connection, CurrentUser, Database, DbBackendMode, DbId, DbMetrics, DbPatch, Invoice, KeyId,
-    LogRetention, Member, MetricsSummaryRow, OidcId, OidcProvider, Plan, ProjectApiKeyInfo, RevealedSecret, Role,
-    ServiceAccount, ServiceAccountId, Subscription, Toast, ToastId, UpgradeModalStep, UserId,
+    AdminKey, Card, CapUsage, CheckoutReturn, Connection, CurrentUser, Database, DbBackendMode, DbId, DbMetrics,
+    DbPatch, Enrolment, Invoice, KeyId, LogRetention, Member, MetricsSummaryRow, OidcId, OidcProvider, Plan,
+    ProjectApiKeyInfo, RecoveryCodes, RevealedSecret, Role, ServiceAccount, ServiceAccountId, Subscription,
+    SubscriptionStatus, Toast, ToastId, UpgradeModalStep, UsageTableRow, UserId,
 };
 
 /// All messages that can be dispatched to the TEA update loop.
@@ -35,6 +38,17 @@ pub enum Msg {
     PasswordResetDone,
     /// Server confirmed sign-out; reset the whole model to its empty default.
     SignOut,
+    /// `invitations/accept` succeeded: show the authenticator secret.
+    InviteAccepted(Enrolment),
+    /// `invitations/confirm` succeeded: show the recovery codes once.
+    InviteConfirmed(RecoveryCodes),
+    /// Recovery codes acknowledged: back to sign-in.
+    InviteFinished,
+    /// `DELETE /account` accepted (202): the session is gone, show the purge date on sign-in.
+    AccountDeleted(DateTime<Utc>),
+    /// Open the delete-account modal (Owner only).
+    OpenDeleteAccount,
+    CloseDeleteAccount,
 
     // ── US-002: Dashboard ──────────────────────────────────────────────────
     /// Async data load: replace database list.
@@ -132,6 +146,15 @@ pub enum Msg {
     /// Async data load: replace subscription snapshot (mock init V1;
     /// `#[server]` V2, ADR-007).
     SetSubscription(Subscription),
+    /// `GET /billing/subscription`: the server's status and Free-plan caps (authoritative over local derivation).
+    SetBilling { status: SubscriptionStatus, cap_status: Option<Vec<CapUsage>> },
+    /// `GET /billing?range=month`: month-to-date usage per database.
+    SetUsage(Vec<UsageTableRow>),
+    /// Checkout / portal session created: leave for the Stripe-hosted page (an https URL).
+    RedirectToHosted(String),
+    /// The browser came back from Stripe Checkout (`?checkout=`).
+    CheckoutReturned(CheckoutReturn),
+    DismissCheckoutNotice,
     /// Async data load: replace invoice history (mock init V1; `#[server]`
     /// V2, ADR-007).
     SetInvoices(Vec<Invoice>),
@@ -164,4 +187,6 @@ pub enum Msg {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     Http(ApiCall),
+    /// Navigate the browser to this (https) URL, e.g. a Stripe-hosted page.
+    Redirect(String),
 }
