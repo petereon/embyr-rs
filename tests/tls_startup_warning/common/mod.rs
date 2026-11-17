@@ -49,7 +49,7 @@ impl ServerProcess {
             .env("GRPC_PORT", find_free_port().to_string())
             .env("REST_PORT", find_free_port().to_string())
             .env("ADMIN_PORT", find_free_port().to_string())
-            .env("EMBYR_ADMIN_KEY", "testkey")
+            .env("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef")
             .env("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY)
             .env("RUST_LOG", "info")
             .env_remove("STRIPE_SECRET_KEY")

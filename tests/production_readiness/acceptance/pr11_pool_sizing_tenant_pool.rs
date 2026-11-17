@@ -85,7 +85,7 @@ use crate::common::{
 async fn start_server(extra_env: &[(&str, &str)]) -> (ContainerAsync<Postgres>, String, ServerProcess) {
     let (sys_pg, sys_url) = start_postgres_container().await;
     let mut env: Vec<(&str, &str)> = vec![
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
     ];
     env.extend_from_slice(extra_env);

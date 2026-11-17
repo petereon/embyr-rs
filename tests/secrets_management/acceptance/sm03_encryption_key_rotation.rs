@@ -82,7 +82,7 @@ async fn totp_signin_decrypts_with_current_key() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             // EMBYR_ENCRYPTION_KEY_PREVIOUS deliberately absent.
         ],
@@ -154,7 +154,7 @@ async fn totp_signin_decrypts_with_previous_key_during_rotation_window() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             ("EMBYR_ENCRYPTION_KEY_PREVIOUS", TEST_ENCRYPTION_KEY_PREVIOUS),
         ],
@@ -223,7 +223,7 @@ async fn totp_signin_fails_when_neither_current_nor_previous_key_decrypts() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             ("EMBYR_ENCRYPTION_KEY_PREVIOUS", TEST_ENCRYPTION_KEY_PREVIOUS),
         ],
@@ -289,7 +289,7 @@ async fn totp_signin_malformed_ciphertext_below_nonce_minimum_fails_cleanly() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             ("EMBYR_ENCRYPTION_KEY_PREVIOUS", TEST_ENCRYPTION_KEY_PREVIOUS),
         ],
@@ -344,7 +344,7 @@ async fn startup_rejects_identical_current_and_previous_encryption_key() {
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:5432/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ("EMBYR_ENCRYPTION_KEY_PREVIOUS", TEST_ENCRYPTION_KEY),
     ]);

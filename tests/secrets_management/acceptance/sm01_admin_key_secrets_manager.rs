@@ -51,7 +51,7 @@ async fn server_starts_with_admin_key_from_aws_secrets_manager() {
     let (_pg, db_url) = start_postgres_container().await;
 
     let sm_client = make_sm_client(&endpoint_url).await;
-    let admin_key_value = "prod-admin-secret-xyz";
+    let admin_key_value = "prod-admin-secret-xyz-0123456789-0123";
     let arn = create_raw_secret(&sm_client, "sm01-ws-admin-key", admin_key_value).await;
 
     let mut env: Vec<(&str, String)> = localstack_aws_env(&endpoint_url);
@@ -115,10 +115,10 @@ async fn server_starts_with_admin_key_from_gcp_secret_manager() {
 /// Journey (chained from the walking skeleton's Given: real Postgres +
 /// real embyr-server subprocess; When: differs — plain var instead of ARN):
 ///   Given: DATABASE_URL and EMBYR_ENCRYPTION_KEY are set
-///   And:   EMBYR_ADMIN_KEY is set to "local-dev-key" directly
+///   And:   EMBYR_ADMIN_KEY is set to "local-dev-key-0123456789-0123456789" directly
 ///   And:   no AWS or GCP secret-ref variables are set
 ///   When:  Sam starts the server
-///   Then:  the server starts successfully using "local-dev-key" as the admin key
+///   Then:  the server starts successfully using "local-dev-key-0123456789-0123456789" as the admin key
 ///
 /// @US-SM-01 @AC-SM-01-03 @backward-compat
 #[tokio::test]
@@ -128,7 +128,7 @@ async fn plain_env_var_still_works_when_no_arn_configured() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "local-dev-key"),
+            ("EMBYR_ADMIN_KEY", "local-dev-key-0123456789-0123456789"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -139,7 +139,7 @@ async fn plain_env_var_still_works_when_no_arn_configured() {
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("http://127.0.0.1:{}/metrics", server.admin_port))
-        .header("Authorization", "Bearer local-dev-key")
+        .header("Authorization", "Bearer local-dev-key-0123456789-0123456789")
         .send()
         .await
         .expect("GET /metrics");
@@ -154,7 +154,7 @@ async fn plain_env_var_still_works_when_no_arn_configured() {
 /// Startup refuses ambiguous admin-key sourcing (plain + AWS ARN both set).
 ///
 /// Journey (error path):
-///   Given: EMBYR_ADMIN_KEY is set to "literal-key"
+///   Given: EMBYR_ADMIN_KEY is set to "literal-key-0123456789-0123456789-01"
 ///   And:   EMBYR_ADMIN_KEY_AWS_SECRET_ARN is also set
 ///   When:  Sam starts the server
 ///   Then:  the process exits with code 1
@@ -168,7 +168,7 @@ async fn startup_refuses_ambiguous_admin_key_sourcing() {
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:5432/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "literal-key"),
+        ("EMBYR_ADMIN_KEY", "literal-key-0123456789-0123456789-01"),
         (
             "EMBYR_ADMIN_KEY_AWS_SECRET_ARN",
             "arn:aws:secretsmanager:us-east-1:123456789012:secret:whatever-AbCdEf",
@@ -263,7 +263,7 @@ async fn admin_key_secret_value_never_appears_in_logs_or_db() {
     let (_pg, db_url) = start_postgres_container().await;
 
     let sm_client = make_sm_client(&endpoint_url).await;
-    let sentinel = "sentinel-do-not-log-987";
+    let sentinel = "sentinel-do-not-log-987-0123456789-01";
     let arn = create_raw_secret(&sm_client, "sm01-sentinel-admin-key", sentinel).await;
 
     let mut env: Vec<(&str, String)> = localstack_aws_env(&endpoint_url);

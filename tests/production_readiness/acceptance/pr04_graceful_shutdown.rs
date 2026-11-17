@@ -44,7 +44,7 @@ async fn sigterm_causes_graceful_shutdown() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -103,7 +103,7 @@ async fn in_flight_request_completes_before_shutdown() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -143,7 +143,7 @@ async fn in_flight_request_completes_before_shutdown() {
     let http = reqwest::Client::new();
     let provision_resp = http
         .post(format!("{admin_base}/admin/v1/projects"))
-        .header("Authorization", "Bearer testkey")
+        .header("Authorization", "Bearer testkey-0123456789-0123456789-abcdef")
         .json(&serde_json::json!({
             "project_id": project_id,
             "dsn": customer_db_url,
@@ -301,7 +301,7 @@ async fn sigterm_drains_within_30s() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );

@@ -53,7 +53,7 @@ async fn server_starts_with_encryption_key_from_aws_secrets_manager() {
 
     let mut env: Vec<(&str, String)> = localstack_aws_env(&endpoint_url);
     env.push(("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN", arn));
-    env.push(("EMBYR_ADMIN_KEY", "testkey".to_string()));
+    env.push(("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef".to_string()));
 
     let mut server = ServerProcess::start_owned(&db_url, &env);
 
@@ -97,7 +97,7 @@ async fn oidc_client_secret_encryption_succeeds_with_secrets_manager_sourced_key
 
     let mut env: Vec<(&str, String)> = localstack_aws_env(&endpoint_url);
     env.push(("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN", arn));
-    env.push(("EMBYR_ADMIN_KEY", "testkey".to_string()));
+    env.push(("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef".to_string()));
 
     let mut server = ServerProcess::start_owned(&db_url, &env);
 
@@ -181,7 +181,7 @@ async fn plain_env_var_still_works_for_encryption_key() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -214,7 +214,7 @@ async fn fetched_encryption_key_of_invalid_length_is_rejected_at_startup() {
 
     let mut env: Vec<(&str, String)> = localstack_aws_env(&endpoint_url);
     env.push(("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN", arn));
-    env.push(("EMBYR_ADMIN_KEY", "testkey".to_string()));
+    env.push(("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef".to_string()));
     env.push((
         "DATABASE_URL",
         "postgres://postgres:postgres@127.0.0.1:5432/embyr".to_string(),
@@ -256,7 +256,7 @@ async fn startup_refuses_ambiguous_encryption_key_sourcing() {
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:5432/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         (
             "EMBYR_ENCRYPTION_KEY_GCP_SECRET_NAME",
@@ -307,7 +307,7 @@ async fn exits_1_when_encryption_key_secret_fetch_fails() {
         "EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN",
         nonexistent_secret_arn(),
     ));
-    env.push(("EMBYR_ADMIN_KEY", "testkey".to_string()));
+    env.push(("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef".to_string()));
     env.push((
         "DATABASE_URL",
         "postgres://postgres:postgres@127.0.0.1:5432/embyr".to_string(),

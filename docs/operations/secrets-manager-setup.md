@@ -30,7 +30,7 @@ not a duplicate.
 ### 1. Create the secrets
 
 The value is the raw string `embyr-server` expects on the equivalent plain env var —
-`EMBYR_ADMIN_KEY` is any non-empty bearer token; `EMBYR_ENCRYPTION_KEY`/
+`EMBYR_ADMIN_KEY` is any bearer token of at least 32 characters (startup fails otherwise; generate one with `openssl rand -hex 32`); `EMBYR_ENCRYPTION_KEY`/
 `EMBYR_ENCRYPTION_KEY_PREVIOUS` must be exactly 64 hex characters (32 bytes).
 
 ```bash

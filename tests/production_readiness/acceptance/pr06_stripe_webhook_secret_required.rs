@@ -67,7 +67,7 @@ async fn webhook_route_not_reachable_when_stripe_fully_unconfigured() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             // STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SIGNING_SECRET intentionally
             // absent — Decision 3's env_remove() guarantees they are not
@@ -133,7 +133,7 @@ async fn exits_nonzero_when_stripe_secret_key_set_without_webhook_signing_secret
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:65535/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ("STRIPE_SECRET_KEY", "sk_live_stripe_webhook_secret_required_test"),
         // STRIPE_WEBHOOK_SIGNING_SECRET intentionally absent
@@ -184,7 +184,7 @@ async fn exits_nonzero_when_stripe_webhook_signing_secret_is_empty_string() {
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:65535/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ("STRIPE_SECRET_KEY", "sk_live_stripe_webhook_secret_required_test"),
         ("STRIPE_WEBHOOK_SIGNING_SECRET", ""),
@@ -225,7 +225,7 @@ async fn webhook_route_is_reachable_when_stripe_correctly_configured() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             ("STRIPE_SECRET_KEY", "sk_live_stripe_webhook_secret_required_test"),
             ("STRIPE_WEBHOOK_SIGNING_SECRET", "whsec_stripe_webhook_secret_required_test"),

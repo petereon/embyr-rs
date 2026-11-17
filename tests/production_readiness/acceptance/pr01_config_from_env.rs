@@ -46,7 +46,7 @@ async fn server_starts_with_all_required_env_vars_set() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -82,7 +82,7 @@ async fn server_starts_with_all_required_env_vars_set() {
 #[tokio::test]
 async fn exits_1_when_database_url_missing() {
     let mut server = ServerProcess::start_env_only(&[
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
     ]);
 
@@ -152,7 +152,7 @@ async fn exits_1_when_encryption_key_missing() {
 
     let mut server = ServerProcess::start_env_only(&[
         ("DATABASE_URL", &db_url),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
     ]);
 
     let exit_code = server.wait_for_exit(Duration::from_secs(3)).await;
@@ -185,7 +185,7 @@ async fn exits_1_when_encryption_key_not_64_hex_chars() {
     // Use a key that is syntactically hex but wrong length.
     let mut server = ServerProcess::start_env_only(&[
         ("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:5432/embyr"),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", "tooshort"),
     ]);
 
@@ -218,7 +218,7 @@ async fn exits_1_when_encryption_key_not_64_hex_chars() {
 async fn exits_1_when_database_unreachable() {
     let mut server = ServerProcess::start_env_only(&[
         ("DATABASE_URL", "postgres://postgres:postgres@127.0.0.1:65535/embyr"),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
     ]);
 
@@ -272,7 +272,7 @@ async fn exits_1_when_db_probe_fails_projects_table_missing() {
     // 3. Start the server pointing at that DB (migrations recorded but schema broken).
     let mut server = ServerProcess::start_env_only(&[
         ("DATABASE_URL", &db_url),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
     ]);
 
@@ -304,7 +304,7 @@ async fn exits_1_when_db_probe_fails_projects_table_missing() {
 #[tokio::test]
 async fn no_port_bound_on_missing_required_env_var() {
     let mut server = ServerProcess::start_env_only(&[
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         // DATABASE_URL intentionally absent
     ]);
@@ -362,7 +362,7 @@ async fn non_default_ports_respected() {
     // server binds on the ports WE specified. We poll `admin_port` directly.
     let mut server = ServerProcess::start_env_only(&[
         ("DATABASE_URL", &db_url),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ("GRPC_PORT", &grpc_str),
         ("REST_PORT", &rest_str),
@@ -407,7 +407,7 @@ async fn grpc_port_env_var_respected() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -441,7 +441,7 @@ async fn rest_port_env_var_respected() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -482,7 +482,7 @@ async fn default_rate_limit_rps_is_1000() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             // EMBYR_RATE_LIMIT_RPS deliberately absent
         ],
@@ -501,7 +501,7 @@ async fn default_rate_limit_rps_is_1000() {
     );
     let resp = client
         .get(&url)
-        .header("Authorization", "Bearer testkey")
+        .header("Authorization", "Bearer testkey-0123456789-0123456789-abcdef")
         .send()
         .await
         .expect("GET /metrics");
