@@ -40,8 +40,9 @@ jobs:
     # (ADR-031/032) unchanged for access-rule enforcement over the
     # aggregation's own underlying filter tree. v1 scope: COUNT for all
     # backend_mode families; SUM/AVG for direct_pg/aws_secret/gcp_secret only
-    # (backend_mode=agent SUM/AVG deferred — requires extending
-    # embyr-agent's own internal proto, a separate deployment artifact). One
+    # (backend_mode=agent SUM/AVG was deferred; since shipped via an additive
+    # embyr-agent proto extension, see ADR-041 update — needs agent >= that
+    # release, older agents still answer Unimplemented). One
     # genuinely unresolved item is explicitly escalated, not decided: whether
     # real Firestore's own RunAggregationQuery wire method is unary or
     # server-streaming (OQ-AGG-01) — this DISCUSS had no tool available to

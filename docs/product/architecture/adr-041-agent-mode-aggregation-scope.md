@@ -62,3 +62,15 @@ fn core_error_to_status(e: CoreError) -> Status {
 **Positive**: Resolution 3's "zero agent-binary changes" holds literally, not just functionally — verifiable by `git diff crates/embyr-agent/` showing nothing. SPEC.md's own documented error taxonomy (`Unimplemented` for unsupported operators) is honored precisely, scoped correctly. Zero new shared-enum surface for other future features to accidentally rely on or collide with.
 
 **Negative**: `handle_run_aggregation_query` uses a DIFFERENT error-mapping function than every other handler in the file (a deliberate, documented exception, not an oversight) — flagged here explicitly so a future reader of `grpc/handler.rs` does not "fix" it into uniformity without reading this ADR first.
+
+## Update 2026-11-17: agent-mode SUM/AVG/count `up_to` shipped (additive agent proto extension)
+
+Decision 3's SUM/AVG rejection and Decision 4's "zero agent changes" are superseded for SUM/AVG; the rest of this ADR (local `aggregation_error_to_status`, no new `CoreError` variant) still stands.
+
+**Wire (`storage_agent.proto`, additive only, fresh tag numbers):** `RunAggregationQueryRequest.aggregations = 3` (repeated `AggregationOp`: `count{up_to}` / `sum{field_path}` / `avg{field_path}`); `RunAggregationQueryResponse.results = 2` (repeated `AggregationResult`, oneof `count`/`sum`/`avg`; no member set = AVG over no numeric inputs, i.e. null). Results are positional; aliases stay in `embyr-server`.
+
+**Agent:** a non-empty `aggregations` is validated (max 5, `validate_field_path`, `up_to >= 0`, 0 = uncapped) and run through the same `PostgresBackendAdapter::run_aggregation_query` / `aggregation_select_list` SQL as direct mode, so semantics are identical by construction. An empty list keeps the old `count` behavior.
+
+**Compatibility (no capability probe needed):**
+- New server + old agent: COUNT-only requests still use the `count` shape. A SUM/AVG request sends `aggregations`; the old agent ignores the unknown field and answers `count` only, so `results` is empty. The server maps empty `results` to the same `FailedPrecondition` -> client `Unimplemented` as before (message now says to upgrade the agent). A non-empty `results` of the wrong length or type is `BackendUnavailable`, never a silently wrong value.
+- Old server + new agent: old servers never send `aggregations`, so the new agent takes the unchanged COUNT path.
