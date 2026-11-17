@@ -686,6 +686,40 @@ impl FirestoreService {
         }
     }
 
+    /// Composite-index gate shared by RunQuery and Listen (audit #68): if the
+    /// query needs a composite index and none is READY for the collection,
+    /// FAILED_PRECONDITION naming the missing index.
+    pub(crate) async fn require_composite_index_ready(
+        index_manager: &IndexManager,
+        project_id: &str,
+        collection_id: &str,
+        query: &StructuredQuery,
+    ) -> Result<(), Status> {
+        if !Self::requires_composite_index(query)
+            // Keyed by the bare collection id (unchanged): composite
+            // indexes are registered per collection id, not per parent.
+            || index_manager.is_index_ready(project_id, collection_id).await
+        {
+            return Ok(());
+        }
+        // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
+        // names the specific missing index (collection_path + fields)
+        // instead of a generic message — reuses the SAME `fields` JSON
+        // shape `POST /admin/v1/projects/:project_id/indexes`
+        // (firestore-composite-indexes-admin-api) expects, so Alex can
+        // copy it directly into a `CreateIndex` call.
+        let missing_fields = Self::missing_index_fields(query);
+        let fields_json =
+            serde_json::to_string(&missing_fields).unwrap_or_else(|_| "[]".to_string());
+        // The leading sentence is Firestore's own wording: SDKs key off
+        // FAILED_PRECONDITION and clients/tools grep for it.
+        Err(Status::failed_precondition(format!(
+            "The query requires an index. query requires a composite index on collection \
+             '{}' with fields {}; create it via POST /admin/v1/projects/{{project_id}}/indexes",
+            collection_id, fields_json
+        )))
+    }
+
     /// Return `true` if the query requires a composite index.
     ///
     /// A composite index is required when there is at least one field filter
@@ -3663,32 +3697,13 @@ impl FirestoreService {
 
         // Composite index check: filter on field X + orderBy field Y (where Y != X)
         // requires a READY composite index in the system DB.
-        let requires_index = Self::requires_composite_index(&domain_query);
-        if requires_index
-            && !self
-                .index_manager
-                // Keyed by the bare collection id (unchanged): composite
-                // indexes are registered per collection id, not per parent.
-                .is_index_ready(&project_id_str, &collection_id)
-                .await
-        {
-            // composite-index-requirement-rules (Slice 03, US-03, AC-CIR-07):
-            // names the specific missing index (collection_path + fields)
-            // instead of a generic message — reuses the SAME `fields` JSON
-            // shape `POST /admin/v1/projects/:project_id/indexes`
-            // (firestore-composite-indexes-admin-api) expects, so Alex can
-            // copy it directly into a `CreateIndex` call.
-            let missing_fields = Self::missing_index_fields(&domain_query);
-            let fields_json = serde_json::to_string(&missing_fields)
-                .unwrap_or_else(|_| "[]".to_string());
-            // The leading sentence is Firestore's own wording: SDKs key off
-            // FAILED_PRECONDITION and clients/tools grep for it.
-            return Err(Status::failed_precondition(format!(
-                "The query requires an index. query requires a composite index on collection \
-                 '{}' with fields {}; create it via POST /admin/v1/projects/{{project_id}}/indexes",
-                collection_id, fields_json
-            )));
-        }
+        Self::require_composite_index_ready(
+            &self.index_manager,
+            &project_id_str,
+            &collection_id,
+            &domain_query,
+        )
+        .await?;
 
         let docs = adapter
             .run_query(&collection, &domain_query, txn_id.as_ref())
@@ -4079,6 +4094,7 @@ impl FirestoreService {
         let keepalive = self.keepalive_interval;
         let registry = Arc::clone(&self.listen_registry);
         let system_db = Arc::clone(&self.system_db);
+        let index_manager = Arc::clone(&self.index_manager);
 
         // `request`'s metadata is no longer needed beyond this point —
         // consume it into the owned `Streaming` body now, immediately
@@ -4093,6 +4109,7 @@ impl FirestoreService {
                 in_stream,
                 &adapter,
                 &system_db,
+                &index_manager,
                 project_id,
                 verified_identity,
                 &tx,

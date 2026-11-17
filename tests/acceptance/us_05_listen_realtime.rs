@@ -907,9 +907,41 @@ async fn idle_listen_stream_receives_no_change_keep_alive() {
     }
 }
 
+/// AC-04f applied to Listen (audit #68): a query that needs a composite index
+/// (two orderBy fields) with no READY index → FAILED_PRECONDITION, like RunQuery.
 #[tokio::test]
-#[ignore = "REAL GAP: Listen has no composite-index gate (only RunQuery does); body is still a panic! scaffold — see docs/product/ignored-test-triage-2026-11-13.md"]
 async fn subscription_with_multi_field_filter_without_index_is_rejected() {
-    // AC-04f applied to Listen: composite filter without a READY index → FAILED_PRECONDITION
-    panic!("RED scaffold — not yet implemented");
+    use embyr_proto::firestore::structured_query::{Direction, FieldReference, Order};
+
+    let env = setup(
+        "test-sk-us05-listen-index-01",
+        "us05-listen-index-project-01",
+        Duration::from_millis(500),
+    )
+    .await;
+    let mut client = FirestoreClient::new(make_channel(env.server.grpc_addr));
+
+    let mut add = add_target_request(&env.project_id, "messages");
+    if let Some(listen_request::TargetChange::AddTarget(t)) = &mut add.target_change {
+        if let Some(target::TargetType::Query(qt)) = &mut t.target_type {
+            if let Some(query_target::QueryType::StructuredQuery(sq)) = &mut qt.query_type {
+                sq.order_by = ["a", "b"]
+                    .into_iter()
+                    .map(|f| Order {
+                        field: Some(FieldReference { field_path: f.to_string() }),
+                        direction: Direction::Ascending as i32,
+                    })
+                    .collect();
+            }
+        }
+    }
+    let mut request = tonic::Request::new(tokio_stream::once(add));
+    request
+        .metadata_mut()
+        .insert("authorization", format!("bearer {}", env.api_key).parse().unwrap());
+
+    let mut stream = client.listen(request).await.expect("stream opens").into_inner();
+    let first = stream.next().await.expect("stream must report the failure");
+    let status = first.expect_err("unindexed composite query must be rejected");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition, "got: {status:?}");
 }

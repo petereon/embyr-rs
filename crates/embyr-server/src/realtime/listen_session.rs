@@ -55,7 +55,9 @@ use tokio_stream::StreamExt;
 use tonic::Status;
 
 use crate::{
-    adapters::{credential_cache::SharedBackendAdapter, system_db::SystemDb},
+    adapters::{
+        credential_cache::SharedBackendAdapter, index_manager::IndexManager, system_db::SystemDb,
+    },
     encoding::firestore_proto::document_to_proto,
     grpc::handler::{query_compliance_rejection, sanitize_backend_error, FirestoreService},
     realtime::{
@@ -130,6 +132,7 @@ struct Snapshot {
 struct Ctx<'a> {
     adapter: &'a SharedBackendAdapter,
     system_db: &'a Arc<SystemDb>,
+    index_manager: &'a IndexManager,
     project_id: String,
     auth_ctx: Option<AuthContext>,
     tx: &'a ResponseTx,
@@ -151,6 +154,7 @@ pub async fn run_listen_session<S>(
     mut in_stream: S,
     adapter: &SharedBackendAdapter,
     system_db: &Arc<SystemDb>,
+    index_manager: &IndexManager,
     project_id: String,
     verified_identity: Option<VerifiedEndUserIdentity>,
     tx: &ResponseTx,
@@ -173,7 +177,7 @@ where
         claims: BTreeMap::new(),
     });
     let mut session = Session {
-        ctx: Ctx { adapter, system_db, project_id, auth_ctx, tx },
+        ctx: Ctx { adapter, system_db, index_manager, project_id, auth_ctx, tx },
         ids: TargetIds::default(),
         targets: BTreeMap::new(),
     };
@@ -372,6 +376,17 @@ impl Ctx<'_> {
             end_at: None,
             since_update_time,
         };
+
+        // Same composite-index gate as RunQuery (audit #68), after the
+        // compliance gate above so a denied caller never learns whether the
+        // query also needs an index.
+        FirestoreService::require_composite_index_ready(
+            self.index_manager,
+            &self.project_id,
+            &collection_id_from_query_target(qt).map_err(Status::internal)?,
+            &query,
+        )
+        .await?;
 
         // See `Snapshot::token_ts`.
         let token_ts = Utc::now() + ChronoDuration::seconds(1);
