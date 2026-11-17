@@ -688,6 +688,8 @@ Supported aggregation operators: `COUNT` (no field), `SUM` (numeric field), `AVG
 
 **Errors**: `InvalidArgument` (missing required fields), `Unimplemented` (unsupported aggregation operator)
 
+**`backend_mode=agent`**: COUNT (with `up_to`), SUM and AVG are all supported with the same result semantics as direct mode (SUM/AVG return doubles; non-numeric/absent values ignored; SUM over no numeric inputs is `0`, AVG is `null`). SUM/AVG require an `embyr-agent` release that understands the additive `aggregations`/`results` fields of the agent `RunAggregationQuery` RPC; against an older agent they return `Unimplemented`. COUNT-only requests keep the original `count` wire shape and work against any agent version.
+
 #### BatchGetDocuments
 
 **Inputs**: `documents` (list of resource names), `consistency_selector` (optional; `new_transaction` creates a read-only transaction)

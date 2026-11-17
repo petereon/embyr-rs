@@ -204,6 +204,7 @@ async fn count_aggregation_returns_correct_total() {
             }],
             ..Default::default()
         })),
+        ..Default::default()
     };
     let response = client
         .run_aggregation_query(tonic::Request::new(req))

@@ -12,7 +12,7 @@ use embyr_core::{
         document::{CollectionPath, DocumentPath, FirestoreDocument, WriteResult},
         field_value::FieldValue,
         project::ProjectId,
-        query::{AggregateValue, AggregationKind, AggregationQuery, FilterOp, QueryFilter, StructuredQuery},
+        query::{AggregateValue, Aggregation, AggregationKind, AggregationQuery, FilterOp, QueryFilter, StructuredQuery},
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
@@ -563,29 +563,23 @@ impl BackendAdapter for AgentBackendAdapter {
         Ok(docs)
     }
 
-    /// aggregation-queries Slice 02 (US-02, ADR-041 § Decision 3): proxies
-    /// `embyr-agent`'s own already-shipped, unchanged `RunAggregationQuery`
-    /// RPC (unary, COUNT-only). Filter translation reuses
-    /// `domain_filter_to_agent_filter` — the exact same helper `run_query`
-    /// above uses — so an approved, compliance-checked filter is forwarded
-    /// identically for both RPCs (no second translator).
+    /// Proxies `embyr-agent`'s `RunAggregationQuery` RPC. COUNT-only requests
+    /// use the original `count` wire shape (works against any agent version);
+    /// anything with SUM/AVG sends `aggregations` and reads `results`. An
+    /// agent that predates those fields ignores them and answers with an empty
+    /// `results`, mapped to a "not supported" FailedPrecondition (-> client
+    /// `Unimplemented`, ADR-041) as before. Filter translation reuses
+    /// `domain_filter_to_agent_filter`, same as `run_query`.
     async fn run_aggregation_query(
         &self,
         collection: &CollectionPath,
         query: &AggregationQuery,
         _transaction_id: Option<&TransactionId>,
     ) -> Result<Vec<AggregateValue>, CoreError> {
-        // The agent's `RunAggregationQueryResponse` carries only `count`;
-        // SUM/AVG need an agent proto change (out of scope), so reject.
-        if query
+        let count_only = query
             .aggregations
             .iter()
-            .any(|a| !matches!(a.kind, AggregationKind::Count(_)))
-        {
-            return Err(CoreError::FailedPrecondition(
-                "SUM/AVG aggregation is not supported for backend_mode=agent in v1".into(),
-            ));
-        }
+            .all(|a| matches!(a.kind, AggregationKind::Count(_)));
 
         use embyr_proto::agent::{
             run_aggregation_query_request::QueryType,
@@ -613,22 +607,26 @@ impl BackendAdapter for AgentBackendAdapter {
         let req = AgentAggregationRequest {
             parent,
             query_type: Some(QueryType::StructuredQuery(sq)),
+            aggregations: if count_only { vec![] } else { aggregations_to_proto(&query.aggregations) },
         };
         let mut client = self.client.clone();
         let resp = client
             .run_aggregation_query(req)
             .await
-            .map_err(grpc_err)?;
-        // One agent round trip serves every COUNT; each applies its own `up_to`.
-        let count = resp.into_inner().count;
-        Ok(query
-            .aggregations
-            .iter()
-            .map(|a| match a.kind {
-                AggregationKind::Count(Some(up_to)) => AggregateValue::Count(count.min(up_to)),
-                _ => AggregateValue::Count(count),
-            })
-            .collect())
+            .map_err(grpc_err)?
+            .into_inner();
+        if count_only {
+            // One agent round trip serves every COUNT; each applies its own `up_to`.
+            return Ok(query
+                .aggregations
+                .iter()
+                .map(|a| match a.kind {
+                    AggregationKind::Count(Some(up_to)) => AggregateValue::Count(resp.count.min(up_to)),
+                    _ => AggregateValue::Count(resp.count),
+                })
+                .collect());
+        }
+        aggregation_results_from_proto(&query.aggregations, resp.results)
     }
 
     /// agent-mode-list-collection-ids (Slice 01, US-01, ADR-059 § Decision
@@ -824,6 +822,54 @@ impl BackendAdapter for AgentBackendAdapter {
     }
 }
 
+/// Domain aggregations -> wire ops (aliases stay server-side; the agent
+/// answers by position). `up_to` 0 on the wire means "no cap".
+fn aggregations_to_proto(aggregations: &[Aggregation]) -> Vec<embyr_proto::agent::AggregationOp> {
+    use embyr_proto::agent::{aggregation_op::Op, AggregationCount, AggregationField, AggregationOp};
+    let field = |fp: &String| AggregationField { field_path: fp.clone() };
+    aggregations
+        .iter()
+        .map(|a| AggregationOp {
+            op: Some(match &a.kind {
+                AggregationKind::Count(up_to) => Op::Count(AggregationCount { up_to: up_to.unwrap_or(0) }),
+                AggregationKind::Sum(fp) => Op::Sum(field(fp)),
+                AggregationKind::Avg(fp) => Op::Avg(field(fp)),
+            }),
+        })
+        .collect()
+}
+
+/// Wire results -> domain values, one per requested aggregation. Empty
+/// `results` means the agent predates SUM/AVG support (it ignored
+/// `aggregations`): report the same "not supported" error as before. Any other
+/// shape mismatch is a protocol violation, never a silently wrong value.
+fn aggregation_results_from_proto(
+    aggregations: &[Aggregation],
+    results: Vec<embyr_proto::agent::AggregationResult>,
+) -> Result<Vec<AggregateValue>, CoreError> {
+    use embyr_proto::agent::aggregation_result::Value;
+    if results.is_empty() {
+        return Err(CoreError::FailedPrecondition(
+            "SUM/AVG aggregation is not supported by this embyr-agent version; upgrade the agent".into(),
+        ));
+    }
+    let malformed = || CoreError::BackendUnavailable("agent returned malformed aggregation results".into());
+    if results.len() != aggregations.len() {
+        return Err(malformed());
+    }
+    aggregations
+        .iter()
+        .zip(results)
+        .map(|(a, r)| match (&a.kind, r.value) {
+            (AggregationKind::Count(_), Some(Value::Count(n))) => Ok(AggregateValue::Count(n)),
+            (AggregationKind::Sum(_), Some(Value::Sum(d))) => Ok(AggregateValue::Sum(d)),
+            (AggregationKind::Avg(_), Some(Value::Avg(d))) => Ok(AggregateValue::Avg(Some(d))),
+            (AggregationKind::Avg(_), None) => Ok(AggregateValue::Avg(None)),
+            _ => Err(malformed()),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     //! firestore-or-filter-support (Slice 01, US-01, AC-OR-07): a direct
@@ -880,6 +926,75 @@ mod tests {
     fn is_not_null_is_cleanly_rejected_for_backend_mode_agent() {
         let result = domain_filter_to_agent_filter(&unary_filter(FilterOp::IsNotNull));
         assert!(result.is_err(), "IS_NOT_NULL must be cleanly rejected for backend_mode=agent");
+    }
+
+    fn agg(kind: AggregationKind) -> Aggregation {
+        Aggregation { alias: "a".into(), kind }
+    }
+
+    #[test]
+    fn aggregations_round_trip_in_order_with_uncapped_count_as_zero() {
+        use embyr_proto::agent::{aggregation_op::Op, aggregation_result::Value, AggregationResult};
+        let aggs = [
+            agg(AggregationKind::Count(None)),
+            agg(AggregationKind::Count(Some(4))),
+            agg(AggregationKind::Sum("s".into())),
+            agg(AggregationKind::Avg("v".into())),
+            agg(AggregationKind::Avg("v".into())),
+        ];
+        let ops: Vec<_> = aggregations_to_proto(&aggs).into_iter().map(|o| o.op.unwrap()).collect();
+        assert!(matches!(&ops[0], Op::Count(c) if c.up_to == 0));
+        assert!(matches!(&ops[1], Op::Count(c) if c.up_to == 4));
+        assert!(matches!(&ops[2], Op::Sum(f) if f.field_path == "s"));
+        assert!(matches!(&ops[3], Op::Avg(f) if f.field_path == "v"));
+        let r = |v| AggregationResult { value: v };
+        let got = aggregation_results_from_proto(
+            &aggs,
+            vec![
+                r(Some(Value::Count(9))),
+                r(Some(Value::Count(4))),
+                r(Some(Value::Sum(1.5))),
+                r(Some(Value::Avg(0.0))),
+                r(None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            [
+                AggregateValue::Count(9),
+                AggregateValue::Count(4),
+                AggregateValue::Sum(1.5),
+                AggregateValue::Avg(Some(0.0)),
+                AggregateValue::Avg(None),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_results_mean_old_agent_and_map_to_not_supported() {
+        let aggs = [agg(AggregationKind::Sum("s".into()))];
+        assert!(matches!(
+            aggregation_results_from_proto(&aggs, vec![]),
+            Err(CoreError::FailedPrecondition(_))
+        ));
+    }
+
+    #[test]
+    fn mismatched_or_mistyped_results_are_a_backend_error_not_a_wrong_value() {
+        use embyr_proto::agent::{aggregation_result::Value, AggregationResult};
+        let aggs = [agg(AggregationKind::Sum("s".into()))];
+        let r = |v| AggregationResult { value: v };
+        for bad in [
+            vec![r(Some(Value::Count(1))), r(Some(Value::Count(1)))],
+            vec![r(Some(Value::Count(1)))],
+            vec![r(None)],
+        ] {
+            assert!(matches!(
+                aggregation_results_from_proto(&aggs, bad),
+                Err(CoreError::BackendUnavailable(_))
+            ));
+        }
     }
 
     fn change(kind: DocChangeKind, name: &str) -> DocChange {

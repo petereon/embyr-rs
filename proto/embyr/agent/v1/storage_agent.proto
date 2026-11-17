@@ -39,7 +39,7 @@ service StorageAgent {
   // Health check: returns the current server time.
   rpc Ping(PingRequest) returns (PingResponse);
 
-  // Runs an aggregation query (e.g., count).
+  // Runs an aggregation query (count, sum, avg).
   rpc RunAggregationQuery(RunAggregationQueryRequest) returns (RunAggregationQueryResponse);
 
   // Lists documents in a collection with pagination.
@@ -379,16 +379,64 @@ message RollbackRequest {
 }
 
 // A request to run an aggregation query.
+//
+// Wire compatibility (additive only): `aggregations` (3) and
+// `RunAggregationQueryResponse.results` (2) were added after the original
+// COUNT-only contract. A client that only needs COUNT leaves `aggregations`
+// empty and reads `count`, exactly as before; this works against both old and
+// new agents. An agent that predates `aggregations` ignores the field and
+// answers with `count` only (empty `results`), which the client treats as
+// "SUM/AVG not supported by this agent version".
 message RunAggregationQueryRequest {
   string parent = 1;
   oneof query_type {
     StructuredQuery structured_query = 2;
   }
+  // Aggregations to compute over the filtered set in one pass (at most 5).
+  // When non-empty the agent answers with `results`, one entry per element,
+  // in the same order. Semantics match direct-PG mode: only integer/double
+  // values are aggregated (null/absent/other types are ignored); SUM over no
+  // numeric inputs is 0, AVG is unset (null); SUM/AVG are doubles.
+  repeated AggregationOp aggregations = 3;
+}
+
+// One aggregation operator of a RunAggregationQueryRequest.
+message AggregationOp {
+  oneof op {
+    AggregationCount count = 1;
+    AggregationField sum = 2;
+    AggregationField avg = 3;
+  }
+}
+
+// COUNT, optionally capped: result = min(count, up_to).
+message AggregationCount {
+  // 0 = no cap; negative is invalid.
+  int64 up_to = 1;
+}
+
+// The field path a SUM/AVG aggregates over (same charset as filter paths).
+message AggregationField {
+  string field_path = 1;
+}
+
+// The computed value of one AggregationOp.
+message AggregationResult {
+  // No member set is only valid for AVG over zero numeric inputs (null).
+  oneof value {
+    int64 count = 1;
+    double sum = 2;
+    double avg = 3;
+  }
 }
 
 // The response to RunAggregationQuery.
 message RunAggregationQueryResponse {
+  // Row count; only populated when the request carried no `aggregations`.
   int64 count = 1;
+  // One result per request `aggregations` element, in order. Empty when the
+  // request carried none (or the agent predates this field).
+  repeated AggregationResult results = 2;
 }
 
 // A request to list documents in a collection.

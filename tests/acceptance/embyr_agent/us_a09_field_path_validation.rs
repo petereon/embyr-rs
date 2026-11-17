@@ -79,6 +79,7 @@ fn run_aggregation_query_with_filter(collection: &str, filter: Filter) -> RunAgg
             from: vec![CollectionSelector { collection_id: collection.to_string(), all_descendants: false }],
             filter: Some(filter),
         })),
+        ..Default::default()
     }
 }
 

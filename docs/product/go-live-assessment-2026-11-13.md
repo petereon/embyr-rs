@@ -75,9 +75,9 @@ Verified OK: operator/session middleware (constant-time compare), RBAC on sessio
 
 ## Status 2026-11-17
 
-Fixed and merged: X1 X2 X3 X4 X5 X6 X8 X9 X10 X12, P1 P2 P4 P6 P7 P8 P10 P11, S1 S2 S3/S4 (UI skeleton + db detail, keys, create/delete in flight), S5 S6 S7 (password reset API + screens), S8 (Stripe checkout/portal, account deletion, hourly metrics), O1 O2 (policy + lint) O3 O6 O7 (pinned actions, report-only scan) O8, CI sharding (~25 min wall).
+Fixed and merged: X1 X2 X3 X4 X5 X6 X8 X9 X10 X12, P1 P2 P4 (incl. agent-mode SUM/AVG/count up_to, see ADR-041 update) P6 P7 P8 P10 P11, S1 S2 S3/S4 (UI skeleton + db detail, keys, create/delete in flight), S5 S6 S7 (password reset API + screens), S8 (Stripe checkout/portal, account deletion, hourly metrics), O1 O2 (policy + lint) O3 O6 O7 (pinned actions, report-only scan) O8, CI sharding (~25 min wall).
 In review: P3 BrowserChannel (#57), UI slice 05 (#56).
-Open: UI slices 09-17, P5 (PartitionQuery/vector/TTL, deferred), agent-mode SUM/AVG, customer-DB migrator `ignore_missing`, X13 lows, audit #64/#66-71.
+Open: UI slices 09-17, P5 (PartitionQuery/vector/TTL, deferred), customer-DB migrator `ignore_missing`, X13 lows, audit #64/#66-71.
 Needs the owner: Stripe Pro product tax code (test + live), first git tag, ghcr visibility, ToS/privacy/support pages, hosting topology + load test + SLO (O4/O5), Free-plan project-count rule.
 
 ## Path to launch
