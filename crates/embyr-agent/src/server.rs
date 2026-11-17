@@ -572,6 +572,26 @@ impl StorageAgent for StorageAgentService {
             end_at: None,
             since_update_time: None,
         };
+        // `aggregations` (SUM/AVG/capped COUNT) is newer than the COUNT-only
+        // contract: an empty list keeps the original `count` behavior for
+        // older servers.
+        if !req.aggregations.is_empty() {
+            let aggregations = crate::encoding::proto_aggregations_to_domain(&req.aggregations)
+                .map_err(core_error_to_status)?;
+            let values = self
+                .storage
+                .run_aggregation_query(
+                    &collection,
+                    &embyr_core::domain::query::AggregationQuery { query, aggregations },
+                    None,
+                )
+                .await
+                .map_err(core_error_to_status)?;
+            return Ok(Response::new(RunAggregationQueryResponse {
+                results: values.into_iter().map(crate::encoding::aggregate_value_to_proto).collect(),
+                ..Default::default()
+            }));
+        }
         let docs = self
             .storage
             .run_query(&collection, &query, None)
@@ -579,6 +599,7 @@ impl StorageAgent for StorageAgentService {
             .map_err(core_error_to_status)?;
         Ok(Response::new(RunAggregationQueryResponse {
             count: docs.len() as i64,
+            ..Default::default()
         }))
     }
 

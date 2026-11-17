@@ -45,3 +45,7 @@ mod us_a08_error_sanitization;
 // agent-field-path-validation (AC-AFP-02 through AC-AFP-05) — DISTILL wave.
 #[path = "embyr_agent/us_a09_field_path_validation.rs"]
 mod us_a09_field_path_validation;
+
+// agent-mode-sum-avg (ADR-083) — SUM/AVG/capped COUNT over RunAggregationQuery.
+#[path = "embyr_agent/us_a10_aggregations.rs"]
+mod us_a10_aggregations;
