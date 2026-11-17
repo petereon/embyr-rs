@@ -25,6 +25,9 @@ All notable changes to embyr-server are documented here. Format follows
   `EMBYR_REQUIRE_SMTP=true` refuses startup when SMTP is unset.
 - Bounded graceful shutdown: on SIGTERM `/healthz` turns 503, all three listeners stop
   accepting and drain for at most `EMBYR_SHUTDOWN_GRACE_SECS` (default 25).
+- `EMBYR_SHUTDOWN_DELAY_SECS` (default 0, max 300): after SIGTERM `/healthz` turns 503 immediately
+  but the listeners keep serving for this long before they stop accepting, so load balancers can
+  deregister the instance first. Recommended 5-10 behind an LB.
 - Container images published to ghcr.io: immutable `:sha-<short sha>` on every `master`
   build, `:vX.Y.Z` only from a matching `vX.Y.Z` git tag.
 - Service-down, metrics-absent and restart-loop alert rules with runbook sections;

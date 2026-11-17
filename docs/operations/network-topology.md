@@ -72,49 +72,44 @@ the public interface. Apply both where relevant: bind `:9090` to a private inter
 
 ## 3. Sticky routing / session affinity for BrowserChannel
 
-ADR-001 states this plainly: "the load balancer must route requests with the same `SID` to the
-same embyr instance." This is a real, non-optional requirement once you run more than one
-`embyr-server` instance behind a shared LB — `single-host-deployment.md` doesn't need it (only
-one instance exists), which is why it wasn't covered there.
+BrowserChannel (the web SDK's fallback realtime transport, `/google.firestore.v1.Firestore/Listen/channel`
+and `.../Write/channel` on `:8081`) keeps its sessions **in the memory of the replica that handled
+the handshake**. Native gRPC (`:8080`) and every other route are stateless and need no affinity.
 
-**The affinity key is the BrowserChannel `SID`, carried as a URL query parameter, not a cookie.**
-This matters because the common cloud-LB stickiness feature (AWS ALB "application-based cookie
-stickiness," GCP HTTP(S) LB session affinity by cookie) expects the *application* to set a
-cookie the LB then pins on — `embyr-server` does not set one for this purpose. Two honest options,
-in order of how well they match the actual requirement:
+**Routing on the `SID` query parameter cannot work.** An earlier version of this section (and
+ADR-001) recommended nginx `hash $arg_SID consistent`. The handshake request carries no `SID`; the
+replica that serves it mints a random `SID` and returns it in the body. A hash of that `SID` picks a
+replica unrelated to the one holding the session, so with N replicas roughly (N-1)/N of follow-up
+requests land on a replica that has no such session.
 
-1. **Run a Layer-7 proxy capable of hashing on the query parameter directly** (nginx or HAProxy),
-   with your cloud LB in front of it purely as a TCP/TLS-terminating passthrough. Extend
-   `single-host-deployment.md`'s existing `embyr_rest` upstream block with nginx's consistent-hash
-   load-balancing method, keyed on the `SID` query argument:
+What a miss looks like: the replica answers `400` with body `Unknown SID` (also for an expired or
+swept session). That is the reply the closure/firebase-js-sdk channel treats as "session gone", so the
+SDK recreates the stream itself instead of hanging. Misrouting is therefore *degraded*, not *broken*:
+the client re-handshakes and re-listens, but every miss costs a re-sync of the query.
 
-   ```nginx
-   upstream embyr_rest {
-       hash $arg_SID consistent;
-       server 10.0.1.10:8081;
-       server 10.0.1.11:8081;
-       keepalive 32;
-   }
-   ```
+`embyr-server` deliberately does **not** set its own affinity cookie: cross-origin XHR carries cookies
+only with `withCredentials`, which would also require `Access-Control-Allow-Credentials: true` and an
+exact-origin response on the whole `:8081` surface (today `allow_credentials(false)`), and
+`SameSite=None` cookies are blocked in third-party contexts by several browsers. Not worth the CORS
+change for a fallback transport.
 
-   `$arg_SID` is nginx's built-in reference to the `SID` query-string parameter; `hash ... consistent`
-   (`ngx_http_upstream_module`) means requests carrying the same `SID` are routed to the same
-   upstream server as long as that server stays healthy, without requiring a cookie. This is the
-   most direct translation of ADR-001's own stated requirement.
+Options, cheapest first:
 
-2. **A cloud Network Load Balancer (L4) with client-IP-based routing** is a fallback, not a
-   recommendation — it approximates affinity by source IP, which breaks for any client population
-   behind NAT/a shared corporate egress IP (multiple distinct `SID`s from the same IP would
-   incorrectly need to land on the same instance, or worse, one client's IP changing mid-session
-   breaks affinity entirely). Only use this if you cannot run an L7 proxy for some reason, and
-   understand the failure mode before you do.
+1. **Path-route the two BrowserChannel paths to one dedicated replica** (or a one-replica target
+   group). No code change; a known ceiling and single point of failure for web realtime. Correct
+   default.
+2. **LB-inserted cookie stickiness on those two paths** (HAProxy `cookie ... insert`, Envoy stateful
+   session, nginx `sticky`; the LB sets the cookie on the handshake response, the app does nothing).
+   Works only where the browser sends cookies on those requests, i.e. the web app and the API are
+   served from the same origin behind the same LB hostname. Cross-origin setups will silently get no
+   stickiness. Test with the real web SDK before relying on it.
+3. **Accept degraded reconnect** with N > 1 and no affinity: the SDK recovers via `Unknown SID`, but
+   most follow-ups miss, so streams thrash. Only tolerable for a handful of web clients.
+4. **Not built:** make the `SID` routable (prefix it with a per-replica tag and hash on the prefix).
+   This is the proper fix if web realtime at scale matters.
 
-There is no third option where a stock cloud L7 LB's built-in stickiness feature satisfies this
-requirement out of the box — its stickiness key (a cookie) and embyr's actual affinity key (the
-`SID` query parameter) don't match. This is a genuine architectural gap for any operator scaling
-past one instance with browser clients, not something this document can paper over; ADR-001's own
-"Trade-offs and costs" section already names it as a cost of the single-process design, not a
-solved problem.
+An L4 client-IP hash is not recommended: it breaks behind NAT/shared egress and when the client IP
+changes mid-session.
 
 ## Cross-references
 

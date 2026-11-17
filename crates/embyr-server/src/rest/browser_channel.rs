@@ -889,6 +889,13 @@ mod tests {
         let r = call(&app, "GET", &uri, false, String::new()).await;
         assert_eq!(r.status(), 400);
         assert_eq!(text_of(r).await, "Unknown SID");
+        // A forward (POST) carrying an unknown/expired SID — e.g. after the LB sent
+        // it to a replica that never minted it — gets the same "session gone" reply
+        // the web SDK recreates the stream on.
+        let uri = format!("{LISTEN}?SID=nope&RID=1&AID=0&VER=8");
+        let r = call(&app, "POST", &uri, true, form(0, &[])).await;
+        assert_eq!(r.status(), 400);
+        assert_eq!(text_of(r).await, "Unknown SID");
         assert_eq!(call(&app, "GET", LISTEN, false, String::new()).await.status(), 400);
         let uri = "/google.firestore.v1.Firestore/Nope/channel?VER=8";
         assert_eq!(call(&app, "POST", uri, true, form(0, &[])).await.status(), 404);
