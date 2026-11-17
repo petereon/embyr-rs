@@ -374,6 +374,21 @@ async fn main() {
         std::time::Duration::from_secs(cfg.cap_check_interval_secs),
     );
 
+    // ttl-policies (go-live P5): background deletion of documents whose TTL
+    // timestamp field has expired. Clones the secret fetchers — the
+    // transaction sweeper below makes the final (moving) use of them.
+    let _ttl_sweeper = embyr_server::sweepers::ttl_sweeper::spawn(
+        Arc::clone(&system_db),
+        std::time::Duration::from_secs(u64::from(cfg.ttl_sweep_interval_secs)),
+        embyr_server::sweepers::ttl_sweeper::TtlSweepConfig {
+            aws_secret_fetcher: aws_secret_fetcher.clone(),
+            gcp_secret_fetcher: gcp_secret_fetcher.clone(),
+            encryption_key: cfg.encryption_key,
+            encryption_key_previous: cfg.encryption_key_previous,
+            max_deletes_per_policy: u64::from(cfg.ttl_max_deletes_per_run),
+        },
+    );
+
     // customer-db-transaction-sweeper (ADR-054): background reclaim +
     // purge of abandoned/terminal transactions rows across every
     // PG-reachable customer database (Slice 01 reclaim, Slice 02 purge).

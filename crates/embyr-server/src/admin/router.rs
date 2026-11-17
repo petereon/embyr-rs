@@ -69,6 +69,7 @@ use super::handlers::access_rules::{
 use super::handlers::composite_indexes::{
     create_composite_index, delete_composite_index, list_composite_indexes,
 };
+use super::handlers::ttl_policies::{delete_ttl_policy, list_ttl_policies, put_ttl_policy};
 use super::handlers::get_project::get_project;
 use super::handlers::lifecycle::{activate_project, delete_project, suspend_project};
 use super::handlers::members::{change_member_role, invite_member, list_members, remove_member};
@@ -422,6 +423,16 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/projects/:project_id/indexes/:index_id",
             delete(delete_composite_index),
+        )
+        // ttl-policies (go-live P5): per-collection-group TTL configuration
+        // (Admin+ to change, any role to list); enforced by the TtlSweeper.
+        .route(
+            "/admin/v1/projects/:project_id/ttl_policies",
+            get(list_ttl_policies).put(put_ttl_policy),
+        )
+        .route(
+            "/admin/v1/projects/:project_id/ttl_policies/:collection_group",
+            delete(delete_ttl_policy),
         )
         .route(
             "/admin/v1/projects/:project_id/metrics",

@@ -7,6 +7,12 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- TTL policies (go-live P5): `GET`/`PUT /admin/v1/projects/:id/ttl_policies` and `DELETE .../ttl_policies/:collection_group`
+  (Admin+ to change, any role to list) configure a per-collection-group Timestamp field; a background `TtlSweeper`
+  (`EMBYR_TTL_SWEEP_INTERVAL_SECS`, default 3600; `EMBYR_TTL_MAX_DELETES_PER_RUN`, default 10000 per policy per sweep)
+  deletes expired documents through the normal commit path, so Listen subscribers see the removals. Subcollections
+  survive; `agent`-mode projects are not supported. Migration 0050; metrics `embyr_ttl_deleted_total`,
+  `embyr_ttl_sweep_errors_total`, `embyr_ttl_skipped_projects_total`, `embyr_ttl_last_run_timestamp_seconds`.
 - `PartitionQuery` RPC (go-live P5): split cursors on `__name__` for parallel reads, gated exactly like
   `RunQuery`; scan capped at 50,000 documents. RunQuery now honours `__name__` cursors and orders `__name__`
   by full document name (`collection_path`, `document_id`).

@@ -227,6 +227,31 @@ commented `EmbyrReadinessFailing` rule) `probe_success == 0` for 2m.
   "Postgres down after startup" above.
 - No response — the process is down: follow "service down or not scraped".
 
+## Operations: TTL policies (expired-document deletion)
+
+Customers configure TTL per collection group through
+`PUT /admin/v1/projects/:id/ttl_policies` (see `docs/SPEC.md` § TTL Policies). Deletion is done
+by the background `TtlSweeper` (`crates/embyr-server/src/sweepers/ttl_sweeper.rs`).
+
+- **Tuning**: `EMBYR_TTL_SWEEP_INTERVAL_SECS` (default 3600) and `EMBYR_TTL_MAX_DELETES_PER_RUN`
+  (default 10000, per policy per sweep). A backlog larger than the cap drains over several sweeps;
+  lower the interval or raise the cap for high-volume collections. One replica sweeps at a time
+  (advisory lock `embyr_ttl_sweep`); the first sweep runs 60 s after start.
+- **Metrics**: `embyr_ttl_deleted_total` (documents deleted), `embyr_ttl_sweep_errors_total` (also
+  counted in `embyr_sweeper_error_total{sweeper="ttl_sweeper"}`, which `EmbyrSweeperFailingRepeatedly`
+  already alerts on), `embyr_ttl_skipped_projects_total{reason="agent_mode"}`, and
+  `embyr_ttl_last_run_timestamp_seconds` (only the replica that holds the lock updates it, so use
+  `max(...)` across replicas; no alert rule is shipped for it, matching the other sweepers).
+- **Not deleting**: check, in order: the policy is `enabled` (`GET .../ttl_policies`); the project is
+  `active` (suspended and deleted projects are skipped); the field is a top-level `Timestamp` (strings
+  and integers never expire); the sweeper log line `TtlSweeper: ...` for connect/DSN errors. A
+  `direct_pg` project whose DSN is only held in the legacy ECIES column is skipped with a warning
+  (same gap as `TransactionSweeper`, ADR-055).
+- **Agent mode** is unsupported (the agent's `RunQuery` cannot express a collection-group query with a
+  limit): the API refuses new policies with 409 and the sweeper skips such projects.
+- **Rollback**: set `enabled=false` or `DELETE` the policy. Deleted documents are gone; they can only
+  be restored from the customer's own backups.
+
 ## Known limitations: real-time Listen in `backend_mode=agent`
 
 Listen works in agent mode via the agent's `Subscribe` stream (see

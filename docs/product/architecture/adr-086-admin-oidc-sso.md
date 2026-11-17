@@ -99,7 +99,7 @@ Feature detail, ACs, schema and slices: `docs/feature/admin-oidc-sso/feature-del
 
 ## Consequences
 
-- One migration (0050, number provisional) adds three tables, three columns and two composite-FK anchor unique indexes; `users.password_hash` becomes nullable. Every
+- One migration (0051, number provisional) adds three tables, three columns and two composite-FK anchor unique indexes; `users.password_hash` becomes nullable. Every
   reader must treat NULL as "no password": `signin` (constant-time dummy verify, generic 401), `verify_credentials`, password reset.
   Old binaries decode NULL as an error, but no NULL exists until the feature code is deployed (expand-then-use ordering).
 - Members who are SSO-only can use the console but not delete the account or self-link (they have no password to re-enter).

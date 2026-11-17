@@ -1347,3 +1347,12 @@ path = "../../tests/admin_ui_wiring/session_project_create_delete.rs"
 [[test]]
 name = "browser_channel_long_polling"
 path = "../../tests/browser_channel/acceptance/bc_long_polling.rs"
+
+# ttl-policies (go-live P5): TTL policy admin API + background TTL sweeper.
+[[test]]
+name = "ttl_policies_ttl01_policy_admin_api"
+path = "../../tests/ttl_policies/acceptance/ttl01_policy_admin_api.rs"
+
+[[test]]
+name = "ttl_policies_ttl02_sweeper"
+path = "../../tests/ttl_policies/acceptance/ttl02_sweeper.rs"

@@ -13,6 +13,7 @@ pub mod hourly_metrics_retention_sweeper;
 pub mod signin_rate_limit_sweeper;
 pub mod soft_delete_purge_sweeper;
 pub mod transaction_sweeper;
+pub mod ttl_sweeper;
 
 /// FNV-1a hash of `s`, used as the `pg_try_advisory_lock` key by every
 /// sweeper in this module (ADR-020, ADR-054 § D5). Computed once, at compile
