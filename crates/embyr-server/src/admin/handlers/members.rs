@@ -296,7 +296,10 @@ pub async fn change_member_role(
     )
     .map_err(|err| {
         tracing::debug!("change_member_role: RBAC rejected: {err}");
-        StatusCode::FORBIDDEN
+        match err {
+            RbacError::TargetNotMember => StatusCode::NOT_FOUND,
+            _ => StatusCode::FORBIDDEN,
+        }
     })?;
 
     // Apply the role change.

@@ -34,6 +34,8 @@ pub enum RbacError {
     AdminCannotModifyOwner,
     /// An Actor tried to escalate above their own role.
     RoleEscalation { actor: Role, requested: Role },
+    /// The target of a `ChangeMemberRole` is not a member of the account.
+    TargetNotMember,
 }
 
 impl std::fmt::Display for RbacError {
@@ -48,6 +50,7 @@ impl std::fmt::Display for RbacError {
             RbacError::AdminCannotModifyOwner => {
                 write!(f, "Admin cannot modify an Owner's role or membership.")
             }
+            RbacError::TargetNotMember => write!(f, "Target is not a member of this account."),
             RbacError::RoleEscalation { actor, requested } => {
                 write!(
                     f,
@@ -105,17 +108,17 @@ pub fn check_rbac(
                     requested: new_role,
                 });
             }
-            if let Some(target) = all_members.iter().find(|m| m.user_id == target_id) {
-                if target.role == Role::Owner {
-                    if actor_role < Role::Owner {
-                        return Err(RbacError::AdminCannotModifyOwner);
-                    }
-                    if new_role < Role::Owner {
-                        let owner_count =
-                            all_members.iter().filter(|m| m.role == Role::Owner).count();
-                        if owner_count <= 1 {
-                            return Err(RbacError::LastOwner);
-                        }
+            let Some(target) = all_members.iter().find(|m| m.user_id == target_id) else {
+                return Err(RbacError::TargetNotMember);
+            };
+            if target.role == Role::Owner {
+                if actor_role < Role::Owner {
+                    return Err(RbacError::AdminCannotModifyOwner);
+                }
+                if new_role < Role::Owner {
+                    let owner_count = all_members.iter().filter(|m| m.role == Role::Owner).count();
+                    if owner_count <= 1 {
+                        return Err(RbacError::LastOwner);
                     }
                 }
             }
@@ -472,5 +475,19 @@ mod tests {
             ),
             Err(RbacError::RoleEscalation { actor: Role::Admin, requested: Role::Owner })
         );
+    }
+
+    // Audit #67: a role change aimed at a non-member must not pass the check.
+    #[test]
+    fn change_role_of_non_member_is_rejected() {
+        let admin = admin_id();
+        let members = vec![make_member(admin.clone(), Role::Admin)];
+        let result = check_rbac(
+            RbacAction::ChangeMemberRole { target_id: viewer_id(), new_role: Role::Viewer },
+            Role::Admin,
+            &admin,
+            &members,
+        );
+        assert_eq!(result, Err(RbacError::TargetNotMember));
     }
 }
