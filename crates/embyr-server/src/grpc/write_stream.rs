@@ -58,14 +58,16 @@ fn now_timestamp() -> Timestamp {
 /// subsequent `WriteRequest` as its own apply-and-reply cycle — unlike
 /// `handle_listen`'s spawned task, which only drains further messages after
 /// its one-time setup.
-pub(crate) async fn run_write_session(
-    mut in_stream: tonic::Streaming<WriteRequest>,
+pub(crate) async fn run_write_session<S>(
+    mut in_stream: S,
     tx: mpsc::Sender<Result<WriteResponse, Status>>,
     adapter: SharedBackendAdapter,
     system_db: std::sync::Arc<SystemDb>,
     project_id_str: String,
     verified_identity: Option<VerifiedEndUserIdentity>,
-) {
+) where
+    S: tokio_stream::Stream<Item = Result<WriteRequest, Status>> + Unpin,
+{
     let stream_id = generate_stream_id();
     let mut current_token = generate_stream_token();
 
