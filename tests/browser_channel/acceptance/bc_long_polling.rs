@@ -378,12 +378,26 @@ async fn bc02_back_channel_replays_unacked_arrays_after_reconnect() {
 
     // Acked 1..=3: only newer arrays come back — here, the next live change.
     env.create("bc_items", "b", 2).await;
-    let after_ack = ch.long_poll(3).await;
-    assert_eq!(after_ack[0][0], 4);
-    assert_eq!(
-        short(&after_ack[0][1][0]["documentChange"]["document"]["name"]),
-        "bc_items/b"
-    );
+    // The long poll can answer with a keep-alive before the NOTIFY-driven
+    // change is queued: keep polling (acking what we have seen) until it lands.
+    let mut acked = 3;
+    let mut change = None;
+    for _ in 0..10 {
+        for arr in ch.long_poll(acked).await {
+            acked = acked.max(arr[0].as_u64().unwrap());
+            for m in arr[1].as_array().unwrap() {
+                if m.get("documentChange").is_some() {
+                    change = Some((arr[0].clone(), m.clone()));
+                }
+            }
+        }
+        if change.is_some() {
+            break;
+        }
+    }
+    let (aid, m) = change.expect("documentChange never arrived after the ack");
+    assert!(aid.as_u64().unwrap() > 3, "arrays 1..=3 were acked and must not be replayed");
+    assert_eq!(short(&m["documentChange"]["document"]["name"]), "bc_items/b");
 }
 
 // ── setDoc over long polling ────────────────────────────────────────────────
