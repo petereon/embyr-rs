@@ -68,7 +68,10 @@ use crate::{
         document_to_proto, field_value_to_proto, fields_to_proto, proto_fields_to_domain,
     },
     middleware::{obs_helpers, rate_limit::RateLimiter},
-    realtime::listen_registry::ListenRegistry,
+    realtime::{
+        change_feed_listener::ChangeFeedListener,
+        listen_registry::{ListenRegistry, ListenerGuard},
+    },
 };
 
 #[derive(Clone)]
@@ -83,9 +86,10 @@ pub struct FirestoreService {
     pub keepalive_interval: std::time::Duration,
     /// Shared fan-out registry for real-time Listen subscribers.
     pub listen_registry: Arc<ListenRegistry>,
-    /// Active `PostgresNotifyListener` handles, keyed by project_id.
+    /// Active change-source handles (`PostgresNotifyListener` for direct_pg,
+    /// `ChangeFeedListener` for agent), keyed by project_id.
     /// Started on first Listen stream for each project.
-    pub active_listeners: Arc<tokio::sync::Mutex<HashMap<String, PostgresNotifyListener>>>,
+    pub active_listeners: Arc<tokio::sync::Mutex<HashMap<String, ListenerGuard>>>,
     /// AWS Secrets Manager fetcher — Some for servers configured with aws_secret support.
     pub aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
     /// GCP Secret Manager fetcher — Some for servers configured with gcp_secret support.
@@ -3952,24 +3956,37 @@ impl FirestoreService {
         {
             let mut listeners = self.active_listeners.lock().await;
             if !listeners.contains_key(&project_id) {
-                // We need the pool from the adapter. The adapter is a SharedBackendAdapter
-                // (dyn BackendAdapter) so we can't downcast. Instead, build a new pool
-                // from the DSN specifically for the listener's fetch queries.
-                let pool = sqlx::postgres::PgPoolOptions::new()
-                    .max_connections(self.listener_db_max_connections)
-                    .acquire_timeout(self.listener_db_acquire_timeout)
-                    .connect(&dsn)
-                    .await
-                    .map_err(|e| sanitize_backend_error(e, "handle_listen: provision notify-listener pool"))?;
-                let listener = PostgresNotifyListener::start(
-                    &dsn,
+                // Backends the server cannot LISTEN on directly (agent mode) expose
+                // their own change feed; its events enter the same registry channel.
+                if let Some(feed_listener) = ChangeFeedListener::start(
+                    Arc::clone(&adapter),
                     &project_id,
                     Arc::clone(&self.listen_registry),
-                    pool,
                 )
                 .await
-                .map_err(|e| sanitize_backend_error(e, "handle_listen: start PostgresNotifyListener"))?;
-                listeners.insert(project_id.clone(), listener);
+                .map_err(|e| sanitize_backend_error(e, "handle_listen: open change feed"))?
+                {
+                    listeners.insert(project_id.clone(), Box::new(feed_listener));
+                } else {
+                    // We need the pool from the adapter. The adapter is a SharedBackendAdapter
+                    // (dyn BackendAdapter) so we can't downcast. Instead, build a new pool
+                    // from the DSN specifically for the listener's fetch queries.
+                    let pool = sqlx::postgres::PgPoolOptions::new()
+                        .max_connections(self.listener_db_max_connections)
+                        .acquire_timeout(self.listener_db_acquire_timeout)
+                        .connect(&dsn)
+                        .await
+                        .map_err(|e| sanitize_backend_error(e, "handle_listen: provision notify-listener pool"))?;
+                    let listener = PostgresNotifyListener::start(
+                        &dsn,
+                        &project_id,
+                        Arc::clone(&self.listen_registry),
+                        pool,
+                    )
+                    .await
+                    .map_err(|e| sanitize_backend_error(e, "handle_listen: start PostgresNotifyListener"))?;
+                    listeners.insert(project_id.clone(), Box::new(listener));
+                }
             }
         }
 

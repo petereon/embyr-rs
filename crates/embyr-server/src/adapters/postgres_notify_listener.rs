@@ -51,7 +51,7 @@ const RECONNECT_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// never correlated with another's. Add per-project jitter only if a future
 /// backend_mode ever shares one Postgres instance across multiple projects'
 /// listeners.
-fn reconnect_backoff(consecutive_failures: u32) -> std::time::Duration {
+pub(crate) fn reconnect_backoff(consecutive_failures: u32) -> std::time::Duration {
     let shift = consecutive_failures.saturating_sub(1).min(5); // 2^5s = 32s, capped at 30s below
     std::time::Duration::from_secs(u64::from(RECONNECT_INITIAL_BACKOFF_SECS) << shift)
         .min(RECONNECT_MAX_BACKOFF)

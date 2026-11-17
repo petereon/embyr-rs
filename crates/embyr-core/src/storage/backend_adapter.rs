@@ -11,6 +11,7 @@ use crate::{
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
+    storage::change_feed::ChangeFeed,
 };
 
 /// Precondition for write operations, matching Firestore protocol semantics.
@@ -209,6 +210,16 @@ pub trait BackendAdapter: Send + Sync {
 
     /// Liveness check — returns `Ok(())` when the backend is reachable.
     async fn probe(&self) -> Result<(), CoreError>;
+
+    /// Open the backend's own change stream for `project_id`, for backends
+    /// that the server cannot `LISTEN` on directly. `Ok(None)` (the default)
+    /// means "no such stream — use the direct Postgres listener".
+    async fn open_change_feed(
+        &self,
+        _project_id: &ProjectId,
+    ) -> Result<Option<Box<dyn ChangeFeed>>, CoreError> {
+        Ok(None)
+    }
 }
 
 /// Type alias for a heap-allocated backend adapter.

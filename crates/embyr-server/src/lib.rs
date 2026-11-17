@@ -20,7 +20,6 @@ use adapters::{
     gcp_secret_fetcher::GcpSecretFetcher,
     index_manager::IndexManager,
     metrics_adapter::MetricsAdapter,
-    postgres_notify_listener::PostgresNotifyListener,
     system_db::SystemDb,
 };
 use embyr_core::admin::email::IEmailSender;
@@ -244,7 +243,7 @@ struct TestComponents {
     idx_mgr: Arc<IndexManager>,
     metrics: Arc<MetricsAdapter>,
     listen_registry: Arc<ListenRegistry>,
-    active_listeners: Arc<tokio::sync::Mutex<std::collections::HashMap<String, PostgresNotifyListener>>>,
+    active_listeners: Arc<tokio::sync::Mutex<std::collections::HashMap<String, realtime::listen_registry::ListenerGuard>>>,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 }
