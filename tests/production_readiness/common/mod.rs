@@ -399,7 +399,7 @@ impl Drop for ServerProcess {
 
 /// Fixed operator Bearer key `ServerProcess::start`/`start_env_only` are
 /// always given via `EMBYR_ADMIN_KEY` in this file's own call sites.
-pub const ADMIN_KEY: &str = "testkey";
+pub const ADMIN_KEY: &str = "testkey-0123456789-0123456789-abcdef";
 
 /// Provision a project via the real operator-Bearer-key admin API
 /// (`POST /admin/v1/projects`, mirrors `pr10_healthz_dependency_checks.rs`'s

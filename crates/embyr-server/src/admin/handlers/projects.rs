@@ -86,6 +86,21 @@ pub async fn list_projects(
 /// Statuses an Owner/Admin may set via PATCH. `deleted` is operator-only.
 const PATCHABLE_STATUSES: &[&str] = &["active", "suspended"];
 
+const MAX_NAME_LEN: usize = 100;
+const MAX_LOG_RETENTION_DAYS: i32 = 3650;
+
+/// Audit #66: bound the free-form PATCH fields (name 1..=100 chars, retention 1..=3650 days).
+fn patch_fields_valid(body: &PatchProjectBody) -> bool {
+    let name_ok = body
+        .name
+        .as_deref()
+        .is_none_or(|n| !n.trim().is_empty() && n.chars().count() <= MAX_NAME_LEN);
+    let retention_ok = body
+        .log_retention_days
+        .is_none_or(|d| (1..=MAX_LOG_RETENTION_DAYS).contains(&d));
+    name_ok && retention_ok
+}
+
 /// Partial-update body for PATCH /admin/v1/projects/:id.
 /// All fields are optional; absent fields are preserved via COALESCE.
 #[derive(Deserialize, Default)]
@@ -105,7 +120,8 @@ pub struct PatchProjectBody {
 ///   which is operator-only) → 422.
 /// - `status = "active"` while the account is on a billing hold
 ///   (`past_due` / `free_cap_exceeded`) → 409.
-/// - Account isolation: project must belong to `session.account_id`; otherwise 403.
+/// - Account isolation: project must belong to `session.account_id`; otherwise 404.
+/// - `name` must be 1..=100 chars, `log_retention_days` 1..=3650; otherwise 422 (#66).
 /// - `backend_pg_dsn` → 422 (ADR-083: use PUT /projects/:id/connection).
 /// - Credential cache is evicted after a status change.
 /// - Absent patch fields are preserved via COALESCE.
@@ -143,6 +159,10 @@ async fn patch_project_inner(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    if !patch_fields_valid(&body) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     // ── Guard: status allow-list, body-only, before any DB access (#59) ───────
     // `deleted` (soft-delete is operator-only) and any unknown string → 422.
     if let Some(status) = body.status.as_deref() {
@@ -154,9 +174,9 @@ async fn patch_project_inner(
     let pool = state.system_db.pool();
 
     // ── Pre-check: account isolation ──────────────────────────────────────────
-    // Fetching account_id before UPDATE allows us to return 403 vs 404 precisely.
+    // Foreign-account projects return 404, same as missing (no existence oracle).
     let pre = sqlx::query(
-        "SELECT account_id, status FROM projects WHERE id = $1",
+        "SELECT account_id, status, suspended_by FROM projects WHERE id = $1",
     )
     .bind(&project_id)
     .fetch_optional(pool)
@@ -177,7 +197,15 @@ async fn patch_project_inner(
 
     let project_account: Option<Uuid> = pre.try_get("account_id").unwrap_or(None);
     if project_account.as_ref() != Some(&session.account_id) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // ── Guard: an operator/system suspension cannot be undone via PATCH (#64) ─
+    if body.status.as_deref() == Some("active") && existing_status == "suspended" {
+        let suspended_by: Option<String> = pre.try_get("suspended_by").unwrap_or(None);
+        if suspended_by.as_deref() != Some("account") {
+            return Err(StatusCode::CONFLICT);
+        }
     }
 
     // ── Guard: a billing suspension cannot be reversed via PATCH (#59) ────────
@@ -198,6 +226,10 @@ async fn patch_project_inner(
          SET \
            name                = COALESCE($2, name), \
            status              = COALESCE($3, status), \
+           suspended_by        = CASE WHEN $3::text IS NULL THEN suspended_by \
+                                      WHEN $3::text = 'active' THEN NULL \
+                                      WHEN status = 'active' THEN 'account' \
+                                      ELSE suspended_by END, \
            logging_enabled     = COALESCE($4, logging_enabled), \
            log_retention_days  = COALESCE($5, log_retention_days), \
            updated_at          = now() \
@@ -239,4 +271,30 @@ async fn patch_project_inner(
         api_key_rotated_at: row.try_get("api_key_rotated_at").unwrap_or(None),
         api_key_previous_expires_at: row.try_get("api_key_previous_expires_at").unwrap_or(None),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(name: Option<&str>, days: Option<i32>) -> PatchProjectBody {
+        PatchProjectBody {
+            name: name.map(String::from),
+            log_retention_days: days,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn patch_field_bounds() {
+        assert!(patch_fields_valid(&body(None, None)));
+        assert!(patch_fields_valid(&body(Some("ok"), Some(1))));
+        assert!(patch_fields_valid(&body(Some(&"x".repeat(100)), Some(3650))));
+        assert!(!patch_fields_valid(&body(Some(""), None)));
+        assert!(!patch_fields_valid(&body(Some("   "), None)));
+        assert!(!patch_fields_valid(&body(Some(&"x".repeat(101)), None)));
+        assert!(!patch_fields_valid(&body(None, Some(0))));
+        assert!(!patch_fields_valid(&body(None, Some(-5))));
+        assert!(!patch_fields_valid(&body(None, Some(3651))));
+    }
 }

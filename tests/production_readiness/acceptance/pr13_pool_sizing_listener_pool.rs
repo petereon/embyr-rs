@@ -150,7 +150,7 @@ async fn listen_still_delivers_document_changes_with_listener_pool_fields_thread
     let server = ServerProcess::start(
         &sys_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );

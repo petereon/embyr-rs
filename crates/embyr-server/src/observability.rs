@@ -36,14 +36,52 @@ pub fn get_or_install_prometheus_handle() -> PrometheusHandle {
     PROMETHEUS_HANDLE
         .get_or_init(|| {
             use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-            PrometheusBuilder::new()
+            let handle = PrometheusBuilder::new()
                 .set_buckets_for_metric(
                     Matcher::Prefix("embyr_grpc_request_duration".to_string()),
                     GRPC_DURATION_BUCKETS,
                 )
                 .expect("failed to configure gRPC duration histogram buckets")
                 .install_recorder()
-                .expect("failed to install Prometheus metrics recorder")
+                .expect("failed to install Prometheus metrics recorder");
+            describe_metrics();
+            handle
         })
         .clone()
+}
+
+/// `# HELP` text for every metric the server emits (audit #69). Must run after
+/// the recorder is installed.
+fn describe_metrics() {
+    use metrics::{describe_counter, describe_gauge, describe_histogram, Unit};
+    describe_histogram!("embyr_grpc_request_duration_seconds", Unit::Seconds, "gRPC request latency");
+    describe_gauge!("embyr_pg_pool_size", "Connections currently open in the system Postgres pool");
+    describe_gauge!("embyr_pg_pool_idle", "Idle connections in the system Postgres pool");
+    describe_gauge!(
+        "embyr_projects_unconverted_connection_secrets",
+        "Projects whose connection secret is not yet converted to the single-store format"
+    );
+    for (name, help) in [
+        ("embyr_grpc_requests_total", "gRPC requests handled"),
+        ("embyr_rate_limit_requests_total", "API requests evaluated by the rate limiter"),
+        ("embyr_rate_limit_pg_error_total", "Rate limiter Postgres errors (fell back to in-process bucket)"),
+        ("embyr_rate_limit_pg_timeout_total", "Rate limiter Postgres timeouts (fell back to in-process bucket)"),
+        ("embyr_signin_rate_limit_requests_total", "Sign-in attempts evaluated by the rate limiter"),
+        ("embyr_signin_rate_limit_pg_error_total", "Sign-in rate limiter Postgres errors"),
+        ("embyr_signin_rate_limit_pg_timeout_total", "Sign-in rate limiter Postgres timeouts"),
+        ("embyr_signin_rate_limit_sweeper_purged_total", "Sign-in rate limit rows purged by the sweeper"),
+        ("embyr_pg_notify_listener_reconnect_attempts_total", "Realtime NOTIFY listener reconnect attempts"),
+        ("embyr_dsn_convert_divergent_total", "Connection secret conversions whose result diverged"),
+        ("embyr_rollup_dropped_total", "Metric rollup events dropped"),
+        ("embyr_rollup_flush_total", "Metric rollup flushes"),
+        ("embyr_hourly_metrics_retention_purged_total", "Hourly metric rows purged by the retention sweeper"),
+        ("embyr_soft_delete_purge_sweeper_purged_total", "Soft-deleted projects purged"),
+        ("embyr_account_purge_sweeper_purged_total", "Soft-deleted accounts purged"),
+        ("embyr_transaction_sweeper_reclaimed_total", "Abandoned transactions reclaimed"),
+        ("embyr_transaction_sweeper_purged_total", "Finished transaction rows purged"),
+        ("embyr_sweeper_error_total", "Background sweeper errors"),
+        ("embyr_stripe_webhook_dispatch_total", "Stripe webhook events dispatched"),
+    ] {
+        describe_counter!(name, help);
+    }
 }

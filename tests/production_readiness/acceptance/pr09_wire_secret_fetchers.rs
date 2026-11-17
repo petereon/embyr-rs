@@ -211,7 +211,7 @@ async fn aws_secret_project_serves_real_grpc_request_when_aws_credentials_availa
     let mut server = ServerProcess::start(
         &sys_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             ("AWS_ENDPOINT_URL", &endpoint_url),
             ("AWS_ACCESS_KEY_ID", "test"),
@@ -233,7 +233,7 @@ async fn aws_secret_project_serves_real_grpc_request_when_aws_credentials_availa
             "http://127.0.0.1:{}/admin/v1/projects",
             server.admin_port
         ))
-        .header("Authorization", "Bearer testkey")
+        .header("Authorization", "Bearer testkey-0123456789-0123456789-abcdef")
         .json(&serde_json::json!({
             "project_id": "wsf-ws-aws-project",
             "backend_mode": "aws_secret",
@@ -353,7 +353,7 @@ async fn gcp_secret_project_wiring_reached_when_token_configured() {
     let mut server = ServerProcess::start(
         &sys_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             (
                 "EMBYR_GCP_ACCESS_TOKEN",
@@ -374,7 +374,7 @@ async fn gcp_secret_project_wiring_reached_when_token_configured() {
             "http://127.0.0.1:{}/admin/v1/projects",
             server.admin_port
         ))
-        .header("Authorization", "Bearer testkey")
+        .header("Authorization", "Bearer testkey-0123456789-0123456789-abcdef")
         .json(&serde_json::json!({
             "project_id": "wsf-gcp-wiring-project",
             "backend_mode": "gcp_secret",
@@ -447,7 +447,7 @@ async fn server_with_neither_cloud_configured_starts_and_direct_pg_unaffected() 
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -465,7 +465,7 @@ async fn server_with_neither_cloud_configured_starts_and_direct_pg_unaffected() 
             "http://127.0.0.1:{}/admin/v1/projects",
             server.admin_port
         ))
-        .header("Authorization", "Bearer testkey")
+        .header("Authorization", "Bearer testkey-0123456789-0123456789-abcdef")
         .json(&serde_json::json!({
             "project_id": "wsf04-direct-pg-project",
             "dsn": customer_db_url,
@@ -558,7 +558,7 @@ async fn aws_secret_project_fails_closed_when_aws_credentials_absent() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -651,7 +651,7 @@ async fn gcp_secret_provisioning_rejected_when_token_unset() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -664,7 +664,7 @@ async fn gcp_secret_provisioning_rejected_when_token_unset() {
             "http://127.0.0.1:{}/admin/v1/projects",
             server.admin_port
         ))
-        .header("Authorization", "Bearer testkey")
+        .header("Authorization", "Bearer testkey-0123456789-0123456789-abcdef")
         .json(&serde_json::json!({
             "project_id": "wsf06-gcp-rejected-project",
             "backend_mode": "gcp_secret",
@@ -763,7 +763,7 @@ async fn transaction_sweeper_reclaims_aws_secret_project_when_aws_credentials_av
     let mut server = ServerProcess::start(
         &sys_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             ("AWS_ENDPOINT_URL", &endpoint_url),
             ("AWS_ACCESS_KEY_ID", "test"),

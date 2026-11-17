@@ -8,7 +8,7 @@
 //! | Variable              | Description                                      |
 //! |-----------------------|--------------------------------------------------|
 //! | `DATABASE_URL`        | Postgres DSN for the system DB                   |
-//! | `EMBYR_ADMIN_KEY`     | Non-empty Bearer token for operator routes       |
+//! | `EMBYR_ADMIN_KEY`     | Bearer token for operator routes, >= 32 chars    |
 //! | `EMBYR_ENCRYPTION_KEY`| Exactly 64 hex chars (32-byte AES-256-GCM key)  |
 //!
 //! # Optional environment variables
@@ -253,6 +253,19 @@ pub enum ConfigError {
     /// `EMBYR_API_KEY_ROTATION_WINDOW_SECS` is present but not an integer in
     /// `1..=MAX_ROTATION_WINDOW_SECS` (api-key-rotation, ADR-085).
     InvalidRotationWindow { value: String },
+    /// `EMBYR_ADMIN_KEY` is shorter than [`MIN_ADMIN_KEY_LEN`] (X13). The
+    /// value itself is never included.
+    AdminKeyTooShort { len: usize },
+}
+
+/// Minimum accepted length of `EMBYR_ADMIN_KEY` (it guards every operator route).
+pub const MIN_ADMIN_KEY_LEN: usize = 32;
+
+fn validate_admin_key(key: &str) -> Result<(), ConfigError> {
+    if key.len() < MIN_ADMIN_KEY_LEN {
+        return Err(ConfigError::AdminKeyTooShort { len: key.len() });
+    }
+    Ok(())
 }
 
 impl fmt::Display for ConfigError {
@@ -312,6 +325,13 @@ impl fmt::Display for ConfigError {
                 write!(
                     f,
                     "invalid EMBYR_CORS_ALLOWED_ORIGINS entry: '{value}' is not a valid HTTP header value"
+                )
+            }
+            ConfigError::AdminKeyTooShort { len } => {
+                write!(
+                    f,
+                    "EMBYR_ADMIN_KEY is too short ({len} chars): it must be at least \
+                     {MIN_ADMIN_KEY_LEN} characters (e.g. `openssl rand -hex 32`)"
                 )
             }
             ConfigError::InvalidRotationWindow { value } => {
@@ -395,6 +415,8 @@ impl ServerConfig {
                 });
             }
         }
+
+        validate_admin_key(&admin_key)?;
 
         let encryption_key =
             validate_encryption_key_hex("EMBYR_ENCRYPTION_KEY", &enc_hex_opt.unwrap())?;
@@ -992,6 +1014,18 @@ fn parse_rate_limit_rps() -> Result<f64, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_key_length_boundary() {
+        assert!(matches!(
+            validate_admin_key(&"a".repeat(MIN_ADMIN_KEY_LEN - 1)),
+            Err(ConfigError::AdminKeyTooShort { len: 31 })
+        ));
+        assert!(validate_admin_key(&"a".repeat(MIN_ADMIN_KEY_LEN)).is_ok());
+        assert!(validate_admin_key("").is_err());
+        let msg = validate_admin_key("short").unwrap_err().to_string();
+        assert!(msg.contains("EMBYR_ADMIN_KEY") && msg.contains("32") && !msg.contains("short)"));
+    }
 
     #[test]
     fn collect_required_absent_pushes_name() {

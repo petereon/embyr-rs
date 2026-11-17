@@ -7,6 +7,7 @@
 //!   Session auth, Owner or Admin.
 //!   Body: { name, member_id? | service_account_id?, role }.
 //!   Role cap: Admins cannot create Owner keys (check_rbac RoleEscalation → 403).
+//!   member_id / service_account_id must belong to the caller's account (else 422).
 //!   201 { id, name, key: "embyr_adm_<32chars>", prefix, created_at }. BLAKE3(key) stored.
 //!   key shown once only; plaintext never in DB.
 //!
@@ -183,6 +184,40 @@ pub async fn create_admin_key(
         .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
 
     let pool = state.system_db.pool();
+
+    // member_id / service_account_id must belong to the caller's own account.
+    if let Some(member) = member_uuid {
+        let ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM account_members WHERE user_id = $1 AND account_id = $2)",
+        )
+        .bind(member)
+        .bind(session.account_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("create_admin_key: member check error: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        if !ok {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
+    if let Some(sa) = sa_uuid {
+        let ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM service_accounts WHERE id = $1 AND account_id = $2)",
+        )
+        .bind(sa)
+        .bind(session.account_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("create_admin_key: service account check error: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        if !ok {
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+    }
 
     let row = sqlx::query(
         "INSERT INTO admin_api_keys \

@@ -65,7 +65,7 @@ pub async fn get_project(
     if let AuthPrincipal::User { account_id, .. } = &principal {
         let project_account: Option<Uuid> = row.try_get("account_id").unwrap_or(None);
         if project_account.as_ref() != Some(account_id) {
-            return Err(StatusCode::FORBIDDEN);
+            return Err(StatusCode::NOT_FOUND);
         }
     }
 

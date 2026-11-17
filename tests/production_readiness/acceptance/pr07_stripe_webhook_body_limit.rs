@@ -90,7 +90,7 @@ async fn start_correctly_configured_server() -> (
     let server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             ("STRIPE_SECRET_KEY", STRIPE_SECRET_KEY),
             ("STRIPE_WEBHOOK_SIGNING_SECRET", WEBHOOK_SECRET),

@@ -410,7 +410,7 @@ async fn exits_nonzero_when_only_cert_path_is_set() {
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:65535/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ("EMBYR_TLS_CERT_PATH", "/tmp/embyr-tls-support-test-cert.pem"),
         // EMBYR_TLS_KEY_PATH intentionally absent
@@ -446,7 +446,7 @@ async fn exits_nonzero_when_only_key_path_is_set() {
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:65535/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ("EMBYR_TLS_KEY_PATH", "/tmp/embyr-tls-support-test-key.pem"),
         // EMBYR_TLS_CERT_PATH intentionally absent
@@ -500,7 +500,7 @@ async fn exits_nonzero_when_key_file_does_not_exist() {
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:65535/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ("EMBYR_TLS_CERT_PATH", cert_file.path().to_str().unwrap()),
         (
@@ -560,7 +560,7 @@ async fn exits_nonzero_when_cert_content_is_not_valid_pem() {
             "DATABASE_URL",
             "postgres://postgres:postgres@127.0.0.1:65535/embyr",
         ),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         (
             "EMBYR_TLS_CERT_PATH",

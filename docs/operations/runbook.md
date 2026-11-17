@@ -237,6 +237,21 @@ Listen works in agent mode via the agent's `Subscribe` stream (see
 - `AgentNotifyBridge` has no reconnect of its own: after a stream drop the server
   reconnects and the agent opens a fresh Postgres connection.
 
+## Security notes for operators
+
+- **API keys in `?key=` query strings.** Firestore-compatible clients may send the project API
+  key as `?key=<api-key>` (as the Google SDKs do). Any reverse proxy or load balancer in front
+  of `:8080`/`:8081` MUST NOT log request query strings (e.g. strip `$args`/`$query_string` from
+  nginx `log_format`, disable query logging on AWS ALB/GCP LB access logs, or redact `key=`),
+  otherwise project API keys end up in your access logs.
+- **Hosted-identity tokens are not revoked on password reset.** A hosted-identity ID token
+  (1 hour lifetime) is stateless: resetting the user's password does not invalidate tokens
+  already issued, they simply expire. Revoking them would need a per-user "valid after"
+  timestamp checked on every request; not implemented. Admin (dashboard) password resets DO
+  revoke all of that user's sessions.
+- **`EMBYR_ADMIN_KEY` minimum length.** The server refuses to start if `EMBYR_ADMIN_KEY` is
+  shorter than 32 characters.
+
 ## Where to look next
 
 - `docs/operations/grafana-dashboard.json` — the dashboard these alerts and panels above

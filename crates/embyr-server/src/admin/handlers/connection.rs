@@ -118,7 +118,7 @@ async fn load_project(
 
     let account: Option<Uuid> = row.try_get("account_id").unwrap_or(None);
     if account != Some(session.account_id) {
-        return Err(err(StatusCode::FORBIDDEN, "forbidden"));
+        return Err(err(StatusCode::NOT_FOUND, "project_not_found"));
     }
     let status: String = row.try_get("status").map_err(|e| db_err("load", e))?;
     if status == "deleted" {

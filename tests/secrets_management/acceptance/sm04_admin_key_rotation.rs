@@ -62,7 +62,7 @@ async fn operator_route_accepts_current_admin_key() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "new-token-2026"),
+            ("EMBYR_ADMIN_KEY", "new-token-2026-0123456789-0123456789"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -74,7 +74,7 @@ async fn operator_route_accepts_current_admin_key() {
     let mut after: HashMap<&str, String> = HashMap::new();
     after.insert(
         universe::OPERATOR_ROUTE_STATUS,
-        get_status(&client, &url, "new-token-2026").await.to_string(),
+        get_status(&client, &url, "new-token-2026-0123456789-0123456789").await.to_string(),
     );
 
     let mut expected = HashMap::new();
@@ -91,10 +91,10 @@ async fn operator_route_accepts_current_admin_key() {
 ///
 /// Journey (chained from scenario 1's Given + When — real subprocess + GET
 /// /metrics — here BOTH tokens are configured and BOTH must succeed):
-///   Given: EMBYR_ADMIN_KEY is "new-token-2026" and EMBYR_ADMIN_KEY_PREVIOUS is "old-token-2025"
+///   Given: EMBYR_ADMIN_KEY is "new-token-2026-0123456789-0123456789" and EMBYR_ADMIN_KEY_PREVIOUS is "old-token-2025"
 ///   When:  a request carries "Authorization: Bearer old-token-2025"
 ///   Then:  the response is HTTP 200
-///   When:  a request carries "Authorization: Bearer new-token-2026"
+///   When:  a request carries "Authorization: Bearer new-token-2026-0123456789-0123456789"
 ///   Then:  the response is HTTP 200
 ///
 /// @real-io @US-SM-04 @AC-SM-04-02
@@ -105,7 +105,7 @@ async fn operator_route_accepts_previous_admin_key_during_rotation_window() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "new-token-2026"),
+            ("EMBYR_ADMIN_KEY", "new-token-2026-0123456789-0123456789"),
             ("EMBYR_ADMIN_KEY_PREVIOUS", "old-token-2025"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
@@ -129,7 +129,7 @@ async fn operator_route_accepts_previous_admin_key_during_rotation_window() {
     assert_state_delta(&before, &after, &[universe::OPERATOR_ROUTE_STATUS], &expected);
 
     // Same route, new token — must ALSO succeed (both tokens valid simultaneously).
-    let status_new = get_status(&client, &url, "new-token-2026").await;
+    let status_new = get_status(&client, &url, "new-token-2026-0123456789-0123456789").await;
     assert_eq!(status_new, 200, "the new token must also succeed during the window");
 
     server.sigterm();
@@ -154,7 +154,7 @@ async fn metrics_endpoint_honors_dual_token_window() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "new-token-2026"),
+            ("EMBYR_ADMIN_KEY", "new-token-2026-0123456789-0123456789"),
             ("EMBYR_ADMIN_KEY_PREVIOUS", "old-token-2025"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
@@ -174,7 +174,7 @@ async fn metrics_endpoint_honors_dual_token_window() {
     expected.insert(universe::METRICS_STATUS, set_to("200".to_string()));
     assert_state_delta(&before, &after, &[universe::METRICS_STATUS], &expected);
 
-    let status_new = get_status(&client, &url, "new-token-2026").await;
+    let status_new = get_status(&client, &url, "new-token-2026-0123456789-0123456789").await;
     assert_eq!(status_new, 200);
 
     server.sigterm();
@@ -199,7 +199,7 @@ async fn operator_route_rejects_token_matching_neither() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "new-token-2026"),
+            ("EMBYR_ADMIN_KEY", "new-token-2026-0123456789-0123456789"),
             ("EMBYR_ADMIN_KEY_PREVIOUS", "old-token-2025"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
@@ -244,7 +244,7 @@ async fn hard_cutover_with_no_grace_period_remains_available() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "incident-response-token"),
+            ("EMBYR_ADMIN_KEY", "incident-response-token-0123456789-01"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
             // EMBYR_ADMIN_KEY_PREVIOUS deliberately absent — hard cutover.
         ],
@@ -323,7 +323,7 @@ async fn dual_auth_middleware_accepts_previous_admin_key_too() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "new-token-2026"),
+            ("EMBYR_ADMIN_KEY", "new-token-2026-0123456789-0123456789"),
             ("EMBYR_ADMIN_KEY_PREVIOUS", "old-token-2025"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
@@ -382,7 +382,7 @@ async fn retired_admin_token_rejected_once_rotation_window_closed() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "new-token-2026"),
+            ("EMBYR_ADMIN_KEY", "new-token-2026-0123456789-0123456789"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );

@@ -446,12 +446,12 @@ async fn pre_existing_project_with_null_dsn_enc_skips_re_encryption_silently() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Error: PATCH project from different account returns 403
+// Error: PATCH project from different account returns 404
 // ─────────────────────────────────────────────────────────────────────────────
 
 // @US-B04 @error @driving_port @real-io
 #[tokio::test]
-async fn patch_project_from_different_account_returns_403() {
+async fn patch_project_from_different_account_returns_404() {
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_as_owner(&ctx).await;
     let other_account_project_id = "project-belonging-to-other-account";
@@ -467,8 +467,8 @@ async fn patch_project_from_different_account_returns_403() {
 
     assert_eq!(
         resp.status().as_u16(),
-        403,
-        "error: PATCH project from different account must return 403"
+        404,
+        "error: PATCH project from different account must return 404"
     );
 }
 

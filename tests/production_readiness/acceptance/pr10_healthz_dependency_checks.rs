@@ -193,7 +193,7 @@ async fn readiness_and_liveness_across_a_real_postgres_outage_on_both_mounts() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -344,7 +344,7 @@ async fn healthz_stays_healthy_when_only_a_tenant_customer_database_is_down() {
     let mut server = ServerProcess::start(
         &sys_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );
@@ -380,7 +380,7 @@ async fn healthz_stays_healthy_when_only_a_tenant_customer_database_is_down() {
     let http = reqwest::Client::new();
     let provision_resp = http
         .post(format!("{admin_base}/admin/v1/projects"))
-        .header("Authorization", "Bearer testkey")
+        .header("Authorization", "Bearer testkey-0123456789-0123456789-abcdef")
         .json(&serde_json::json!({
             "project_id": "hdc-tenant-down",
             "dsn": cust_url,
@@ -442,7 +442,7 @@ async fn healthz_503_body_never_leaks_postgres_driver_or_schema_error_text() {
     let mut server = ServerProcess::start(
         &db_url,
         &[
-            ("EMBYR_ADMIN_KEY", "testkey"),
+            ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
             ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         ],
     );

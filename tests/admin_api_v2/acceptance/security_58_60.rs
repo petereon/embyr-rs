@@ -124,6 +124,31 @@ async fn owner_cannot_reactivate_project_during_billing_hold() {
     assert_eq!(status, "suspended");
 }
 
+// ── #64 ───────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn account_cannot_undo_system_suspension_but_can_undo_own() {
+    let ctx = AdminTestContext::new().await;
+    let cookie = owner(&ctx).await;
+
+    // Operator/system suspension: not reversible by the account (no billing hold needed).
+    sqlx::query("UPDATE projects SET status = 'suspended', suspended_by = 'system' WHERE id = $1")
+        .bind(PROJECT)
+        .execute(&ctx.pool)
+        .await
+        .expect("system suspend");
+    assert_eq!(patch_project(&ctx, &cookie, serde_json::json!({"status": "active"})).await, 409);
+
+    // Account's own suspension: reversible.
+    sqlx::query("UPDATE projects SET status = 'active', suspended_by = NULL WHERE id = $1")
+        .bind(PROJECT)
+        .execute(&ctx.pool)
+        .await
+        .expect("reset");
+    assert_eq!(patch_project(&ctx, &cookie, serde_json::json!({"status": "suspended"})).await, 200);
+    assert_eq!(patch_project(&ctx, &cookie, serde_json::json!({"status": "active"})).await, 200);
+}
+
 // ── #60 ───────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -173,4 +198,54 @@ async fn admin_cannot_promote_self_to_owner() {
         .status()
         .as_u16();
     assert_eq!(status, 403);
+}
+
+// ── X13: role caps on service accounts / admin keys ──────────────────────────
+
+async fn post_json(ctx: &AdminTestContext, cookie: &str, path: &str, body: serde_json::Value) -> u16 {
+    ctx.client
+        .post(ctx.url(path))
+        .header("Cookie", cookie)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST failed")
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn admin_cannot_create_owner_service_account() {
+    let ctx = AdminTestContext::new().await;
+    let cookie = admin(&ctx).await;
+    let body = |role: &str| serde_json::json!({"name": "sa", "role": role});
+    assert_eq!(post_json(&ctx, &cookie, "/admin/v1/service_accounts", body("Owner")).await, 403);
+    assert_eq!(post_json(&ctx, &cookie, "/admin/v1/service_accounts", body("Admin")).await, 201);
+}
+
+#[tokio::test]
+async fn owner_can_create_owner_service_account() {
+    let ctx = AdminTestContext::new().await;
+    let cookie = owner(&ctx).await;
+    let body = serde_json::json!({"name": "sa-owner", "role": "Owner"});
+    assert_eq!(post_json(&ctx, &cookie, "/admin/v1/service_accounts", body).await, 201);
+}
+
+#[tokio::test]
+async fn admin_key_rejects_foreign_member_and_service_account() {
+    let ctx = AdminTestContext::new().await;
+    let cookie = admin(&ctx).await;
+    let foreign = Uuid::new_v4().to_string();
+    let key_body = |extra: serde_json::Value| {
+        let mut b = serde_json::json!({"name": "k", "role": "Viewer"});
+        b.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        b
+    };
+    let by_member = key_body(serde_json::json!({"member_id": foreign}));
+    assert_eq!(post_json(&ctx, &cookie, "/admin/v1/admin_keys", by_member).await, 422);
+    let by_sa = key_body(serde_json::json!({"service_account_id": foreign}));
+    assert_eq!(post_json(&ctx, &cookie, "/admin/v1/admin_keys", by_sa).await, 422);
+    // Own account's member is accepted.
+    let own = key_body(serde_json::json!({"member_id": ctx.viewer_id}));
+    assert_eq!(post_json(&ctx, &cookie, "/admin/v1/admin_keys", own).await, 201);
 }

@@ -12,7 +12,8 @@ use uuid::Uuid;
 ///
 /// Returns `Ok(())` on success.
 /// Returns `Err(NOT_FOUND)` if the project does not exist or has been deleted.
-/// Returns `Err(FORBIDDEN)` if the project belongs to a different account.
+/// A project owned by a different account also yields `Err(NOT_FOUND)` (404), so the
+/// response is not an existence oracle for foreign project IDs (X13).
 pub(crate) async fn verify_project_ownership(
     pool: &sqlx::PgPool,
     project_id: &str,
@@ -33,7 +34,7 @@ pub(crate) async fn verify_project_ownership(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if project_account != account_id {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::NOT_FOUND);
     }
 
     Ok(())

@@ -54,7 +54,7 @@ const PLACEHOLDER_DSN: &str = "postgres://postgres:postgres@127.0.0.1:65535/emby
 async fn assert_invalid_pool_var_fails_startup(var: &str, value: &str) {
     let mut server = ServerProcess::start_env_only(&[
         ("DATABASE_URL", PLACEHOLDER_DSN),
-        ("EMBYR_ADMIN_KEY", "testkey"),
+        ("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef"),
         ("EMBYR_ENCRYPTION_KEY", TEST_ENCRYPTION_KEY),
         (var, value),
     ]);

@@ -296,7 +296,7 @@ pub const TEST_ENCRYPTION_KEY: &str =
 /// Admin bearer key the US-02 provisioning scenarios spawn `embyr-server`
 /// with, and authenticate `provision()` calls against — arbitrary, not a
 /// real secret.
-pub const TEST_ADMIN_KEY: &str = "testkey";
+pub const TEST_ADMIN_KEY: &str = "testkey-0123456789-0123456789-abcdef";
 
 /// Wraps a spawned `embyr-server` subprocess. Mirrors
 /// `tests/production_readiness/common/mod.rs::ServerProcess` (trimmed to
