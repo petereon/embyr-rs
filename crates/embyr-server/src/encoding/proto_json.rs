@@ -245,6 +245,11 @@ fn query_from(v: &J) -> R<StructuredQuery> {
             fields: list(obj(s)?, "fields")?.iter().map(field_ref).collect::<R<_>>()?,
         }),
     };
+    // This parser serves Listen targets only, and vector queries are not
+    // real-time: fail loudly rather than run the query without its vector part.
+    if m.contains_key("findNearest") {
+        return Err("findNearest is not supported on Listen".into());
+    }
     Ok(StructuredQuery {
         select,
         from,
@@ -254,6 +259,7 @@ fn query_from(v: &J) -> R<StructuredQuery> {
         end_at: m.get("endAt").map(cursor_from).transpose()?,
         offset: m.get("offset").map(int32).transpose()?.unwrap_or(0),
         limit: m.get("limit").map(int32).transpose()?,
+        find_nearest: None,
     })
 }
 

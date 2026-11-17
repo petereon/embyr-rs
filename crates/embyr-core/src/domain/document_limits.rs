@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use crate::domain::document::DocumentPath;
 use crate::domain::field_value::FieldValue;
+use crate::domain::vector::check_vector_dimension;
 use crate::error::CoreError;
 
 pub const MAX_DOCUMENT_BYTES: usize = 1_048_576;
@@ -78,7 +79,11 @@ fn value_size(value: &FieldValue, depth: usize, path_len: usize) -> Result<usize
             .iter()
             .map(|item| value_size(item, depth + 1, path_len))
             .sum(),
-        FieldValue::Map(inner) => map_size(inner, depth + 1, Some(path_len)),
+        FieldValue::Map(inner) => {
+            // Vector values (`__type__: __vector__`) have a 2048-dimension cap.
+            check_vector_dimension(value)?;
+            map_size(inner, depth + 1, Some(path_len))
+        }
     }
 }
 
@@ -142,6 +147,20 @@ mod tests {
             validate_document_limits(&path(), &fields),
             Err(CoreError::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn vector_value_over_2048_dimensions_is_rejected_at_any_depth() {
+        let vector = |n: usize| {
+            FieldValue::Map(BTreeMap::from([
+                ("__type__".to_string(), FieldValue::String("__vector__".into())),
+                ("value".to_string(), FieldValue::Array(vec![FieldValue::Double(0.5); n])),
+            ]))
+        };
+        assert!(validate_document_limits(&path(), &one("emb", vector(2048))).is_ok());
+        assert!(validate_document_limits(&path(), &one("emb", vector(2049))).is_err());
+        let nested = one("a", FieldValue::Map(one("emb", vector(2049))));
+        assert!(validate_document_limits(&path(), &nested).is_err());
     }
 
     proptest! {
