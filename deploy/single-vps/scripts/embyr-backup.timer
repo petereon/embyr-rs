@@ -1,0 +1,14 @@
+# Pairs with embyr-backup.service (install steps are in that file). Daily; RPO is therefore up to 24 h.
+# For a tighter RPO use e.g. OnCalendar=*-*-* 00/6:15:00 (every 6 h) and raise KEEP_DAILY in backup.env
+# to 28 (retention counts files, not days).
+# UNTESTED: see the PR description.
+[Unit]
+Description=Daily embyr system database backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

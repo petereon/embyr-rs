@@ -1,0 +1,26 @@
+# systemd unit for scripts/backup.sh. Install (paths assume the bundle lives in /opt/embyr, owned by
+# the "deploy" user, who is in the docker group and has an rclone config):
+#
+#   sudo cp scripts/embyr-backup.service scripts/embyr-backup.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now embyr-backup.timer
+#   systemctl list-timers embyr-backup.timer          # next run
+#   sudo systemctl start embyr-backup.service         # run one now, then: journalctl -u embyr-backup -e
+#
+# Cron alternative (as the deploy user, `crontab -e`; no journald, so keep a log file):
+#   15 3 * * *  /opt/embyr/scripts/backup.sh >>/opt/embyr/backups/backup.log 2>&1
+#   */5 * * * * /opt/embyr/scripts/check.sh  >>/opt/embyr/backups/check.log 2>&1
+# UNTESTED: see the PR description.
+[Unit]
+Description=embyr system database backup
+After=docker.service network-online.target
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=deploy
+WorkingDirectory=/opt/embyr
+ExecStart=/opt/embyr/scripts/backup.sh
+TimeoutStartSec=30min
+Nice=10

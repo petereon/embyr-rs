@@ -22,6 +22,7 @@ use embyr_core::{
             OrderDirection, QueryFilter, StructuredQuery,
         },
         transaction::TransactionOptions,
+        vector::{nearest, vector_components, DistanceMeasure, NearestQuery, MAX_VECTOR_SCAN_DOCS},
     },
     error::CoreError,
     storage::backend_adapter::{FieldTransform, Write as DomainWrite, WritePrecondition},
@@ -3716,6 +3717,9 @@ impl FirestoreService {
         let Some(PartitionQueryType::StructuredQuery(sq)) = &req.query_type else {
             return Err(Status::invalid_argument("query_type is required"));
         };
+        if sq.find_nearest.is_some() {
+            return Err(Status::invalid_argument("PartitionQuery does not support find_nearest"));
+        }
         // Real Firestore partitions the whole result set by name: no bounds,
         // limit or other ordering.
         let by_name_asc = |o: &embyr_proto::firestore::structured_query::Order| {
@@ -3848,14 +3852,39 @@ impl FirestoreService {
             None => return Err(Status::invalid_argument("query_type is required")),
         };
 
+        // Shape-validate a vector query first (cheap, reveals nothing), then
+        // gate it exactly like any other query: a vector query is a list.
+        let nearest_query = translate_find_nearest(sq_proto)?;
+
         let (collection, domain_query) = self
             .prepare_gated_query(&req.parent, sq_proto, &project_id_str, &verified_identity)
             .await?;
 
-        let docs = adapter
-            .run_query(&collection, &domain_query, txn_id.as_ref())
-            .await
-            .map_err(core_error_to_status)?;
+        let docs = match &nearest_query {
+            None => adapter
+                .run_query(&collection, &domain_query, txn_id.as_ref())
+                .await
+                .map_err(core_error_to_status)?,
+            Some(nq) => {
+                // Brute-force kNN: scan the filter's matches in memory (capped),
+                // rank them with the pure core function.
+                let cap = MAX_VECTOR_SCAN_DOCS;
+                let candidates = adapter
+                    .run_query(
+                        &collection,
+                        &StructuredQuery { limit: Some(cap as i32 + 1), ..domain_query },
+                        txn_id.as_ref(),
+                    )
+                    .await
+                    .map_err(core_error_to_status)?;
+                if candidates.len() > cap {
+                    return Err(Status::failed_precondition(format!(
+                        "vector query matches more than {cap} documents; narrow it with a filter"
+                    )));
+                }
+                nearest(nq, candidates)
+            }
+        };
 
         // Build response stream
         let mut responses: Vec<Result<RunQueryResponse, Status>> = docs
@@ -3962,6 +3991,11 @@ impl FirestoreService {
             Some(StructuredAggQueryType::StructuredQuery(sq)) => sq,
             None => return Err(Status::invalid_argument("structured_query is required")),
         };
+        if sq_proto.find_nearest.is_some() {
+            return Err(Status::invalid_argument(
+                "aggregation queries do not support find_nearest",
+            ));
+        }
 
         let collection_id = sq_proto
             .from
@@ -4712,6 +4746,66 @@ fn validate_cursor_value_types(values: &[FieldValue]) -> Result<(), String> {
 /// convert, or that is not orderable (finding #44: a cursor bound is a range
 /// comparison in SQL), is `invalid_argument` naming the cursor (`name`) —
 /// never `None`, which would silently run the query without the bound.
+/// Validate and translate `StructuredQuery.find_nearest` (vector search).
+///
+/// `Ok(None)` when absent. Combined with `order_by`, `limit`, `offset` or a
+/// cursor it is `InvalidArgument`: the vector ranking and `FindNearest.limit`
+/// replace them, so honouring both would silently return a different answer.
+pub(crate) fn translate_find_nearest(
+    sq: &embyr_proto::firestore::StructuredQuery,
+) -> Result<Option<NearestQuery>, Status> {
+    use embyr_proto::firestore::structured_query::find_nearest::DistanceMeasure as Dm;
+    let Some(fnn) = sq.find_nearest.as_ref() else {
+        return Ok(None);
+    };
+    if !sq.order_by.is_empty()
+        || sq.limit.is_some()
+        || sq.offset != 0
+        || sq.start_at.is_some()
+        || sq.end_at.is_some()
+    {
+        return Err(Status::invalid_argument(
+            "find_nearest cannot be combined with order_by, limit, offset or cursors",
+        ));
+    }
+    let measure = match Dm::try_from(fnn.distance_measure).unwrap_or(Dm::Unspecified) {
+        Dm::Euclidean => DistanceMeasure::Euclidean,
+        Dm::Cosine => DistanceMeasure::Cosine,
+        Dm::DotProduct => DistanceMeasure::DotProduct,
+        Dm::Unspecified => {
+            return Err(Status::invalid_argument("find_nearest distance_measure is required"))
+        }
+    };
+    let vector_field = fnn
+        .vector_field
+        .as_ref()
+        .map(|f| f.field_path.as_str())
+        .ok_or_else(|| Status::invalid_argument("find_nearest vector_field is required"))?;
+    let query_vector = fnn
+        .query_vector
+        .as_ref()
+        .and_then(crate::encoding::firestore_proto::proto_value_to_field_value)
+        .and_then(|v| vector_components(&v))
+        .ok_or_else(|| {
+            Status::invalid_argument(
+                "find_nearest query_vector must be a vector value of 1 to 2048 finite numbers",
+            )
+        })?;
+    let limit = fnn
+        .limit
+        .ok_or_else(|| Status::invalid_argument("find_nearest limit is required"))?;
+    NearestQuery::new(
+        vector_field,
+        query_vector,
+        measure,
+        i64::from(limit),
+        Some(fnn.distance_result_field.as_str()).filter(|f| !f.is_empty()),
+        fnn.distance_threshold,
+    )
+    .map(Some)
+    .map_err(core_error_to_status)
+}
+
 pub(crate) fn translate_cursor(
     name: &str,
     cursor: Option<&embyr_proto::firestore::Cursor>,
@@ -5641,5 +5735,97 @@ mod root_collection_visibility_tests {
     #[test]
     fn open_rule_is_visible() {
         assert!(unfiltered_list_admitted(&rule("true"), None));
+    }
+}
+
+#[cfg(test)]
+mod find_nearest_tests {
+    use super::translate_find_nearest;
+    use embyr_proto::firestore::{
+        structured_query::{find_nearest::DistanceMeasure, FieldReference, FindNearest, Order},
+        value::ValueType,
+        ArrayValue, Cursor, MapValue, StructuredQuery, Value,
+    };
+    use std::collections::HashMap;
+
+    fn vector(xs: &[f64]) -> Value {
+        let s = |s: &str| Value { value_type: Some(ValueType::StringValue(s.into())) };
+        let arr = Value {
+            value_type: Some(ValueType::ArrayValue(ArrayValue {
+                values: xs
+                    .iter()
+                    .map(|x| Value { value_type: Some(ValueType::DoubleValue(*x)) })
+                    .collect(),
+            })),
+        };
+        Value {
+            value_type: Some(ValueType::MapValue(MapValue {
+                fields: HashMap::from([
+                    ("__type__".to_string(), s("__vector__")),
+                    ("value".to_string(), arr),
+                ]),
+            })),
+        }
+    }
+
+    fn fnn() -> FindNearest {
+        FindNearest {
+            vector_field: Some(FieldReference { field_path: "emb".into() }),
+            query_vector: Some(vector(&[1.0, 2.0])),
+            distance_measure: DistanceMeasure::Cosine as i32,
+            limit: Some(5),
+            distance_result_field: String::new(),
+            distance_threshold: None,
+        }
+    }
+
+    fn sq(f: FindNearest) -> StructuredQuery {
+        StructuredQuery { find_nearest: Some(f), ..Default::default() }
+    }
+
+    /// Status code of a rejected translation.
+    fn code(q: &StructuredQuery) -> tonic::Code {
+        translate_find_nearest(q).map(|_| ()).unwrap_err().code()
+    }
+
+    #[test]
+    fn absent_find_nearest_is_none_and_valid_one_translates() {
+        assert!(translate_find_nearest(&StructuredQuery::default()).unwrap().is_none());
+        assert!(translate_find_nearest(&sq(fnn())).unwrap().is_some());
+    }
+
+    #[test]
+    fn incompatible_base_query_parts_are_invalid_argument() {
+        let base = sq(fnn());
+        let cases = [
+            StructuredQuery { order_by: vec![Order::default()], ..base.clone() },
+            StructuredQuery { limit: Some(3), ..base.clone() },
+            StructuredQuery { offset: 1, ..base.clone() },
+            StructuredQuery { start_at: Some(Cursor::default()), ..base.clone() },
+            StructuredQuery { end_at: Some(Cursor::default()), ..base },
+        ];
+        for c in cases {
+            assert_eq!(code(&c), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn malformed_find_nearest_is_invalid_argument() {
+        let ia = tonic::Code::InvalidArgument;
+        let bad = |f: FindNearest| code(&sq(f));
+        assert_eq!(bad(FindNearest { distance_measure: 0, ..fnn() }), ia);
+        assert_eq!(bad(FindNearest { vector_field: None, ..fnn() }), ia);
+        assert_eq!(bad(FindNearest { limit: None, ..fnn() }), ia);
+        assert_eq!(bad(FindNearest { limit: Some(0), ..fnn() }), ia);
+        assert_eq!(bad(FindNearest { limit: Some(1001), ..fnn() }), ia);
+        assert_eq!(bad(FindNearest { query_vector: None, ..fnn() }), ia);
+        assert_eq!(bad(FindNearest { query_vector: Some(vector(&[])), ..fnn() }), ia);
+        assert_eq!(bad(FindNearest { query_vector: Some(vector(&vec![1.0; 2049])), ..fnn() }), ia);
+        // a plain (untagged) array is not a vector value
+        let plain = Value { value_type: Some(ValueType::ArrayValue(ArrayValue { values: vec![] })) };
+        assert_eq!(bad(FindNearest { query_vector: Some(plain), ..fnn() }), ia);
+        let path = |p: &str| Some(FieldReference { field_path: p.into() });
+        assert_eq!(bad(FindNearest { vector_field: path("a;b"), ..fnn() }), ia);
+        assert_eq!(bad(FindNearest { distance_result_field: "x y".into(), ..fnn() }), ia);
     }
 }

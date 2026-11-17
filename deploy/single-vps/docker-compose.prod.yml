@@ -1,0 +1,155 @@
+# Single-VPS production stack: caddy (TLS) -> embyr-server -> postgres (system DB).
+# Sized for ONE 2 vCPU / 4 GB host. Entry point / runbook: docs/operations/single-vps-deploy.md
+#
+# Do NOT confuse with the repo-root docker-compose.yml: that one is a dev stack with placeholder
+# secrets, a published Postgres and EMBYR_ALLOW_PRIVATE_DSN_HOSTS=true. Nothing here is shared with it.
+#
+# Run it with (scripts do this for you via scripts/lib.sh):
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+# `--env-file` feeds the ${...} interpolation below; the embyr-server `env_file:` feeds the container.
+#
+# Exposure summary (the whole point of this file):
+#   - 80/tcp, 443/tcp    published on the host, by caddy ONLY.
+#   - 127.0.0.1:9090     embyr admin port, loopback ONLY (operator curl / SSH tunnel). Not reachable
+#                        from outside the host. Deliberate deviation from "no host ports": the image
+#                        has no curl, so without this you could not call the operator API at all.
+#   - everything else    (8080, 8081, postgres 5432) exists only on the internal docker networks.
+#   NOTE: Docker publishes ports by editing iptables directly, which BYPASSES ufw. Safety here comes
+#   from not publishing anything else, not from ufw. Never add a `ports:` entry to postgres.
+#
+# UNTESTED: this file was written without running docker/compose (see the PR description).
+
+name: embyr
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    # Same major as CI (.github/workflows/ci.yml) and the dev compose: 15. Minor updates arrive on
+    # `docker compose pull postgres`; a MAJOR bump needs dump/restore, never just a new tag.
+    image: postgres:15-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: embyr
+      POSTGRES_DB: embyr
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}
+      # Only applied on first init of an empty volume: page checksums catch silent disk corruption.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    # Modest settings for a box shared with the app (container cap below is 1.5 GB):
+    #   shared_buffers 384MB (~25% of the cap), effective_cache_size 1GB (what the OS cache can
+    #   plausibly hold), work_mem 4MB (x connections x sort nodes; keep small), max_connections 50
+    #   (embyr system pool is 10 + backups/psql headroom; see .env.production.example).
+    command:
+      - postgres
+      - -c
+      - shared_buffers=384MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=50
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - log_min_duration_statement=1000
+    shm_size: 256m
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U embyr -d embyr"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks: [db]          # internal network: no host port, no route to the internet
+    mem_limit: 1536m
+    stop_grace_period: 60s  # let Postgres checkpoint on `docker compose stop`
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+
+  embyr-server:
+    # Immutable tag only (sha-<7 hex> or vX.Y.Z, see docs/operations/release-process.md). Never
+    # :master. scripts/update.sh rewrites EMBYR_IMAGE_TAG in .env.production and rolls back on failure.
+    # Image name is ghcr.io/<repository_owner>/embyr-server (ci.yml "Compute image tags").
+    image: ${EMBYR_IMAGE:-ghcr.io/petereon/embyr-server}:${EMBYR_IMAGE_TAG:?set EMBYR_IMAGE_TAG in .env.production}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: [.env.production]
+    # `environment:` wins over env_file. Values derived here cannot drift from the rest of the stack.
+    environment:
+      DATABASE_URL: postgres://embyr:${POSTGRES_PASSWORD}@postgres:5432/embyr
+      EMBYR_PUBLIC_BASE_URL: https://console.${DOMAIN}
+      # Hard-pinned off: customer DSN SSRF/TLS policy (audit #65). A line in .env.production must
+      # never be able to turn this on in production.
+      EMBYR_ALLOW_PRIVATE_DSN_HOSTS: "false"
+    expose: ["8080", "8081", "9090"]
+    ports:
+      - "127.0.0.1:9090:9090"
+    # The runtime image is debian-slim with no curl/wget, so probe /healthz (readiness, checks the
+    # system DB, 3 s timeout) with bash's /dev/tcp. start_period covers startup migrations.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8081 &&
+          printf 'GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          head -n 1 <&3 | grep -q ' 200 '
+      interval: 15s
+      timeout: 6s
+      retries: 3
+      start_period: 60s
+    networks: [edge, db]    # edge: caddy + outbound internet (SMTP, Stripe, customer DBs); db: postgres
+    mem_limit: 1536m        # Argon2id costs 64 MiB per concurrent hash (resource-sizing.md)
+    cpus: 2.0
+    # > EMBYR_SHUTDOWN_DELAY_SECS + EMBYR_SHUTDOWN_GRACE_SECS (0 + 25 by default); docker kills at this.
+    stop_grace_period: 45s
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    logging: *default-logging
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - embyr-server        # started, not healthy: caddy should still answer 502 during a restart
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env.production}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env.production}
+    ports:
+      - "80:80"             # ACME HTTP challenge + redirect to https
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data    # certificates + ACME account: keep, or you re-issue (rate limits)
+      - caddy_config:/config
+    networks: [edge]
+    mem_limit: 192m
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+
+networks:
+  edge: {}
+  db:
+    internal: true
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
