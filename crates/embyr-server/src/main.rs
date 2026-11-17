@@ -492,6 +492,13 @@ async fn main() {
     // Readiness first: `/healthz` answers 503 from here on, so a load
     // balancer stops routing to this instance while it drains.
     embyr_server::grpc::healthz::mark_draining();
+    // Optional delay (EMBYR_SHUTDOWN_DELAY_SECS, default 0): keep serving on all
+    // three listeners while the load balancer notices the 503 and stops routing
+    // here; only then stop accepting. The grace deadline below starts after it.
+    if cfg.shutdown_delay_secs > 0 {
+        tracing::info!(delay_secs = cfg.shutdown_delay_secs, "draining: still serving before closing listeners");
+        tokio::time::sleep(std::time::Duration::from_secs(cfg.shutdown_delay_secs)).await;
+    }
     let _ = shutdown_tx.send(());
     let grace = std::time::Duration::from_secs(cfg.shutdown_grace_secs);
     tracing::info!(grace_secs = cfg.shutdown_grace_secs, "shutdown signal received, draining...");

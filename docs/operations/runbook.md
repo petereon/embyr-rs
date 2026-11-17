@@ -18,7 +18,8 @@ scenario needs one (notably system-DB loss), it links out rather than duplicatin
 - `GET /healthz` on **:8081** — readiness. Calls `SystemDb::probe()` (shared system Postgres
   pool) with a 3s timeout; 200 `{"status":"ok"}` or 503 `{"status":"unhealthy"}`. After
   SIGTERM it answers 503 `{"status":"draining"}` until the process exits (at most
-  `EMBYR_SHUTDOWN_GRACE_SECS`, default 25) — expected during a deploy, not an incident. No auth,
+  `EMBYR_SHUTDOWN_DELAY_SECS`, default 0, plus `EMBYR_SHUTDOWN_GRACE_SECS`, default 25;
+  during the delay the listeners still serve) — expected during a deploy, not an incident. No auth,
   no request body echoed back (ADR-078, AC-HDC-11 — never leaks raw driver/schema text).
 - `GET /livez` on **:8081** — liveness. Zero I/O, always 200 while the process is up. Never
   fails on a Postgres outage by design (ADR-078) — do not alert on `/livez` for DB problems,
@@ -221,7 +222,7 @@ commented `EmbyrReadinessFailing` rule) `probe_success == 0` for 2m.
 
 **Triage:** `curl -s http://127.0.0.1:8081/healthz`.
 - `{"status":"draining"}` — the process received SIGTERM and is shutting down; it exits
-  within `EMBYR_SHUTDOWN_GRACE_SECS`. Only a problem if nothing is starting in its place.
+  within `EMBYR_SHUTDOWN_DELAY_SECS` + `EMBYR_SHUTDOWN_GRACE_SECS`. Only a problem if nothing is starting in its place.
 - `{"status":"unhealthy"}` — system Postgres is unreachable or slow (>3s): follow
   "Postgres down after startup" above.
 - No response — the process is down: follow "service down or not scraped".

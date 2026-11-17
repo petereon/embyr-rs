@@ -172,6 +172,13 @@ pub struct ServerConfig {
     /// process exits and drops them. Default 25 (under Docker/K8s' usual
     /// 30s SIGKILL window).
     pub shutdown_grace_secs: u64,
+    /// `EMBYR_SHUTDOWN_DELAY_SECS` — after SIGTERM, how long the server keeps
+    /// serving normally (while `/healthz` already answers 503 draining) before
+    /// the listeners stop accepting and `EMBYR_SHUTDOWN_GRACE_SECS` starts.
+    /// Gives load balancers time to notice the failing health check and stop
+    /// routing here. Default 0 (stop accepting immediately); valid `0..=300`;
+    /// recommended 5-10 behind an LB.
+    pub shutdown_delay_secs: u64,
     /// `EMBYR_ADMIN_UI_DIR` — optional path to a Trunk `dist/` directory served
     /// under `/admin` on the admin listener (admin-ui-api-wiring, ADR-082).
     /// Unset/empty = API-only (today's behaviour). Validated at startup by
@@ -256,6 +263,8 @@ pub enum ConfigError {
     /// `EMBYR_ADMIN_KEY` is shorter than [`MIN_ADMIN_KEY_LEN`] (X13). The
     /// value itself is never included.
     AdminKeyTooShort { len: usize },
+    /// `EMBYR_SHUTDOWN_DELAY_SECS` is present but not an integer in `0..=MAX_SHUTDOWN_DELAY_SECS`.
+    InvalidShutdownDelay { value: String },
 }
 
 /// Minimum accepted length of `EMBYR_ADMIN_KEY` (it guards every operator route).
@@ -339,6 +348,13 @@ impl fmt::Display for ConfigError {
                     f,
                     "invalid value for EMBYR_API_KEY_ROTATION_WINDOW_SECS: '{value}' \
                      (must be an integer 1-{MAX_ROTATION_WINDOW_SECS})"
+                )
+            }
+            ConfigError::InvalidShutdownDelay { value } => {
+                write!(
+                    f,
+                    "invalid value for EMBYR_SHUTDOWN_DELAY_SECS: '{value}' \
+                     (must be an integer 0-{MAX_SHUTDOWN_DELAY_SECS})"
                 )
             }
         }
@@ -456,6 +472,7 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(25);
+        let shutdown_delay_secs = shutdown_delay_from(std::env::var("EMBYR_SHUTDOWN_DELAY_SECS").ok())?;
         let trusted_proxy_hops = std::env::var("EMBYR_TRUSTED_PROXY_HOPS")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
@@ -536,6 +553,7 @@ impl ServerConfig {
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             shutdown_grace_secs,
+            shutdown_delay_secs,
             admin_ui_dir,
             api_key_rotation_window_secs,
             trusted_proxy_hops,
@@ -993,6 +1011,20 @@ fn rotation_window_from(raw: Option<String>) -> Result<u32, ConfigError> {
         .ok_or(ConfigError::InvalidRotationWindow { value: v })
 }
 
+/// Longest allowed `EMBYR_SHUTDOWN_DELAY_SECS` (5 min; anything longer outlives any sane kill timeout).
+pub const MAX_SHUTDOWN_DELAY_SECS: u64 = 300;
+
+/// Parse `EMBYR_SHUTDOWN_DELAY_SECS`: default 0 (current behaviour), valid `0..=300`,
+/// anything else is an error naming the variable.
+fn shutdown_delay_from(raw: Option<String>) -> Result<u64, ConfigError> {
+    let Some(v) = raw else { return Ok(0) };
+    v.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n <= MAX_SHUTDOWN_DELAY_SECS)
+        .ok_or(ConfigError::InvalidShutdownDelay { value: v })
+}
+
 /// Parse `EMBYR_RATE_LIMIT_RPS`. Returns 1000.0 when the variable is absent.
 fn parse_rate_limit_rps() -> Result<f64, ConfigError> {
     match std::env::var("EMBYR_RATE_LIMIT_RPS") {
@@ -1119,6 +1151,18 @@ mod tests {
     }
 
     /// AC-AKR-18 (parsing half): unset -> 86400; 0, negative, non-numeric, > 30 d -> error naming the variable.
+    #[test]
+    fn shutdown_delay_defaults_to_zero_and_rejects_out_of_range() {
+        assert_eq!(shutdown_delay_from(None).unwrap(), 0);
+        for (raw, want) in [("0", 0), ("7", 7), (" 10 ", 10), ("300", 300)] {
+            assert_eq!(shutdown_delay_from(Some(raw.into())).unwrap(), want);
+        }
+        for bad in ["301", "-1", "abc", "", "1.5"] {
+            let msg = shutdown_delay_from(Some(bad.into())).unwrap_err().to_string();
+            assert!(msg.contains("EMBYR_SHUTDOWN_DELAY_SECS"), "{msg}");
+        }
+    }
+
     #[test]
     fn rotation_window_defaults_and_rejects_out_of_range() {
         assert_eq!(rotation_window_from(None).unwrap(), 86_400);
