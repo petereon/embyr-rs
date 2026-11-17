@@ -51,7 +51,7 @@ mod shell {
     use crate::components::{SecretModal, Sidebar, SuspensionBanner, Topbar};
     use crate::model::{AppModel, Section};
     use crate::views::api_keys::ApiKeysView;
-    use crate::views::billing::{BillingView, CardModal, UpgradeModal};
+    use crate::views::billing::BillingView;
     use crate::views::dashboard::DashboardView;
     use crate::views::create_database::CreateDatabaseModal;
     use crate::views::databases::DatabasesView;
@@ -90,12 +90,6 @@ mod shell {
                         }}
                     </main>
                 </div>
-                // card-payments (ADR-019): global modal state — mounted here
-                // (not nested inside BillingView) so a cross-cutting caller
-                // (SuspensionBanner, Slice 07) can open either modal from any
-                // Section via the same Msg dispatch.
-                <CardModal />
-                <UpgradeModal />
                 // One-time secrets (AC-AUW-20): global so any screen can reveal one.
                 <SecretModal />
                 <CreateDatabaseModal />

@@ -8,9 +8,9 @@ use chrono::{DateTime, Utc};
 use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
     AdminKey, Card, CapUsage, CheckoutReturn, Connection, CurrentUser, Database, DbBackendMode, DbId, DbMetrics,
-    DbPatch, Enrolment, Invoice, KeyId, LogRetention, Member, MetricsSummaryRow, OidcId, OidcProvider, Plan,
+    DbPatch, Enrolment, Invoice, KeyId, LogRetention, Member, MetricsSummaryRow, Plan,
     ProjectApiKeyInfo, QueryLogEntry, RecoveryCodes, RevealedSecret, Role, ServiceAccount, ServiceAccountId, Subscription,
-    SubscriptionStatus, Toast, ToastId, UpgradeModalStep, UsageTableRow, UserId,
+    SubscriptionStatus, Toast, ToastId, UsageTableRow, UserId,
 };
 
 /// All messages that can be dispatched to the TEA update loop.
@@ -135,14 +135,6 @@ pub enum Msg {
     /// Revoke an admin API key by id.
     RevokeAdminKey(KeyId),
 
-    // ── US-011: Settings ───────────────────────────────────────────────────
-    /// Add a new OIDC provider.
-    OidcProviderAdded(OidcProvider),
-    /// Toggle enabled state for an OIDC provider.
-    ToggleOidc(OidcId),
-    /// Remove an OIDC provider.
-    RemoveOidcProvider(OidcId),
-
     // ── Toast notifications ────────────────────────────────────────────────
     /// Push a toast to the queue.
     PushToast(Toast),
@@ -169,28 +161,14 @@ pub enum Msg {
     /// Async data load: replace invoice history (mock init V1; `#[server]`
     /// V2, ADR-007).
     SetInvoices(Vec<Invoice>),
-    /// CardModal submit: replaces (never appends) the card on file.
-    /// AC-105-03/04.
+    /// Replaces (never appends) the card on file. AC-105-03/04.
     SetCard(Card),
-    /// UpgradeModal confirm: change subscription plan. AC-106-02/04. No
-    /// separate "clear suspension" message needed — `effective_status()`
-    /// re-derives automatically. AC-106-05.
+    /// Change the subscription plan. No separate "clear suspension" message is needed:
+    /// `effective_status()` re-derives automatically. AC-106-05.
     SetPlan(Plan),
     /// TestClockCard Segmented toggle (dev-only, US-109). Mirrors the JSX
     /// prototype's `setPaymentFailure` directly.
     SetPaymentFailure(bool),
-    /// Open the Card modal. Dispatched from PaymentMethodCard's Add/Update
-    /// button AND from SuspensionBanner's past_due CTA — global state, not
-    /// view-local (ADR-019).
-    OpenCardModal,
-    CloseCardModal,
-    /// Open the Upgrade modal (resets step to Compare). Dispatched from
-    /// PlanCard's Upgrade button AND from SuspensionBanner's
-    /// free_cap_exceeded CTA (ADR-019).
-    OpenUpgradeModal,
-    CloseUpgradeModal,
-    /// Drive the UpgradeModal's compare → confirm-downgrade step transition.
-    SetUpgradeModalStep(UpgradeModalStep),
 }
 
 /// A side effect requested by `update`, executed by the runtime (`app.rs`, `csr` only).

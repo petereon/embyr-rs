@@ -294,23 +294,6 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
             model.admin_keys.retain(|key| key.id != id);
         }
 
-        // ── US-011: Settings ───────────────────────────────────────────────────
-        Msg::OidcProviderAdded(provider) => {
-            model.oidc_providers.push(provider);
-        }
-        Msg::ToggleOidc(id) => {
-            if let Some(provider) = model
-                .oidc_providers
-                .iter_mut()
-                .find(|provider| provider.id == id)
-            {
-                provider.enabled = !provider.enabled;
-            }
-        }
-        Msg::RemoveOidcProvider(id) => {
-            model.oidc_providers.retain(|provider| provider.id != id);
-        }
-
         // ── Toast notifications ────────────────────────────────────────────────
         Msg::PushToast(toast) => {
             model.toasts.push(toast);
@@ -350,22 +333,6 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
         }
         Msg::SetPaymentFailure(failed) => {
             model.subscription.payment_failure = failed;
-        }
-        Msg::OpenCardModal => {
-            model.card_modal_open = true;
-        }
-        Msg::CloseCardModal => {
-            model.card_modal_open = false;
-        }
-        Msg::OpenUpgradeModal => {
-            model.upgrade_modal_open = true;
-            model.upgrade_modal_step = crate::model::UpgradeModalStep::Compare;
-        }
-        Msg::CloseUpgradeModal => {
-            model.upgrade_modal_open = false;
-        }
-        Msg::SetUpgradeModalStep(step) => {
-            model.upgrade_modal_step = step;
         }
     }
     effects

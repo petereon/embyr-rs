@@ -16,7 +16,7 @@
 use proptest::prelude::*;
 
 use embyr_admin_ui::model::{
-    AppModel, Database, DbId, DbStatus, KeyId, Member, OidcId, Role,
+    AppModel, Database, DbId, DbStatus, KeyId, Member, Role,
     ProjectApiKeyInfo, ServiceAccountId, Toast, ToastId, UserId,
 };
 use embyr_admin_ui::msg::Msg;
@@ -483,49 +483,6 @@ fn revoke_admin_key_missing_is_noop() {
     assert_eq!(m.admin_keys.len(), 0, "no-op: admin_keys unchanged");
 }
 
-// ── US-011: Settings ──────────────────────────────────────────────────────
-
-proptest! {
-    /// AC-011-04: ToggleOidc flips the enabled flag on the matching provider.
-    #[test]
-    fn toggle_oidc_flips_enabled(provider in arb_oidc_provider()) {
-        let mut m = AppModel::default();
-        m.authed = true;
-        let oidc_id = provider.id.clone();
-        let initial_enabled = provider.enabled;
-        m.oidc_providers.push(provider);
-
-        update(&mut m, Msg::ToggleOidc(oidc_id.clone()));
-
-        let updated = m.oidc_providers.iter().find(|p| p.id == oidc_id).unwrap();
-        prop_assert_eq!(
-            updated.enabled, !initial_enabled,
-            "ToggleOidc must flip the enabled flag"
-        );
-    }
-}
-
-proptest! {
-    /// AC-011-04: ToggleOidc is idempotent in the sense that double-toggle restores original state.
-    #[test]
-    fn toggle_oidc_double_toggle_restores(provider in arb_oidc_provider()) {
-        let mut m = AppModel::default();
-        m.authed = true;
-        let oidc_id = provider.id.clone();
-        let initial_enabled = provider.enabled;
-        m.oidc_providers.push(provider);
-
-        update(&mut m, Msg::ToggleOidc(oidc_id.clone()));
-        update(&mut m, Msg::ToggleOidc(oidc_id.clone()));
-
-        let updated = m.oidc_providers.iter().find(|p| p.id == oidc_id).unwrap();
-        prop_assert_eq!(
-            updated.enabled, initial_enabled,
-            "Double ToggleOidc must restore original enabled state"
-        );
-    }
-}
-
 // ── Toast notifications ────────────────────────────────────────────────────
 
 proptest! {
@@ -666,23 +623,4 @@ fn non_sole_owner_can_be_removed() {
 
     assert_eq!(m.members.len(), 1, "Owner with a peer Owner must be removable");
     assert_eq!(m.members[0].id, owner2_id, "remaining member must be owner2");
-}
-
-// Test that RemoveOidcProvider removes the matching provider.
-// Kills the retain `!= → ==` mutation on that arm.
-#[test]
-fn remove_oidc_provider_removes_matching() {
-    use embyr_admin_ui::model::OidcProvider;
-    let target_id = OidcId(uuid::Uuid::new_v4());
-    let other_id = OidcId(uuid::Uuid::new_v4());
-    let mut m = AppModel::default();
-    m.oidc_providers = vec![
-        OidcProvider { id: target_id.clone(), issuer: "https://a.example".to_string(), client_id: "a".to_string(), enabled: true },
-        OidcProvider { id: other_id.clone(), issuer: "https://b.example".to_string(), client_id: "b".to_string(), enabled: false },
-    ];
-
-    update(&mut m, Msg::RemoveOidcProvider(target_id.clone()));
-
-    assert_eq!(m.oidc_providers.len(), 1, "RemoveOidcProvider must remove one provider");
-    assert_eq!(m.oidc_providers[0].id, other_id, "only the non-targeted provider must remain");
 }

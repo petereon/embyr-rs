@@ -33,9 +33,6 @@ pub struct UserId(pub Uuid);
 pub struct KeyId(pub Uuid);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct OidcId(pub Uuid);
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ToastId(pub Uuid);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -210,13 +207,6 @@ pub enum InvoiceStatus {
     #[default]
     Upcoming,
     Paid,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum UpgradeModalStep {
-    #[default]
-    Compare,
-    ConfirmDowngrade,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -559,14 +549,6 @@ pub struct AdminKey {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct OidcProvider {
-    pub id: OidcId,
-    pub issuer: String,
-    pub client_id: String,
-    pub enabled: bool,
-}
-
 /// The signed-in person, as reported by `GET /auth/session`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CurrentUser {
@@ -650,8 +632,7 @@ pub struct UsageTotals {
 }
 
 /// Field-for-field conversion from the data layer's `FreeCaps` shape.
-/// Shared by `plan_summary()` and `upgrade_modal_view()`, both of which
-/// project `data::FREE_CAPS`/`data::PLAN_FEATURES` into a `UsageTotals`.
+/// Used by `plan_summary()` to project `data::FREE_CAPS` into a `UsageTotals`.
 impl From<crate::data::FreeCaps> for UsageTotals {
     fn from(caps: crate::data::FreeCaps) -> Self {
         UsageTotals {
@@ -701,17 +682,8 @@ pub struct SuspensionBannerView {
     pub status: EffectiveStatus,
     pub message: &'static str,
     pub cta_label: &'static str,
-    /// true → CTA dispatches `Msg::OpenUpgradeModal`; false → `Msg::OpenCardModal`.
-    pub cta_opens_upgrade_modal: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct UpgradeModalView {
-    pub step: UpgradeModalStep,
-    pub free_included: UsageTotals,
-    pub pro_base_price: f64,
-    /// true only when the pending transition is Pro → Free (AC-106-03).
-    pub shows_downgrade_warning: bool,
+    /// true → the CTA starts Stripe Checkout (Free-plan limit); false → opens the billing portal (past due).
+    pub cta_starts_checkout: bool,
 }
 
 // ── AppModel ────────────────────────────────────────────────────────────────
@@ -748,8 +720,6 @@ pub struct AppModel {
     pub service_accounts: Vec<ServiceAccount>,
     /// Account-level admin API keys.
     pub admin_keys: Vec<AdminKey>,
-    /// OIDC providers.
-    pub oidc_providers: Vec<OidcProvider>,
     /// Toast notification queue.
     pub toasts: Vec<Toast>,
     /// Current navigation state.
@@ -778,15 +748,8 @@ pub struct AppModel {
     pub subscription: Subscription,
     /// card-payments: invoice history (persists across plan changes, AC-107-04).
     pub invoices: Vec<Invoice>,
-    /// card-payments: global modal-open state (ADR-019 — cross-cutting
-    /// SuspensionBanner must open CardModal directly, not view-local state).
-    pub card_modal_open: bool,
-    /// card-payments: global modal-open state (ADR-019).
-    pub upgrade_modal_open: bool,
     /// Create-database modal is open (the form fields are view-local; secrets never enter the model).
     pub create_db_modal_open: bool,
-    /// card-payments: drives UpgradeModal's compare → confirm-downgrade step.
-    pub upgrade_modal_step: UpgradeModalStep,
     /// Server-owned subscription status, caps and month usage.
     pub billing: BillingState,
     /// The browser just came back from Stripe Checkout: shown once on the Billing screen.
@@ -797,65 +760,6 @@ pub struct AppModel {
     pub delete_account_modal_open: bool,
     /// Error inside the delete-account modal (a wrong password is not a session expiry).
     pub account_delete_error: Option<String>,
-}
-
-impl AppModel {
-    /// Build an initial model from mock data.
-    ///
-    /// Returns the default model pre-populated with mock data from the data layer.
-    pub fn from_mock() -> Self {
-        use crate::data::mock;
-        Self {
-            authed: false,
-            databases: mock::databases(),
-            members: mock::members(),
-            api_key_info: std::collections::HashMap::new(),
-            db_metrics: HashMap::new(),
-            metrics_summary: HashMap::new(),
-            connections: HashMap::new(),
-            connection_saves: 0,
-            revealed_secret: None,
-            query_logs: HashMap::new(),
-            hosted_identity: HashSet::new(),
-            service_accounts: mock::service_accounts(),
-            admin_keys: mock::admin_keys(),
-            oidc_providers: mock::oidc_providers(),
-            toasts: Vec::new(),
-            nav: NavState::default(),
-            account_locked: false,
-            booting: false,
-            server_unreachable: false,
-            current_user: None,
-            sign_in_error: None,
-            auth_screen: AuthScreen::default(),
-            reset_error: None,
-            auth_notice: None,
-            pending: HashSet::new(),
-            toast_seq: 0,
-            // card-payments: demo account is Pro-plan with a card on file and
-            // invoice history, to showcase the billing views' full feature set.
-            subscription: mock::subscription(
-                Plan::Pro,
-                Some(Card {
-                    brand: CardBrand::Visa,
-                    last4: "4242".to_string(),
-                    exp_month: 12,
-                    exp_year: 2027,
-                }),
-                false,
-            ),
-            invoices: mock::invoices(&Plan::Pro),
-            card_modal_open: false,
-            upgrade_modal_open: false,
-            create_db_modal_open: false,
-            upgrade_modal_step: UpgradeModalStep::default(),
-            billing: BillingState::default(),
-            checkout_return: None,
-            invite_step: InviteStep::default(),
-            delete_account_modal_open: false,
-            account_delete_error: None,
-        }
-    }
 }
 
 impl AppModel {
@@ -1051,25 +955,14 @@ impl AppModel {
                 status: EffectiveStatus::FreeCapExceeded,
                 message: "You've reached your Free plan limits for this cycle.",
                 cta_label: "Upgrade to Pro",
-                cta_opens_upgrade_modal: true,
+                cta_starts_checkout: true,
             });
         }
         Some(SuspensionBannerView {
             status: EffectiveStatus::PastDue,
             message: "We couldn't process your last payment.",
             cta_label: "Update payment method",
-            cta_opens_upgrade_modal: false,
+            cta_starts_checkout: false,
         })
-    }
-
-    /// AC-106-01/03: UpgradeModal compare/confirm-downgrade projection.
-    pub fn upgrade_modal_view(&self) -> UpgradeModalView {
-        let plan_features = crate::data::PLAN_FEATURES;
-        UpgradeModalView {
-            step: self.upgrade_modal_step.clone(),
-            free_included: plan_features.free_included.into(),
-            pro_base_price: plan_features.pro_base,
-            shows_downgrade_warning: self.upgrade_modal_step == UpgradeModalStep::ConfirmDowngrade,
-        }
     }
 }

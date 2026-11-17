@@ -10,7 +10,7 @@
 
 use embyr_admin_ui::model::{
     AdminKey, AppModel, Database, DbBackendMode, DbId, DbStatus, KeyId, LogRetention, Member,
-    OidcId, OidcProvider, Role, ServiceAccount, ServiceAccountId, Toast, ToastId,
+    Role, ServiceAccount, ServiceAccountId, Toast, ToastId,
     ToastLevel, UserId,
 };
 use proptest::prelude::*;
@@ -36,13 +36,6 @@ prop_compose! {
     /// Generate an arbitrary KeyId.
     pub fn arb_key_id()(bytes in any::<[u8; 16]>()) -> KeyId {
         KeyId(Uuid::from_bytes(bytes))
-    }
-}
-
-prop_compose! {
-    /// Generate an arbitrary OidcId.
-    pub fn arb_oidc_id()(bytes in any::<[u8; 16]>()) -> OidcId {
-        OidcId(Uuid::from_bytes(bytes))
     }
 }
 
@@ -185,18 +178,6 @@ prop_compose! {
             prefix: "embyr_ad".to_string(),
             created_at: None,
         }
-    }
-}
-
-prop_compose! {
-    /// Generate an OidcProvider.
-    pub fn arb_oidc_provider()(
-        id in arb_oidc_id(),
-        issuer in "https://[a-z]{3,12}\\.example\\.com",
-        client_id in "[a-zA-Z0-9]{8,16}",
-        enabled in any::<bool>(),
-    ) -> OidcProvider {
-        OidcProvider { id, issuer, client_id, enabled }
     }
 }
 

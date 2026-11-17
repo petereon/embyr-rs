@@ -23,7 +23,7 @@ pub fn SuspensionBanner() -> impl IntoView {
 
     view! {
         {move || model.with(|m| m.suspension_banner_view()).map(|banner| {
-            let css_class = if banner.cta_opens_upgrade_modal {
+            let css_class = if banner.cta_starts_checkout {
                 "suspension-banner suspension-banner-amber"
             } else {
                 "suspension-banner suspension-banner-red"
@@ -39,7 +39,7 @@ pub fn SuspensionBanner() -> impl IntoView {
                                 class="suspension-banner-cta"
                                 disabled=busy
                                 on:click=move |_| {
-                                    dispatch.run(Msg::Request(if banner.cta_opens_upgrade_modal {
+                                    dispatch.run(Msg::Request(if banner.cta_starts_checkout {
                                         ApiCall::StartCheckout
                                     } else {
                                         ApiCall::OpenPortal
