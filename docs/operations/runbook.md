@@ -226,14 +226,16 @@ commented `EmbyrReadinessFailing` rule) `probe_success == 0` for 2m.
   "Postgres down after startup" above.
 - No response — the process is down: follow "service down or not scraped".
 
-## Known limitation: real-time Listen is not supported in `backend_mode=agent`
+## Known limitations: real-time Listen in `backend_mode=agent`
 
-`Listen` (onSnapshot, gRPC and BrowserChannel) works for direct-PG, `aws_secret` and
-`gcp_secret` projects only. For an agent-mode project the server holds no DSN (it is an empty
-string in the credential cache), so `PostgresNotifyListener` cannot connect and a Listen
-stream fails with an internal error. The agent does emit NOTIFY on every write and exposes a
-`Subscribe` RPC, but `embyr-server` never calls it. Wiring it into the `ListenRegistry` is a
-separate feature; until then agent-mode clients must poll with `RunQuery`/`GetDocument`.
+Listen works in agent mode via the agent's `Subscribe` stream (see
+`docs/feature/agent-mode-listen/feature-delta.md`). Three caveats:
+
+- A delete reaches clients only where the collection's rule does not read the document
+  (the event carries no pre-delete fields; rule-gated deletes are withheld, fail closed).
+- Clients see a RESET after any agent-stream reconnect.
+- `AgentNotifyBridge` has no reconnect of its own: after a stream drop the server
+  reconnects and the agent opens a fresh Postgres connection.
 
 ## Where to look next
 
