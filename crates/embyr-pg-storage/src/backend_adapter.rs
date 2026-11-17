@@ -56,7 +56,20 @@ enum CachedSchemaCapability {
 /// `migrate()` and (from step 03-01) `verify_schema_readiness()` both read
 /// this identical `Migrator` instance — never invoke `sqlx::migrate!` a
 /// second time anywhere in the workspace.
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations/customer");
+///
+/// `ignore_missing`: an older image provisioning/migrating a customer database
+/// that a newer release already migrated must not fail with "migration N was
+/// previously applied but is missing" (rollback = redeploy previous image; see
+/// docs/operations/migration-policy.md). Checksum validation of the migrations
+/// this build does know is unchanged, and `verify_schema_readiness` still
+/// compares the DB's highest applied version against this build's own highest.
+/// `LazyLock` because `set_ignore_missing` needs `&mut` and `sqlx::migrate!`
+/// yields a plain value: still exactly one embed point.
+static MIGRATOR: std::sync::LazyLock<sqlx::migrate::Migrator> = std::sync::LazyLock::new(|| {
+    let mut migrator = sqlx::migrate!("../../migrations/customer");
+    migrator.set_ignore_missing(true);
+    migrator
+});
 
 impl PostgresBackendAdapter {
     /// Connect to the customer database. Does NOT run migrations.
@@ -1643,6 +1656,19 @@ mod to_datetime_tests {
     fn out_of_range_seconds_is_rejected() {
         let err = to_datetime(i64::MAX, 0).unwrap_err();
         assert!(err.to_string().contains("seconds"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod migrator_tests {
+    use super::MIGRATOR;
+
+    /// Rollback guard: an older image must tolerate a customer DB that a newer
+    /// release already migrated (no "previously applied but missing" error).
+    #[test]
+    fn migrator_tolerates_newer_applied_migrations() {
+        assert!(MIGRATOR.ignore_missing);
+        assert!(MIGRATOR.iter().count() > 0);
     }
 }
 

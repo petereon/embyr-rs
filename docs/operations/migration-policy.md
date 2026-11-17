@@ -63,18 +63,17 @@ If the schema itself is damaged (a bad backfill, a wrongly applied contract step
 the image does not help; restore from backup/PITR per `backup-disaster-recovery.md`, accepting
 the data loss window.
 
-### Known gap: older binary refuses to start on a newer schema
+### Older binary on a newer schema
 
-`SystemDb::migrate()` uses sqlx's `Migrator` with its default `ignore_missing = false`. An older
-binary started against a database that has migrations it does not embed fails with
-"migration N was previously applied but is missing in the resolved migrations" and exits 1.
-Until that is changed (one line: `set_ignore_missing(true)` on the migrator in
-`crates/embyr-server/src/adapters/system_db.rs`, with a test, and the same check for the
-customer-schema migrator in `crates/embyr-pg-storage/src/backend_adapter.rs`), **rolling back
-across a release that added a migration does not work by simply redeploying the old image**,
-even for a perfectly expand/contract-compliant migration. Tracked as a follow-up to O2; until
-it lands, treat any release that adds a migration as roll-forward-only (fix and redeploy
-forward) or as requiring a restore.
+Both migrators (`SystemDb::migrate()` in `crates/embyr-server/src/adapters/system_db.rs` and the
+customer-schema `MIGRATOR` in `crates/embyr-pg-storage/src/backend_adapter.rs`) set sqlx's
+`ignore_missing`, so an older binary started against a database that has migrations it does not
+embed boots normally instead of failing with "migration N was previously applied but is missing
+in the resolved migrations". Rollback across a release that added an expand/contract-compliant
+migration is therefore a plain redeploy of the previous image. Checksum validation of the
+migrations the old binary does know is unchanged, and customer-database provisioning still
+compares the DB's highest applied version against the binary's own (a DB at or ahead of the
+binary is `Ready`).
 
 ## CI lint
 
@@ -108,8 +107,7 @@ Before merging a PR that adds a migration:
    anything touching a large table (`pg_stat_activity` during the run).
 3. **N-1 compatibility:** with the PR's schema in place, run the previous release's test
    suite or smoke-test the previous image (`ghcr.io/<owner>/embyr-server:sha-<previous>`)
-   against it: it must read and write without errors. (Booting the old image additionally
-   needs the known gap above fixed.)
+   against it: it must read and write without errors.
 4. **Contract steps:** grep the previous released tag for the dropped/renamed identifier
    (`git grep -n <name> <tag> -- crates`); it must find nothing.
 5. **Customer-schema migrations** (`migrations/customer/`): additionally verify against a
