@@ -1,31 +1,54 @@
-//! IdentitiesView — Members and Service Accounts tabs.
+//! IdentitiesView — Members and Service Accounts tabs, both on the real API.
 //!
 //! Gated behind #[cfg(feature = "csr")].
 //!
-//! AC-009-02: Invite member modal dispatches Msg::MemberInvited.
-//! AC-009-04: Role selector per row dispatches Msg::SetMemberRole.
-//! AC-009-05: Remove button per row dispatches Msg::RemoveMember.
-//! AC-009-06: Sole-Owner guard: role selector and remove disabled when member is
-//!            the sole Owner (mirrors the invariant enforced in update.rs).
-//! AC-010-02: Service Accounts table with Delete dispatching Msg::DeleteServiceAccount.
+//! Every action is a request: the model changes only after the server confirms (AC-AUW-19).
+//! Viewers see disabled controls; an Admin cannot touch an Owner and cannot hand out a role above
+//! their own (the server enforces the same rules, the controls just do not offer the dead ends).
+//! A pending invitation row only offers Revoke (AC-AUW-22).
 
+#[cfg(feature = "csr")]
+use crate::api::{ApiCall, CallKind};
 #[cfg(feature = "csr")]
 use crate::components::primitives::Modal;
 #[cfg(feature = "csr")]
-use crate::model::{AppModel, Member, Role, ServiceAccount, UserId};
+use crate::model::{AppModel, Member, Role, ServiceAccount};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
 use leptos::prelude::*;
+
 #[cfg(feature = "csr")]
-use uuid::Uuid;
+pub fn role_label(role: &Role) -> &'static str {
+    match role {
+        Role::Owner => "Owner",
+        Role::Admin => "Admin",
+        Role::Viewer => "Viewer",
+    }
+}
+
+#[cfg(feature = "csr")]
+pub fn role_from_label(label: &str) -> Role {
+    match label {
+        "Owner" => Role::Owner,
+        "Admin" => Role::Admin,
+        _ => Role::Viewer,
+    }
+}
+
+/// `<option>`s for the roles the signed-in user may assign.
+#[cfg(feature = "csr")]
+pub fn role_options(model: RwSignal<AppModel>) -> impl IntoView {
+    model
+        .with(|m| m.assignable_roles())
+        .into_iter()
+        .map(|r| view! { <option value=role_label(&r)>{role_label(&r)}</option> })
+        .collect_view()
+}
 
 // ── IdentitiesView ───────────────────────────────────────────────────────────
 
 /// Identities page — Members | Service Accounts tabs.
-///
-/// Top-level nav section for `Section::Identities`. Renders a tab bar and
-/// delegates content rendering to `MembersTab` or `ServiceAccountsTab`.
 #[cfg(feature = "csr")]
 #[component]
 pub fn IdentitiesView() -> impl IntoView {
@@ -67,10 +90,7 @@ pub fn IdentitiesView() -> impl IntoView {
 
 // ── MembersTab ───────────────────────────────────────────────────────────────
 
-/// Members table with Invite modal.
-///
-/// Renders Email | Role | Last Login | Actions for each member.
-/// Sole-Owner guard disables role selector and remove button for the sole Owner.
+/// Members table with the Invite modal.
 #[cfg(feature = "csr")]
 #[component]
 fn MembersTab() -> impl IntoView {
@@ -79,39 +99,38 @@ fn MembersTab() -> impl IntoView {
 
     let invite_open = RwSignal::new(false);
     let invite_email = RwSignal::new(String::new());
-    let invite_role = RwSignal::new(String::from("viewer"));
+    let invite_role = RwSignal::new(String::from("Viewer"));
+
+    let can_manage = move || model.with(|m| m.can_manage_identities());
+    let inviting = move || model.with(|m| m.pending.contains(&CallKind::MemberInvite));
+    let loading = move || model.with(|m| m.pending.contains(&CallKind::Members));
 
     let on_invite_submit = move |_| {
         let email = invite_email.get();
         if email.trim().is_empty() {
             return;
         }
-        let role = match invite_role.get().as_str() {
-            "owner" => Role::Owner,
-            "admin" => Role::Admin,
-            _ => Role::Viewer,
-        };
-        let member = Member {
-            id: UserId(Uuid::new_v4()),
-            email: email.trim().to_string(),
-            display_name: None,
-            role,
-            pending: true,
-            mfa_enabled: false,
-            last_login: None,
-        };
-        dispatch.run(Msg::MemberInvited(member));
+        dispatch.run(Msg::Request(ApiCall::InviteMember { email, role: role_from_label(&invite_role.get()) }));
         invite_open.set(false);
         invite_email.set(String::new());
-        invite_role.set(String::from("viewer"));
+        invite_role.set(String::from("Viewer"));
     };
 
     view! {
         <div class="fade-in">
             <div class="page-head-actions" style="margin-bottom: 14px">
                 <button
+                    class="btn btn-ghost"
+                    type="button"
+                    disabled=loading
+                    on:click=move |_| { dispatch.run(Msg::Request(ApiCall::LoadMembers)); }
+                >
+                    "Refresh"
+                </button>
+                <button
                     class="btn btn-primary"
                     type="button"
+                    disabled=move || !can_manage() || inviting()
                     on:click=move |_| invite_open.set(true)
                 >
                     "Invite member"
@@ -131,14 +150,19 @@ fn MembersTab() -> impl IntoView {
                     <tbody>
                         {move || {
                             let members = model.with(|m| m.members.clone());
-                            let count_owners = members
-                                .iter()
-                                .filter(|mbr| mbr.role == Role::Owner)
-                                .count();
+                            if members.is_empty() {
+                                return view! {
+                                    <tr><td colspan="4" class="empty-state">
+                                        {if loading() { "Loading…" } else { "No members yet." }}
+                                    </td></tr>
+                                }.into_any();
+                            }
+                            let owners = members.iter().filter(|m| m.role == Role::Owner && !m.pending).count();
                             members
                                 .into_iter()
-                                .map(|member| render_member_row(member, count_owners, dispatch))
+                                .map(|member| render_member_row(member, owners, model, dispatch))
                                 .collect_view()
+                                .into_any()
                         }}
                     </tbody>
                 </table>
@@ -166,25 +190,15 @@ fn MembersTab() -> impl IntoView {
                             prop:value=invite_role
                             on:change=move |e| invite_role.set(event_target_value(&e))
                         >
-                            <option value="viewer">"Viewer"</option>
-                            <option value="admin">"Admin"</option>
-                            <option value="owner">"Owner"</option>
+                            {role_options(model)}
                         </select>
                     </div>
                     <div class="modal-footer">
-                        <button
-                            class="btn btn-ghost"
-                            type="button"
-                            on:click=move |_| invite_open.set(false)
-                        >
+                        <button class="btn btn-ghost" type="button" on:click=move |_| invite_open.set(false)>
                             "Cancel"
                         </button>
-                        <button
-                            class="btn btn-primary"
-                            type="button"
-                            on:click=on_invite_submit
-                        >
-                            "Send invitation"
+                        <button class="btn btn-primary" type="button" on:click=on_invite_submit>
+                            "Create invitation"
                         </button>
                     </div>
                 </Modal>
@@ -193,85 +207,80 @@ fn MembersTab() -> impl IntoView {
     }
 }
 
-/// Render a single member row.
-///
-/// Extracted to keep the reactive block readable.
-/// Sole-Owner guard: disables role selector and remove button when this member
-/// is the only Owner in the account.
+/// One member row. The sole Owner cannot be demoted or removed; a pending invitation can only be
+/// revoked; an Admin cannot edit an Owner.
 #[cfg(feature = "csr")]
 fn render_member_row(
     member: Member,
-    count_owners: usize,
+    owners: usize,
+    model: RwSignal<AppModel>,
     dispatch: Callback<Msg>,
 ) -> impl IntoView {
-    let uid_role = member.id.clone();
-    let uid_remove = member.id.clone();
-    let is_sole_owner = member.role == Role::Owner && count_owners == 1;
-
-    let role_str = match member.role {
-        Role::Owner => "owner",
-        Role::Admin => "admin",
-        Role::Viewer => "viewer",
-    };
+    let id = member.id.clone();
+    let id_role = member.id.clone();
+    let pending = member.pending;
+    let is_sole_owner = member.role == Role::Owner && !pending && owners == 1;
+    let editable = model.with(|m| m.can_edit_member(&member));
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::MemberChange));
 
     let last_login_display = member
         .last_login
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "—".to_string());
 
-    let pending_badge = if member.pending {
-        view! { <span class="badge badge-neutral" style="margin-left:6px">"pending"</span> }
-            .into_any()
+    let role_cell = if pending || !editable || is_sole_owner {
+        let title = if is_sole_owner { "Cannot change the sole Owner's role" } else { "" };
+        view! { <span title=title>{role_label(&member.role)}</span> }.into_any()
     } else {
-        view! {}.into_any()
+        let assignable = model.with(|m| m.assignable_roles());
+        view! {
+            <select
+                prop:value=role_label(&member.role)
+                disabled=busy
+                on:change=move |e| {
+                    dispatch.run(Msg::Request(ApiCall::ChangeMemberRole {
+                        id: id_role.clone(),
+                        role: role_from_label(&event_target_value(&e)),
+                    }));
+                }
+            >
+                {assignable.iter().map(|r| view! { <option value=role_label(r)>{role_label(r)}</option> }).collect_view()}
+            </select>
+        }
+        .into_any()
     };
 
-    let sole_owner_tooltip = if is_sole_owner {
-        "Cannot change the sole Owner's role"
+    let (action_label, action_title) = if pending {
+        ("Revoke", "Revoke invitation")
+    } else if is_sole_owner {
+        ("Remove", "Cannot remove the sole Owner")
     } else {
-        ""
-    };
-    let remove_tooltip = if is_sole_owner {
-        "Cannot remove the sole Owner"
-    } else {
-        "Remove member"
+        ("Remove", "Remove member")
     };
 
     view! {
         <tr>
             <td>
                 {member.email.clone()}
-                {pending_badge}
+                {pending.then(|| view! { <span class="badge badge-neutral" style="margin-left:6px">"pending"</span> })}
             </td>
-            <td>
-                <select
-                    prop:value=role_str
-                    disabled=is_sole_owner
-                    title=sole_owner_tooltip
-                    on:change=move |e| {
-                        let new_role = match event_target_value(&e).as_str() {
-                            "owner" => Role::Owner,
-                            "admin" => Role::Admin,
-                            _ => Role::Viewer,
-                        };
-                        dispatch.run(Msg::SetMemberRole(uid_role.clone(), new_role));
-                    }
-                >
-                    <option value="owner">"Owner"</option>
-                    <option value="admin">"Admin"</option>
-                    <option value="viewer">"Viewer"</option>
-                </select>
-            </td>
+            <td>{role_cell}</td>
             <td>{last_login_display}</td>
             <td>
                 <button
                     class="btn btn-ghost"
                     type="button"
-                    disabled=is_sole_owner
-                    title=remove_tooltip
-                    on:click=move |_| dispatch.run(Msg::RemoveMember(uid_remove.clone()))
+                    disabled=move || !editable || is_sole_owner || busy()
+                    title=action_title
+                    on:click=move |_| {
+                        dispatch.run(Msg::Request(if pending {
+                            ApiCall::RevokeInvitation(id.clone())
+                        } else {
+                            ApiCall::RemoveMember(id.clone())
+                        }));
+                    }
                 >
-                    "Remove"
+                    {action_label}
                 </button>
             </td>
         </tr>
@@ -280,20 +289,54 @@ fn render_member_row(
 
 // ── ServiceAccountsTab ────────────────────────────────────────────────────────
 
-/// Service Accounts table.
-///
-/// Renders Name | Created | Actions for each service account.
-/// Delete button dispatches `Msg::DeleteServiceAccount`.
+/// Service accounts table with a create modal.
 #[cfg(feature = "csr")]
 #[component]
 fn ServiceAccountsTab() -> impl IntoView {
     let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
     let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
 
+    let create_open = RwSignal::new(false);
+    let name = RwSignal::new(String::new());
+    let description = RwSignal::new(String::new());
+    let role = RwSignal::new(String::from("Viewer"));
+
+    let can_manage = move || model.with(|m| m.can_manage_identities());
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::ServiceAccountWrite));
+    let loading = move || model.with(|m| m.pending.contains(&CallKind::ServiceAccounts));
+
+    let on_create = move |_| {
+        if name.get().trim().is_empty() {
+            return;
+        }
+        dispatch.run(Msg::Request(ApiCall::CreateServiceAccount {
+            name: name.get(),
+            description: Some(description.get()),
+            role: role_from_label(&role.get()),
+        }));
+        create_open.set(false);
+        name.set(String::new());
+        description.set(String::new());
+        role.set(String::from("Viewer"));
+    };
+
     view! {
         <div class="fade-in">
             <div class="page-head-actions" style="margin-bottom: 14px">
-                <button class="btn btn-primary" type="button" disabled=true>
+                <button
+                    class="btn btn-ghost"
+                    type="button"
+                    disabled=loading
+                    on:click=move |_| { dispatch.run(Msg::Request(ApiCall::LoadServiceAccounts)); }
+                >
+                    "Refresh"
+                </button>
+                <button
+                    class="btn btn-primary"
+                    type="button"
+                    disabled=move || !can_manage() || busy()
+                    on:click=move |_| create_open.set(true)
+                >
                     "New service account"
                 </button>
             </div>
@@ -304,6 +347,7 @@ fn ServiceAccountsTab() -> impl IntoView {
                         <tr>
                             <th>"Name"</th>
                             <th>"Description"</th>
+                            <th>"Role"</th>
                             <th>"Created"</th>
                             <th>"Actions"</th>
                         </tr>
@@ -311,38 +355,98 @@ fn ServiceAccountsTab() -> impl IntoView {
                     <tbody>
                         {move || {
                             let accounts = model.with(|m| m.service_accounts.clone());
+                            if accounts.is_empty() {
+                                return view! {
+                                    <tr><td colspan="5" class="empty-state">
+                                        {if loading() { "Loading…" } else { "No service accounts yet." }}
+                                    </td></tr>
+                                }.into_any();
+                            }
                             accounts
                                 .into_iter()
-                                .map(|sa| render_service_account_row(sa, dispatch))
+                                .map(|sa| render_service_account_row(sa, can_manage, busy, dispatch))
                                 .collect_view()
+                                .into_any()
                         }}
                     </tbody>
                 </table>
             </div>
+
+            <Show when=move || create_open.get() fallback=|| ()>
+                <Modal
+                    title="New service account"
+                    on_close=Callback::new(move |_| create_open.set(false))
+                >
+                    <div class="modal-field">
+                        <label class="modal-label">"Name"</label>
+                        <input
+                            class="modal-input"
+                            type="text"
+                            placeholder="ci-deployer"
+                            prop:value=name
+                            on:input=move |e| name.set(event_target_value(&e))
+                        />
+                    </div>
+                    <div class="modal-field">
+                        <label class="modal-label">"Description (optional)"</label>
+                        <input
+                            class="modal-input"
+                            type="text"
+                            prop:value=description
+                            on:input=move |e| description.set(event_target_value(&e))
+                        />
+                    </div>
+                    <div class="modal-field">
+                        <label class="modal-label">"Role"</label>
+                        <select
+                            class="modal-select"
+                            prop:value=role
+                            on:change=move |e| role.set(event_target_value(&e))
+                        >
+                            {role_options(model)}
+                        </select>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-ghost" type="button" on:click=move |_| create_open.set(false)>
+                            "Cancel"
+                        </button>
+                        <button class="btn btn-primary" type="button" on:click=on_create>
+                            "Create"
+                        </button>
+                    </div>
+                </Modal>
+            </Show>
         </div>
     }
 }
 
-/// Render a single service account row.
+/// One service account row. Deleting it revokes its admin keys on the server.
 #[cfg(feature = "csr")]
-fn render_service_account_row(sa: ServiceAccount, dispatch: Callback<Msg>) -> impl IntoView {
+fn render_service_account_row(
+    sa: ServiceAccount,
+    can_manage: impl Fn() -> bool + Copy + Send + Sync + 'static,
+    busy: impl Fn() -> bool + Copy + Send + Sync + 'static,
+    dispatch: Callback<Msg>,
+) -> impl IntoView {
     let sa_id = sa.id.clone();
     let created_display = sa
         .created_at
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "—".to_string());
-    let description_display = sa.description.unwrap_or_else(|| "—".to_string());
 
     view! {
         <tr>
             <td>{sa.name.clone()}</td>
-            <td>{description_display}</td>
+            <td>{sa.description.clone().unwrap_or_else(|| "—".to_string())}</td>
+            <td>{role_label(&sa.role)}</td>
             <td>{created_display}</td>
             <td>
                 <button
                     class="btn btn-ghost"
                     type="button"
-                    on:click=move |_| dispatch.run(Msg::DeleteServiceAccount(sa_id.clone()))
+                    disabled=move || !can_manage() || busy()
+                    title="Deleting a service account also revokes its admin keys"
+                    on:click=move |_| { dispatch.run(Msg::Request(ApiCall::DeleteServiceAccount(sa_id.clone()))); }
                 >
                     "Delete"
                 </button>

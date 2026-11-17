@@ -1,28 +1,24 @@
-//! ApiKeysView — account-level admin API keys table + revoke flow.
+//! ApiKeysView — account-level admin API keys: list, create (plaintext shown once), revoke.
 //!
 //! Gated behind #[cfg(feature = "csr")].
 //!
-//! AC-010-05: AdminKeyCreated appends the key (modal dispatches Msg::AdminKeyCreated).
-//! AC-010-06: Revoke button dispatches Msg::RevokeAdminKey.
+//! Owner/Admin only for writes (Viewers see disabled controls); the role a key can carry is capped
+//! at the creator's own. A key may be bound to a service account.
 
+#[cfg(feature = "csr")]
+use crate::api::{ApiCall, CallKind};
 #[cfg(feature = "csr")]
 use crate::components::primitives::Modal;
 #[cfg(feature = "csr")]
-use crate::model::{AdminKey, AppModel, KeyId, Role};
+use crate::model::{AdminKey, AppModel, ServiceAccountId};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
-use leptos::prelude::*;
+use crate::views::identities::{role_from_label, role_label, role_options};
 #[cfg(feature = "csr")]
-use uuid::Uuid;
-
-// ── ApiKeysView ──────────────────────────────────────────────────────────────
+use leptos::prelude::*;
 
 /// Admin API Keys page.
-///
-/// Renders a table of account-level admin keys. A "Create Admin Key" button
-/// opens a modal that dispatches `Msg::AdminKeyCreated`. Each row has a Revoke
-/// button that dispatches `Msg::RevokeAdminKey`.
 #[cfg(feature = "csr")]
 #[component]
 pub fn ApiKeysView() -> impl IntoView {
@@ -31,24 +27,29 @@ pub fn ApiKeysView() -> impl IntoView {
 
     let create_open = RwSignal::new(false);
     let key_name = RwSignal::new(String::new());
+    let key_role = RwSignal::new(String::from("Viewer"));
+    // Empty = an account key not bound to a service account; otherwise the service account's id.
+    let key_sa = RwSignal::new(String::new());
+
+    let can_manage = move || model.with(|m| m.can_manage_identities());
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::AdminKeyWrite));
+    let loading = move || model.with(|m| m.pending.contains(&CallKind::AdminKeys));
 
     let on_create = move |_| {
         let name = key_name.get();
         if name.trim().is_empty() {
             return;
         }
-        let key = AdminKey {
-            id: KeyId(Uuid::new_v4()),
-            name: name.trim().to_string(),
-            service_account_id: None,
-            member_id: None,
-            role: Role::Viewer,
-            prefix: "embyr_ad".to_string(),
-            created_at: None,
-        };
-        dispatch.run(Msg::AdminKeyCreated(key));
+        let service_account_id = uuid::Uuid::parse_str(&key_sa.get()).ok().map(ServiceAccountId);
+        dispatch.run(Msg::Request(ApiCall::CreateAdminKey {
+            name,
+            role: role_from_label(&key_role.get()),
+            service_account_id,
+        }));
         create_open.set(false);
         key_name.set(String::new());
+        key_role.set(String::from("Viewer"));
+        key_sa.set(String::new());
     };
 
     view! {
@@ -62,8 +63,17 @@ pub fn ApiKeysView() -> impl IntoView {
                 </div>
                 <div class="page-head-actions">
                     <button
+                        class="btn btn-ghost"
+                        type="button"
+                        disabled=loading
+                        on:click=move |_| { dispatch.run(Msg::Request(ApiCall::LoadAdminKeys)); }
+                    >
+                        "Refresh"
+                    </button>
+                    <button
                         class="btn btn-primary"
                         type="button"
+                        disabled=move || !can_manage() || busy()
                         on:click=move |_| create_open.set(true)
                     >
                         "Create Admin Key"
@@ -76,6 +86,7 @@ pub fn ApiKeysView() -> impl IntoView {
                     <thead>
                         <tr>
                             <th>"Name"</th>
+                            <th>"Role"</th>
                             <th>"Key Prefix"</th>
                             <th>"Created"</th>
                             <th>"Actions"</th>
@@ -84,9 +95,17 @@ pub fn ApiKeysView() -> impl IntoView {
                     <tbody>
                         {move || {
                             let keys = model.with(|m| m.admin_keys.clone());
+                            if keys.is_empty() {
+                                return view! {
+                                    <tr><td colspan="5" class="empty-state">
+                                        {if loading() { "Loading…" } else { "No admin keys yet." }}
+                                    </td></tr>
+                                }.into_any();
+                            }
                             keys.into_iter()
-                                .map(|key| render_admin_key_row(key, dispatch))
+                                .map(|key| render_admin_key_row(key, can_manage, busy, dispatch))
                                 .collect_view()
+                                .into_any()
                         }}
                     </tbody>
                 </table>
@@ -107,19 +126,34 @@ pub fn ApiKeysView() -> impl IntoView {
                             on:input=move |e| key_name.set(event_target_value(&e))
                         />
                     </div>
-                    <div class="modal-footer">
-                        <button
-                            class="btn btn-ghost"
-                            type="button"
-                            on:click=move |_| create_open.set(false)
+                    <div class="modal-field">
+                        <label class="modal-label">"Role"</label>
+                        <select
+                            class="modal-select"
+                            prop:value=key_role
+                            on:change=move |e| key_role.set(event_target_value(&e))
                         >
+                            {role_options(model)}
+                        </select>
+                    </div>
+                    <div class="modal-field">
+                        <label class="modal-label">"Service account (optional)"</label>
+                        <select
+                            class="modal-select"
+                            prop:value=key_sa
+                            on:change=move |e| key_sa.set(event_target_value(&e))
+                        >
+                            <option value="">"None"</option>
+                            {move || model.with(|m| m.service_accounts.clone()).into_iter().map(|sa| {
+                                view! { <option value=sa.id.0.to_string()>{sa.name}</option> }
+                            }).collect_view()}
+                        </select>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-ghost" type="button" on:click=move |_| create_open.set(false)>
                             "Cancel"
                         </button>
-                        <button
-                            class="btn btn-primary"
-                            type="button"
-                            on:click=on_create
-                        >
+                        <button class="btn btn-primary" type="button" on:click=on_create>
                             "Create key"
                         </button>
                     </div>
@@ -129,11 +163,14 @@ pub fn ApiKeysView() -> impl IntoView {
     }
 }
 
-/// Render a single admin key row.
-///
-/// Extracted to keep the reactive block readable.
+/// One admin key row.
 #[cfg(feature = "csr")]
-fn render_admin_key_row(key: AdminKey, dispatch: Callback<Msg>) -> impl IntoView {
+fn render_admin_key_row(
+    key: AdminKey,
+    can_manage: impl Fn() -> bool + Copy + Send + Sync + 'static,
+    busy: impl Fn() -> bool + Copy + Send + Sync + 'static,
+    dispatch: Callback<Msg>,
+) -> impl IntoView {
     let key_id = key.id.clone();
     let created_display = key
         .created_at
@@ -143,13 +180,15 @@ fn render_admin_key_row(key: AdminKey, dispatch: Callback<Msg>) -> impl IntoView
     view! {
         <tr>
             <td>{key.name.clone()}</td>
+            <td>{role_label(&key.role)}</td>
             <td><span class="tag">{key.prefix.clone()}</span></td>
             <td>{created_display}</td>
             <td>
                 <button
                     class="btn btn-ghost"
                     type="button"
-                    on:click=move |_| dispatch.run(Msg::RevokeAdminKey(key_id.clone()))
+                    disabled=move || !can_manage() || busy()
+                    on:click=move |_| { dispatch.run(Msg::Request(ApiCall::RevokeAdminKey(key_id.clone()))); }
                 >
                     "Revoke"
                 </button>
