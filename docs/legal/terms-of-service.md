@@ -2,11 +2,11 @@
 
 > Draft for lawyer review. Not legal advice. Fill every `[BRACKETED]` item first.
 
-**Effective date:** [DATE]  ·  **Provider:** [COMPANY], [ADDRESS] ("we", "us")
+**Effective date:** [DATE]  ·  **Provider:** [FULL NAME], sole trader, [ADDRESS], Slovakia, IČO [ICO], registered in the Trade Register of [DISTRICT OFFICE] under no. [NUMBER] ("we", "us")
 
 ## 1. Agreement
 
-By creating an account or using the service you ("Customer", "you") agree to these terms. If you
+The service is offered **only to businesses and professionals** (developers and organisations acting in the course of their trade, business or profession). It is not offered to consumers. By creating an account or using the service you ("Customer", "you") confirm you act in that capacity and agree to these terms. If you
 accept for an organisation, you confirm you have authority to bind it. If you do not agree, do
 not use the service.
 
@@ -134,10 +134,12 @@ accept the update; if you do not, you may terminate before then.
 
 These terms, the privacy policy and any order form are the entire agreement. If a provision is
 unenforceable the rest stays in force. You may not assign these terms without our consent; we
-may assign them in a merger or sale. No waiver is effective unless in writing. Governing law:
-[JURISDICTION]; courts: [COURTS]. Notices go to the email on your account, and to
+may assign them in a merger or sale. No waiver is effective unless in writing. Governing law: the law of the Slovak Republic (the
+Commercial Code applies to these business-to-business terms), excluding its conflict-of-law
+rules; courts: the competent court in the Slovak Republic [for the provider's seat — confirm with
+your lawyer]. Notices go to the email on your account, and to
 [SUPPORT_EMAIL] for us.
 
 ## 16. Contact
 
-[COMPANY] · [ADDRESS] · [SUPPORT_EMAIL]
+[FULL NAME] · [ADDRESS] · IČO [ICO] · [SUPPORT_EMAIL]
