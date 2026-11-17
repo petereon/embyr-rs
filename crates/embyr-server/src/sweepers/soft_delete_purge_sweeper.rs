@@ -140,6 +140,21 @@ pub async fn run_cycle(system_db: &Arc<SystemDb>, grace_days: i64) {
             super::record_sweeper_error("soft_delete_purge_sweeper");
         }
     }
+
+    // ttl-policies: the project row survives as a tombstone, so its TTL
+    // policies (which the TTL sweeper already ignores for non-active
+    // projects) are removed here once the grace window has elapsed.
+    if let Err(e) = sqlx::query(
+        "DELETE FROM ttl_policies WHERE project_id IN \
+         (SELECT id FROM projects WHERE status = 'deleted' AND deleted_at < $1)",
+    )
+    .bind(cutoff)
+    .execute(system_db.pool())
+    .await
+    {
+        tracing::warn!(error = %e, "SoftDeletePurgeSweeper: ttl_policies purge failed");
+        super::record_sweeper_error("soft_delete_purge_sweeper");
+    }
 }
 
 /// Dependent-row deletes for one soft-deleted account, in FK order. `$1` =

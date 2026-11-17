@@ -76,7 +76,7 @@ Secrets, audit, hygiene
 - AC-SSO-19: Every failure after state is read produces the same redirect and message; response shape and status do not differ between
   "no such link", "link exists but user removed" and "bad token".
 
-## 4. Data model — migration `0050_admin_sso.sql` (0041 is taken by invitation tokens and 0049 is the latest on master; re-check the next free number when implementing)
+## 4. Data model — migration `0051_admin_sso.sql` (0041 is taken by invitation tokens, 0050 by TTL policies and 0049 was the latest before that; re-check the next free number when implementing)
 
 ```sql
 ALTER TABLE users ALTER COLUMN password_hash DROP NOT NULL;            -- NULL = SSO-only
@@ -162,7 +162,7 @@ the chosen second IdP) with a throwaway client.
 
 | # | Slice | Size | Depends on |
 |---|---|---|---|
-| 1 | Migration 0050 (next free at implementation time); pure core (PKCE, state/nonce, claim validator, URL/IP policy extracted from `dsn_policy`); `issue_session` extraction; mock IdP harness | M | none |
+| 1 | Migration 0051 (next free at implementation time); pure core (PKCE, state/nonce, claim validator, URL/IP policy extracted from `dsn_policy`); `issue_session` extraction; mock IdP harness | M | none |
 | 2 | Nullable `password_hash` in `signin`, `verify_credentials`, password reset; `admin_audit_events` writer; `remove_member` deletes links | S | 1 |
 | 3 | `start` + discovery/JWKS caches + `callback` for intent `signin`; provider create/enable validation; `ServerKeys` for provider secret + `PUT .../secret` | L | 1, 2 |
 | 4 | Invitation `auth_method='sso'` (create, lookup, callback intent `invite`) | M | 3, `account-bootstrap-and-invitations` (landed) |

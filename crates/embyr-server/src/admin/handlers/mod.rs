@@ -31,5 +31,6 @@ pub mod prometheus_metrics;
 pub mod provision;
 pub mod query_logs;
 pub mod service_accounts;
+pub mod ttl_policies;
 pub(crate) mod shared;
 pub mod webhooks_stripe;

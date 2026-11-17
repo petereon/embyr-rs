@@ -61,6 +61,10 @@ fn describe_metrics() {
         "embyr_projects_unconverted_connection_secrets",
         "Projects whose connection secret is not yet converted to the single-store format"
     );
+    describe_gauge!(
+        "embyr_ttl_last_run_timestamp_seconds",
+        "Unix time the TTL sweeper last completed a cycle (max across replicas)"
+    );
     for (name, help) in [
         ("embyr_grpc_requests_total", "gRPC requests handled"),
         ("embyr_rate_limit_requests_total", "API requests evaluated by the rate limiter"),
@@ -80,6 +84,9 @@ fn describe_metrics() {
         ("embyr_transaction_sweeper_reclaimed_total", "Abandoned transactions reclaimed"),
         ("embyr_transaction_sweeper_purged_total", "Finished transaction rows purged"),
         ("embyr_sweeper_error_total", "Background sweeper errors"),
+        ("embyr_ttl_deleted_total", "Documents deleted by TTL policies"),
+        ("embyr_ttl_sweep_errors_total", "TTL sweeper errors (policy load, connect, query or commit)"),
+        ("embyr_ttl_skipped_projects_total", "Projects skipped by the TTL sweeper (reason label)"),
         ("embyr_stripe_webhook_dispatch_total", "Stripe webhook events dispatched"),
     ] {
         describe_counter!(name, help);

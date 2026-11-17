@@ -6,4 +6,5 @@ pub mod project;
 pub mod query;
 pub mod schema_readiness;
 pub mod transaction;
+pub mod ttl;
 pub mod vector;

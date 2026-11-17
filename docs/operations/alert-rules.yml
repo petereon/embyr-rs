@@ -70,7 +70,7 @@ groups:
 
       # --- Background sweeper failures (finding #47) -----------------------
       # embyr_sweeper_error_total{sweeper=...} is the shared failure counter
-      # for all 4 background sweepers, added because they previously only
+      # for all background sweepers (incl. "ttl_sweeper"), added because they previously only
       # logged tracing::warn!/error! on failure — invisible to this dashboard
       # and no alert. A sustained non-zero rate means a sweeper is failing
       # every cycle, not just once transiently.

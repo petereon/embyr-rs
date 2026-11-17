@@ -151,6 +151,17 @@ Single-field queries are always satisfied without an explicit index (implicit si
 
 Indexes created via the admin API use `state=READY` immediately (no async build phase is required for correctness, since embyr rebuilds from the documents table on demand during index creation).
 
+### TTL Policies
+
+A TTL (time-to-live) policy deletes expired documents automatically, matching Firestore's TTL semantics. A policy is per `(project, collection group, timestamp field)`; there is at most one policy (one TTL field) per collection group, and it applies to every collection with that id at any depth.
+
+- **Eligibility**: a document is deleted once the policy's field holds a `Timestamp` strictly in the past. A document whose field is missing, `null`, or any other type is never deleted. `field_path` must be a top-level field (a dotted path is rejected).
+- **Timing**: deletion is not immediate. A background sweeper (default every 1 hour, `EMBYR_TTL_SWEEP_INTERVAL_SECS`) deletes eligible documents, at most `EMBYR_TTL_MAX_DELETES_PER_RUN` (default 10 000) per policy per sweep; any remainder is deleted by the next sweep. The first sweep runs one minute after start. Firestore documents "typically within 24 hours"; embyr's bound is one sweep interval plus backlog drain time.
+- **Effects**: deletes are real deletes, committed through the normal write path, so active `Listen` streams receive the removal. Subcollections of a deleted document are NOT deleted (same as Firestore). TTL deletes bypass security rules. A document rewritten between the sweeper's read and its delete (for example its TTL pushed out) is kept.
+- **Scope**: `direct_pg`, `aws_secret` and `gcp_secret` projects with `status=active`. Suspended and deleted projects are skipped. `agent` projects are not supported (the admin API answers `409`; the sweeper skips and counts them).
+- **Admin API**: `GET /admin/v1/projects/:project_id/ttl_policies` (any role), `PUT /admin/v1/projects/:project_id/ttl_policies` with `{"collection_group", "field_path", "enabled"}` (upsert on the collection group; Admin or Owner; `enabled` defaults to `true`), `DELETE /admin/v1/projects/:project_id/ttl_policies/:collection_group` (Admin or Owner). `404` for a project of another account, `422` for an invalid collection group or field path.
+- **Storage**: system database table `ttl_policies` (migration 0050), removed with its project.
+
 ---
 
 ## Tenant Management

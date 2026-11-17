@@ -135,6 +135,13 @@ pub struct ServerConfig {
     /// window (ADR-073 § D3); default 7 days (168h), matching the admin-UI's
     /// own unchanged promise text.
     pub soft_delete_grace_days: i64,
+    /// `EMBYR_TTL_SWEEP_INTERVAL_SECS` — `TtlSweeper` interval (go-live P5);
+    /// default 3600s (1 hour). Positive integer; invalid values fail startup.
+    pub ttl_sweep_interval_secs: u32,
+    /// `EMBYR_TTL_MAX_DELETES_PER_RUN` — `TtlSweeper` cap on documents
+    /// deleted per TTL policy per sweep (go-live P5); default 10000.
+    /// Positive integer; invalid values fail startup.
+    pub ttl_max_deletes_per_run: u32,
     /// `EMBYR_TLS_CERT_PATH`/`EMBYR_TLS_KEY_PATH` — optional, both-or-neither.
     /// `None` = today's plaintext behavior on all 3 listeners, unchanged
     /// (AC-TLS-01, hard regression guard).
@@ -493,6 +500,8 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(7);
+        let ttl_sweep_interval_secs = parse_positive_u32("EMBYR_TTL_SWEEP_INTERVAL_SECS", 3600)?;
+        let ttl_max_deletes_per_run = parse_positive_u32("EMBYR_TTL_MAX_DELETES_PER_RUN", 10_000)?;
 
         // pool-sizing-and-limits (ADR-079): 5 env-overridable pool-sizing/
         // timeout knobs, all optional/defaulted, invalid values already
@@ -542,6 +551,8 @@ impl ServerConfig {
             transaction_retention_days,
             soft_delete_sweep_interval_secs,
             soft_delete_grace_days,
+            ttl_sweep_interval_secs,
+            ttl_max_deletes_per_run,
             tls,
             system_db_max_connections,
             tenant_db_max_connections,
