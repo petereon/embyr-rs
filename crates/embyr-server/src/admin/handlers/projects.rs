@@ -86,6 +86,21 @@ pub async fn list_projects(
 /// Statuses an Owner/Admin may set via PATCH. `deleted` is operator-only.
 const PATCHABLE_STATUSES: &[&str] = &["active", "suspended"];
 
+const MAX_NAME_LEN: usize = 100;
+const MAX_LOG_RETENTION_DAYS: i32 = 3650;
+
+/// Audit #66: bound the free-form PATCH fields (name 1..=100 chars, retention 1..=3650 days).
+fn patch_fields_valid(body: &PatchProjectBody) -> bool {
+    let name_ok = body
+        .name
+        .as_deref()
+        .map_or(true, |n| !n.trim().is_empty() && n.chars().count() <= MAX_NAME_LEN);
+    let retention_ok = body
+        .log_retention_days
+        .map_or(true, |d| (1..=MAX_LOG_RETENTION_DAYS).contains(&d));
+    name_ok && retention_ok
+}
+
 /// Partial-update body for PATCH /admin/v1/projects/:id.
 /// All fields are optional; absent fields are preserved via COALESCE.
 #[derive(Deserialize, Default)]
@@ -105,7 +120,8 @@ pub struct PatchProjectBody {
 ///   which is operator-only) → 422.
 /// - `status = "active"` while the account is on a billing hold
 ///   (`past_due` / `free_cap_exceeded`) → 409.
-/// - Account isolation: project must belong to `session.account_id`; otherwise 403.
+/// - Account isolation: project must belong to `session.account_id`; otherwise 404.
+/// - `name` must be 1..=100 chars, `log_retention_days` 1..=3650; otherwise 422 (#66).
 /// - `backend_pg_dsn` → 422 (ADR-083: use PUT /projects/:id/connection).
 /// - Credential cache is evicted after a status change.
 /// - Absent patch fields are preserved via COALESCE.
@@ -141,6 +157,10 @@ async fn patch_project_inner(
     // ── Guard: Owner or Admin only (audit finding #59) ────────────────────────
     if session.role < Role::Admin {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    if !patch_fields_valid(&body) {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     // ── Guard: status allow-list, body-only, before any DB access (#59) ───────
@@ -251,4 +271,30 @@ async fn patch_project_inner(
         api_key_rotated_at: row.try_get("api_key_rotated_at").unwrap_or(None),
         api_key_previous_expires_at: row.try_get("api_key_previous_expires_at").unwrap_or(None),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(name: Option<&str>, days: Option<i32>) -> PatchProjectBody {
+        PatchProjectBody {
+            name: name.map(String::from),
+            log_retention_days: days,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn patch_field_bounds() {
+        assert!(patch_fields_valid(&body(None, None)));
+        assert!(patch_fields_valid(&body(Some("ok"), Some(1))));
+        assert!(patch_fields_valid(&body(Some(&"x".repeat(100)), Some(3650))));
+        assert!(!patch_fields_valid(&body(Some(""), None)));
+        assert!(!patch_fields_valid(&body(Some("   "), None)));
+        assert!(!patch_fields_valid(&body(Some(&"x".repeat(101)), None)));
+        assert!(!patch_fields_valid(&body(None, Some(0))));
+        assert!(!patch_fields_valid(&body(None, Some(-5))));
+        assert!(!patch_fields_valid(&body(None, Some(3651))));
+    }
 }
