@@ -1526,6 +1526,25 @@ impl BackendAdapter for PostgresBackendAdapter {
         .await
         .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
 
+        // Real-time fan-out: the single-document methods NOTIFY after every
+        // write, but this batch path (Commit, BatchWrite, the Write stream)
+        // never did, so Listen subscribers never saw those writes. NOTIFY
+        // inside the transaction: Postgres delivers it at COMMIT, i.e. after
+        // the rows the listener will fetch are visible.
+        for write in &writes {
+            let path = match write {
+                Write::Update { path, .. }
+                | Write::Delete { path, .. }
+                | Write::Transform { path, .. } => path,
+            };
+            sqlx::query("SELECT pg_notify($1, $2)")
+                .bind(notify_channel(path.project_id.as_str()))
+                .bind(format!("{}/{}", path.collection_path, path.document_id))
+                .execute(&mut *pg_txn)
+                .await
+                .map_err(|e| CoreError::BackendUnavailable(e.to_string()))?;
+        }
+
         pg_txn
             .commit()
             .await
