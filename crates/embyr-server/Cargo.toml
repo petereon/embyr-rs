@@ -863,6 +863,12 @@ path = "../../tests/agent_mode_write_streaming/acceptance/aw01_single_write_stre
 name = "agent_mode_write_streaming_aw02_multi_write_durability"
 path = "../../tests/agent_mode_write_streaming/acceptance/aw02_multi_write_durability.rs"
 
+# agent-mode-listen acceptance test — Listen against backend_mode=agent via the
+# agent's Subscribe stream (ChangeFeedListener). Docker-backed: CI only.
+[[test]]
+name = "agent_mode_listen_al01_agent_mode_listen"
+path = "../../tests/agent_mode_listen/acceptance/al01_agent_mode_listen.rs"
+
 # agent-mode-list-collection-ids acceptance tests (Slice 01, Walking
 # Skeleton, LAST/ONLY slice, US-01, ADR-059) — new unary ListCollectionIds
 # RPC on storage_agent.proto, zero SQL duplication, AgentBackendAdapter's own

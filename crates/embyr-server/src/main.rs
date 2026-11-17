@@ -30,7 +30,6 @@ use embyr_server::{
         google_jwks_cache::GoogleJwksCache,
         index_manager::IndexManager,
         metrics_adapter::MetricsAdapter,
-        postgres_notify_listener::PostgresNotifyListener,
         system_db::SystemDb,
     },
     admin::router::build_admin_router,
@@ -42,7 +41,7 @@ use embyr_server::{
     middleware::rate_limit::RateLimiter,
     middleware::signin_rate_limit::SigninRateLimiter,
     observability::get_or_install_prometheus_handle,
-    realtime::listen_registry::ListenRegistry,
+    realtime::listen_registry::{ListenRegistry, ListenerGuard},
     spawn_all_servers,
 };
 
@@ -161,7 +160,7 @@ async fn main() {
     let metrics_adapter = Arc::new(MetricsAdapter::new(system_db.pool().clone()));
     let listen_registry = ListenRegistry::new();
     let active_listeners = Arc::new(
-        tokio::sync::Mutex::new(HashMap::<String, PostgresNotifyListener>::new()),
+        tokio::sync::Mutex::new(HashMap::<String, ListenerGuard>::new()),
     );
     let rate_limiter =
         RateLimiter::with_pg(cfg.rate_limit_rps, cfg.rate_limit_rps, system_db.pool().clone());

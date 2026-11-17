@@ -16,8 +16,11 @@ use embyr_core::{
         transaction::{TransactionId, TransactionOptions},
     },
     error::CoreError,
-    storage::backend_adapter::{
-        BackendAdapter, FieldTransform as CoreFieldTransform, Write, WritePrecondition,
+    storage::{
+        backend_adapter::{
+            BackendAdapter, FieldTransform as CoreFieldTransform, Write, WritePrecondition,
+        },
+        change_feed::{ChangeEvent, ChangeFeed},
     },
 };
 use embyr_proto::agent::{
@@ -29,7 +32,7 @@ use embyr_proto::agent::{
     FieldFilterProto as AgentFieldFilterProto, FieldTransform as AgentFieldTransform,
     Filter as AgentFilter, GetDocumentRequest, RollbackRequest, ServerValue as AgentServerValue,
     Transform as AgentTransform, UpdateDocumentRequest, Value as AgentValue, Write as AgentWrite,
-    Precondition as AgentPrecondition,
+    Precondition as AgentPrecondition, DocChange, DocChangeKind, SubscribeRequest,
 };
 use prost_types::Timestamp;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
@@ -225,6 +228,37 @@ fn agent_doc_to_domain(doc: AgentDocument) -> Option<FirestoreDocument> {
         update_time,
         version: 0,
     })
+}
+
+/// Translate one agent `DocChange` into a backend-neutral `ChangeEvent`.
+/// Anything unintelligible becomes `Reset` (resync) rather than being dropped.
+fn doc_change_to_event(change: &DocChange) -> ChangeEvent {
+    let kind = DocChangeKind::try_from(change.kind).unwrap_or(DocChangeKind::Unspecified);
+    let path = || {
+        let (pid, collection_path, document_id) = parse_agent_doc_name(&change.document_name)?;
+        Some(DocumentPath { project_id: ProjectId::new(&pid).ok()?, collection_path, document_id })
+    };
+    match (kind, path()) {
+        (DocChangeKind::Upsert, Some(p)) => ChangeEvent::Changed(p),
+        (DocChangeKind::Delete, Some(p)) => ChangeEvent::Deleted(p),
+        _ => ChangeEvent::Reset,
+    }
+}
+
+/// `ChangeFeed` over the agent's `Subscribe` server-stream.
+struct AgentChangeFeed {
+    stream: tonic::Streaming<DocChange>,
+}
+
+#[async_trait]
+impl ChangeFeed for AgentChangeFeed {
+    async fn next(&mut self) -> Result<ChangeEvent, CoreError> {
+        match self.stream.message().await {
+            Ok(Some(change)) => Ok(doc_change_to_event(&change)),
+            Ok(None) => Err(CoreError::BackendUnavailable("agent subscribe stream closed".into())),
+            Err(s) => Err(grpc_err(s)),
+        }
+    }
 }
 
 fn fields_to_agent_map(fields: &BTreeMap<String, FieldValue>) -> HashMap<String, AgentValue> {
@@ -767,6 +801,27 @@ impl BackendAdapter for AgentBackendAdapter {
             Err(s) => Err(CoreError::BackendUnavailable(format!("agent probe failed: {s}"))),
         }
     }
+
+    async fn open_change_feed(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<Option<Box<dyn ChangeFeed>>, CoreError> {
+        // The agent's `Subscribe` filters by SUBSTRING match of
+        // `collection_path` against each change's full document name and
+        // rejects an empty value. A project-wide feed (one registry channel
+        // per project) therefore subscribes with the project's documents
+        // prefix, which every document name of the project contains. Zero
+        // proto/agent change; works with already-deployed agents.
+        let req = SubscribeRequest {
+            collection_path: format!(
+                "projects/{}/databases/(default)/documents/",
+                project_id.as_str()
+            ),
+        };
+        let mut client = self.client.clone();
+        let stream = client.subscribe(req).await.map_err(grpc_err)?.into_inner();
+        Ok(Some(Box::new(AgentChangeFeed { stream })))
+    }
 }
 
 #[cfg(test)]
@@ -825,5 +880,25 @@ mod tests {
     fn is_not_null_is_cleanly_rejected_for_backend_mode_agent() {
         let result = domain_filter_to_agent_filter(&unary_filter(FilterOp::IsNotNull));
         assert!(result.is_err(), "IS_NOT_NULL must be cleanly rejected for backend_mode=agent");
+    }
+
+    fn change(kind: DocChangeKind, name: &str) -> DocChange {
+        DocChange { kind: kind as i32, document_name: name.to_string(), ..Default::default() }
+    }
+
+    #[test]
+    fn doc_change_translates_to_neutral_event_and_degrades_to_reset() {
+        let name = "projects/p1/databases/(default)/documents/orders/o1";
+        let path = DocumentPath {
+            project_id: ProjectId::new("p1").unwrap(),
+            collection_path: "orders".into(),
+            document_id: "o1".into(),
+        };
+        assert_eq!(doc_change_to_event(&change(DocChangeKind::Upsert, name)), ChangeEvent::Changed(path.clone()));
+        assert_eq!(doc_change_to_event(&change(DocChangeKind::Delete, name)), ChangeEvent::Deleted(path));
+        assert_eq!(doc_change_to_event(&change(DocChangeKind::Reset, "")), ChangeEvent::Reset);
+        // Unintelligible input must resync, never be dropped.
+        assert_eq!(doc_change_to_event(&change(DocChangeKind::Upsert, "garbage")), ChangeEvent::Reset);
+        assert_eq!(doc_change_to_event(&change(DocChangeKind::Unspecified, name)), ChangeEvent::Reset);
     }
 }

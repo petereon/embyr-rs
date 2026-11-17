@@ -13,6 +13,11 @@ use embyr_core::domain::{
     field_value::FieldValue,
 };
 
+/// Keep-alive guard for a project's running change source
+/// (`PostgresNotifyListener` or `ChangeFeedListener`): dropping it stops the
+/// background task. Type-erased so `active_listeners` holds either.
+pub type ListenerGuard = Box<dyn std::any::Any + Send>;
+
 /// An event delivered to a registered Listen subscriber.
 #[derive(Clone, Debug)]
 pub enum ListenEvent {
@@ -102,17 +107,22 @@ impl ListenRegistry {
         }
     }
 
-    /// Signal RESET to all subscribers on a channel.
-    ///
-    /// Used in integration tests to simulate overflow without relying on channel
-    /// saturation timing, which is non-deterministic under async scheduling.
-    /// Not compiled into production builds.
-    pub async fn simulate_overflow(&self, channel: &str) {
+    /// Signal RESET to all subscribers on a channel: each Listen session
+    /// tells its client to resync and ends. Used when a change source may
+    /// have lost events (agent feed reconnect / reset event).
+    pub async fn reset(&self, channel: &str) {
         let map = self.subscribers.read().await;
         if let Some(entries) = map.get(channel) {
             for entry in entries {
                 entry.reset_notify.notify_one();
             }
         }
+    }
+
+    /// Integration tests use this to simulate overflow without relying on
+    /// channel saturation timing, which is non-deterministic under async
+    /// scheduling.
+    pub async fn simulate_overflow(&self, channel: &str) {
+        self.reset(channel).await;
     }
 }
