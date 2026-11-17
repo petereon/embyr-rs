@@ -40,7 +40,8 @@ async fn set_project_status(
     credential_cache: &CredentialCache,
 ) -> StatusCode {
     let result = sqlx::query(
-        "UPDATE projects SET status = $2, updated_at = now() \
+        "UPDATE projects SET status = $2, updated_at = now(), \
+         suspended_by = CASE WHEN $2::text = 'suspended' THEN 'system' ELSE NULL END \
          WHERE id = $1 AND status IN ('active', 'suspended')",
     )
     .bind(project_id)

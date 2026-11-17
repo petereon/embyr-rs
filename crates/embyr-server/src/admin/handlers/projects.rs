@@ -156,7 +156,7 @@ async fn patch_project_inner(
     // ── Pre-check: account isolation ──────────────────────────────────────────
     // Fetching account_id before UPDATE allows us to return 403 vs 404 precisely.
     let pre = sqlx::query(
-        "SELECT account_id, status FROM projects WHERE id = $1",
+        "SELECT account_id, status, suspended_by FROM projects WHERE id = $1",
     )
     .bind(&project_id)
     .fetch_optional(pool)
@@ -180,6 +180,14 @@ async fn patch_project_inner(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    // ── Guard: an operator/system suspension cannot be undone via PATCH (#64) ─
+    if body.status.as_deref() == Some("active") && existing_status == "suspended" {
+        let suspended_by: Option<String> = pre.try_get("suspended_by").unwrap_or(None);
+        if suspended_by.as_deref() != Some("account") {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
+
     // ── Guard: a billing suspension cannot be reversed via PATCH (#59) ────────
     // Billing suspensions (Stripe final payment failure → `past_due`, free-plan
     // cap → `free_cap_exceeded`) are recorded on the account's subscription,
@@ -198,6 +206,10 @@ async fn patch_project_inner(
          SET \
            name                = COALESCE($2, name), \
            status              = COALESCE($3, status), \
+           suspended_by        = CASE WHEN $3::text IS NULL THEN suspended_by \
+                                      WHEN $3::text = 'active' THEN NULL \
+                                      WHEN status = 'active' THEN 'account' \
+                                      ELSE suspended_by END, \
            logging_enabled     = COALESCE($4, logging_enabled), \
            log_retention_days  = COALESCE($5, log_retention_days), \
            updated_at          = now() \

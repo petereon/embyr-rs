@@ -124,6 +124,31 @@ async fn owner_cannot_reactivate_project_during_billing_hold() {
     assert_eq!(status, "suspended");
 }
 
+// ── #64 ───────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn account_cannot_undo_system_suspension_but_can_undo_own() {
+    let ctx = AdminTestContext::new().await;
+    let cookie = owner(&ctx).await;
+
+    // Operator/system suspension: not reversible by the account (no billing hold needed).
+    sqlx::query("UPDATE projects SET status = 'suspended', suspended_by = 'system' WHERE id = $1")
+        .bind(PROJECT)
+        .execute(&ctx.pool)
+        .await
+        .expect("system suspend");
+    assert_eq!(patch_project(&ctx, &cookie, serde_json::json!({"status": "active"})).await, 409);
+
+    // Account's own suspension: reversible.
+    sqlx::query("UPDATE projects SET status = 'active', suspended_by = NULL WHERE id = $1")
+        .bind(PROJECT)
+        .execute(&ctx.pool)
+        .await
+        .expect("reset");
+    assert_eq!(patch_project(&ctx, &cookie, serde_json::json!({"status": "suspended"})).await, 200);
+    assert_eq!(patch_project(&ctx, &cookie, serde_json::json!({"status": "active"})).await, 200);
+}
+
 // ── #60 ───────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
