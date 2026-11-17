@@ -111,6 +111,10 @@ name = "typed_order_by"
 path = "../../tests/acceptance/typed_order_by.rs"
 
 [[test]]
+name = "partition_query"
+path = "../../tests/acceptance/partition_query.rs"
+
+[[test]]
 name = "us_04b_subcollection_query_scope"
 path = "../../tests/acceptance/us_04b_subcollection_query_scope.rs"
 
