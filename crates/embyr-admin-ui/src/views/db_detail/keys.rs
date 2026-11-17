@@ -35,6 +35,13 @@ pub fn KeysView(id: DbId) -> impl IntoView {
     let disabled =
         move || model.with(|m| !m.can_manage_databases() || m.pending.contains(&CallKind::ApiKey));
     let confirm_revoke = RwSignal::new(false);
+    let enabled_hosted = Memo::new({
+        let id = id.clone();
+        move |_| model.with(|m| m.hosted_identity.contains(&id))
+    });
+    let hosted_disabled =
+        move || model.with(|m| !m.can_manage_databases() || m.pending.contains(&CallKind::HostedIdentity));
+    let hosted_id = id.clone();
 
     let rotate_id = id.clone();
     let revoke_id = id.clone();
@@ -74,6 +81,34 @@ pub fn KeysView(id: DbId) -> impl IntoView {
                     "Rotate issues a new key and keeps the previous one working for a grace period. \
                      Revoke now issues a new key and stops the previous one immediately."
                 </p>
+            </div>
+
+            <div class="row keys-header" style="margin-top:24px">
+                <div class="col">
+                    <span class="keys-title">"Hosted identity"</span>
+                    <span class="sub">
+                        "Let your app's end users sign in through Embyr. Enabling creates a signing key \
+                         that the server keeps encrypted; it is never shown. Enabling again changes nothing."
+                    </span>
+                </div>
+            </div>
+            <div class="card">
+                <div class="row modal-footer">
+                    <span class="sub">
+                        {move || if enabled_hosted.get() {
+                            "Enabled in this session. The API cannot report the current state, so a reload shows the button again."
+                        } else {
+                            "Not available for agent-mode databases."
+                        }}
+                    </span>
+                    <span class="spacer"/>
+                    <button
+                        class="btn btn-primary"
+                        type="button"
+                        disabled=hosted_disabled
+                        on:click=move |_| { dispatch.run(Msg::Request(ApiCall::EnableHostedIdentity(hosted_id.clone()))); }
+                    >"Enable hosted identity"</button>
+                </div>
             </div>
 
             {move || confirm_revoke.get().then(|| {

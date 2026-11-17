@@ -8,9 +8,10 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::model::{
-    CapUsage, CheckoutReturn, Connection, ConnectionSummary, CurrentUser, Database, DbBackendMode, DbId, DbMetrics,
-    DbStatus, Enrolment, LatencyStats, LogRetention, MetricsSummaryRow, MetricsWindow, Plan, ProjectApiKeyInfo,
-    RecoveryCodes, RevealedSecret, Role, SeriesPoint, Subscription, SubscriptionStatus, UsageStats, UsageTableRow,
+    AdminKey, CapUsage, CheckoutReturn, Connection, ConnectionSummary, CurrentUser, Database, DbBackendMode, DbId,
+    DbMetrics, DbStatus, Enrolment, KeyId, LatencyStats, LogRetention, Member, MetricsSummaryRow, MetricsWindow, Plan,
+    ProjectApiKeyInfo, QueryLogEntry, RecoveryCodes, RevealedSecret, Role, SecretKind, SeriesPoint, ServiceAccount,
+    ServiceAccountId, Subscription, SubscriptionStatus, UsageStats, UsageTableRow, UserId,
 };
 use crate::msg::Msg;
 
@@ -40,6 +41,18 @@ pub enum CallKind {
     DeleteAccount,
     InviteAccept,
     InviteConfirm,
+    QueryLogs,
+    HostedIdentity,
+    Members,
+    MemberInvite,
+    /// Role change, removal and invitation revoke share a kind: one member operation at a time.
+    MemberChange,
+    ServiceAccounts,
+    /// Create and delete share a kind: one service-account operation at a time.
+    ServiceAccountWrite,
+    AdminKeys,
+    /// Create and revoke share a kind: one admin-key operation at a time.
+    AdminKeyWrite,
 }
 
 /// How the second factor was supplied. Exactly one reaches the server.
@@ -152,6 +165,27 @@ pub enum ApiCall {
     AcceptInvitation { token: String, display_name: String, password: String },
     /// `POST /auth/invitations/confirm`: step 2, proves the authenticator is enrolled.
     ConfirmInvitation { token: String, totp_code: String },
+    /// `GET /projects/:id/query_logs`: `op` filters exactly, `after` is the cursor of a "load more".
+    LoadQueryLogs { id: DbId, op: Option<String>, after: Option<String> },
+    /// `POST /projects/:id/hosted_identity/enable` (Owner/Admin): idempotent, no body.
+    EnableHostedIdentity(DbId),
+    LoadMembers,
+    /// `POST /members/invite` (Owner/Admin): the role may not exceed the inviter's own.
+    InviteMember { email: String, role: Role },
+    /// `PATCH /members/:id/role`.
+    ChangeMemberRole { id: UserId, role: Role },
+    /// `DELETE /members/:id`.
+    RemoveMember(UserId),
+    /// `DELETE /members/invitations/:id`.
+    RevokeInvitation(UserId),
+    LoadServiceAccounts,
+    CreateServiceAccount { name: String, description: Option<String>, role: Role },
+    DeleteServiceAccount(ServiceAccountId),
+    LoadAdminKeys,
+    /// `POST /admin_keys`: the plaintext comes back once.
+    CreateAdminKey { name: String, role: Role, service_account_id: Option<ServiceAccountId> },
+    /// `DELETE /admin_keys/:id`.
+    RevokeAdminKey(KeyId),
 }
 
 impl ApiCall {
@@ -178,6 +212,17 @@ impl ApiCall {
             ApiCall::DeleteAccount { .. } => CallKind::DeleteAccount,
             ApiCall::AcceptInvitation { .. } => CallKind::InviteAccept,
             ApiCall::ConfirmInvitation { .. } => CallKind::InviteConfirm,
+            ApiCall::LoadQueryLogs { .. } => CallKind::QueryLogs,
+            ApiCall::EnableHostedIdentity(_) => CallKind::HostedIdentity,
+            ApiCall::LoadMembers => CallKind::Members,
+            ApiCall::InviteMember { .. } => CallKind::MemberInvite,
+            ApiCall::ChangeMemberRole { .. } | ApiCall::RemoveMember(_) | ApiCall::RevokeInvitation(_) => {
+                CallKind::MemberChange
+            }
+            ApiCall::LoadServiceAccounts => CallKind::ServiceAccounts,
+            ApiCall::CreateServiceAccount { .. } | ApiCall::DeleteServiceAccount(_) => CallKind::ServiceAccountWrite,
+            ApiCall::LoadAdminKeys => CallKind::AdminKeys,
+            ApiCall::CreateAdminKey { .. } | ApiCall::RevokeAdminKey(_) => CallKind::AdminKeyWrite,
         }
     }
 
@@ -256,6 +301,19 @@ impl std::fmt::Debug for ApiCall {
                 .field("token", &"<redacted>")
                 .field("totp_code", &"<redacted>")
                 .finish(),
+            ApiCall::LoadQueryLogs { id, op, after } => write!(f, "LoadQueryLogs({}, {op:?}, {after:?})", id.0),
+            ApiCall::EnableHostedIdentity(id) => write!(f, "EnableHostedIdentity({})", id.0),
+            ApiCall::LoadMembers => f.write_str("LoadMembers"),
+            ApiCall::InviteMember { email, role } => write!(f, "InviteMember({email}, {role:?})"),
+            ApiCall::ChangeMemberRole { id, role } => write!(f, "ChangeMemberRole({}, {role:?})", id.0),
+            ApiCall::RemoveMember(id) => write!(f, "RemoveMember({})", id.0),
+            ApiCall::RevokeInvitation(id) => write!(f, "RevokeInvitation({})", id.0),
+            ApiCall::LoadServiceAccounts => f.write_str("LoadServiceAccounts"),
+            ApiCall::CreateServiceAccount { name, role, .. } => write!(f, "CreateServiceAccount({name}, {role:?})"),
+            ApiCall::DeleteServiceAccount(id) => write!(f, "DeleteServiceAccount({})", id.0),
+            ApiCall::LoadAdminKeys => f.write_str("LoadAdminKeys"),
+            ApiCall::CreateAdminKey { name, role, .. } => write!(f, "CreateAdminKey({name}, {role:?})"),
+            ApiCall::RevokeAdminKey(id) => write!(f, "RevokeAdminKey({})", id.0),
         }
     }
 }
@@ -404,7 +462,73 @@ pub fn to_request(call: &ApiCall) -> HttpRequest {
             path: "/admin/v1/auth/invitations/confirm".into(),
             body: Some(serde_json::json!({ "token": token, "totp_code": totp_code })),
         },
+        ApiCall::LoadQueryLogs { id, op, after } => {
+            // Op values and entry ids are API-controlled tokens (`[a-z_]`, UUID): no escaping needed.
+            let query: Vec<String> = [("op", op), ("after", after)]
+                .into_iter()
+                .filter_map(|(key, value)| value.as_ref().map(|v| format!("{key}={v}")))
+                .collect();
+            let suffix = if query.is_empty() { String::new() } else { format!("?{}", query.join("&")) };
+            get(&project(id, &format!("/query_logs{suffix}")))
+        }
+        ApiCall::EnableHostedIdentity(id) => post(project(id, "/hosted_identity/enable")),
+        ApiCall::LoadMembers => get("/admin/v1/members"),
+        ApiCall::InviteMember { email, role } => HttpRequest {
+            method: Method::Post,
+            path: "/admin/v1/members/invite".into(),
+            body: Some(serde_json::json!({ "email": email.trim(), "role": role_value(role) })),
+        },
+        ApiCall::ChangeMemberRole { id, role } => {
+            patch(format!("/admin/v1/members/{}/role", id.0), serde_json::json!({ "role": role_value(role) }))
+        }
+        ApiCall::RemoveMember(id) => {
+            HttpRequest { method: Method::Delete, path: format!("/admin/v1/members/{}", id.0), body: None }
+        }
+        ApiCall::RevokeInvitation(id) => HttpRequest {
+            method: Method::Delete,
+            path: format!("/admin/v1/members/invitations/{}", id.0),
+            body: None,
+        },
+        ApiCall::LoadServiceAccounts => get("/admin/v1/service_accounts"),
+        ApiCall::CreateServiceAccount { name, description, role } => {
+            let mut body = serde_json::json!({ "name": name.trim(), "role": role_value(role) });
+            if let Some(d) = description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                body["description"] = d.into();
+            }
+            HttpRequest { method: Method::Post, path: "/admin/v1/service_accounts".into(), body: Some(body) }
+        }
+        ApiCall::DeleteServiceAccount(id) => HttpRequest {
+            method: Method::Delete,
+            path: format!("/admin/v1/service_accounts/{}", id.0),
+            body: None,
+        },
+        ApiCall::LoadAdminKeys => get("/admin/v1/admin_keys"),
+        ApiCall::CreateAdminKey { name, role, service_account_id } => {
+            let mut body = serde_json::json!({ "name": name.trim(), "role": role_value(role) });
+            if let Some(sa) = service_account_id {
+                body["service_account_id"] = sa.0.to_string().into();
+            }
+            HttpRequest { method: Method::Post, path: "/admin/v1/admin_keys".into(), body: Some(body) }
+        }
+        ApiCall::RevokeAdminKey(id) => {
+            HttpRequest { method: Method::Delete, path: format!("/admin/v1/admin_keys/{}", id.0), body: None }
+        }
     }
+}
+
+/// G-08: the API's role strings are exactly `Owner | Admin | Viewer`.
+fn role_value(role: &Role) -> &'static str {
+    match role {
+        Role::Owner => "Owner",
+        Role::Admin => "Admin",
+        Role::Viewer => "Viewer",
+    }
+}
+
+/// The link an invitee opens to redeem `token`. `origin` is the console's own origin
+/// (`window.location.origin`), so the link points at the deployment the admin is using.
+pub fn invite_link(origin: &str, token: &str) -> String {
+    format!("{}/admin/?invite={token}", origin.trim_end_matches('/'))
 }
 
 fn post(path: String) -> HttpRequest {
@@ -485,7 +609,7 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
             let dto: ProvisionedDto = parse(body)?;
             Ok(vec![
                 Msg::CloseCreateDb,
-                Msg::SecretRevealed(RevealedSecret { db: DbId(dto.project_id), secret: dto.api_key }),
+                Msg::SecretRevealed(RevealedSecret::api_key(DbId(dto.project_id), dto.api_key)),
                 Msg::Request(ApiCall::LoadProjects),
             ])
         }
@@ -499,7 +623,7 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
             };
             Ok(vec![
                 Msg::ApiKeyInfoLoaded(id.clone(), info),
-                Msg::SecretRevealed(RevealedSecret { db: id.clone(), secret: dto.api_key }),
+                Msg::SecretRevealed(RevealedSecret::api_key(id.clone(), dto.api_key)),
             ])
         }
         ApiCall::LoadSubscription => {
@@ -552,6 +676,89 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
             let dto: ConfirmedInvitationDto = parse(body)?;
             Ok(vec![Msg::InviteConfirmed(RecoveryCodes(dto.recovery_codes))])
         }
+        ApiCall::LoadQueryLogs { id, after, .. } => {
+            let dto: QueryLogsDto = parse(body)?;
+            let entries = dto
+                .entries
+                .into_iter()
+                .map(|e| {
+                    Ok(QueryLogEntry {
+                        created_at: parse_ts("created_at", &e.created_at)?,
+                        id: e.id,
+                        op: e.op,
+                        collection_path: e.collection_path,
+                        latency_ms: e.latency_ms,
+                        status: e.status,
+                        error_code: e.error_code,
+                    })
+                })
+                .collect::<Result<_, ApiError>>()?;
+            Ok(vec![Msg::SetQueryLogs { db: id.clone(), total: dto.total, entries, append: after.is_some() }])
+        }
+        ApiCall::EnableHostedIdentity(id) => Ok(vec![Msg::HostedIdentityEnabled(id.clone())]),
+        ApiCall::LoadMembers => {
+            let rows: Vec<MemberDto> = parse(body)?;
+            Ok(vec![Msg::SetMembers(rows.into_iter().map(Member::try_from).collect::<Result<_, _>>()?)])
+        }
+        // The token comes back once: reveal it so the admin can share the link when mail is not
+        // delivered. The pending row is built from the server's own invitation id.
+        ApiCall::InviteMember { .. } => {
+            let dto: InvitationDto = parse(body)?;
+            let pending = Member {
+                id: UserId(parse_uuid("invitation_id", &dto.invitation_id)?),
+                email: dto.email.clone(),
+                display_name: None,
+                role: parse_role(&dto.role)?,
+                pending: true,
+                mfa_enabled: false,
+                last_login: None,
+            };
+            Ok(vec![
+                Msg::MemberInvited(pending),
+                Msg::SecretRevealed(RevealedSecret::other(SecretKind::InviteToken, dto.email, dto.invite_token)),
+            ])
+        }
+        ApiCall::ChangeMemberRole { id, role } => Ok(vec![Msg::SetMemberRole(id.clone(), role.clone())]),
+        ApiCall::RemoveMember(id) => Ok(vec![Msg::RemoveMember(id.clone())]),
+        ApiCall::RevokeInvitation(id) => Ok(vec![Msg::InvitationRevoked(id.clone())]),
+        ApiCall::LoadServiceAccounts => {
+            let rows: Vec<ServiceAccountDto> = parse(body)?;
+            Ok(vec![Msg::SetServiceAccounts(
+                rows.into_iter().map(ServiceAccount::try_from).collect::<Result<_, _>>()?,
+            )])
+        }
+        ApiCall::CreateServiceAccount { .. } => {
+            let dto: ServiceAccountDto = parse(body)?;
+            Ok(vec![Msg::ServiceAccountCreated(dto.try_into()?)])
+        }
+        // Deleting a service account revokes its admin keys server-side: re-read them.
+        ApiCall::DeleteServiceAccount(id) => {
+            Ok(vec![Msg::DeleteServiceAccount(id.clone()), Msg::Request(ApiCall::LoadAdminKeys)])
+        }
+        ApiCall::LoadAdminKeys => {
+            let rows: Vec<AdminKeyDto> = parse(body)?;
+            // Revoked keys stay in the API list for audit; the console lists live keys only.
+            let keys = rows
+                .into_iter()
+                .filter(|k| k.revoked_at.is_none())
+                .map(AdminKey::try_from)
+                .collect::<Result<_, _>>()?;
+            Ok(vec![Msg::SetAdminKeys(keys)])
+        }
+        ApiCall::CreateAdminKey { role, service_account_id, .. } => {
+            let dto: CreatedAdminKeyDto = parse(body)?;
+            let key = AdminKey {
+                id: KeyId(parse_uuid("id", &dto.id)?),
+                name: dto.name.clone(),
+                service_account_id: service_account_id.clone(),
+                member_id: None,
+                role: role.clone(),
+                prefix: dto.prefix,
+                created_at: Some(parse_ts("created_at", &dto.created_at)?),
+            };
+            Ok(vec![Msg::AdminKeyCreated(key), Msg::SecretRevealed(RevealedSecret::other(SecretKind::AdminKey, dto.name, dto.key))])
+        }
+        ApiCall::RevokeAdminKey(id) => Ok(vec![Msg::RevokeAdminKey(id.clone())]),
     }
 }
 
@@ -604,6 +811,43 @@ fn refine(call: &ApiCall, error: ApiError, body: &str) -> ApiError {
         (ApiCall::ConfirmInvitation { .. }, ApiError::NotFound) => ApiError::Invalid(
             "Enrolment expired or was reset after too many wrong codes. Go back and set your password again.".into(),
         ),
+        // Hosted identity is refused for agent-mode databases with a `{reason}` body.
+        (ApiCall::EnableHostedIdentity(_), ApiError::Forbidden) if body.contains("HOSTED_IDENTITY_UNAVAILABLE") => {
+            ApiError::Invalid("Hosted identity is not available for agent-mode databases".into())
+        }
+        (ApiCall::InviteMember { .. }, ApiError::Conflict(_)) => {
+            ApiError::Conflict("That email already belongs to a member or has an open invitation".into())
+        }
+        (ApiCall::InviteMember { .. }, ApiError::Invalid(_)) => {
+            ApiError::Invalid("Enter a valid email address and choose a role".into())
+        }
+        (ApiCall::InviteMember { .. }, ApiError::Forbidden) => {
+            ApiError::Invalid("You cannot invite someone to a role above your own".into())
+        }
+        (ApiCall::ChangeMemberRole { .. }, ApiError::Forbidden) => ApiError::Invalid(
+            "That change is not allowed: an Admin cannot change an Owner, and the last Owner cannot be demoted".into(),
+        ),
+        (ApiCall::RemoveMember(_) | ApiCall::RevokeInvitation(_), ApiError::Forbidden) => ApiError::Invalid(
+            "That removal is not allowed: an Admin cannot remove an Owner".into(),
+        ),
+        (ApiCall::ChangeMemberRole { .. } | ApiCall::RemoveMember(_) | ApiCall::RevokeInvitation(_), ApiError::NotFound) => {
+            ApiError::Invalid("That member no longer exists. Refresh the list.".into())
+        }
+        (ApiCall::CreateServiceAccount { .. }, ApiError::Invalid(_)) => {
+            ApiError::Invalid("Enter a name and choose a role".into())
+        }
+        (ApiCall::DeleteServiceAccount(_), ApiError::NotFound) => {
+            ApiError::Invalid("That service account no longer exists. Refresh the list.".into())
+        }
+        (ApiCall::CreateAdminKey { .. }, ApiError::Forbidden) => {
+            ApiError::Invalid("You cannot create a key with a role above your own".into())
+        }
+        (ApiCall::CreateAdminKey { .. }, ApiError::Invalid(_)) => {
+            ApiError::Invalid("Enter a name, choose a role, and pick an existing service account".into())
+        }
+        (ApiCall::RevokeAdminKey(_), ApiError::NotFound) => {
+            ApiError::Invalid("That key no longer exists. Refresh the list.".into())
+        }
         _ => error,
     }
 }
@@ -1022,4 +1266,118 @@ struct RotatedKeyDto {
     api_key: String,
     rotated_at: String,
     previous_key_expires_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct QueryLogEntryDto {
+    id: String,
+    op: String,
+    collection_path: Option<String>,
+    latency_ms: Option<i64>,
+    status: String,
+    error_code: Option<String>,
+    created_at: String,
+}
+
+#[derive(Deserialize)]
+struct QueryLogsDto {
+    total: u64,
+    entries: Vec<QueryLogEntryDto>,
+}
+
+fn parse_uuid(field: &str, value: &str) -> Result<uuid::Uuid, ApiError> {
+    uuid::Uuid::parse_str(value).map_err(|e| ApiError::Decode(format!("{field}: {e}")))
+}
+
+/// `auth_method == "pending"` marks an invitation row, whose id is the invitation's.
+#[derive(Deserialize)]
+struct MemberDto {
+    id: String,
+    email: String,
+    display_name: Option<String>,
+    role: String,
+    auth_method: String,
+    mfa_enabled: bool,
+    #[serde(default)]
+    last_login_at: Option<String>,
+}
+
+impl TryFrom<MemberDto> for Member {
+    type Error = ApiError;
+    fn try_from(dto: MemberDto) -> Result<Self, ApiError> {
+        Ok(Member {
+            id: UserId(parse_uuid("id", &dto.id)?),
+            email: dto.email,
+            display_name: dto.display_name,
+            role: parse_role(&dto.role)?,
+            pending: dto.auth_method == "pending",
+            mfa_enabled: dto.mfa_enabled,
+            last_login: parse_opt_ts("last_login_at", dto.last_login_at.as_deref())?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct InvitationDto {
+    invitation_id: String,
+    email: String,
+    role: String,
+    invite_token: String,
+}
+
+#[derive(Deserialize)]
+struct ServiceAccountDto {
+    id: String,
+    name: String,
+    description: Option<String>,
+    role: String,
+    created_at: String,
+}
+
+impl TryFrom<ServiceAccountDto> for ServiceAccount {
+    type Error = ApiError;
+    fn try_from(dto: ServiceAccountDto) -> Result<Self, ApiError> {
+        Ok(ServiceAccount {
+            id: ServiceAccountId(parse_uuid("id", &dto.id)?),
+            name: dto.name,
+            description: dto.description.filter(|d| !d.is_empty()),
+            role: parse_role(&dto.role)?,
+            created_at: Some(parse_ts("created_at", &dto.created_at)?),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct AdminKeyDto {
+    id: String,
+    name: String,
+    role: String,
+    prefix: String,
+    created_at: String,
+    #[serde(default)]
+    revoked_at: Option<String>,
+}
+
+impl TryFrom<AdminKeyDto> for AdminKey {
+    type Error = ApiError;
+    fn try_from(dto: AdminKeyDto) -> Result<Self, ApiError> {
+        Ok(AdminKey {
+            id: KeyId(parse_uuid("id", &dto.id)?),
+            name: dto.name,
+            service_account_id: None,
+            member_id: None,
+            role: parse_role(&dto.role)?,
+            prefix: dto.prefix,
+            created_at: Some(parse_ts("created_at", &dto.created_at)?),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct CreatedAdminKeyDto {
+    id: String,
+    name: String,
+    key: String,
+    prefix: String,
+    created_at: String,
 }

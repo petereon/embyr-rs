@@ -166,6 +166,7 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
             model.db_metrics.remove(&db_id);
             model.metrics_summary.remove(&db_id);
             model.connections.remove(&db_id);
+            model.query_logs.remove(&db_id);
             // Leave the detail view of the database that just went away (the list reloads).
             if model.nav.section == Section::DbDetail(db_id) {
                 model.nav.section = Section::Databases;
@@ -190,6 +191,21 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
             }
         }
         Msg::SetDbTab(_, _) => {}
+
+        // ── US-007: Query Logs ─────────────────────────────────────────────
+        Msg::SetQueryLogs { db, total, entries, append } => {
+            let logs = model.query_logs.entry(db).or_default();
+            logs.total = total;
+            if append {
+                logs.entries.extend(entries);
+            } else {
+                logs.entries = entries;
+            }
+        }
+        Msg::HostedIdentityEnabled(db) => {
+            model.hosted_identity.insert(db);
+            push_toast(model, "Hosted identity is enabled for this database".into(), ToastLevel::Info);
+        }
 
         // ── US-005: Connections ────────────────────────────────────────────
         Msg::PatchDb(db_id, patch) => {
@@ -230,6 +246,8 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
         }
 
         // ── US-009: Members ────────────────────────────────────────────────
+        Msg::SetMembers(members) => model.members = members,
+        Msg::InvitationRevoked(id) => model.members.retain(|m| !(m.pending && m.id == id)),
         Msg::MemberInvited(member) => {
             model.members.push(member);
         }
@@ -261,6 +279,8 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
         }
 
         // ── US-010: Service Accounts + Admin Keys ──────────────────────────
+        Msg::SetServiceAccounts(accounts) => model.service_accounts = accounts,
+        Msg::SetAdminKeys(keys) => model.admin_keys = keys,
         Msg::ServiceAccountCreated(sa) => {
             model.service_accounts.push(sa);
         }
@@ -364,6 +384,8 @@ fn section_loads(model: &mut AppModel) -> Vec<Effect> {
         Section::Dashboard => vec![ApiCall::LoadProjects, ApiCall::LoadMetricsSummary],
         Section::Databases => vec![ApiCall::LoadProjects],
         Section::Billing => vec![ApiCall::LoadSubscription, ApiCall::LoadUsage],
+        Section::Identities => vec![ApiCall::LoadMembers, ApiCall::LoadServiceAccounts],
+        Section::ApiKeys => vec![ApiCall::LoadAdminKeys, ApiCall::LoadServiceAccounts],
         Section::DbDetail(id) => vec![
             ApiCall::LoadProject(id.clone()),
             ApiCall::LoadDbMetrics { id: id.clone(), window: MetricsWindow::default() },
@@ -437,12 +459,12 @@ fn account_delete_failed(model: &mut AppModel, error: ApiError) {
 }
 
 fn push_error_toast(model: &mut AppModel, message: String) {
+    push_toast(model, message, ToastLevel::Error);
+}
+
+fn push_toast(model: &mut AppModel, message: String, level: ToastLevel) {
     model.toast_seq += 1;
-    model.toasts.push(Toast {
-        id: ToastId(Uuid::from_u128(u128::from(model.toast_seq))),
-        message,
-        level: ToastLevel::Error,
-    });
+    model.toasts.push(Toast { id: ToastId(Uuid::from_u128(u128::from(model.toast_seq))), message, level });
 }
 
 /// Count the number of members with the Owner role.
@@ -451,6 +473,6 @@ fn push_error_toast(model: &mut AppModel, message: String) {
 fn count_owners(members: &[Member]) -> usize {
     members
         .iter()
-        .filter(|member| member.role == Role::Owner)
+        .filter(|member| member.role == Role::Owner && !member.pending)
         .count()
 }

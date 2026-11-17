@@ -366,22 +366,81 @@ pub struct ProjectApiKeyInfo {
     pub previous_expires_at: Option<DateTime<Utc>>,
 }
 
+/// What a revealed one-time secret is, so the reveal modal can word itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretKind {
+    /// A project's SDK API key (`db` names the database).
+    ApiKey,
+    /// An account-level admin API key (`label` is the key name).
+    AdminKey,
+    /// An invitation token (`label` is the invitee's email); the view turns it into a link.
+    InviteToken,
+}
+
 /// One-time plaintext secret shown in the reveal modal. `Debug` redacts it; `update` drops it when
 /// the modal closes, on navigation, sign-out and session expiry (AC-AUW-20).
 #[derive(Clone, PartialEq, Eq)]
 pub struct RevealedSecret {
+    /// The database an API key belongs to; empty for the other kinds.
     pub db: DbId,
     pub secret: String,
+    pub kind: SecretKind,
+    /// What the secret is for: key name or invitee email. Empty for API keys.
+    pub label: String,
+}
+
+impl RevealedSecret {
+    pub fn api_key(db: DbId, secret: String) -> Self {
+        Self { db, secret, kind: SecretKind::ApiKey, label: String::new() }
+    }
+
+    pub fn other(kind: SecretKind, label: String, secret: String) -> Self {
+        Self { db: DbId::default(), secret, kind, label }
+    }
 }
 
 impl std::fmt::Debug for RevealedSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RevealedSecret")
             .field("db", &self.db)
+            .field("kind", &self.kind)
+            .field("label", &self.label)
             .field("secret", &"<redacted>")
             .finish()
     }
 }
+
+/// One row of `GET /projects/:id/query_logs`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryLogEntry {
+    pub id: String,
+    /// `read | write | delete | listen | run_query` (G-34).
+    pub op: String,
+    pub collection_path: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub status: String,
+    pub error_code: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The loaded pages of one database's query log (newest first).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QueryLogs {
+    /// Size of the whole filtered set on the server, not of `entries`.
+    pub total: u64,
+    pub entries: Vec<QueryLogEntry>,
+}
+
+impl QueryLogs {
+    /// The cursor for the next page: the last loaded entry's id, while the server still has more.
+    pub fn next_cursor(&self) -> Option<&str> {
+        let more = (self.entries.len() as u64) < self.total;
+        self.entries.last().filter(|_| more).map(|e| e.id.as_str())
+    }
+}
+
+/// Query-log operation filter values the API accepts (`?op=`), in display order.
+pub const LOG_OPS: [&str; 5] = ["read", "write", "delete", "listen", "run_query"];
 
 /// Percentiles of one op class. `None` (server `null`) means no samples: shown as "—", never 0 ms (AC-AUW-30).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -681,6 +740,10 @@ pub struct AppModel {
     pub connection_saves: u32,
     /// One-time plaintext secret for the reveal modal; cleared on close/navigation/sign-out.
     pub revealed_secret: Option<RevealedSecret>,
+    /// Query-log pages per database (`GET /projects/:id/query_logs`).
+    pub query_logs: HashMap<DbId, QueryLogs>,
+    /// Databases whose hosted identity was enabled in this session (the API has no read for it).
+    pub hosted_identity: HashSet<DbId>,
     /// Service accounts.
     pub service_accounts: Vec<ServiceAccount>,
     /// Account-level admin API keys.
@@ -752,6 +815,8 @@ impl AppModel {
             connections: HashMap::new(),
             connection_saves: 0,
             revealed_secret: None,
+            query_logs: HashMap::new(),
+            hosted_identity: HashSet::new(),
             service_accounts: mock::service_accounts(),
             admin_keys: mock::admin_keys(),
             oidc_providers: mock::oidc_providers(),
@@ -798,6 +863,27 @@ impl AppModel {
     /// The server enforces the same rule.
     pub fn can_manage_databases(&self) -> bool {
         self.current_user.as_ref().is_some_and(|u| u.role != Role::Viewer)
+    }
+
+    /// Owner and Admin may manage members, service accounts and admin keys (the server enforces it).
+    pub fn can_manage_identities(&self) -> bool {
+        self.can_manage_databases()
+    }
+
+    /// Roles the signed-in user may hand out: never above their own (the server rejects escalation).
+    pub fn assignable_roles(&self) -> Vec<Role> {
+        match self.current_user.as_ref().map(|u| &u.role) {
+            Some(Role::Owner) => vec![Role::Owner, Role::Admin, Role::Viewer],
+            Some(Role::Admin) => vec![Role::Admin, Role::Viewer],
+            _ => vec![],
+        }
+    }
+
+    /// Whether the signed-in user may change the role of, remove or revoke `target`:
+    /// an Admin may not touch an Owner.
+    pub fn can_edit_member(&self, target: &Member) -> bool {
+        self.can_manage_identities()
+            && (target.role != Role::Owner || self.current_user.as_ref().is_some_and(|u| u.role == Role::Owner))
     }
 
     /// Only the account Owner may delete a database (the server enforces the same rule).

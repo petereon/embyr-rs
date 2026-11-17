@@ -19,7 +19,7 @@ pub fn copy_to_clipboard(text: &str) {
 }
 
 #[cfg(feature = "csr")]
-use crate::model::AppModel;
+use crate::model::{AppModel, SecretKind};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -34,22 +34,50 @@ pub fn SecretModal() -> impl IntoView {
     view! {
         {move || {
             model.with(|m| m.revealed_secret.clone()).map(|revealed| {
-                let secret = revealed.secret.clone();
+                // An invitation is shared as a link: the bare token is of no use to the invitee.
+                let (title, hint, shown) = match revealed.kind {
+                    SecretKind::ApiKey => (
+                        "Copy your new API key".to_string(),
+                        "This key is shown only once. Store it now: it cannot be retrieved later.".to_string(),
+                        revealed.secret.clone(),
+                    ),
+                    SecretKind::AdminKey => (
+                        "Copy your new admin key".to_string(),
+                        format!(
+                            "Admin key '{}' is shown only once. Store it now: it cannot be retrieved later.",
+                            revealed.label
+                        ),
+                        revealed.secret.clone(),
+                    ),
+                    SecretKind::InviteToken => {
+                        let origin = web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default();
+                        (
+                            "Invitation created".to_string(),
+                            format!(
+                                "{} is emailed this link only if the server has mail delivery configured. \
+                                 It is shown once and expires in 7 days: share it directly if needed.",
+                                revealed.label
+                            ),
+                            crate::api::invite_link(&origin, &revealed.secret),
+                        )
+                    }
+                };
+                let secret = shown.clone();
                 view! {
                     <div class="modal-backdrop">
                         <div class="modal" role="dialog" aria-modal="true">
                             <div class="modal-head">
-                                <span class="modal-title">"Copy your new API key"</span>
+                                <span class="modal-title">{title}</span>
                             </div>
                             <div class="modal-body">
                                 <p style="color:var(--text-2);font-size:13.5px;line-height:1.55">
-                                    "This key is shown only once. Store it now: it cannot be retrieved later."
+                                    {hint}
                                 </p>
                                 <input
                                     class="input mono"
                                     type="text"
                                     readonly=true
-                                    prop:value=revealed.secret
+                                    prop:value=shown
                                 />
                                 <div class="row modal-footer" style="justify-content:flex-end">
                                     <button

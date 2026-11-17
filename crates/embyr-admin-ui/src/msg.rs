@@ -9,7 +9,7 @@ use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
     AdminKey, Card, CapUsage, CheckoutReturn, Connection, CurrentUser, Database, DbBackendMode, DbId, DbMetrics,
     DbPatch, Enrolment, Invoice, KeyId, LogRetention, Member, MetricsSummaryRow, OidcId, OidcProvider, Plan,
-    ProjectApiKeyInfo, RecoveryCodes, RevealedSecret, Role, ServiceAccount, ServiceAccountId, Subscription,
+    ProjectApiKeyInfo, QueryLogEntry, RecoveryCodes, RevealedSecret, Role, ServiceAccount, ServiceAccountId, Subscription,
     SubscriptionStatus, Toast, ToastId, UpgradeModalStep, UsageTableRow, UserId,
 };
 
@@ -101,12 +101,19 @@ pub enum Msg {
     ApiKeyInfoLoaded(DbId, ProjectApiKeyInfo),
 
     // ── US-007: Query Logs ─────────────────────────────────────────────────
-    /// (No model-mutating msg needed beyond SetDbLogging; logs are read-only in V1.)
+    /// `GET /projects/:id/query_logs`: a first page replaces the loaded entries, a later page appends.
+    SetQueryLogs { db: DbId, total: u64, entries: Vec<QueryLogEntry>, append: bool },
+    /// `POST .../hosted_identity/enable` returned 2xx (idempotent server-side).
+    HostedIdentityEnabled(DbId),
 
     // ── US-008: Billing ────────────────────────────────────────────────────
     /// (Billing uses SetDatabases as its data source in V1.)
 
     // ── US-009: Members ────────────────────────────────────────────────────
+    /// `GET /members`: replace the member list (pending invitations included).
+    SetMembers(Vec<Member>),
+    /// A pending invitation was revoked on the server.
+    InvitationRevoked(UserId),
     /// Append a newly invited member (or pending member).
     MemberInvited(Member),
     /// Change a member's role (subject to sole-Owner invariant).
@@ -115,6 +122,10 @@ pub enum Msg {
     RemoveMember(UserId),
 
     // ── US-010: Service Accounts + Admin Keys ──────────────────────────────
+    /// `GET /service_accounts`: replace the list.
+    SetServiceAccounts(Vec<ServiceAccount>),
+    /// `GET /admin_keys`: replace the list (revoked keys are not shown).
+    SetAdminKeys(Vec<AdminKey>),
     /// Append a newly created service account.
     ServiceAccountCreated(ServiceAccount),
     /// Delete a service account (cascades to revoke its admin keys).
