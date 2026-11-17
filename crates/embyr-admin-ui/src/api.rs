@@ -28,6 +28,8 @@ pub enum CallKind {
     Connection,
     PutConnection,
     PatchProject,
+    CreateProject,
+    DeleteProject,
     /// Rotate and revoke share a kind: one key operation at a time.
     ApiKey,
 }
@@ -53,6 +55,55 @@ impl ConnectionConfig {
             ConnectionConfig::Agent { .. } => DbBackendMode::AgentMode,
         }
     }
+
+    /// Every field the mode needs is non-blank (the server validates the content).
+    pub fn is_complete(&self) -> bool {
+        match self {
+            ConnectionConfig::DirectPg { dsn } => !dsn.trim().is_empty(),
+            ConnectionConfig::Agent { endpoint, ca_pem, client_cert_pem, client_key_pem } => {
+                [endpoint, ca_pem, client_cert_pem, client_key_pem].iter().all(|v| !v.trim().is_empty())
+            }
+        }
+    }
+
+    /// The mode + secret fields shared by `PUT /connection` and `POST /projects`.
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            ConnectionConfig::DirectPg { dsn } => serde_json::json!({ "backend_mode": "direct_pg", "dsn": dsn }),
+            ConnectionConfig::Agent { endpoint, ca_pem, client_cert_pem, client_key_pem } => serde_json::json!({
+                "backend_mode": "agent",
+                "agent_endpoint": endpoint,
+                "agent_ca_pem": ca_pem,
+                "agent_client_cert_pem": client_cert_pem,
+                "agent_client_key_pem": client_key_pem,
+            }),
+        }
+    }
+}
+
+/// A new database for `POST /projects` (Owner/Admin). The secrets in `config` live only in the
+/// `ApiCall`; the one-time API key comes back in the response.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NewProject {
+    pub project_id: String,
+    /// Optional display name; blank is not sent.
+    pub name: String,
+    pub config: ConnectionConfig,
+}
+
+impl NewProject {
+    /// Client-side gate only (the server re-validates): a well-formed id and a complete config.
+    pub fn is_ready(&self) -> bool {
+        is_valid_project_id(&self.project_id) && self.config.is_complete()
+    }
+}
+
+/// Mirrors the server's `ProjectId` rule `^[a-z][a-z0-9-]{0,62}$`.
+pub fn is_valid_project_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && id.len() <= 63
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// A user intent that needs the server. Secrets live only inside this value; `Debug` redacts them.
@@ -72,6 +123,10 @@ pub enum ApiCall {
     LoadConnection(DbId),
     PutConnection { id: DbId, config: ConnectionConfig },
     SetSuspended { id: DbId, suspended: bool },
+    /// `POST /projects` (Owner/Admin).
+    CreateProject(NewProject),
+    /// `DELETE /projects/:id` (Owner): soft delete.
+    DeleteProject(DbId),
     SetLogging { id: DbId, enabled: bool, retention: Option<LogRetention> },
     RotateApiKey(DbId),
     RevokeApiKey(DbId),
@@ -92,6 +147,8 @@ impl ApiCall {
             ApiCall::LoadConnection(_) => CallKind::Connection,
             ApiCall::PutConnection { .. } => CallKind::PutConnection,
             ApiCall::SetSuspended { .. } | ApiCall::SetLogging { .. } => CallKind::PatchProject,
+            ApiCall::CreateProject(_) => CallKind::CreateProject,
+            ApiCall::DeleteProject(_) => CallKind::DeleteProject,
             ApiCall::RotateApiKey(_) | ApiCall::RevokeApiKey(_) => CallKind::ApiKey,
         }
     }
@@ -138,6 +195,13 @@ impl std::fmt::Debug for ApiCall {
                 .field("config", &"<redacted>")
                 .finish(),
             ApiCall::SetSuspended { id, suspended } => write!(f, "SetSuspended({}, {suspended})", id.0),
+            ApiCall::CreateProject(new) => f
+                .debug_struct("CreateProject")
+                .field("project_id", &new.project_id)
+                .field("mode", &new.config.mode().api_value())
+                .field("config", &"<redacted>")
+                .finish(),
+            ApiCall::DeleteProject(id) => write!(f, "DeleteProject({})", id.0),
             ApiCall::SetLogging { id, enabled, retention } => {
                 write!(f, "SetLogging({}, {enabled}, {retention:?})", id.0)
             }
@@ -153,6 +217,7 @@ pub enum Method {
     Post,
     Put,
     Patch,
+    Delete,
 }
 
 /// Plain request data; the runtime adds same-origin credentials and the JSON content type.
@@ -238,19 +303,19 @@ pub fn to_request(call: &ApiCall) -> HttpRequest {
         ApiCall::PutConnection { id, config } => HttpRequest {
             method: Method::Put,
             path: project(id, "/connection"),
-            body: Some(match config {
-                ConnectionConfig::DirectPg { dsn } => {
-                    serde_json::json!({ "backend_mode": "direct_pg", "dsn": dsn })
-                }
-                ConnectionConfig::Agent { endpoint, ca_pem, client_cert_pem, client_key_pem } => serde_json::json!({
-                    "backend_mode": "agent",
-                    "agent_endpoint": endpoint,
-                    "agent_ca_pem": ca_pem,
-                    "agent_client_cert_pem": client_cert_pem,
-                    "agent_client_key_pem": client_key_pem,
-                }),
-            }),
+            body: Some(config.to_json()),
         },
+        ApiCall::CreateProject(new) => {
+            let mut body = new.config.to_json();
+            body["project_id"] = new.project_id.as_str().into();
+            if !new.name.trim().is_empty() {
+                body["name"] = new.name.trim().into();
+            }
+            HttpRequest { method: Method::Post, path: "/admin/v1/projects".into(), body: Some(body) }
+        }
+        ApiCall::DeleteProject(id) => {
+            HttpRequest { method: Method::Delete, path: project(id, ""), body: None }
+        }
         ApiCall::SetSuspended { id, suspended } => patch(
             project(id, ""),
             serde_json::json!({ "status": if *suspended { "suspended" } else { "active" } }),
@@ -281,7 +346,7 @@ pub fn decode(call: &ApiCall, response: HttpResponse) -> Vec<Msg> {
     let result = if (200..300).contains(&response.status) {
         decode_success(call, &response.body)
     } else {
-        Err(refine(call, error_for(&response)))
+        Err(refine(call, error_for(&response), &response.body))
     };
     settle(call, result)
 }
@@ -339,6 +404,17 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
             Msg::ConnectionSaved(id.clone(), config.mode()),
             Msg::Request(ApiCall::LoadConnection(id.clone())),
         ]),
+        // The key is shown once (AC-AUW-20); the list is refreshed from the server rather than
+        // patched locally, so the new row carries the server's own id/status/created_at.
+        ApiCall::CreateProject(_) => {
+            let dto: ProvisionedDto = parse(body)?;
+            Ok(vec![
+                Msg::CloseCreateDb,
+                Msg::SecretRevealed(RevealedSecret { db: DbId(dto.project_id), secret: dto.api_key }),
+                Msg::Request(ApiCall::LoadProjects),
+            ])
+        }
+        ApiCall::DeleteProject(id) => Ok(vec![Msg::DeleteDatabase(id.clone())]),
         // Revoke is rotate with a zero window: both return the replacement key, shown once.
         ApiCall::RotateApiKey(id) | ApiCall::RevokeApiKey(id) => {
             let dto: RotatedKeyDto = parse(body)?;
@@ -355,8 +431,21 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
 }
 
 /// Call-specific wording for statuses that carry no body of their own.
-fn refine(call: &ApiCall, error: ApiError) -> ApiError {
+fn refine(call: &ApiCall, error: ApiError, body: &str) -> ApiError {
     match (call, &error) {
+        (ApiCall::CreateProject(_), ApiError::Invalid(code)) => {
+            let detail = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| v.get("detail").and_then(|d| d.as_str().map(str::to_string)));
+            ApiError::Invalid(create_message(code, detail.as_deref()))
+        }
+        (ApiCall::CreateProject(_), ApiError::Conflict(code)) => ApiError::Conflict(create_message(code, None)),
+        (ApiCall::CreateProject(_), ApiError::Throttled { .. }) => {
+            ApiError::Invalid("Too many requests - wait a moment and try again".into())
+        }
+        (ApiCall::DeleteProject(_), ApiError::NotFound) => {
+            ApiError::Invalid("That database no longer exists. Refresh the list.".into())
+        }
         (ApiCall::SetSuspended { suspended: false, .. }, ApiError::Conflict(_)) => ApiError::Conflict(
             "cannot activate: the account is on a billing hold (past due or free-plan limit reached)".into(),
         ),
@@ -369,6 +458,40 @@ fn refine(call: &ApiCall, error: ApiError) -> ApiError {
             ApiError::Invalid("Password must be at least 12 characters".into())
         }
         _ => error,
+    }
+}
+
+/// User-facing text for the error codes `POST /projects` answers with (400 and 409).
+fn create_message(code: &str, detail: Option<&str>) -> String {
+    let with_detail = |text: &str| match detail {
+        Some(d) => format!("{text}: {d}"),
+        None => text.to_string(),
+    };
+    match code {
+        "invalid_project_id_format" => {
+            "Database id must start with a lowercase letter and use only lowercase letters, digits and hyphens (max 63)".into()
+        }
+        "invalid_name" => "Name must be 1-100 characters".into(),
+        "dsn_required" => "A Postgres DSN is required".into(),
+        "invalid_dsn" => with_detail("The DSN was rejected"),
+        "backend_unavailable" => {
+            "Could not connect to that Postgres. Check the DSN, network access and TLS.".into()
+        }
+        "customer_db_not_prepped" | "customer_db_schema_stale" => {
+            with_detail("The target database is not prepared for Embyr")
+        }
+        "agent_endpoint_required"
+        | "agent_ca_pem_required"
+        | "agent_client_cert_pem_required"
+        | "agent_client_key_pem_required" => {
+            "Agent endpoint, CA certificate, client certificate and client key are all required".into()
+        }
+        "project_already_exists" => "A database with this id already exists".into(),
+        "account_billing_hold" => {
+            "This account is on a billing hold (past due or free-plan limit reached). Resolve it under Billing, then try again."
+                .into()
+        }
+        other => other.to_string(),
     }
 }
 
@@ -649,6 +772,12 @@ impl ConnectionDto {
         };
         Ok(Connection { mode, summary })
     }
+}
+
+#[derive(Deserialize)]
+struct ProvisionedDto {
+    project_id: String,
+    api_key: String,
 }
 
 #[derive(Deserialize)]

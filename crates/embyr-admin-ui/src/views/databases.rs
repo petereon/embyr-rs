@@ -3,8 +3,7 @@
 //! Gated behind #[cfg(feature = "csr")].
 //!
 //! AC-003-01: Renders table with Name, Status, Backend Mode columns.
-//! Create/delete return with slice 05 (they need the server-side dual-auth routes); until then the
-//! view offers no control that would only change local state.
+//! "New database" opens the create modal (Owner/Admin); delete lives on the database's detail page.
 
 #[cfg(feature = "csr")]
 use crate::api::{ApiCall, CallKind};
@@ -29,6 +28,7 @@ pub fn DatabasesView() -> impl IntoView {
 
     let loading = move || model.with(|m| m.pending.contains(&CallKind::Projects));
     let databases = move || model.with(|m| m.databases.clone());
+    let can_create = move || model.with(|m| m.can_manage_databases());
 
     view! {
         <div class="page page-wide">
@@ -44,6 +44,15 @@ pub fn DatabasesView() -> impl IntoView {
                         on:click=move |_| dispatch.run(Msg::Request(ApiCall::LoadProjects))
                     >
                         "Refresh"
+                    </button>
+                    <button
+                        class="btn btn-primary"
+                        type="button"
+                        disabled=move || !can_create()
+                        title=move || if can_create() { "" } else { "Your role cannot create databases" }
+                        on:click=move |_| dispatch.run(Msg::OpenCreateDb)
+                    >
+                        "New database"
                     </button>
                 </div>
             </div>

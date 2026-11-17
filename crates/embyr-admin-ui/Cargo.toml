@@ -63,6 +63,10 @@ name = "admin_ui_wiring_ui_db_detail"
 path = "../../tests/admin_ui_wiring/ui_db_detail.rs"
 
 [[test]]
+name = "admin_ui_wiring_ui_create_delete_db"
+path = "../../tests/admin_ui_wiring/ui_create_delete_db.rs"
+
+[[test]]
 name = "admin_ui_wiring_ui_password_reset"
 path = "../../tests/admin_ui_wiring/ui_password_reset.rs"
 

@@ -98,6 +98,8 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
                 .collect();
         }
         Msg::NavigateToDb(_) | Msg::NavigateToNewDb => {}
+        Msg::OpenCreateDb => model.create_db_modal_open = model.can_manage_databases(),
+        Msg::CloseCreateDb => model.create_db_modal_open = false,
         Msg::DatabaseLoaded(db) => match model.databases.iter_mut().find(|d| d.id == db.id) {
             Some(existing) => *existing = Database { usage: existing.usage.clone(), ..db },
             None => model.databases.push(db),
@@ -125,6 +127,14 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
         Msg::DeleteDatabase(db_id) => {
             model.databases.retain(|db| db.id != db_id);
             model.api_key_info.remove(&db_id);
+            model.db_metrics.remove(&db_id);
+            model.metrics_summary.remove(&db_id);
+            model.connections.remove(&db_id);
+            // Leave the detail view of the database that just went away (the list reloads).
+            if model.nav.section == Section::DbDetail(db_id) {
+                model.nav.section = Section::Databases;
+                effects.extend(section_loads(model));
+            }
         }
         Msg::SetDbStatus(db_id, status) => {
             if let Some(db) = model.databases.iter_mut().find(|db| db.id == db_id) {

@@ -43,6 +43,10 @@ pub enum Msg {
     NavigateToDb(DbId),
     /// Navigate to the "New Database" form.
     NavigateToNewDb,
+    /// Open the create-database modal (Owner/Admin only).
+    OpenCreateDb,
+    /// Close the create-database modal (also sent once a create succeeds).
+    CloseCreateDb,
     /// `GET /projects/:id` (or a PATCH response): upsert the database's server-side detail.
     DatabaseLoaded(Database),
     /// `GET /metrics/summary`: replace the per-database dashboard figures.

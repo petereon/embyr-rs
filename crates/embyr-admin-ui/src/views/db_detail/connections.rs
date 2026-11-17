@@ -71,12 +71,7 @@ pub fn ConnectionsView(id: DbId) -> impl IntoView {
             ConnectionConfig::DirectPg { dsn: dsn.get() }
         }
     };
-    let complete = move || match config() {
-        ConnectionConfig::DirectPg { dsn } => !dsn.trim().is_empty(),
-        ConnectionConfig::Agent { endpoint, ca_pem, client_cert_pem, client_key_pem } => {
-            [endpoint, ca_pem, client_cert_pem, client_key_pem].iter().all(|v| !v.trim().is_empty())
-        }
-    };
+    let complete = move || config().is_complete();
     // Secret-manager modes are managed outside the console (G-25).
     let editable_mode = move || matches!(mode.get(), Some(DbBackendMode::DirectPg | DbBackendMode::AgentMode));
 

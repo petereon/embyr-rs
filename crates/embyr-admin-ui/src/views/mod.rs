@@ -11,6 +11,8 @@ pub mod billing;
 #[cfg(feature = "csr")]
 pub mod dashboard;
 #[cfg(feature = "csr")]
+pub mod create_database;
+#[cfg(feature = "csr")]
 pub mod databases;
 #[cfg(feature = "csr")]
 pub mod db_detail;
@@ -27,6 +29,8 @@ pub use auth::{AuthView, ForgotPasswordView, ResetPasswordView};
 pub use billing::BillingView;
 #[cfg(feature = "csr")]
 pub use dashboard::DashboardView;
+#[cfg(feature = "csr")]
+pub use create_database::CreateDatabaseModal;
 #[cfg(feature = "csr")]
 pub use databases::DatabasesView;
 #[cfg(feature = "csr")]
@@ -49,6 +53,7 @@ mod shell {
     use crate::views::api_keys::ApiKeysView;
     use crate::views::billing::{BillingView, CardModal, UpgradeModal};
     use crate::views::dashboard::DashboardView;
+    use crate::views::create_database::CreateDatabaseModal;
     use crate::views::databases::DatabasesView;
     use crate::views::db_detail::DbDetailView;
     use crate::views::identities::IdentitiesView;
@@ -93,6 +98,7 @@ mod shell {
                 <UpgradeModal />
                 // One-time secrets (AC-AUW-20): global so any screen can reveal one.
                 <SecretModal />
+                <CreateDatabaseModal />
             </div>
 
         }

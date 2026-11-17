@@ -1,10 +1,12 @@
 //! DB Detail view — header, actions and tab router for a selected database.
 //!
-//! Every figure comes from the admin API (`GET /projects/:id` and friends). Delete returns with
-//! slice 05, which needs the server-side dual-auth `DELETE /projects/:id`.
+//! Every figure comes from the admin API (`GET /projects/:id` and friends). Delete is the Danger
+//! zone at the foot of the Overview tab (Owner only, type the id to confirm).
 
 #[cfg(feature = "csr")]
 pub mod connections;
+#[cfg(feature = "csr")]
+pub mod danger;
 #[cfg(feature = "csr")]
 pub mod keys;
 #[cfg(feature = "csr")]
@@ -14,6 +16,8 @@ pub mod overview;
 
 #[cfg(feature = "csr")]
 pub use connections::ConnectionsView;
+#[cfg(feature = "csr")]
+pub use danger::DangerZone;
 #[cfg(feature = "csr")]
 pub use keys::KeysView;
 #[cfg(feature = "csr")]
@@ -245,7 +249,11 @@ fn DbDetailBody(id: DbId) -> impl IntoView {
             {move || {
                 let id = tab_id.clone();
                 match active_tab.get() {
-                    DbTab::Overview => view! { <DbOverview id=id/> }.into_any(),
+                    DbTab::Overview => view! {
+                        <DbOverview id=id.clone()/>
+                        <DangerZone id=id/>
+                    }
+                    .into_any(),
                     DbTab::Connections => view! { <ConnectionsView id=id/> }.into_any(),
                     DbTab::Keys => view! { <KeysView id=id/> }.into_any(),
                     DbTab::Logs => view! { <LogsView id=id/> }.into_any(),
