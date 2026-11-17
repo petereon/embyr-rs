@@ -1,0 +1,190 @@
+# Caddy edge for the single-VPS stack. Runbook: docs/operations/single-vps-deploy.md
+# Needs env DOMAIN and ACME_EMAIL (set by docker-compose.prod.yml). TLS is automatic (Let's Encrypt)
+# once the DNS A records for api.<DOMAIN> and console.<DOMAIN> point at this host and 80/443 are open.
+#
+# UNTESTED: written without running caddy (see the PR description). Validate before first use:
+#   docker compose --env-file .env.production -f docker-compose.prod.yml run --rm caddy \
+#       caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+# then run scripts/verify-exposure.sh against the live hostnames.
+#
+# NEVER add a `log` directive without filtering: Firestore SDKs may send the project API key as
+# `?key=...` on api.<DOMAIN>, and access logs would then store keys (docs/operations/runbook.md,
+# "Security notes for operators"). Caddy does not access-log unless `log` is configured.
+
+{
+	email {$ACME_EMAIL}
+
+	# Uncomment while testing, so failed attempts do not burn the Let's Encrypt rate limit.
+	# Switch back and `docker compose down caddy && docker volume rm embyr_caddy_data` afterwards.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+
+	servers {
+		# No HTTP/3: nothing here benefits, and it would need 443/udp published.
+		protocols h1 h2
+		timeouts {
+			# Only closes IDLE keep-alive connections; open gRPC / BrowserChannel streams are unaffected.
+			# There is deliberately no read/write timeout: Listen streams and long-poll responses are
+			# open-ended.
+			idle 10m
+		}
+	}
+}
+
+# Shared upstream for the console host (a Caddyfile snippet; defined before it is imported).
+(console_upstream) {
+	reverse_proxy embyr-server:9090 {
+		header_up X-Forwarded-For {remote_host}
+		lb_try_duration 10s
+		lb_try_interval 250ms
+		transport http {
+			dial_timeout 5s
+		}
+	}
+}
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+# api.<DOMAIN>  -  data plane (public by design; every request authenticates with a project API key)
+#   native gRPC          -> embyr-server :8080 over h2c   (Content-Type: application/grpc[+proto])
+#   everything else      -> embyr-server :8081            (gRPC-Web, REST, BrowserChannel, /healthz)
+# The REST/BrowserChannel/gRPC-Web CORS allow-list is enforced by embyr-server itself
+# (EMBYR_CORS_ALLOWED_ORIGINS), not here.
+#
+# X-Forwarded-For: header_up REPLACES whatever the client sent with the address Caddy saw, so the
+# header has exactly one entry. embyr trusts exactly one hop (EMBYR_TRUSTED_PROXY_HOPS=1: rightmost
+# entry). If you ever put another proxy/CDN in front of Caddy, hops and this file must change together.
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+api.{$DOMAIN} {
+	# Native gRPC only: "application/grpc", "application/grpc+proto", optionally ";charset...".
+	# `application/grpc-web*` must NOT match (that is :8081's job), hence the regexp, not a prefix.
+	@grpc header_regexp grpc Content-Type "^application/grpc($|[+;])"
+
+	handle @grpc {
+		reverse_proxy h2c://embyr-server:8080 {
+			# Stream messages through immediately (Listen / Write are long-lived bidi streams).
+			flush_interval -1
+			header_up X-Forwarded-For {remote_host}
+			# Ride out the few seconds of a container restart instead of failing instantly.
+			lb_try_duration 10s
+			lb_try_interval 250ms
+			transport http {
+				versions h2c
+				dial_timeout 5s
+			}
+		}
+	}
+
+	# No `request_body max_size` on this host: a limit would cap the TOTAL bytes of a long-lived
+	# gRPC stream. embyr enforces its own limits (10 MiB gRPC messages, 2 MiB REST).
+	handle {
+		reverse_proxy embyr-server:8081 {
+			# BrowserChannel long-poll and gRPC-Web streaming must not be buffered.
+			flush_interval -1
+			header_up X-Forwarded-For {remote_host}
+			lb_try_duration 10s
+			lb_try_interval 250ms
+			transport http {
+				dial_timeout 5s
+			}
+		}
+	}
+}
+
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+# console.<DOMAIN>  -  admin console (SPA) + session API + Stripe webhook, all from :9090
+#
+# :9090 ALSO serves operator-only routes (suspend/activate, billing metering, account bootstrap,
+# /metrics) and detail health endpoints. They are guarded by EMBYR_ADMIN_KEY, but there is no
+# reason to let the internet even try, so this block is an explicit ALLOWLIST: a request is proxied
+# only if it matches one of the handlers below, in this order; everything else is a plain 404.
+# Operator routes are reached ONLY from the VPS itself: http://127.0.0.1:9090 (see the runbook).
+# Source of truth for the route list: crates/embyr-server/src/admin/router.rs (+ main.rs for
+# /healthz, /livez and the static UI mount at /admin).
+#
+# RE-CHECK THIS BLOCK whenever router.rs changes (checklist in docs/operations/single-vps-deploy.md):
+#   * new route in `operator_router` or `bootstrap_router`  -> add it to @operator below
+#   * new route in `session_router`/`dual_auth_router`/`public_router` under a NEW top-level
+#     prefix                                                 -> add the prefix to @spa_api or the
+#                                                              SPA gets 404s through this proxy
+#   * new route under an existing exposed prefix (e.g. /admin/v1/projects/:id/foo) is exposed
+#     automatically: check that it is session-authed, not operator-only
+#   then run scripts/verify-exposure.sh.
+#
+# EXPOSED (and why)
+#   GET  /                                  302 -> /admin/
+#   GET  /admin/                            static SPA (everything under /admin/ except /admin/v1)
+#   *    /admin/v1/auth/*                   sign-in/out, session, invitation accept/confirm,
+#                                           password reset: public by nature, rate limited server-side
+#   *    /admin/v1/projects[/...]           project CRUD + per-project config (session or operator key)
+#   *    /admin/v1/members[/...]            team + invitations (session)
+#   *    /admin/v1/service_accounts[/...]   (session)
+#   *    /admin/v1/admin_keys[/...]         customer API keys for the admin API (session)
+#   *    /admin/v1/account                  account deletion (session + password + TOTP)
+#   *    /admin/v1/metrics/summary          per-project usage summary (session)
+#   *    /admin/v1/billing                  GET billing view
+#   *    /admin/v1/billing/{subscription,checkout_session,portal_session}   (session)
+#   POST /admin/v1/webhooks/stripe          Stripe -> us. Route exists in embyr-server only when
+#                                           STRIPE_SECRET_KEY is set; otherwise the upstream answers 404.
+#
+# BLOCKED (404)
+#   /metrics                                Prometheus (operator Bearer). Scrape it on-host only.
+#   /healthz, /livez on this host           use https://api.<DOMAIN>/healthz instead (same handler)
+#   /admin/v1/accounts[/...]                operator account bootstrap
+#   /admin/v1/billing/run-metering          operator-triggered metering
+#   /admin/v1/projects/:id/suspend|activate operator lifecycle
+#   /admin/v1/oidc_providers[/...]          not used by the SPA; OIDC sign-in is disabled server-side
+#   anything else not listed above          default-deny
+#
+# Residual risk, by design: /admin/v1/projects (POST) and /admin/v1/projects/:id (GET/DELETE) also
+# accept the operator Bearer key (dual-auth), and the session routes accept admin-API keys as Bearer.
+# They cannot be blocked without breaking the SPA; the key is >= 32 chars and sign-in is rate limited.
+# ──────────────────────────────────────────────────────────────────────────────────────────────
+console.{$DOMAIN} {
+	# The SPA ships a large .wasm; compress. (Not on api.<DOMAIN>: streaming must stay unbuffered.)
+	encode zstd gzip
+
+	# Stripe's payload limit server-side is 5 MiB; admin JSON is 1 MiB. Cap the edge slightly above.
+	request_body {
+		max_size 6MB
+	}
+
+	@root path / /admin
+	redir @root /admin/ 302
+
+	# 1. Operator-only: checked FIRST so it wins even if a later matcher would also match.
+	#    One regexp (not several `path` lines) so the OR is unambiguous; (?i) because Caddy matches
+	#    paths case-insensitively elsewhere and we would rather over-block than under-block.
+	@operator path_regexp "(?i)^/(metrics|healthz|livez)(/|$)|^/admin/v1/(accounts|billing/run-metering|oidc_providers)(/|$)|^/admin/v1/projects/[^/]+/(suspend|activate)(/|$)"
+	handle @operator {
+		respond "Not found" 404
+	}
+
+	# 2. Session / public JSON API used by the SPA (allowlist by prefix).
+	@spa_api path_regexp "(?i)^/admin/v1/(auth/.+|projects(/.+)?|members(/.+)?|service_accounts(/.+)?|admin_keys(/.+)?|account|metrics/summary|billing|billing/(subscription|checkout_session|portal_session))$"
+	handle @spa_api {
+		import console_upstream
+	}
+
+	# 3. Static SPA. Explicitly NOT /admin/v1: an unknown /admin/v1/x must never reach the upstream
+	#    just because it starts with /admin/.
+	@spa_static {
+		path /admin/*
+		not path /admin/v1 /admin/v1/*
+	}
+	handle @spa_static {
+		import console_upstream
+	}
+
+	# 4. Stripe webhook (signature-verified by embyr-server; needs the raw body untouched).
+	@stripe {
+		path /admin/v1/webhooks/stripe
+		method POST
+	}
+	handle @stripe {
+		import console_upstream
+	}
+
+	# 5. Default deny.
+	handle {
+		respond "Not found" 404
+	}
+}

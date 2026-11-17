@@ -5,3 +5,9 @@ dist/
 .DS_Store
 .env.local
 .env
+
+# single-VPS deployment bundle: real secrets/state live next to the compose file on the server
+deploy/single-vps/.env.production
+deploy/single-vps/backup.env
+deploy/single-vps/backups/
+deploy/single-vps/deploy-history.log
