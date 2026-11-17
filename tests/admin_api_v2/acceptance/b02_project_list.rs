@@ -124,12 +124,12 @@ async fn deleted_projects_excluded_from_account_list() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Critical security property: project detail for a project owned by account B
-/// returns 403 when requested by an authenticated user from account A.
+/// returns 404 when requested by an authenticated user from account A.
 ///
 /// AC-B02-03
 // @US-B02 @AC-B02-03 @error @driving_port @real-io
 #[tokio::test]
-async fn cross_account_project_detail_returns_403() {
+async fn cross_account_project_detail_returns_404() {
     let ctx = AdminTestContext::new().await;
     // Seed: project owned by a DIFFERENT account than ctx.account_id.
     let session_cookie = sign_in_and_get_cookie(&ctx).await;
@@ -145,8 +145,8 @@ async fn cross_account_project_detail_returns_403() {
 
     assert_eq!(
         resp.status().as_u16(),
-        403,
-        "AC-B02-03: project detail for another account must return 403 (not 404)"
+        404,
+        "AC-B02-03: project detail for another account must return 404 (no existence oracle)"
     );
 }
 

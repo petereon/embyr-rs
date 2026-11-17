@@ -6,7 +6,7 @@
 //!   create  Owner and Admin create under THEIR account (body `account_id` ignored), key shown once
 //!           and usable over gRPC; Viewer 403; no credential 401; billing hold 409; BYOC DSN validator
 //!           applies on the session path; operator Bearer still creates an unowned project
-//!   delete  Owner only (Admin 403); other account's project 403, unknown 404; deleted project's key
+//!   delete  Owner only (Admin 403); other account's project 404, unknown 404; deleted project's key
 //!           stops authenticating at once (credential cache evicted); operator Bearer still deletes
 
 #[path = "../dsn_single_store/common/mod.rs"]
@@ -215,7 +215,7 @@ async fn delete_is_owner_only_account_scoped_and_kills_the_key() {
     assert_eq!(c.delete(Auth::None, "sp-del-db").await, 401);
     assert_eq!(c.delete(Auth::Cookie(&c.viewer), "sp-del-db").await, 403);
     assert_eq!(c.delete(Auth::Cookie(&c.admin), "sp-del-db").await, 403);
-    assert_eq!(c.delete(Auth::Cookie(&stranger), "sp-del-db").await, 403);
+    assert_eq!(c.delete(Auth::Cookie(&stranger), "sp-del-db").await, 404);
     assert_eq!(c.delete(Auth::Cookie(&c.owner), "sp-no-such").await, 404);
     assert_eq!(c.project_row("sp-del-db").await.map(|r| r.2), Some("active".to_string()));
     assert_eq!(get_greeting(&c.server, "sp-del-db", &key).await.unwrap(), "alive");

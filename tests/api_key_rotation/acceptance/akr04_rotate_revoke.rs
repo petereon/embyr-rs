@@ -396,7 +396,7 @@ async fn only_owner_or_admin_of_the_owning_account_rotates_and_every_success_is_
 
     for (cookie, project, want) in [
         (Some(c.viewer.as_str()), "guarded", 403),
-        (Some(foreign.as_str()), "guarded", 403),
+        (Some(foreign.as_str()), "guarded", 404),
         (Some(c.owner.as_str()), "no-such-project", 404),
         (Some(c.owner.as_str()), "gone", 404),
         (None, "guarded", 401),

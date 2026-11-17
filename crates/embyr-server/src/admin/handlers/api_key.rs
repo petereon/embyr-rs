@@ -149,7 +149,7 @@ async fn rotate_or_revoke(
         return Err(err(StatusCode::NOT_FOUND, "project_not_found"));
     }
     if account != Some(session.account_id) {
-        return Err(err(StatusCode::FORBIDDEN, "forbidden"));
+        return Err(err(StatusCode::NOT_FOUND, "project_not_found"));
     }
     if observed.unconverted {
         return Err(err(StatusCode::CONFLICT, "connection_secrets_unconverted"));

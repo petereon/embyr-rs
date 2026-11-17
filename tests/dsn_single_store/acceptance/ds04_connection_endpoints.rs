@@ -180,7 +180,7 @@ async fn switching_agent_to_direct_pg_nulls_agent_secrets() {
     assert_eq!(get_greeting(&c.server, "ds04-mode", "k-mode").await.unwrap(), "direct");
 }
 
-/// AC-DSS-11: Viewer 403, foreign account 403, suspended 409, deleted 404 -- and no write.
+/// AC-DSS-11: Viewer 403, foreign account 404, suspended 409, deleted 404 -- and no write.
 #[tokio::test]
 async fn put_is_refused_for_viewer_foreign_suspended_and_deleted_without_writing() {
     let c = ctx().await;
@@ -193,7 +193,7 @@ async fn put_is_refused_for_viewer_foreign_suspended_and_deleted_without_writing
     let body = dsn_put("postgres://u:p@127.0.0.1:1/none");
     for (cookie, project, expected) in [
         (&c.viewer, "ds04-own", 403),
-        (&c.owner, "ds04-foreign", 403),
+        (&c.owner, "ds04-foreign", 404),
         (&c.owner, "ds04-susp", 409),
         (&c.owner, "ds04-del", 404),
     ] {

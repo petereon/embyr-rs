@@ -154,7 +154,7 @@ async fn patch_project_inner(
     let pool = state.system_db.pool();
 
     // ── Pre-check: account isolation ──────────────────────────────────────────
-    // Fetching account_id before UPDATE allows us to return 403 vs 404 precisely.
+    // Foreign-account projects return 404, same as missing (no existence oracle).
     let pre = sqlx::query(
         "SELECT account_id, status, suspended_by FROM projects WHERE id = $1",
     )
@@ -177,7 +177,7 @@ async fn patch_project_inner(
 
     let project_account: Option<Uuid> = pre.try_get("account_id").unwrap_or(None);
     if project_account.as_ref() != Some(&session.account_id) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::NOT_FOUND);
     }
 
     // ── Guard: an operator/system suspension cannot be undone via PATCH (#64) ─
