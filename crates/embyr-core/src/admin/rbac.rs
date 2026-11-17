@@ -17,6 +17,8 @@ pub enum RbacAction {
     },
     /// Create an admin key with a given role.
     CreateAdminKey { requested_role: Role },
+    /// Create a service account with a given role.
+    CreateServiceAccount { requested_role: Role },
     /// Delete a service account.
     DeleteServiceAccount { service_account_id: uuid::Uuid },
 }
@@ -119,7 +121,8 @@ pub fn check_rbac(
             }
             Ok(())
         }
-        RbacAction::CreateAdminKey { requested_role } => {
+        RbacAction::CreateAdminKey { requested_role }
+        | RbacAction::CreateServiceAccount { requested_role } => {
             if actor_role < Role::Admin {
                 return Err(RbacError::InsufficientRole {
                     actor: actor_role,
@@ -440,5 +443,34 @@ mod tests {
                 err
             );
         }
+    }
+    // Service-account role cap mirrors the admin-key cap: no grant above own role.
+    #[test]
+    fn create_service_account_role_cap() {
+        let cases = [
+            (Role::Viewer, Role::Viewer, false),
+            (Role::Admin, Role::Owner, false),
+            (Role::Admin, Role::Admin, true),
+            (Role::Admin, Role::Viewer, true),
+            (Role::Owner, Role::Owner, true),
+        ];
+        for (actor, requested, ok) in cases {
+            let r = check_rbac(
+                RbacAction::CreateServiceAccount { requested_role: requested },
+                actor,
+                &admin_id(),
+                &[],
+            );
+            assert_eq!(r.is_ok(), ok, "{actor:?} -> {requested:?}");
+        }
+        assert_eq!(
+            check_rbac(
+                RbacAction::CreateServiceAccount { requested_role: Role::Owner },
+                Role::Admin,
+                &admin_id(),
+                &[]
+            ),
+            Err(RbacError::RoleEscalation { actor: Role::Admin, requested: Role::Owner })
+        );
     }
 }

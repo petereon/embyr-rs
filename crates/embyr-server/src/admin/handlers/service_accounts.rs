@@ -4,7 +4,7 @@
 //!   Session auth, any role.
 //!
 //! create_service_account (POST /admin/v1/service_accounts):
-//!   Session auth, Owner or Admin.
+//!   Session auth, Owner or Admin. Role cap: cannot grant a role above the caller's own (403).
 //!   Body: { name, description?, role }. 201 { id, name, description, role, created_at }.
 //!
 //! delete_service_account (DELETE /admin/v1/service_accounts/:sa_id):
@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-use embyr_core::admin::account::Role;
+use embyr_core::admin::account::{Role, UserId};
+use embyr_core::admin::rbac::{check_rbac, RbacAction};
 
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::state::UserAdminState;
@@ -111,9 +112,19 @@ pub async fn create_service_account(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    if parse_role(&body.role).is_none() {
-        return Err(StatusCode::UNPROCESSABLE_ENTITY);
-    }
+    let requested_role = parse_role(&body.role).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+
+    // Role cap: caller cannot grant a role above their own.
+    check_rbac(
+        RbacAction::CreateServiceAccount { requested_role },
+        session.role,
+        &UserId(session.user_id),
+        &[],
+    )
+    .map_err(|err| {
+        tracing::debug!("create_service_account: RBAC rejected: {err}");
+        StatusCode::FORBIDDEN
+    })?;
 
     let pool = state.system_db.pool();
 
