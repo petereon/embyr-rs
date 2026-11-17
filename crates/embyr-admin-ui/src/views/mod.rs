@@ -22,7 +22,7 @@ pub mod settings;
 #[cfg(feature = "csr")]
 pub use api_keys::ApiKeysView;
 #[cfg(feature = "csr")]
-pub use auth::AuthView;
+pub use auth::{AuthView, ForgotPasswordView, ResetPasswordView};
 #[cfg(feature = "csr")]
 pub use billing::BillingView;
 #[cfg(feature = "csr")]

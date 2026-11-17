@@ -90,6 +90,17 @@ pub enum Section {
     Settings,
 }
 
+/// Which signed-out screen is showing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuthScreen {
+    #[default]
+    SignIn,
+    /// Ask for a reset link by email.
+    ForgotPassword,
+    /// Choose a new password (reached from the emailed `?reset=` link; the token never enters the model).
+    ResetPassword,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Role {
     Owner,
@@ -593,6 +604,12 @@ pub struct AppModel {
     pub current_user: Option<CurrentUser>,
     /// Message shown on the sign-in view (server text, throttle, or "session expired").
     pub sign_in_error: Option<String>,
+    /// Which signed-out screen is showing.
+    pub auth_screen: AuthScreen,
+    /// Error on the forgot/reset screens (server text or throttle).
+    pub reset_error: Option<String>,
+    /// Neutral confirmation on the signed-out screens ("link sent", "password updated").
+    pub auth_notice: Option<String>,
     /// API calls in flight; drives disabled buttons and loading states (AC-AUW-16).
     pub pending: HashSet<CallKind>,
     /// Monotonic counter minting deterministic toast ids inside the pure `update`.
@@ -636,6 +653,9 @@ impl AppModel {
             server_unreachable: false,
             current_user: None,
             sign_in_error: None,
+            auth_screen: AuthScreen::default(),
+            reset_error: None,
+            auth_notice: None,
             pending: HashSet::new(),
             toast_seq: 0,
             // card-payments: demo account is Pro-plan with a card on file and
