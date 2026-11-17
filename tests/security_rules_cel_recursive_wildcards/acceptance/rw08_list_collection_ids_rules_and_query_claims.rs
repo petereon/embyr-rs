@@ -4,7 +4,9 @@
 //! sub-collection NAMES to callers the rules deny. The parent DOCUMENT is now
 //! the read target: the exact-match rule for the parent's collection, else the
 //! pattern rules (the same resolution `ListDocuments` uses). No rule = still
-//! unrestricted; the database root has no document and stays unrestricted.
+//! unrestricted. The database root has no document: each root collection NAME
+//! is shown only to callers an unfiltered list query of that collection would
+//! admit (no governing rule = shown; all names hidden = PermissionDenied).
 //!
 //! X12: RunQuery / RunAggregationQuery built their auth context with an empty
 //! claims map. Claims now come from the verified identity. The claim-reading
@@ -307,8 +309,8 @@ async fn list_collection_ids_evaluates_claims_from_the_verified_identity() {
 /// Journey:
 ///   Given: no rule governs `plain/doc1`, which has a `sub` subcollection
 ///   When:  an anonymous caller lists the ids of `plain/doc1` and of the root
-///   Then:  both succeed — no rule stays unrestricted, and the database root
-///          (no parent document) is not rule-gated
+///   Then:  both succeed — no rule stays unrestricted, and the root lists the
+///          ungoverned collection `plain`
 ///
 /// @driving_port @real-io
 #[tokio::test]
@@ -318,6 +320,47 @@ async fn list_collection_ids_without_a_governing_rule_or_at_the_root_stays_unres
 
     assert_eq!(f.collection_ids("plain/doc1", None).await.unwrap(), vec!["sub".to_string()]);
     assert!(f.collection_ids("", None).await.unwrap().contains(&"plain".to_string()));
+}
+
+/// Journey:
+///   Given: `members_only` requires a signed-in caller, `profiles` is
+///          owner-only (undecidable without a filter), `plain` has no rule
+///   When:  an anonymous caller, then a signed-in caller, list the root
+///   Then:  anonymous sees only `plain`; signed-in sees `members_only` and
+///          `plain`; `profiles` is never named
+///
+/// @error @driving_port @real-io
+#[tokio::test]
+async fn root_list_collection_ids_hides_names_the_callers_rules_deny() {
+    let f = Fixture::new("trailmark-prod-rw08-root-filter").await;
+    f.ctx.seed_access_rule("members_only", "request.auth != null").await;
+    f.ctx.seed_access_rule("profiles", "request.auth.uid == resource.data.owner_id").await;
+    let marias = f.token("maria-santos", serde_json::json!({}));
+    f.set_doc("members_only/m1", ("k", "v"), Some(&marias)).await;
+    f.set_doc("profiles/p1", ("owner_id", "maria-santos"), None).await;
+    f.set_doc("plain/p1", ("k", "v"), None).await;
+
+    let mut anon = f.collection_ids("", None).await.unwrap();
+    anon.sort();
+    assert_eq!(anon, vec!["plain".to_string()]);
+    let mut signed_in = f.collection_ids("", Some(&marias)).await.unwrap();
+    signed_in.sort();
+    assert_eq!(signed_in, vec!["members_only".to_string(), "plain".to_string()]);
+}
+
+/// Journey:
+///   Given: the only root collection, `profiles`, is owner-only
+///   When:  an anonymous caller lists the root
+///   Then:  PermissionDenied, not an empty list that confirms nothing is there
+///
+/// @error @driving_port @real-io
+#[tokio::test]
+async fn root_list_collection_ids_is_denied_when_every_name_is_hidden() {
+    let f = Fixture::new("trailmark-prod-rw08-root-denied").await;
+    f.ctx.seed_access_rule("profiles", "request.auth.uid == resource.data.owner_id").await;
+    f.set_doc("profiles/p1", ("owner_id", "maria-santos"), None).await;
+
+    assert_denied(f.collection_ids("", None).await, "anonymous root listing");
 }
 
 /// Journey:
