@@ -1,0 +1,14 @@
+# Overrides for load testing the root docker-compose.yml stack (NOT for production):
+#   docker compose -f docker-compose.yml -f loadtest/docker-compose.loadtest.yml up -d --build
+services:
+  postgres:
+    # The default (100) is shared by the system DB and the tenant DB in this stack.
+    command: ["postgres", "-c", "max_connections=200"]
+  embyr-server:
+    environment:
+      # Default is 1000 rps per project; the test uses a single project, so lift it or you
+      # measure the limiter instead of the server.
+      EMBYR_RATE_LIMIT_RPS: "100000"
+      # Leave the ADR-079 pool defaults (5 / 5 / 2) for the first run; raise to explore sizing:
+      # EMBYR_SYSTEM_DB_MAX_CONNECTIONS: "20"
+      # EMBYR_TENANT_DB_MAX_CONNECTIONS: "20"
