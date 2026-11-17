@@ -379,6 +379,11 @@ impl Ctx<'_> {
         let Some(QueryType::StructuredQuery(sq)) = &qt.query_type else {
             return Err(Status::internal("QueryTarget has no query_type"));
         };
+        if sq.find_nearest.is_some() {
+            return Err(Status::invalid_argument(
+                "Listen does not support find_nearest (vector queries are not real-time)",
+            ));
+        }
         let order_by = order_by_from_query(sq)?;
         // Cursors go through RunQuery's own translation and SQL (typed
         // comparison), so Listen and RunQuery cannot disagree on a bound.
