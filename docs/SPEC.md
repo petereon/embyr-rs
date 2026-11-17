@@ -982,18 +982,21 @@ For `query` targets: pages through the query (default page size 300 or the expli
 
 ### Delta Delivery (Resume-Token Reconnect)
 
-On `addTarget` with a valid resume token **and** a query target:
+No tombstone / change log is kept (decision: a log is the only way to report deletes exactly, and its cost is not justified yet). Instead the server answers a resume (`resumeToken` or `readTime`) in one of two protocol-correct ways, so the client's cached documents are never silently left stale:
 
-1. Decode the token to obtain `sinceTime`.
-2. Retrieve all documents in (parent, collectionID) with `updated_at > sinceTime`.
-3. Retrieve all tombstones in (parent, collectionID) with `deleted_at > sinceTime`.
-4. Send `targetChange{ADD, [targetId]}`.
-5. For each updated document matching the query filter: send `documentChange`.
-6. For each deleted path: send `documentDelete`.
-7. Send `targetChange{CURRENT, [targetId], resumeToken=<now>}`.
-8. Send `targetChange{NO_CHANGE, resumeToken=<now>}`.
+**A. Whole-collection query target (no filter, orderBy, limit, offset or cursor) with a decodable token/readTime <= 24h old: delta.**
 
-If the token is malformed, or the target is a documents target: fall back to full snapshot.
+1. `targetChange{ADD}`
+2. `documentChange` for every document with `update_time > sinceTime`.
+3. `existenceFilter{targetId, count}` where `count` is the true number of documents now in the collection. The SDK compares it to its own cached count after applying the delta; on mismatch (a document was deleted while it was away) it drops the token and re-adds the target, which gets a full snapshot.
+4. `targetChange{CURRENT}`, then `targetChange{NO_CHANGE, resumeToken=<now+1s>}`.
+
+**B. Everything else that presents a resume token/readTime (windowed query, `documents` target, stale >24h, malformed): RESET + full result.**
+
+1. `targetChange{ADD}`, `targetChange{RESET, [targetId]}` (the client discards its cached documents for the target)
+2. `documentChange` for every document of the full result, then CURRENT and NO_CHANGE with a fresh token.
+
+A delta of a windowed query cannot tell which documents left the window while the client was away, hence RESET rather than a delta. An empty resume token means no resume.
 
 ### Live Changes
 

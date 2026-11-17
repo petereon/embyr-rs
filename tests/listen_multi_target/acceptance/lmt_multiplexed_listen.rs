@@ -489,3 +489,119 @@ async fn offset_window_shifts_when_an_earlier_document_is_deleted() {
         Ev::Left { doc: "scores/s20".into(), removed_from: vec![1] }
     );
 }
+
+// ── cursors and resume (listen-resume-and-agent-deletes) ────────────────────
+
+/// Give a Query target `startAt(start)` / `endBefore(end)` cursors (single
+/// field, matching the single-field orderBy the storage layer supports).
+fn with_cursors(mut target: Target, start: i64, end: i64) -> Target {
+    let Some(target::TargetType::Query(qt)) = &mut target.target_type else { panic!("query target") };
+    let Some(query_target::QueryType::StructuredQuery(sq)) = &mut qt.query_type else {
+        panic!("structured query")
+    };
+    sq.start_at = Some(embyr_proto::firestore::Cursor { values: vec![int(start)], before: true });
+    sq.end_at = Some(embyr_proto::firestore::Cursor { values: vec![int(end)], before: true });
+    target
+}
+
+/// The messages a client sees until CURRENT, as short tags: `ADD`, `RESET`,
+/// `doc:<collection/id>`, `FILTER:<count>`. NO_CHANGE keep-alives are skipped.
+async fn until_current(stream: &mut tonic::Streaming<ListenResponse>) -> Vec<String> {
+    let mut seen = Vec::new();
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(20), stream.next())
+            .await
+            .expect("timed out waiting for CURRENT")
+            .expect("stream ended before CURRENT")
+            .expect("stream error before CURRENT");
+        match message.response_type.expect("response_type set") {
+            listen_response::ResponseType::TargetChange(tc) => {
+                match TargetChangeType::try_from(tc.target_change_type).unwrap() {
+                    TargetChangeType::Add => seen.push("ADD".to_string()),
+                    TargetChangeType::Reset => seen.push("RESET".to_string()),
+                    TargetChangeType::Current => return seen,
+                    _ => {}
+                }
+            }
+            listen_response::ResponseType::DocumentChange(dc) => {
+                seen.push(format!("doc:{}", short(&dc.document.expect("document").name)));
+            }
+            listen_response::ResponseType::Filter(f) => seen.push(format!("FILTER:{}", f.count)),
+            other => panic!("unexpected message before CURRENT: {other:?}"),
+        }
+    }
+}
+
+fn with_resume_token(mut target: Target, ts_seconds: i64) -> Target {
+    // Token layout (see resume_token.rs): 8-byte big-endian unix seconds.
+    target.resume_type = Some(target::ResumeType::ResumeToken(ts_seconds.to_be_bytes().to_vec()));
+    target
+}
+
+/// startAt / endBefore cursors on a Listen query bound the initial snapshot
+/// AND every later change: a document outside the bounds is never delivered.
+///
+/// @driving_port @real-io
+#[tokio::test]
+async fn cursor_bounds_apply_to_the_snapshot_and_to_later_changes() {
+    let env = setup("test-sk-lmt-multi-06", "lmt-multi-project-06").await;
+    for (id, s) in [("s10", 10), ("s20", 20), ("s30", 30), ("s40", 40)] {
+        env.create("scores", id, score(s)).await;
+    }
+
+    let target =
+        with_cursors(env.query_target(1, "scores", vec![("score", Direction::Ascending)], None, 0), 20, 40);
+    let (_request_tx, mut stream) = env.listen(env.add(target)).await;
+    assert_eq!(next_event(&mut stream).await, Ev::Added(vec![1]));
+    assert_eq!(next_event(&mut stream).await, changed("scores/s20", 1));
+    assert_eq!(next_event(&mut stream).await, changed("scores/s30", 1));
+    assert_eq!(next_event(&mut stream).await, Ev::Current(vec![1]));
+
+    // s05 and s45 are outside [20, 40): the next event is s35's.
+    env.create("scores", "s05", score(5)).await;
+    env.create("scores", "s45", score(45)).await;
+    env.create("scores", "s35", score(35)).await;
+    assert_eq!(next_event(&mut stream).await, changed("scores/s35", 1));
+}
+
+/// A resume on a windowed target cannot be answered with a delta: the server
+/// says RESET (client drops its cached documents for the target) and then
+/// sends the full result, instead of silently resending over a stale cache.
+///
+/// @driving_port @real-io
+#[tokio::test]
+async fn resume_token_on_a_windowed_target_resets_then_sends_the_full_window() {
+    let env = setup("test-sk-lmt-multi-07", "lmt-multi-project-07").await;
+    for (id, s) in [("s10", 10), ("s20", 20), ("s30", 30)] {
+        env.create("scores", id, score(s)).await;
+    }
+
+    let one_minute_ago = chrono::Utc::now().timestamp() - 60;
+    let target = with_resume_token(
+        env.query_target(1, "scores", vec![("score", Direction::Ascending)], Some(2), 0),
+        one_minute_ago,
+    );
+    let (_request_tx, mut stream) = env.listen(env.add(target)).await;
+    assert_eq!(
+        until_current(&mut stream).await,
+        ["ADD", "RESET", "doc:scores/s10", "doc:scores/s20"]
+    );
+}
+
+/// A resume on a whole-collection target sends only what changed since the
+/// token, then an ExistenceFilter with the TRUE match count so the client can
+/// detect a deletion that happened while it was away. (A token newer than
+/// every document stands for "nothing changed since": no documents, count 2.)
+///
+/// @driving_port @real-io
+#[tokio::test]
+async fn resume_token_on_a_collection_target_sends_delta_then_existence_filter() {
+    let env = setup("test-sk-lmt-multi-08", "lmt-multi-project-08").await;
+    env.create("things", "t1", HashMap::new()).await;
+    env.create("things", "t2", HashMap::new()).await;
+
+    let in_an_hour = chrono::Utc::now().timestamp() + 3600;
+    let target = with_resume_token(env.collection_target(1, "things"), in_an_hour);
+    let (_request_tx, mut stream) = env.listen(env.add(target)).await;
+    assert_eq!(until_current(&mut stream).await, ["ADD", "FILTER:2"]);
+}

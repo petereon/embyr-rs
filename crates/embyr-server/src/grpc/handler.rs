@@ -4472,7 +4472,7 @@ fn validate_cursor_value_types(values: &[FieldValue]) -> Result<(), String> {
 /// convert, or that is not orderable (finding #44: a cursor bound is a range
 /// comparison in SQL), is `invalid_argument` naming the cursor (`name`) —
 /// never `None`, which would silently run the query without the bound.
-fn translate_cursor(
+pub(crate) fn translate_cursor(
     name: &str,
     cursor: Option<&embyr_proto::firestore::Cursor>,
 ) -> Result<Option<Cursor>, Status> {
