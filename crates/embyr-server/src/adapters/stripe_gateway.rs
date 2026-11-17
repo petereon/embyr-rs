@@ -172,7 +172,7 @@ impl StripeGateway {
         })?;
         let session = stripe_billing::billing_portal_session::CreateBillingPortalSession::new()
             .customer(customer_id)
-            .return_url(format!("{base}/billing"))
+            .return_url(format!("{base}/admin/"))
             .send(&self.client)
             .await
             .map_err(map_stripe_error)?;
@@ -522,8 +522,8 @@ fn checkout_session_request(
         .client_reference_id(account_id.to_string())
         .metadata(metadata)
         .line_items(vec![item])
-        .success_url(format!("{base_url}/billing?checkout=success"))
-        .cancel_url(format!("{base_url}/billing?checkout=cancelled"))
+        .success_url(format!("{base_url}/admin/?checkout=success"))
+        .cancel_url(format!("{base_url}/admin/?checkout=cancelled"))
 }
 
 /// Maps `stripe::StripeError` (the vendor SDK's transport/API error enum) to
@@ -634,8 +634,8 @@ mod tests {
             &format!("client_reference_id={account}"),
             "line_items[0][price]=price_1",
             "line_items[0][quantity]=1",
-            "success_url=https://app.example.com/billing?checkout=success",
-            "cancel_url=https://app.example.com/billing?checkout=cancelled",
+            "success_url=https://app.example.com/admin/?checkout=success",
+            "cancel_url=https://app.example.com/admin/?checkout=cancelled",
         ] {
             assert!(body.contains(expected), "missing {expected:?} in {body}");
         }
