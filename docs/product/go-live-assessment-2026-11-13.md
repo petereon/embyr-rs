@@ -24,6 +24,8 @@ Security findings are agent-reported (code-read, not exercised) except where not
 | P7 | Medium | No 1 MiB document / nesting-depth limits. |
 | P8 | Medium | Composite-index gate maps FailedPrecondition → `unimplemented` (`handler.rs:4227`), breaking SDK index hints; ListDocuments pages in memory by offset. |
 | P9 | Low | Transaction abort codes (ABORTED vs FAILED_PRECONDITION) not traced; SDK retry depends on ABORTED. |
+| P10 | Blocker | **One-shot Commit rejected** (empty transaction → "invalid transaction ID length"): every SDK `setDoc`/`updateDoc`/`deleteDoc`/batch failed. Found and fixed during the X1 work (PR #20). |
+| P11 | Blocker | **Query ORDER BY sorted values as text** (`5 > 30`), so every numeric `orderBy` was wrong. Found via a Listen test; fixed with typed ordering (PRs #43/#44). Residual: float8 inexact above 2^53, no document-name tiebreak. |
 
 ## 2. Product surface — NO-GO for self-serve
 
@@ -70,6 +72,13 @@ Security findings are agent-reported (code-read, not exercised) except where not
 | X13 | Low | Open Listen streams don't re-evaluate on rule change or identity/project revocation; reset token consumed before password-strength check; hosted tokens (1 h) not revoked on password reset; API key in `?key=` query string hits LB logs; TOTP no replay guard, non-atomic failure counter; `EMBYR_ADMIN_KEY` no minimum length, operator routes unthrottled; admin keys accept unchecked `member_id` (Admin can make an Owner service account); cross-account project IDs give 403 vs 404 (existence oracle). |
 
 Verified OK: operator/session middleware (constant-time compare), RBAC on session routes except #59/#60, ownership scoping, admin cookie flags (HttpOnly/Secure/SameSite=Strict/Path=/admin), Stripe webhook HMAC + bounded body, ECIES KDF binds both public keys, JWT alg pinned + audience checked, admin sign-in Argon2 uses `spawn_blocking`, CORS default-deny, no secrets in logs.
+
+## Status 2026-11-17
+
+Fixed and merged: X1 X2 X3 X4 X5 X6 X8 X9 X10 X12, P1 P2 P4 P6 P7 P8 P10 P11, S1 S2 S3/S4 (UI skeleton + db detail, keys, create/delete in flight), S5 S6 S7 (password reset API + screens), S8 (Stripe checkout/portal, account deletion, hourly metrics), O1 O2 (policy + lint) O3 O6 O7 (pinned actions, report-only scan) O8, CI sharding (~25 min wall).
+In review: P3 BrowserChannel (#57), UI slice 05 (#56).
+Open: UI slices 09-17, P5 (PartitionQuery/vector/TTL, deferred), agent-mode SUM/AVG, customer-DB migrator `ignore_missing`, X13 lows, audit #64/#66-71.
+Needs the owner: Stripe Pro product tax code (test + live), first git tag, ghcr visibility, ToS/privacy/support pages, hosting topology + load test + SLO (O4/O5), Free-plan project-count rule.
 
 ## Path to launch
 
