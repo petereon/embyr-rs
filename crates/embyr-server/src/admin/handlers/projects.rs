@@ -94,10 +94,10 @@ fn patch_fields_valid(body: &PatchProjectBody) -> bool {
     let name_ok = body
         .name
         .as_deref()
-        .map_or(true, |n| !n.trim().is_empty() && n.chars().count() <= MAX_NAME_LEN);
+        .is_none_or(|n| !n.trim().is_empty() && n.chars().count() <= MAX_NAME_LEN);
     let retention_ok = body
         .log_retention_days
-        .map_or(true, |d| (1..=MAX_LOG_RETENTION_DAYS).contains(&d));
+        .is_none_or(|d| (1..=MAX_LOG_RETENTION_DAYS).contains(&d));
     name_ok && retention_ok
 }
 
