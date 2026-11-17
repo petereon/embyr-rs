@@ -377,5 +377,5 @@ targets locally; push to CI.
 
 - Slices 01-04: merged (#33).
 - Slices 06, 07, 07b, 08: delivered together on `feat/admin-ui-wiring-slices-05-08` (hourly metrics, project detail and PATCH, masked connection with `PUT` edit, API-key rotate/revoke with a reveal-once modal). Findings: `POST /api_key/revoke` returns a replacement key exactly like rotate (not 204 as §3 assumed), so both reveal; `GET /projects/:id/connection` returns `summary: null` for rows whose secret is not yet server-key encrypted.
-- Slice 05 (create / delete database) is **blocked on server work**: `POST /projects` and `DELETE /projects/:id` are still operator-Bearer only (`operator_router`), so a session cookie gets 401 and the SPA would drop the session. The DB-detail Delete action and the create button stay absent until the dual-auth routes land (AC-AUW-25, 26).
+- Slice 05 (create / delete database) is **done**: server dual-auth routes (PR #51) plus the UI create modal (reveal-once key, list refresh), Owner-only delete with type-the-id confirm, role-gated buttons (AC-AUW-19, 20, 21, 25, 26).
 - Not started: 09-17.

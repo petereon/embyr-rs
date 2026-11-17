@@ -9,6 +9,11 @@ use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+/// Delete confirmation: the typed text must be exactly the database id (surrounding blanks ignored).
+pub fn confirms_delete(typed: &str, id: &DbId) -> bool {
+    typed.trim() == id.0
+}
+
 // ── Newtype identifiers ─────────────────────────────────────────────────────
 
 /// API project ids are operator-chosen strings, not UUIDs (G-05).
@@ -623,6 +628,8 @@ pub struct AppModel {
     pub card_modal_open: bool,
     /// card-payments: global modal-open state (ADR-019).
     pub upgrade_modal_open: bool,
+    /// Create-database modal is open (the form fields are view-local; secrets never enter the model).
+    pub create_db_modal_open: bool,
     /// card-payments: drives UpgradeModal's compare → confirm-downgrade step.
     pub upgrade_modal_step: UpgradeModalStep,
 }
@@ -673,6 +680,7 @@ impl AppModel {
             invoices: mock::invoices(&Plan::Pro),
             card_modal_open: false,
             upgrade_modal_open: false,
+            create_db_modal_open: false,
             upgrade_modal_step: UpgradeModalStep::default(),
         }
     }
@@ -683,6 +691,11 @@ impl AppModel {
     /// The server enforces the same rule.
     pub fn can_manage_databases(&self) -> bool {
         self.current_user.as_ref().is_some_and(|u| u.role != Role::Viewer)
+    }
+
+    /// Only the account Owner may delete a database (the server enforces the same rule).
+    pub fn can_delete_databases(&self) -> bool {
+        self.current_user.as_ref().is_some_and(|u| u.role == Role::Owner)
     }
 
     /// Dashboard totals from `GET /metrics/summary`; `None` until it has loaded.

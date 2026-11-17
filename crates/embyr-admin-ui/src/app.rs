@@ -45,6 +45,7 @@ mod inner {
             Method::Post => "POST",
             Method::Put => "PUT",
             Method::Patch => "PATCH",
+            Method::Delete => "DELETE",
         });
         if let Some(body) = &request.body {
             let headers = web_sys::Headers::new().map_err(js)?;

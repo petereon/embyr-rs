@@ -1,7 +1,7 @@
 //! DashboardView — KPI row and one card per real database (`GET /projects` + `GET /metrics/summary`).
 //!
 //! Figures are the server's hourly-metrics rollup (ADR-084); a percentile without samples is "—"
-//! (AC-AUW-30). "New database" returns with slice 05.
+//! (AC-AUW-30). "New database" opens the create modal (Owner/Admin).
 
 #[cfg(feature = "csr")]
 use crate::api::CallKind;
@@ -31,6 +31,7 @@ pub fn DashboardView() -> impl IntoView {
             m.pending.contains(&CallKind::Projects) || m.pending.contains(&CallKind::MetricsSummary)
         })
     };
+    let can_create = move || model.with(|m| m.can_manage_databases());
     let totals = move || model.with(|m| m.summary_totals());
     let reads = move || totals().map(|t| fmt_num(t.reads_today)).unwrap_or_else(|| "—".into());
     let writes = move || totals().map(|t| fmt_num(t.writes_today)).unwrap_or_else(|| "—".into());
@@ -55,6 +56,15 @@ pub fn DashboardView() -> impl IntoView {
                         on:click=move |_| dispatch.run(Msg::NavigateTo(Section::Dashboard))
                     >
                         <Icon name="refresh" size=14/>"Refresh"
+                    </button>
+                    <button
+                        class="btn btn-primary btn-sm"
+                        type="button"
+                        disabled=move || !can_create()
+                        title=move || if can_create() { "" } else { "Your role cannot create databases" }
+                        on:click=move |_| dispatch.run(Msg::OpenCreateDb)
+                    >
+                        <Icon name="plus" size=14/>"New database"
                     </button>
                 </div>
             </div>
