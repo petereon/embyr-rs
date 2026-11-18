@@ -70,6 +70,14 @@ async fn setup() -> Sso {
     setup_with(limiter()).await
 }
 
+/// Like `setup`, but the unknown-`kid` JWKS refetch throttle is `window` instead of 60 s.
+async fn setup_with_jwks_window(window: std::time::Duration) -> Sso {
+    let ctx = AdminTestContext::with_sso_jwks_refetch_min_age(limiter(), window).await;
+    let idp = MockIdp::start().await;
+    let provider = insert_provider(&ctx, uuid(&ctx.account_id), &idp.issuer(), &idp.client_id, true).await;
+    Sso { ctx, idp, provider }
+}
+
 async fn link(s: &Sso, user: &str, subject: &str) {
     sqlx::query(
         "INSERT INTO admin_sso_identities (provider_id, subject, account_id, user_id) VALUES ($1, $2, $3, $4)",
@@ -526,6 +534,59 @@ async fn an_unknown_kid_refetches_at_most_once_a_minute() {
     // fresh cache (< 60 s): no refetch, the unknown kid fails
     assert_failed_with(&s, &login(&s).await, "token_unknown_key").await;
     assert_eq!(s.idp.hits("jwks"), 1, "no forced refetch inside the minute");
+}
+
+/// Throttle window for the two tests below (production: 60 s). Long enough that nothing between
+/// priming the cache and the first refused sign-in can outlast it, short enough to wait out.
+const JWKS_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[tokio::test]
+async fn a_rotated_key_is_picked_up_by_exactly_one_refetch_once_the_window_has_passed() {
+    let s = setup_with_jwks_window(JWKS_WINDOW).await;
+    link(&s, &s.ctx.admin_id, "idp-user-1").await;
+    // RSA keygen is slow in debug builds: pay for it before the cache is primed, so the window
+    // cannot run out while the key is being made.
+    let new_key = MockIdp::generate_rsa_key("rsa-2");
+    assert_eq!(location_of(&login(&s).await), "/admin/");
+    assert_eq!(s.idp.hits("jwks"), 1, "first sign-in primes the cache");
+
+    s.idp.install_rsa_key(new_key);
+    clear_sso_sessions(&s).await;
+    // inside the window the unknown kid does not reach the IdP again
+    assert_failed_with(&s, &login(&s).await, "token_unknown_key").await;
+    assert_eq!(s.idp.hits("jwks"), 1, "no forced refetch inside the window");
+
+    tokio::time::sleep(JWKS_WINDOW + std::time::Duration::from_millis(500)).await;
+    let r = login(&s).await;
+    assert_eq!(location_of(&r), "/admin/", "the refetched key verifies the token");
+    assert!(session_cookie_of(&r).is_some());
+    assert_eq!(s.idp.hits("jwks"), 2, "exactly one refetch");
+
+    // the new key is cached now: later sign-ins do not fetch again
+    clear_sso_sessions(&s).await;
+    assert_eq!(location_of(&login(&s).await), "/admin/");
+    assert_eq!(s.idp.hits("jwks"), 2, "still one refetch in total");
+}
+
+#[tokio::test]
+async fn a_kid_that_never_appears_is_refetched_at_most_once_per_window() {
+    let s = setup_with_jwks_window(JWKS_WINDOW).await;
+    link(&s, &s.ctx.admin_id, "idp-user-1").await;
+    assert_eq!(location_of(&login(&s).await), "/admin/");
+    assert_eq!(s.idp.hits("jwks"), 1);
+    clear_sso_sessions(&s).await;
+
+    s.idp.set(|b| b.kid = Some("ghost".into()));
+    for _ in 0..3 {
+        assert_failed_with(&s, &login(&s).await, "token_unknown_key").await;
+    }
+    assert_eq!(s.idp.hits("jwks"), 1, "inside the window: no refetch at all");
+
+    tokio::time::sleep(JWKS_WINDOW + std::time::Duration::from_millis(500)).await;
+    for _ in 0..3 {
+        assert_failed_with(&s, &login(&s).await, "token_unknown_key").await;
+    }
+    assert_eq!(s.idp.hits("jwks"), 2, "after the window: one refetch, then throttled again");
 }
 
 #[tokio::test]

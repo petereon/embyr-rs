@@ -80,6 +80,9 @@ fn initial_keys() -> Vec<SigningKey> {
     KEYS.get_or_init(|| vec![new_rsa_key("rsa-1"), new_ec_key("ec-1")]).clone()
 }
 
+/// A pre-generated RSA signing key, see `MockIdp::generate_rsa_key`.
+pub struct NewRsaKey(SigningKey);
+
 // ── Behaviour (what a test can break) ─────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -244,11 +247,20 @@ impl MockIdp {
     /// Key rotation: from now on tokens are signed with a new RSA key (`kid`) and the JWKS no
     /// longer lists the old RSA key. Slow in debug builds (RSA keygen).
     pub fn rotate_rsa_key(&self, kid: &str) {
-        let key = new_rsa_key(kid);
+        self.install_rsa_key(Self::generate_rsa_key(kid));
+    }
+
+    /// The slow half of [`rotate_rsa_key`], so a time-sensitive test can pay for keygen up front
+    /// and rotate instantly with [`install_rsa_key`].
+    pub fn generate_rsa_key(kid: &str) -> NewRsaKey {
+        NewRsaKey(new_rsa_key(kid))
+    }
+
+    pub fn install_rsa_key(&self, key: NewRsaKey) {
         let mut i = self.inner.lock().unwrap();
+        i.behaviour.kid = Some(key.0.kid.clone());
         i.keys.retain(|k| k.alg != Algorithm::RS256);
-        i.keys.push(key);
-        i.behaviour.kid = Some(kid.into());
+        i.keys.push(key.0);
     }
 
     /// What `GET <authorize>` does for a browser: returns the `Location` the IdP redirects to

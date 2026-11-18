@@ -67,6 +67,8 @@ pub struct PatchAccountRequest {
 /// caller's own links). Disabling is immediate and unconditional. Enabling is refused with 422
 /// `{error:"sso_required_prerequisites"}` unless the account has an enabled provider AND the
 /// caller already has a link to one (lock-out guard). Owners stay exempt from the effect (O3).
+/// Enabling also deletes, in the same transaction, the password sessions of the account's non-Owner
+/// members (SSO sessions and all Owner sessions stay); the audit reason carries the count.
 /// Every change is audited (labels only); a no-op repeat writes nothing.
 pub async fn patch_account(
     session: SessionContext,
@@ -85,6 +87,27 @@ pub async fn patch_account(
     ev.actor_user_id = Some(session.user_id).filter(|u| !u.is_nil());
     ev.source_ip = Some(state.signin_rate_limiter.source_ip(peer, &headers));
 
+    // One transaction with the account row locked: the guard's facts cannot change underneath it
+    // (provider handlers take the same lock) and the session cut-off lands with the flag.
+    let mut tx = match pool.begin().await {
+        Ok(t) => t,
+        Err(e) => return internal("begin", e),
+    };
+    let current: Result<Option<bool>, sqlx::Error> =
+        sqlx::query_scalar("SELECT sso_required FROM accounts WHERE id = $1 AND deleted_at IS NULL FOR UPDATE")
+            .bind(session.account_id)
+            .fetch_optional(&mut *tx)
+            .await;
+    let current = match current {
+        Ok(Some(c)) => c,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => return internal("lock account", e),
+    };
+    // A repeat is a no-op that writes nothing (no audit row, no session cut-off).
+    if current == body.sso_required {
+        return Json(serde_json::json!({ "sso_required": body.sso_required })).into_response();
+    }
+
     if body.sso_required {
         let facts: Result<(bool, bool), sqlx::Error> = sqlx::query_as(
             "SELECT EXISTS(SELECT 1 FROM oidc_providers p WHERE p.account_id = $1 AND p.enabled), \
@@ -94,13 +117,14 @@ pub async fn patch_account(
         )
         .bind(session.account_id)
         .bind(session.user_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await;
         let (has_provider, caller_linked) = match facts {
             Ok(f) => f,
             Err(e) => return internal("sso_required guard", e),
         };
         if !may_enable_sso_required(has_provider, caller_linked) {
+            drop(tx);
             ev.outcome = AuditOutcome::Failed;
             ev.reason = Some(if has_provider { "caller_not_linked" } else { "no_enabled_provider" });
             record(pool, &ev).await;
@@ -112,24 +136,40 @@ pub async fn patch_account(
         }
     }
 
-    // `IS DISTINCT FROM` makes a repeat a no-op that returns no row (nothing to audit).
-    let changed: Result<Option<bool>, sqlx::Error> = sqlx::query_scalar(
-        "UPDATE accounts SET sso_required = $2 \
-         WHERE id = $1 AND deleted_at IS NULL AND sso_required IS DISTINCT FROM $2 \
-         RETURNING sso_required",
-    )
-    .bind(session.account_id)
-    .bind(body.sso_required)
-    .fetch_optional(pool)
-    .await;
-    match changed {
-        Ok(Some(_)) => {
-            ev.reason = Some(if body.sso_required { "enabled" } else { "disabled" });
-            record(pool, &ev).await;
-        }
-        Ok(None) => {}
-        Err(e) => return internal("update sso_required", e),
+    if let Err(e) = sqlx::query("UPDATE accounts SET sso_required = $2 WHERE id = $1")
+        .bind(session.account_id)
+        .bind(body.sso_required)
+        .execute(&mut *tx)
+        .await
+    {
+        return internal("update sso_required", e);
     }
+
+    // Enabling ends the password sessions of non-Owner members (their password path just closed);
+    // SSO sessions, every Owner session (the caller's included) and API keys stay.
+    let mut ended = 0u64;
+    if body.sso_required {
+        match sqlx::query(
+            "DELETE FROM sessions s USING account_members am \
+             WHERE s.account_id = $1 AND s.auth_method = 'password' \
+               AND am.account_id = s.account_id AND am.user_id = s.user_id AND am.role <> 'Owner'",
+        )
+        .bind(session.account_id)
+        .execute(&mut *tx)
+        .await
+        {
+            Ok(r) => ended = r.rows_affected(),
+            Err(e) => return internal("end password sessions", e),
+        }
+    }
+    if let Err(e) = tx.commit().await {
+        return internal("commit", e);
+    }
+
+    // Label only: how many sessions the switch ended, no identifiers.
+    let reason = if body.sso_required { format!("enabled:sessions_ended_{ended}") } else { "disabled".to_string() };
+    ev.reason = Some(&reason);
+    record(pool, &ev).await;
     Json(serde_json::json!({ "sso_required": body.sso_required })).into_response()
 }
 

@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use embyr_core::admin::account::Role;
 use embyr_core::admin::audit::{events, AuditEvent, AuditOutcome};
+use embyr_core::admin::sso::policy::may_remove_enabled_provider;
 
 use crate::adapters::admin_audit::record;
 use crate::admin::extractors::session_context::SessionContext;
@@ -41,11 +42,11 @@ const MAX_CREDENTIAL_BYTES: usize = 1024;
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 /// Handler error: a bare status, or a 422 that tells the Owner which check failed (labels only).
-pub struct Reject(StatusCode, Option<(&'static str, &'static str)>);
+pub struct Reject(StatusCode, Option<(&'static str, &'static str)>, Option<&'static str>);
 
 impl From<StatusCode> for Reject {
     fn from(s: StatusCode) -> Self {
-        Reject(s, None)
+        Reject(s, None, None)
     }
 }
 
@@ -53,7 +54,11 @@ impl IntoResponse for Reject {
     fn into_response(self) -> Response {
         match self.1 {
             Some((error, reason)) => {
-                (self.0, Json(serde_json::json!({ "error": error, "reason": reason }))).into_response()
+                let mut body = serde_json::json!({ "error": error, "reason": reason });
+                if let Some(message) = self.2 {
+                    body["message"] = message.into();
+                }
+                (self.0, Json(body)).into_response()
             }
             None => self.0.into_response(),
         }
@@ -61,7 +66,53 @@ impl IntoResponse for Reject {
 }
 
 fn invalid(reason: &'static str) -> Reject {
-    Reject(StatusCode::UNPROCESSABLE_ENTITY, Some(("invalid_request", reason)))
+    Reject(StatusCode::UNPROCESSABLE_ENTITY, Some(("invalid_request", reason)), None)
+}
+
+/// While the account requires SSO, an Owner may not disable or delete its last enabled provider
+/// (everyone but the Owners would be locked out). Locks the account row for the transaction, so two
+/// concurrent removals cannot each see the other provider still enabled. A provider that is not
+/// enabled (or not found) passes; the caller's own 404 handling applies. Refusals are audited.
+async fn guard_last_enabled_provider(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    state: &UserAdminState,
+    session: &SessionContext,
+    provider_id: Uuid,
+    event: &str,
+) -> Result<(), Reject> {
+    let db_err = |e: sqlx::Error| {
+        tracing::error!("oidc_providers: last-provider guard: {e}");
+        Reject::from(StatusCode::INTERNAL_SERVER_ERROR)
+    };
+    let required: bool = sqlx::query_scalar("SELECT sso_required FROM accounts WHERE id = $1 FOR UPDATE")
+        .bind(session.account_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(db_err)?
+        .unwrap_or(false);
+    let (this_enabled, others): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE id = $2 AND enabled), count(*) FILTER (WHERE id <> $2 AND enabled) \
+         FROM oidc_providers WHERE account_id = $1",
+    )
+    .bind(session.account_id)
+    .bind(provider_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(db_err)?;
+    if this_enabled == 0 || may_remove_enabled_provider(required, others) {
+        return Ok(());
+    }
+    let mut ev = AuditEvent::new(event, AuditOutcome::Failed);
+    ev.account_id = Some(session.account_id);
+    ev.actor_user_id = Some(session.user_id).filter(|u| !u.is_nil());
+    ev.provider_id = Some(provider_id);
+    ev.reason = Some("sso_required_last_provider");
+    record(state.system_db.pool(), &ev).await;
+    Err(Reject(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Some(("sso_required_active", "last_enabled_provider")),
+        Some("This account requires SSO and this is its last enabled provider. Turn off the SSO requirement first."),
+    ))
 }
 
 /// AC-SSO-17: credentials are non-empty and bounded; the secret is never echoed or logged.
@@ -82,7 +133,7 @@ async fn check_issuer(state: &UserAdminState, provider_id: Option<Uuid>, issuer:
         Some(id) => state.sso_client.refresh_discovery(id, issuer).await.map(|_| ()),
         None => state.sso_client.discover_fresh(issuer).await.map(|_| ()),
     };
-    result.map_err(|e| Reject(StatusCode::UNPROCESSABLE_ENTITY, Some(("issuer_invalid", e.reason()))))
+    result.map_err(|e| Reject(StatusCode::UNPROCESSABLE_ENTITY, Some(("issuer_invalid", e.reason())), None))
 }
 
 async fn audit(state: &UserAdminState, session: &SessionContext, event: &str, provider_id: Uuid) {
@@ -282,6 +333,9 @@ pub async fn patch_oidc_provider(
     }
 
     let mut tx = pool.begin().await.map_err(db_err)?;
+    if body.enabled == Some(false) {
+        guard_last_enabled_provider(&mut tx, &state, &session, provider_uuid, events::SSO_PROVIDER_DISABLED).await?;
+    }
     let row = sqlx::query(
         "UPDATE oidc_providers \
          SET enabled = COALESCE($3, enabled) \
@@ -364,30 +418,34 @@ pub async fn delete_oidc_provider(
     Path(provider_id): Path<String>,
     State(state): State<UserAdminState>,
     session: SessionContext,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, Reject> {
     if session.role != Role::Owner {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into());
     }
 
     let provider_uuid = Uuid::parse_str(&provider_id).map_err(|_| StatusCode::NOT_FOUND)?;
 
     let pool = state.system_db.pool();
+    let db_err = |e: sqlx::Error| {
+        tracing::error!("delete_oidc_provider: DB error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
 
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    guard_last_enabled_provider(&mut tx, &state, &session, provider_uuid, events::SSO_PROVIDER_DELETED).await?;
     let result = sqlx::query(
         "DELETE FROM oidc_providers WHERE id = $1 AND account_id = $2",
     )
     .bind(provider_uuid)
     .bind(session.account_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        tracing::error!("delete_oidc_provider: DELETE error: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    .map_err(db_err)?;
 
     if result.rows_affected() == 0 {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into());
     }
+    tx.commit().await.map_err(db_err)?;
 
     audit(&state, &session, events::SSO_PROVIDER_DELETED, provider_uuid).await;
     Ok(StatusCode::NO_CONTENT)

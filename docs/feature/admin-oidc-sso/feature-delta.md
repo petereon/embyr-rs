@@ -304,8 +304,40 @@ password-reset endpoints, and `auth_method` / `sso_linked` / `sso_required` on `
   a token that was issued before the flag was switched on.
 - **Session probe:** `auth_method` is the session's own (`password` | `sso`; a Bearer admin key reports `password`), `sso_linked`
   is "this user has at least one link", `sso_required` is the account flag.
-- Not handled (deliberate, small): demoting an Owner to Admin while required leaves that user without a password path until
-  linked; existing non-Owner password sessions are not ended when the flag is turned on (they expire after 24 h as usual).
+- The two gaps first noted here (an Owner demoted while required, password sessions surviving the switch) are closed, see
+  "Known-gap fixes" below.
+
+Known-gap fixes (branch `fix/sso-known-gaps`; no migration, no new environment variable). Pure decisions live in
+`embyr_core::admin::sso::policy` (`check_role_change`, `may_remove_enabled_provider`, `may_unlink`, exhaustive table tests):
+
+- **Role changes** (`PATCH /members/:id/role`): only a change across the Owner boundary alters how a member can sign in, so
+  only those are checked, in one transaction with a shared lock on the account row. Owner -> Admin/Viewer while `sso_required`
+  and the target has no link to an enabled provider of the account is 422 `{error:"sso_link_required", message}`. Non-Owner ->
+  Owner for a member without a password is 422 `owner_requires_password` (O3: Owners are never SSO-only; found while
+  reading, same lock-out family). Admin <-> Viewer and no-op changes are never refused, so an already locked-out member can
+  still be re-roled. Refusals change nothing and are audited (`member_role_changed`, outcome `failed`, reason = the error
+  code); successful changes are now audited too (reason `promoted`|`demoted`|`unchanged`).
+- **Providers** (`PATCH`/`DELETE /oidc_providers/:id`): while `sso_required`, disabling or deleting the last enabled provider
+  is 422 `{error:"sso_required_active", reason:"last_enabled_provider", message}` ("Turn off the SSO requirement first"),
+  audited as `failed` (`sso_provider_disabled`/`sso_provider_deleted`, reason `sso_required_last_provider`). The decision
+  is refuse, not auto-disable: switching a security setting off as a side effect would be surprising. Disabling or deleting a
+  provider that is already disabled is unaffected; the account row is locked `FOR UPDATE` so two concurrent removals cannot
+  each see the other provider enabled. `PATCH /account` takes the same lock before reading its own facts.
+- **Unlink** (`DELETE /auth/sso_identity`): a non-Owner of a required account may not remove their last link to an enabled
+  provider (409 `{error:"sso_link_required"}`, audited `sso_link_removed` failed, reason `sso_required_last_link`). Owners
+  keep password + TOTP and are unaffected. This is the "last link" case: there is no separate guard for an Owner's link,
+  because Owners never depend on SSO.
+- **Password sessions on enable** (`PATCH /account {sso_required:true}`): in the same transaction as the flag, the sessions
+  with `auth_method='password'` of the account's non-Owner members are deleted. SSO sessions, every Owner session (the
+  caller's included) and API keys stay. The audit reason carries the count as a label: `enabled:sessions_ended_<n>`
+  (previously `enabled`). A repeat of the current value is still a no-op (no audit row, nothing ended); disabling ends nothing.
+- **JWKS refetch throttle is injectable**: `SsoClient::with_forced_refetch_min_age(Duration)` (default 60 s, which is what the
+  composition root gets). `build_admin_router_with_sso_client` takes the client; `build_admin_router` is a thin wrapper
+  passing `SsoClient::new()`. The harness exposes `AdminTestContext::with_sso_jwks_refetch_min_age`. Acceptance tests
+  (`s03_start_and_callback.rs`) rotate the mock's key: inside the window the new `kid` is refused with no refetch, after it
+  exactly one refetch makes the sign-in succeed, and a `kid` that never appears causes one refetch per window and no more.
+- Still true: a non-Owner who had only a password and no link when the requirement was switched on cannot sign in (that is
+  the requirement working); the Owner can turn it off, remove and re-invite the member with SSO, or link them first.
 
 Slices 1-3 deliver working SSO for pre-linked users only if a link exists, so 4 or 5 is required before any real use; ship 1-5 together.
 Total roughly 4-5 weeks of one engineer including the mock IdP.

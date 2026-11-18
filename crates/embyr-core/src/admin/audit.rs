@@ -20,6 +20,7 @@ pub mod events {
     pub const SSO_PROVIDER_SECRET_ROTATED: &str = "sso_provider_secret_rotated";
     pub const SSO_PROVIDER_DELETED: &str = "sso_provider_deleted";
     pub const SSO_REQUIRED_TOGGLED: &str = "sso_required_toggled";
+    pub const MEMBER_ROLE_CHANGED: &str = "member_role_changed";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +101,7 @@ mod tests {
         for e in [
             SSO_SIGNIN, SSO_LINK_CREATED, SSO_LINK_REMOVED, SSO_INVITE_ACCEPTED, SSO_PROVIDER_CREATED, SSO_PROVIDER_ENABLED,
             SSO_PROVIDER_DISABLED, SSO_PROVIDER_SECRET_ROTATED, SSO_PROVIDER_DELETED, SSO_REQUIRED_TOGGLED,
+            MEMBER_ROLE_CHANGED,
         ] {
             assert!(is_label(e), "{e}");
         }
