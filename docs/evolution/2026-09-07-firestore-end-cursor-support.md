@@ -116,7 +116,7 @@ direct inspection.
 - **Multi-field cursors** — explicitly out of scope, unchanged from `start_at`'s own existing
   single-field-orderBy-only limitation.
 
-Carried forward, unchanged, from `docs/product/known-gaps.md`: #3 (`Filter.or()` composite OR
+Carried forward, unchanged, from `docs/product/gaps.md`: #3 (`Filter.or()` composite OR
 rejected), #4 (`IS_NULL`/`IS_NOT_NULL` unary filter rejected), #5 (no TLS/mTLS on any listener), #6
 (no graceful shutdown), #7 (`secrets_management` Docker/LocalStack timing flakiness), #8 (CEL
 "chaining" construct-detection gap).

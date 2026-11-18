@@ -10,7 +10,7 @@
 //! Walking skeleton: `pr01_config_from_env::server_starts_with_all_required_env_vars_set`
 //!   — the ONLY test NOT marked #[ignore]. Proves the full startup path end-to-end.
 //!   Other tests were unskipped 2026-11-13, except pr02 (Docker image
-//!   build/inspect — see `docs/product/ignored-test-triage-2026-11-13.md`).
+//!   build/inspect — see `docs/product/gaps.md`).
 //!
 //! Implementation order:
 //!   1. pr01 — US-PR-01: env-var config + main() startup (D-PR-1 through D-PR-6)
@@ -38,7 +38,7 @@
 //!      AwsSecretFetcher/GcpSecretFetcher instances and threads them into
 //!      all 3 existing composition-root call sites (FirestoreService,
 //!      build_admin_router, transaction_sweeper::spawn) instead of
-//!      hardcoding None, None (production-readiness-audit-2026-09-08.md
+//!      hardcoding None, None (gaps.md
 //!      finding #7) (AC-WSF-01 through AC-WSF-06)
 //!   10. pr10 — healthz-dependency-checks (finding #15): `/healthz` redefined
 //!      as readiness (real `SystemDb::probe()`, shared system pool only,

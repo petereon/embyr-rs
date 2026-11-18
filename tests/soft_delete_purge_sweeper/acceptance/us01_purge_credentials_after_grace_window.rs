@@ -1,7 +1,7 @@
 // SCAFFOLD: false
 //! US-01 (Walking Skeleton, the entire feature) — A Soft-Deleted Project's
 //! Encrypted Credentials Are Genuinely Purged Once the Grace Window Elapses
-//! (ADR-073, production-readiness-audit-2026-09-08.md finding #6).
+//! (ADR-073, gaps.md finding #6).
 //!
 //! Acceptance criteria verified here (docs/feature/soft-delete-purge-sweeper/
 //! feature-delta.md § Acceptance Criteria):
@@ -542,7 +542,7 @@ async fn purge_never_touches_status_deleted_at_updated_at_or_referencing_rows() 
     );
 }
 
-// ─── Finding #47 (production-readiness-audit-2026-09-08.md § Follow-Up Scan) ─
+// ─── Finding #47 (gaps.md § Follow-Up Scan) ─
 
 /// A genuine purge-query failure (closed pool, not a mock) increments the new
 /// shared `embyr_sweeper_error_total{sweeper="soft_delete_purge_sweeper"}`

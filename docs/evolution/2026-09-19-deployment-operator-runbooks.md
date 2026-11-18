@@ -1,7 +1,7 @@
 # Evolution: deployment-operator-runbooks
 
 Closes High findings #45 and #46 (DevOps / Deployment) from
-`docs/product/production-readiness-audit-2026-09-08.md`'s Follow-Up Scan.
+`docs/product/gaps.md`'s Follow-Up Scan.
 
 ## Business Context
 
@@ -28,7 +28,7 @@ documentation — no code changes.
   create-secret`, GCP `roles/secretsmanager.secretAccessor` + `gcloud secrets create`, the
   `get_raw_secret()` (plain string) vs `get_dsn()` (JSON-wrapped) distinction, `_PREVIOUS`
   rotation window
-- `docs/product/production-readiness-audit-2026-09-08.md` — rows #45/#46 marked CLOSED
+- `docs/product/gaps.md` — rows #45/#46 marked CLOSED
 
 ## Follow-Up
 

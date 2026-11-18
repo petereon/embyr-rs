@@ -4,7 +4,7 @@
 **Scope**: `crates/embyr-server/src/middleware/rate_limit.rs`, `--in-diff` scoped to the DELIVER commit
 (`git diff 430dae1 0a88292975e3c2f4e82589defd4a1d04f4a2614e -- crates/embyr-server/src/middleware/rate_limit.rs`).
 
-Closes Medium finding #20 (Security) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes Medium finding #20 (Security) from `docs/product/gaps.md`.
 
 ## Command
 

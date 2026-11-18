@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-`docs/product/production-readiness-audit-2026-09-08.md` finding #6 (Blocker): the documented 168-hour
+`docs/product/gaps.md` finding #6 (Blocker): the documented 168-hour
 soft-delete purge sweeper does not exist. `delete_project` (`crates/embyr-server/src/admin/handlers/
 lifecycle.rs:165-196`) sets `projects.status = 'deleted'` and `projects.deleted_at = now()`, but
 `deleted_at` is write-only — nothing in the codebase ever reads it again (confirmed by repo-wide grep,

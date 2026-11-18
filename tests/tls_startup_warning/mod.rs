@@ -4,7 +4,7 @@
 //! in `crates/embyr-server/Cargo.toml`.
 //!
 //! Closes finding #22 (Medium, Security/Ops) from
-//! `docs/product/production-readiness-audit-2026-09-08.md`. See
+//! `docs/product/gaps.md`. See
 //! `docs/feature/tls-startup-warning/feature-delta.md`.
 
 pub mod common;

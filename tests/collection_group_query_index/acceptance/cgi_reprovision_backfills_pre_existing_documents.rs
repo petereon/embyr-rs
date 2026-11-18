@@ -1,5 +1,5 @@
 // @driving_port @real-io @regression
-//! Finding #48 (production-readiness-audit-2026-09-08.md, Follow-Up Scan):
+//! Finding #48 (gaps.md, Follow-Up Scan):
 //! `provision.rs`'s Stale/NotPrepped reprovision path never called
 //! `backfill_collection_id()` -- pre-existing rows on a reprovisioned
 //! project stayed permanently un-backfilled until a DBA manually ran

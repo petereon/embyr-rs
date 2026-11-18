@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-`docs/product/production-readiness-audit-2026-09-08.md` finding #4 (Blocker): `PostgresNotifyListener`'s
+`docs/product/gaps.md` finding #4 (Blocker): `PostgresNotifyListener`'s
 background task (`crates/embyr-server/src/adapters/postgres_notify_listener.rs:57-72`) ends permanently
 — `break`, no retry — the first time `pg_listener.recv().await` returns `Err`. `handle_listen`'s own
 listener-provisioning guard (`crates/embyr-server/src/grpc/handler.rs:3544-3567`) only ever checks

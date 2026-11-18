@@ -1,7 +1,7 @@
 # Resource Sizing (CPU / Memory) — embyr-server and embyr-agent
 
 Closes Medium finding #52 from
-[`docs/product/production-readiness-audit-2026-09-08.md`](../product/production-readiness-audit-2026-09-08.md).
+[`docs/product/gaps.md`](../product/gaps.md).
 
 ## Honesty disclaimer
 

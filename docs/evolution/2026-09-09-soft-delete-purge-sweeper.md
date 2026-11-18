@@ -7,7 +7,7 @@ long-standing but previously-fake promise.
 **Job:** JOB-10 (`account-admin`) — reused, persona Chris.
 **ADRs:** ADR-073 (new) — idempotency guard + sweeper scope decisions.
 
-## This closes finding #6 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #6 from `docs/product/gaps.md`
 
 ## Business Context
 

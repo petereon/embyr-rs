@@ -3,7 +3,7 @@
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
 ✓ `docs/product/jobs.yaml`, JOB-01 (`sdk-compat`, persona P1 Alex) — read in full.
-✓ `docs/product/known-gaps.md` #4 — `IS_NULL`/`IS_NOT_NULL` unary filter rejected
+✓ `docs/product/gaps.md` #4 — `IS_NULL`/`IS_NOT_NULL` unary filter rejected
 (`crates/embyr-server/src/grpc/handler.rs:4015-4019` at scan time), flagged "likely reachable —
 some SDKs lower `where(f,'==',null)` to this shape; unconfirmed, needs live-SDK verification."
 ✓ `proto/google/firestore/v1/query.proto` lines 111-128 — confirmed `UnaryFilter.Operator` is a
@@ -37,7 +37,7 @@ support`'s own `CompositeOr`.
 behavior, not a contested edge case: `IS_NULL` matches only documents where the field is
 EXPLICITLY present with value `null` (a document missing the field entirely does not match);
 `IS_NOT_NULL` matches documents where the field is present AND not `null` (a document missing the
-field does not match either). This resolves known-gaps.md #4's own "unconfirmed, needs
+field does not match either). This resolves gaps.md #4's own "unconfirmed, needs
 verification" framing — it IS reachable: every official Firebase SDK (`this.where('field', '==',
 null)` in the JS/Node Admin SDK, equivalently in Python/Go/Java) generates exactly this proto
 shape, since a raw `==`/`!=` comparison against `null` cannot be expressed as an ordinary
@@ -116,7 +116,7 @@ abstractions, effort well under 1 day. Not oversized — no split needed.
 6. Full regression suite clean (pre-existing flakes excepted, triaged not assumed).
 7. Mutation testing: 0 missed on all viable mutants, especially the new SQL predicates and the
    proto-to-domain translation arms.
-8. Evolution doc written, `known-gaps.md` #4 updated to CLOSED.
+8. Evolution doc written, `gaps.md` #4 updated to CLOSED.
 9. Memory updated.
 
 ## Wave: DISCUSS / [REF] Out of Scope

@@ -166,7 +166,7 @@ two environmental detours this run hit before reaching that result.
   running for this workspace's testcontainers setup, given dozens of containers accumulated
   silently across a single session.
 
-Carried forward, unchanged, from `docs/product/known-gaps.md`: #4 (`IS_NULL`/`IS_NOT_NULL` unary
+Carried forward, unchanged, from `docs/product/gaps.md`: #4 (`IS_NULL`/`IS_NOT_NULL` unary
 filter rejected — unconfirmed, needs live verification), #5 (no TLS/mTLS on any listener), #6 (no
 graceful shutdown), #7 (`secrets_management` Docker/LocalStack timing flakiness — reinforced by
 today's new `PortNotExposed` flavor in `admin_api_v2_b04_project_patch`, same root cause), #8 (CEL

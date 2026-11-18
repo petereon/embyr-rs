@@ -4,7 +4,7 @@
 //! in `crates/embyr-server/Cargo.toml`. All acceptance modules are included here.
 //!
 //! This feature closes finding #19 (High, DevOps) from
-//! `docs/product/production-readiness-audit-2026-09-08.md`, split into two
+//! `docs/product/gaps.md`, split into two
 //! independently-shippable stories:
 //!   - US-DRP-01: version / git tag / CHANGELOG / startup log convention
 //!   - US-DRP-02: docker-compose.yml for local/single-host evaluation

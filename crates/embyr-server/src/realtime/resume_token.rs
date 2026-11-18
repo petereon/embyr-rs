@@ -9,7 +9,7 @@
 /// cannot cross project boundaries; the worst case is a caller forcing a
 /// larger-than-necessary delta scan against their own already-authorized
 /// project, bounded by the 24h staleness window below. Audit finding #31
-/// (production-readiness-audit-2026-09-08.md): a previous revision appended
+/// (gaps.md): a previous revision appended
 /// an unkeyed 32-byte BLAKE3 suffix that `decode_ts` never read or verified
 /// — decorative weight with no security effect. Removed rather than made
 /// real, since keyed verification would not reduce the (already-bounded,

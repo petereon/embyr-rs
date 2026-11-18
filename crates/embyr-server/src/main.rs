@@ -408,7 +408,7 @@ async fn main() {
         cfg.transaction_retention_days,
     );
 
-    // soft-delete-purge-sweeper (Blocker finding #6, production-readiness-audit-2026-09-08.md):
+    // soft-delete-purge-sweeper (Blocker finding #6, gaps.md):
     // background purge of the 3 sensitive encrypted-credential columns on a
     // `'deleted'` project's own row, once the configured grace window (default
     // 168h/7 days, matching the admin-UI's own unchanged promise) has elapsed.

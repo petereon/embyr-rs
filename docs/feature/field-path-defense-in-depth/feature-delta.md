@@ -1,6 +1,6 @@
 # field-path-defense-in-depth — DISCUSS+DESIGN (combined, token-budget mode)
 
-Closes finding #26 (Medium, Security/DB), `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes finding #26 (Medium, Security/DB), `docs/product/gaps.md`.
 
 ## 1. Finding, restated
 

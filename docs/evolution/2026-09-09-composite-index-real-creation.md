@@ -7,7 +7,7 @@ readiness.
 **Job:** JOB-01 (`sdk-compat`) — reused, P1 Alex.
 **ADRs:** ADR-072 (new) — composite index real provisioning (4 sub-decisions A-D).
 
-## This closes finding #5 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #5 from `docs/product/gaps.md`
 
 ## Business Context
 

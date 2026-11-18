@@ -1,6 +1,6 @@
 # cors-origin-policy — Feature Delta (combined DISCUSS + DESIGN)
 
-Closes finding #21 (Medium, Security) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes finding #21 (Medium, Security) from `docs/product/gaps.md`.
 Token-budget mode: single doc, no separate wave-decisions/slices ceremony (Medium severity, one middleware layer).
 
 ## 1. DISCUSS-equivalent — current state

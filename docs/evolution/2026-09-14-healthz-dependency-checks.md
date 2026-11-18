@@ -8,7 +8,7 @@ traffic here" from "restart this pod," and a DB outage can no longer trigger a
 restart-storm.
 **ADR:** `docs/product/architecture/adr-078-liveness-readiness-split.md`
 
-## This closes finding #15 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #15 from `docs/product/gaps.md`
 
 ## Business Context
 

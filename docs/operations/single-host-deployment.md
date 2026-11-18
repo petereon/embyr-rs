@@ -1,6 +1,6 @@
 # Single-Host Deployment (Non-Kubernetes)
 
-Closes High finding #45 from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes High finding #45 from `docs/product/gaps.md`.
 
 ## Who this is for
 

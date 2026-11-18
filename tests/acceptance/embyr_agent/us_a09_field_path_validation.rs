@@ -2,7 +2,7 @@
 //! US-A09 (agent-field-path-validation) — embyr-agent's own query-filter
 //! field-path validator enforces the identical spec-mandated charset
 //! embyr-server already does, closing the SQL-injection-reachable
-//! asymmetry named by production-readiness-audit-2026-09-08 finding #11.
+//! asymmetry named by gaps.md finding #11.
 //!
 //! Driving port: StorageAgent gRPC service (mTLS :9191) — `RunQuery` and
 //! `RunAggregationQuery` (Count), the two confirmed callers of the one

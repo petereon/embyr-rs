@@ -7,7 +7,7 @@ Accepted
 ## Context
 
 Audit finding #16 (High, Reliability) and #30 (Medium, Database — same root cause, confirmed by
-direct read of `docs/product/production-readiness-audit-2026-09-08.md` line 40): `embyr-server`'s
+direct read of `docs/product/gaps.md` line 40): `embyr-server`'s
 3 long-running Postgres pools (`system_db.rs`, `backend_adapter.rs`, `handler.rs`'s `handle_listen`)
 hardcode `max_connections`, and 2 of the 3 have no `acquire_timeout` at all (sqlx default 30s).
 A saturated tenant pool queues silently for up to 30s before erroring — indistinguishable from a

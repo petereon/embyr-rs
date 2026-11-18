@@ -1,7 +1,7 @@
 # Service Level Indicators and Objectives (proposed)
 
 Closes the SLO half of go-live finding O5
-([`go-live-assessment-2026-11-13.md`](../product/go-live-assessment-2026-11-13.md)).
+([`gaps.md`](../product/gaps.md)).
 
 ## Status: proposal, not a commitment
 

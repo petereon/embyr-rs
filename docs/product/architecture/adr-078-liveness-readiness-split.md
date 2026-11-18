@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-`production-readiness-audit-2026-09-08.md` finding #15 (High, DevOps/SRE): `/healthz`
+`gaps.md` finding #15 (High, DevOps/SRE): `/healthz`
 (`crates/embyr-server/src/grpc/healthz.rs`) is a hardcoded `200 OK`, mounted identically on the
 :8081 (REST/gRPC-Web) and :9090 (Admin) HTTP surfaces. An orchestrator has no way to distinguish
 "this process is wedged, restart it" from "this process is fine but cannot currently reach

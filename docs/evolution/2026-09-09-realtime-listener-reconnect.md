@@ -7,7 +7,7 @@ process.
 **Job:** JOB-03 (`live-sync`) — reused, secondary persona P2 Sam Chen noted.
 **ADRs:** ADR-071 (new, amended during DELIVER) — internal reconnect-with-backoff mechanism.
 
-## This closes finding #4 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #4 from `docs/product/gaps.md`
 
 ## Business Context
 

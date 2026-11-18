@@ -1,7 +1,7 @@
 # Network Topology — DNS, Load Balancer, Firewall
 
 Closes Medium finding #53 from
-[`docs/product/production-readiness-audit-2026-09-08.md`](../product/production-readiness-audit-2026-09-08.md).
+[`docs/product/gaps.md`](../product/gaps.md).
 
 ## Who this is for
 

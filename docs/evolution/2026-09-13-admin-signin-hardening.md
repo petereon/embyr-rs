@@ -8,7 +8,7 @@ gap and (as an accepted side effect, not full elimination) narrows the
 timing-oracle email-enumeration window.
 **ADR:** `docs/product/architecture/adr-076-signin-rate-limiting.md`
 
-## This closes findings #12 AND #13 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes findings #12 AND #13 from `docs/product/gaps.md`
 
 Both findings share one route and one fix surface, so were designed and
 delivered together per a single feature (as flagged as likely in

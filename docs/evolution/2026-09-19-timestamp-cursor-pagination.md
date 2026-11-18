@@ -1,7 +1,7 @@
 # Timestamp Cursor Pagination Fix
 
 **Date**: 2026-09-19
-**Closes**: Finding #44 (High, Database/Correctness), `docs/product/production-readiness-audit-2026-09-08.md` Follow-Up Scan
+**Closes**: Finding #44 (High, Database/Correctness), `docs/product/gaps.md` Follow-Up Scan
 **Commit**: `ba7da5a`
 
 ## Business Context

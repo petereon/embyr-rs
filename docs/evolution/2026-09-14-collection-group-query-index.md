@@ -8,7 +8,7 @@ and a cached schema-version probe so query code stays correct on not-yet-migrate
 customer databases while getting the fast path once they're current.
 **ADR:** `docs/product/architecture/adr-080-collection-group-query-index.md`
 
-## This closes finding #17 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #17 from `docs/product/gaps.md`
 
 Compounds finding #5 (`composite-index-real-creation`) — that work gave real per-field
 indexes to ordinary queries but delivered zero benefit here, since a leading-`%` LIKE

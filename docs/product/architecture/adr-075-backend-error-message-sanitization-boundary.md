@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-`docs/product/production-readiness-audit-2026-09-08.md` finding #10 (High): raw Postgres/sqlx driver
+`docs/product/gaps.md` finding #10 (High): raw Postgres/sqlx driver
 error text reaches the client verbatim in gRPC `Status` messages, confirmed to embed literal column
 names (`"ecies_encrypted_dsn"`, `"api_key_hash_current"`) via `sqlx::Error::ColumnDecode`'s own
 `Display` format, and Postgres's own constraint/table names via `sqlx::Error::Database`. Full

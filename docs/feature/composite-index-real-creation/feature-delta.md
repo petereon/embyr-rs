@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` finding #5 confirmed by direct reading:
+✓ `docs/product/gaps.md` finding #5 confirmed by direct reading:
 "Composite-index feature never creates a real Postgres index — `IndexManager`/`create_composite_index`
 only read/write a metadata row (`status='ready'` set on INSERT, no build step). Zero GIN/expression
 index exists on the `fields` JSONB column; every 'index ready' filtered/sorted query is actually a

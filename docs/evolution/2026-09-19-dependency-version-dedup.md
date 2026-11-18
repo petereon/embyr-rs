@@ -3,7 +3,7 @@
 **Date:** 2026-09-19
 **Commit:** `afa97f7`
 
-## This closes finding #27 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #27 from `docs/product/gaps.md`
 
 ## Business Context
 

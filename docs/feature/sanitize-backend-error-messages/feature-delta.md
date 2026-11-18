@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` — read in full. Finding #10 confirmed
+✓ `docs/product/gaps.md` — read in full. Finding #10 confirmed
 verbatim: *"Raw Postgres/sqlx driver error text is returned to the client verbatim as the gRPC
 status message on every backend failure (52+ call sites) — can leak column/constraint/schema
 detail."* Category: Security / Correctness. Severity: **High**. Location cited:

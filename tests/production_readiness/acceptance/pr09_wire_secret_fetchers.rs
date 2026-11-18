@@ -5,7 +5,7 @@
 //! `transaction_sweeper::spawn`) hardcode `None, None`. Every `aws_secret`/
 //! `gcp_secret`-mode project fails closed 100% of the time, in every
 //! environment, regardless of whether that cloud's credentials are actually
-//! available (production-readiness-audit-2026-09-08.md finding #7).
+//! available (gaps.md finding #7).
 //!
 //! Acceptance criteria verified here:
 //!   AC-WSF-01: with AWS credentials genuinely available (via the standard
