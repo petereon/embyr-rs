@@ -484,7 +484,7 @@ pub fn numeric_sort_key(v: &FieldValue) -> Option<(f64, i64)> {
 /// total, so limits, offsets and cursors page deterministically.
 pub fn effective_order_by(order_by: &[OrderBy]) -> Vec<OrderBy> {
     let mut out = order_by.to_vec();
-    if order_by.last().map_or(true, |o| o.field_path != "__name__") {
+    if order_by.last().is_none_or(|o| o.field_path != "__name__") {
         let direction = order_by.last().map_or(OrderDirection::Ascending, |o| o.direction.clone());
         out.push(OrderBy { field_path: "__name__".to_string(), direction });
     }
