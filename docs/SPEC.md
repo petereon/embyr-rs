@@ -568,7 +568,7 @@ When no `document_id` is provided to `CreateDocument`, the server generates a 20
 | array | `{"arrayValue": {"values": [...]}}` |
 | map | `{"mapValue": {"fields": {...}}}` |
 
-**Cross-type numeric comparison**: `integer` and `double` fields are compared after type promotion. Integer comparisons use int64 precision; only when one side is double is floating-point used. This avoids precision loss for integers beyond 2^53.
+**Cross-type numeric comparison**: `integer` and `double` fields are compared after type promotion. Integer comparisons use int64 precision; an integer is compared with a double by exact numeric value (see OrderBy > Numbers). This avoids precision loss for integers beyond 2^53.
 
 ---
 
@@ -914,6 +914,10 @@ Each order clause: `{field: string, direction: ASC | DESC}`.
 
 Non-scalar fields use type-aware ordering: numeric values (integer or double) sort numerically; strings and timestamps sort lexicographically/chronologically.
 
+**Numbers**: integer vs integer compares as int64, double vs double as IEEE 754 (`NaN` before every number, `-0` equals `0`, `-Infinity`/`Infinity` the extremes), and integer vs double by exact numeric value (an integer above 2^53 is never rounded to a double for the comparison; e.g. `2^53 + 1` sorts after the double `2^53`, and `i64::MAX` before the double `2^63`). The same exact order applies to `ORDER BY`, range filters (`<`, `<=`, `>`, `>=`) and cursors. Equality (`==`, `!=`, `in`, `not-in`) still compares the stored typed value, so integer `1` does not equal double `1.0`.
+
+**Implicit `__name__` order**: every query is additionally ordered by document name (`(collection_path, document_id)`, bytewise) after the explicit orders, in the direction of the last explicit order (ascending when there is none). Documents that tie on every explicit order therefore have one fixed order, and limits, offsets and cursors page without gaps or duplicates. An explicit trailing `__name__` order is not repeated.
+
 ### Cursors
 
 Cursors apply a boundary to a sorted result set:
@@ -925,7 +929,7 @@ Cursors apply a boundary to a sorted result set:
 | `endAt(v)` | false | true | field <= v (field >= v for DESC) |
 | `endBefore(v)` | true | true | field < v (field > v for DESC) |
 
-Multi-field cursors use lexicographic OR-of-AND expansion.
+A cursor's values line up with the query's orders (the explicit ones, then the implicit `__name__`): `values[k]` positions order `k`, and fewer values than orders is a prefix. The boundary is the lexicographic OR-of-AND expansion over those orders, each in its own direction. `startAt` and `endAt` are inclusive of the cursor position, `startAfter` and `endBefore` exclusive; a prefix cursor therefore covers every document whose leading values equal it (`startAfter(5)` on `orderBy score` skips all documents with score 5, `startAt(5)` begins at the first of them). To resume inside a run of ties, end the cursor with the document reference of the last row (`startAfter(score, ref)`, what the SDKs send for a document-snapshot cursor). A cursor with more values than the query has orders, or a `__name__` value that is not a document reference, is `InvalidArgument`.
 
 When a query has cursors, page tokens are ignored (offset is 0).
 

@@ -7,6 +7,17 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- Query ordering (G-001, `fix/g001-numeric-order-name-tiebreak`; no migration, no new environment variables):
+  - Integers and doubles are ordered and range-compared by exact numeric value (two-part key `(float8, exact residual)`),
+    not through `float8` alone: integers above 2^53, `i64::MAX` next to `2^63` as a double, `-0`, `NaN`, infinities.
+  - Every query now ends its ORDER BY with the implicit `__name__` order (direction of the last explicit order), so ties
+    page deterministically across limits, offsets and Listen windows.
+  - Cursors accept one value per order, including a trailing document reference (lexicographic expansion, per-order
+    direction); previously only the first value was used and a trailing reference was ignored, so a document-snapshot
+    cursor could skip or repeat tied rows. A cursor with more values than orders is `InvalidArgument`.
+  - Operational: the composite-index key list gained one expression, so composite indexes created by earlier builds no
+    longer match the query ORDER BY and must be re-created (see `docs/operations/runbook.md`, "composite indexes created
+    before exact numeric ordering"). Results stay correct meanwhile, queries just lose the index.
 - Admin OIDC SSO known gaps (ADR-086, `fix/sso-known-gaps`; no migration, no new environment variables):
   - Demoting an Owner to Admin/Viewer while the account requires SSO is 422 `sso_link_required` unless the target has a link to
     an enabled provider (and promoting a member without a password to Owner is 422 `owner_requires_password`); refusals change
