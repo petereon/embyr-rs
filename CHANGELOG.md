@@ -7,6 +7,10 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- Hosted-identity REST requests (sign-up, sign-in with password, sendOobCode, reset) no longer build a new Postgres pool to the
+  customer DB on every credential-cache hit (G-002, go-live X11): they reuse the per-project tenant pool the gRPC path caches
+  (`CachedEntry.pg`), with the same 60 s TTL, `EMBYR_TENANT_DB_MAX_CONNECTIONS` / acquire-timeout bounds and eviction on
+  suspend/delete/rotate. A REST miss now also warms the cache for gRPC. No migration, no new environment variables.
 - Admin OIDC SSO known gaps (ADR-086, `fix/sso-known-gaps`; no migration, no new environment variables):
   - Demoting an Owner to Admin/Viewer while the account requires SSO is 422 `sso_link_required` unless the target has a link to
     an enabled provider (and promoting a member without a password to Owner is 422 `owner_requires_password`); refusals change

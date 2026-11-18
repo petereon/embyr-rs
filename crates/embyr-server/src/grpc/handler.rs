@@ -346,7 +346,7 @@ impl FirestoreService {
         }
 
         // Build adapter based on backend_mode.
-        let (shared, dsn) = if row.backend_mode == "aws_secret" {
+        let (shared, dsn, pg) = if row.backend_mode == "aws_secret" {
             // AWS Secrets Manager mode: fetch DSN via the fetcher, create PostgresBackendAdapter.
             let arn = row
                 .backend_secret_arn
@@ -366,8 +366,9 @@ impl FirestoreService {
             )
                 .await
                 .map_err(|e| sanitize_backend_error(e, "authenticate: aws_secret backend connect"))?;
-            let shared: SharedBackendAdapter = Arc::new(adapter);
-            (shared, dsn)
+            let pg = Arc::new(adapter);
+            let shared: SharedBackendAdapter = pg.clone();
+            (shared, dsn, Some(pg))
         } else if row.backend_mode == "gcp_secret" {
             // GCP Secret Manager mode: fetch DSN via the fetcher, create PostgresBackendAdapter.
             let resource_name = row
@@ -388,8 +389,9 @@ impl FirestoreService {
             )
                 .await
                 .map_err(|e| sanitize_backend_error(e, "authenticate: gcp_secret backend connect"))?;
-            let shared: SharedBackendAdapter = Arc::new(adapter);
-            (shared, dsn)
+            let pg = Arc::new(adapter);
+            let shared: SharedBackendAdapter = pg.clone();
+            (shared, dsn, Some(pg))
         } else if row.backend_mode == "agent" {
             // Agent-mode: decrypt TLS bundle and create AgentBackendAdapter.
             let endpoint = row
@@ -434,7 +436,7 @@ impl FirestoreService {
                 self.server_keys,
             );
             let shared: SharedBackendAdapter = Arc::new(adapter);
-            (shared, String::new())
+            (shared, String::new(), None)
         } else {
             // Direct-PG mode (ADR-083): server-key store, legacy ECIES fallback, lazy conversion.
             let (dsn, dsn_conversion) = read_secret(
@@ -461,8 +463,9 @@ impl FirestoreService {
                 dsn.clone(),
                 self.server_keys,
             );
-            let shared: SharedBackendAdapter = Arc::new(adapter);
-            (shared, dsn)
+            let pg = Arc::new(adapter);
+            let shared: SharedBackendAdapter = pg.clone();
+            (shared, dsn, Some(pg))
         };
 
         self.credential_cache
@@ -472,6 +475,7 @@ impl FirestoreService {
                     adapter: Arc::clone(&shared),
                     project_status: row.status.clone(),
                     dsn: dsn.clone(),
+                    pg,
                 },
             )
             .await;
