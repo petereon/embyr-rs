@@ -26,6 +26,7 @@ pub mod metrics;
 pub mod oauth_providers;
 pub mod oidc_providers;
 pub mod oidc_sso;
+pub mod oidc_sso_links;
 pub mod password_reset;
 pub mod projects;
 pub mod prometheus_metrics;

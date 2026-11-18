@@ -344,19 +344,24 @@ async fn unset_public_base_url_means_unavailable() {
 }
 
 #[tokio::test]
-async fn unsupported_intents_are_refused_until_their_slices_land() {
+async fn unknown_intents_are_refused_and_invite_and_link_need_their_credentials() {
+    // Slices 4/5 implement `invite` and `link` (see s04/s05); here only the guard rails matter.
     let s = setup().await;
-    for intent in ["invite", "link", "bogus"] {
-        let r = s
-            .ctx
-            .client
-            .post(s.ctx.url("/admin/v1/auth/oidc/start"))
-            .json(&json!({"provider_id": s.provider, "intent": intent}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 400, "{intent}");
-    }
+    let post = |intent: &'static str| {
+        let (ctx, id) = (&s.ctx, s.provider);
+        async move {
+            ctx.client
+                .post(ctx.url("/admin/v1/auth/oidc/start"))
+                .json(&json!({"provider_id": id, "intent": intent}))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(post("bogus").await.status(), 400);
+    assert_eq!(post("link").await.status(), 401, "link needs a session");
+    let r = post("invite").await; // no invitation token
+    assert_eq!((r.status().as_u16(), r.json::<Value>().await.unwrap()), (200, json!({"error": "sso_unavailable"})));
     assert_eq!(count(&s, "SELECT count(*) FROM sso_auth_requests").await, 0);
 }
 

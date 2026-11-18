@@ -17,9 +17,10 @@ use super::handlers::account::delete_account;
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
 use super::handlers::auth::{session_info, signin, signout};
 use super::handlers::oidc_sso::{oidc_callback, oidc_start};
+use super::handlers::oidc_sso_links::unlink_sso_identity;
 use super::handlers::password_reset::{confirm_password_reset, request_password_reset};
 use super::handlers::invitations::{
-    accept_invitation, confirm_invitation, create_account, revoke_invitation,
+    accept_invitation, confirm_invitation, create_account, lookup_invitation, revoke_invitation,
 };
 use super::handlers::billing::get_billing;
 use super::handlers::billing_metering::run_metering;
@@ -261,6 +262,7 @@ pub fn build_admin_router(
         .route("/admin/v1/auth/oidc/callback", get(oidc_callback))
         .route("/admin/v1/auth/invitations/accept", post(accept_invitation))
         .route("/admin/v1/auth/invitations/confirm", post(confirm_invitation))
+        .route("/admin/v1/auth/invitations/lookup", post(lookup_invitation))
         .route("/admin/v1/auth/password_reset/request", post(request_password_reset))
         .route("/admin/v1/auth/password_reset/confirm", post(confirm_password_reset))
         .with_state(user_state.clone());
@@ -280,6 +282,8 @@ pub fn build_admin_router(
     // Routes MUST be added BEFORE route_layer so the middleware applies to them.
     let session_router = Router::<UserAdminState>::new()
         .route("/admin/v1/auth/session", get(session_info))
+        // admin-oidc-sso slice 5: a member unlinks their own SSO identity.
+        .route("/admin/v1/auth/sso_identity", delete(unlink_sso_identity))
         .route("/admin/v1/projects", get(list_projects))
         .route("/admin/v1/projects/:project_id", patch(patch_project))
         .route(

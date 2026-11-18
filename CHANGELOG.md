@@ -7,6 +7,19 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- Admin OIDC SSO invitations and self-link (ADR-086, slices 4-5 of `admin-oidc-sso`). `POST /admin/v1/members/invite` accepts
+  `auth_method` (`password` default, or `sso`: 422 for an Owner invitation or when the account has no enabled provider; the
+  response echoes it and the invite e-mail is worded for SSO). A password enrolment (`accept`/`confirm`) of an SSO invitation
+  is refused like any dead token; new public `POST /admin/v1/auth/invitations/lookup {token}` returns `auth_method` (and, for
+  `sso`, the account's enabled `sso_provider_ids`) so the SPA can branch. `POST /admin/v1/auth/oidc/start` gains intent
+  `invite` (+ `invite_token`) and `link` (+ session cookie, `password`, `totp_code`, verified like account deletion); the
+  callback, for `invite`, requires a verified e-mail equal (case-insensitively) to the invitation's and then creates the
+  SSO-only user (no password, no TOTP), member, link and accepted invitation in one transaction before the session; for
+  `link` it links `(provider, sub)` to the user who re-authenticated (a sub linked to anyone else fails) and answers
+  `302 /admin/?sso_linked=1` without minting a session. `DELETE /admin/v1/auth/sso_identity[?provider_id=]` unlinks the
+  caller's own identity (409 for an SSO-only user; ends their other sessions minted through it). New audit event
+  `sso_invite_accepted`; invite/link failures are audited under their own event with a granular reason. The members list
+  reports `auth_method: "sso"` for SSO-only members. No migration, no new environment variables.
 - Admin OIDC SSO sign-in (ADR-086, slice 3 of `admin-oidc-sso`): `POST /admin/v1/auth/oidc/start` (JSON, returns the IdP
   authorization URL; authorization code + PKCE + `state` + `nonce`, `embyr_sso` browser-binding cookie, single-use state rows
   expiring in 10 minutes, 200 live rows per provider) and `GET /admin/v1/auth/oidc/callback`, which replaces the disabled stub:
