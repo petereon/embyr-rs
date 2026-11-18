@@ -156,10 +156,18 @@ struct JwksEntry {
 
 /// Per-instance caches (ADR-086 decision 3): discovery 1 h, JWKS 1 h with one forced refetch per
 /// minute per provider on an unknown `kid`. Keyed by provider id (issuer and client_id are immutable).
-#[derive(Default)]
 pub struct SsoClient {
     discovery: Mutex<HashMap<Uuid, (Arc<DiscoveryDoc>, Instant)>>,
     jwks: Mutex<HashMap<Uuid, JwksEntry>>,
+    /// Minimum age of the cached JWKS before an unknown `kid` may force a refetch.
+    /// `JWKS_FORCED_MIN_AGE` in production; the test harness injects a short one.
+    forced_refetch_min_age: Duration,
+}
+
+impl Default for SsoClient {
+    fn default() -> Self {
+        Self::with_forced_refetch_min_age(JWKS_FORCED_MIN_AGE)
+    }
 }
 
 /// ponytail: a full map is cleared rather than evicted LRU; 1024 live providers per instance is far
@@ -174,6 +182,16 @@ fn insert_bounded<V>(map: &mut HashMap<Uuid, V>, key: Uuid, value: V) {
 impl SsoClient {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Same caches with another forced-refetch throttle (acceptance tests use a short one; the
+    /// composition root never calls this, so production keeps 60 s).
+    pub fn with_forced_refetch_min_age(min_age: Duration) -> Self {
+        Self {
+            discovery: Mutex::default(),
+            jwks: Mutex::default(),
+            forced_refetch_min_age: min_age,
+        }
     }
 
     /// Fetch and vet the discovery document for `issuer`, bypassing the cache. Used when an Owner
@@ -212,7 +230,7 @@ impl SsoClient {
     }
 
     /// Cached JWKS from the provider's discovery document. `unknown_kid` allows one refetch per
-    /// minute even while the cached copy is fresh (key rotation); callers compare `Arc::ptr_eq` to
+    /// throttle window (a minute in production) even while the cached copy is fresh (key rotation); callers compare `Arc::ptr_eq` to
     /// see whether anything new arrived.
     pub async fn jwks(
         &self,
@@ -222,7 +240,7 @@ impl SsoClient {
     ) -> Result<Arc<Jwks>, SsoFetchError> {
         let cached = self.jwks.lock().unwrap().get(&provider_id).map(|e| (e.jwks.clone(), e.fetched.elapsed()));
         if let Some((jwks, age)) = &cached {
-            let stale = *age >= JWKS_TTL || (unknown_kid && *age >= JWKS_FORCED_MIN_AGE);
+            let stale = *age >= JWKS_TTL || (unknown_kid && *age >= self.forced_refetch_min_age);
             if !stale {
                 return Ok(jwks.clone());
             }

@@ -131,6 +131,48 @@ pub fn build_admin_router(
     rate_limit_capacity: f64,
     prometheus_handle: PrometheusHandle,
     stripe_gateway: Arc<StripeGateway>,
+    webhook_signing_secret: Option<String>,
+    cap_status_cache: Arc<CapStatusCache>,
+    signin_rate_limiter: Arc<SigninRateLimiter>,
+    api_key_rotation_window_secs: u32,
+) -> Router {
+    build_admin_router_with_sso_client(
+        system_db,
+        admin_key,
+        admin_key_previous,
+        credential_cache,
+        encryption_key,
+        encryption_key_previous,
+        email_sender,
+        aws_secret_fetcher,
+        gcp_secret_fetcher,
+        rate_limit_capacity,
+        prometheus_handle,
+        stripe_gateway,
+        webhook_signing_secret,
+        cap_status_cache,
+        signin_rate_limiter,
+        api_key_rotation_window_secs,
+        crate::adapters::sso_client::SsoClient::new(),
+    )
+}
+
+/// `build_admin_router` with an injected `SsoClient` (its JWKS refetch throttle is the only thing a
+/// caller varies; the composition root and every other harness use the default 60 s one above).
+#[allow(clippy::too_many_arguments)]
+pub fn build_admin_router_with_sso_client(
+    system_db: Arc<SystemDb>,
+    admin_key: String,
+    admin_key_previous: Option<String>,
+    credential_cache: Arc<CredentialCache>,
+    encryption_key: [u8; 32],
+    encryption_key_previous: Option<[u8; 32]>,
+    email_sender: Arc<dyn IEmailSender + Send + Sync>,
+    aws_secret_fetcher: Option<Arc<AwsSecretFetcher>>,
+    gcp_secret_fetcher: Option<Arc<GcpSecretFetcher>>,
+    rate_limit_capacity: f64,
+    prometheus_handle: PrometheusHandle,
+    stripe_gateway: Arc<StripeGateway>,
     // card-payments-backend (US-203): the 5th sub-router's own signing
     // secret, checked by `stripe_signature_middleware` — no session/operator
     // auth guards this sub-router.
@@ -151,6 +193,7 @@ pub fn build_admin_router(
     signin_rate_limiter: Arc<SigninRateLimiter>,
     // api-key-rotation (ADR-085): previous-key window applied by `.../api_key/rotate`.
     api_key_rotation_window_secs: u32,
+    sso_client: Arc<crate::adapters::sso_client::SsoClient>,
 ) -> Router {
     let operator_state = OperatorState {
         system_db: system_db.clone(),
@@ -211,7 +254,7 @@ pub fn build_admin_router(
         reset_ip_limiter: SigninRateLimiter::new(10.0, 1.0 / 60.0),
         reset_email_limiter: SigninRateLimiter::new(3.0, 1.0 / 1200.0),
         api_key_rotation_window_secs,
-        sso_client: crate::adapters::sso_client::SsoClient::new(),
+        sso_client,
     };
 
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by

@@ -28,9 +28,11 @@ use uuid::Uuid;
 use embyr_core::admin::account::{AccountId, AccountMember, Role, UserId};
 use embyr_core::admin::invitation::{parse_role, validate_invite, InviteError};
 use embyr_core::admin::sso::enroll::sso_invite_role_allowed;
-use embyr_core::admin::sso::policy::password_invite_allowed;
+use embyr_core::admin::audit::{events, AuditEvent, AuditOutcome};
+use embyr_core::admin::sso::policy::{check_role_change, password_invite_allowed};
 use embyr_core::admin::rbac::{check_rbac, RbacAction, RbacError};
 
+use crate::adapters::admin_audit::record;
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::state::UserAdminState;
 
@@ -306,27 +308,38 @@ pub async fn invite_member(
 /// Enforces sole-owner invariant and Admin-cannot-modify-Owner via check_rbac.
 /// Sole Owner attempting self-demotion → 403. Admin attempting to change Owner → 403.
 /// Returns 200 { "ok": true } on success.
+///
+/// admin-oidc-sso: a change across the Owner boundary is checked by `check_role_change` in the same
+/// transaction (account row locked): demoting an Owner of a `sso_required` account whose target has
+/// no link to an enabled provider, or promoting a member without a password, is 422
+/// `{error, message}` (`sso_link_required` / `owner_requires_password`), audited as `failed`, and
+/// changes nothing.
 pub async fn change_member_role(
     Path(member_id): Path<String>,
     State(state): State<UserAdminState>,
     session: SessionContext,
     Json(body): Json<ChangeMemberRoleBody>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, Response> {
+    let db_err = |e: sqlx::Error| {
+        tracing::error!("change_member_role: DB error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    };
+
     // Viewer cannot change roles.
     if session.role < Role::Admin {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into_response());
     }
 
     // Parse target user UUID (invalid UUID → 404).
-    let target_user_id = Uuid::parse_str(&member_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let target_user_id = Uuid::parse_str(&member_id).map_err(|_| StatusCode::NOT_FOUND.into_response())?;
 
     // Parse requested new role (unknown string → 422).
-    let new_role = parse_role(&body.role).ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+    let new_role = parse_role(&body.role).ok_or_else(|| StatusCode::UNPROCESSABLE_ENTITY.into_response())?;
 
     let pool = state.system_db.pool();
 
     // Load all members for RBAC check.
-    let all_members = load_account_members(pool, session.account_id).await?;
+    let all_members = load_account_members(pool, session.account_id).await.map_err(|s| s.into_response())?;
 
     // RBAC check — all failure variants map to 403 for this endpoint.
     check_rbac(
@@ -341,10 +354,54 @@ pub async fn change_member_role(
     .map_err(|err| {
         tracing::debug!("change_member_role: RBAC rejected: {err}");
         match err {
-            RbacError::TargetNotMember => StatusCode::NOT_FOUND,
-            _ => StatusCode::FORBIDDEN,
+            RbacError::TargetNotMember => StatusCode::NOT_FOUND.into_response(),
+            _ => StatusCode::FORBIDDEN.into_response(),
         }
     })?;
+    // check_rbac proved the target is a member.
+    let current_role = all_members
+        .iter()
+        .find(|m| m.user_id.0 == target_user_id)
+        .map(|m| m.role)
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    // Shared lock on the account row: serialises with PATCH /account and provider changes.
+    let sso_required: bool = sqlx::query_scalar("SELECT sso_required FROM accounts WHERE id = $1 FOR SHARE")
+        .bind(session.account_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+    let (has_password, has_enabled_link): (bool, bool) = sqlx::query_as(
+        "SELECT u.password_hash IS NOT NULL, \
+                EXISTS(SELECT 1 FROM admin_sso_identities i \
+                       JOIN oidc_providers p ON p.id = i.provider_id \
+                       WHERE i.user_id = u.id AND p.account_id = $2 AND p.enabled) \
+         FROM users u WHERE u.id = $1",
+    )
+    .bind(target_user_id)
+    .bind(session.account_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?
+    .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+
+    let mut ev = AuditEvent::new(events::MEMBER_ROLE_CHANGED, AuditOutcome::Ok);
+    ev.account_id = Some(session.account_id);
+    ev.actor_user_id = Some(session.user_id).filter(|u| !u.is_nil());
+
+    if let Err(reject) = check_role_change(current_role, new_role, sso_required, has_enabled_link, has_password) {
+        drop(tx);
+        ev.outcome = AuditOutcome::Failed;
+        ev.reason = Some(reject.reason());
+        record(pool, &ev).await;
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": reject.reason(), "message": reject.message() })),
+        )
+            .into_response());
+    }
 
     // Apply the role change.
     let result = sqlx::query(
@@ -353,16 +410,17 @@ pub async fn change_member_role(
     .bind(&body.role)
     .bind(target_user_id)
     .bind(session.account_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        tracing::error!("change_member_role: UPDATE error: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    .map_err(db_err)?;
 
     if result.rows_affected() == 0 {
-        return Err(StatusCode::NOT_FOUND);
+        return Err(StatusCode::NOT_FOUND.into_response());
     }
+    tx.commit().await.map_err(db_err)?;
+
+    ev.reason = Some(if new_role > current_role { "promoted" } else if new_role < current_role { "demoted" } else { "unchanged" });
+    record(pool, &ev).await;
 
     Ok(Json(serde_json::json!({"ok": true})))
 }

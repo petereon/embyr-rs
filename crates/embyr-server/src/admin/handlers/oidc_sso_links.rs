@@ -15,7 +15,7 @@
 use std::net::SocketAddr;
 
 use axum::{
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Json, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -26,6 +26,7 @@ use uuid::Uuid;
 use embyr_core::admin::audit::{events, AuditEvent, AuditOutcome};
 use embyr_core::admin::sso::claims::VerifiedIdToken;
 use embyr_core::admin::sso::enroll::{check_invite_identity, default_display_name, sso_invite_role_allowed};
+use embyr_core::admin::sso::policy::may_unlink;
 
 use crate::adapters::admin_audit::record;
 use crate::admin::extractors::session_context::SessionContext;
@@ -168,7 +169,9 @@ pub struct UnlinkQuery {
 }
 
 /// Removes the caller's own link(s). 409 when the caller has no password (SSO-only: the link is
-/// their only way in), 404 when there was nothing to remove, 204 otherwise. SSO sessions the user
+/// their only way in) and 409 `{error:"sso_link_required"}` (audited `failed`) when a non-Owner of a
+/// `sso_required` account would be left without a link to an enabled provider, 404 when there was
+/// nothing to remove, 204 otherwise. SSO sessions the user
 /// minted through a removed link end with it, except the session making this request.
 pub async fn unlink_sso_identity(
     State(state): State<UserAdminState>,
@@ -218,6 +221,38 @@ pub async fn unlink_sso_identity(
     };
     if removed.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    // A non-Owner of a required account has no password path, so the removal must leave a link to
+    // an enabled provider behind. Shared lock: serialises with PATCH /account and provider changes.
+    let required: bool = match sqlx::query_scalar("SELECT sso_required FROM accounts WHERE id = $1 FOR SHARE")
+        .bind(session.account_id)
+        .fetch_one(&mut *tx)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return fail("load sso_required", e),
+    };
+    let remaining: i64 = match sqlx::query_scalar(
+        "SELECT count(*) FROM admin_sso_identities i JOIN oidc_providers p ON p.id = i.provider_id \
+         WHERE i.user_id = $1 AND p.account_id = $2 AND p.enabled",
+    )
+    .bind(session.user_id)
+    .bind(session.account_id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => return fail("count remaining links", e),
+    };
+    if !may_unlink(session.role, required, remaining) {
+        drop(tx);
+        let mut ev = AuditEvent::new(events::SSO_LINK_REMOVED, AuditOutcome::Failed);
+        ev.account_id = Some(session.account_id);
+        ev.actor_user_id = Some(session.user_id);
+        ev.source_ip = Some(ip);
+        ev.reason = Some("sso_required_last_link");
+        record(pool, &ev).await;
+        return (StatusCode::CONFLICT, Json(serde_json::json!({ "error": "sso_link_required" }))).into_response();
     }
     if let Err(e) = sqlx::query(
         "DELETE FROM sessions WHERE user_id = $1 AND sso_provider_id = ANY($2) AND id <> $3",

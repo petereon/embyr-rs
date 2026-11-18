@@ -6,6 +6,17 @@ All notable changes to embyr-server are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- Admin OIDC SSO known gaps (ADR-086, `fix/sso-known-gaps`; no migration, no new environment variables):
+  - Demoting an Owner to Admin/Viewer while the account requires SSO is 422 `sso_link_required` unless the target has a link to
+    an enabled provider (and promoting a member without a password to Owner is 422 `owner_requires_password`); refusals change
+    nothing and are audited under the new `member_role_changed` event, which now also records successful role changes.
+  - While SSO is required, disabling or deleting the account's last enabled provider is 422 `sso_required_active` (turn the
+    requirement off first), and a non-Owner cannot unlink their last link to an enabled provider (409 `sso_link_required`).
+  - Switching `sso_required` on now ends the password sessions of non-Owner members in the same transaction (SSO and Owner
+    sessions stay). The `sso_required_toggled` audit reason for enabling is now `enabled:sessions_ended_<n>` (was `enabled`).
+  - The unknown-`kid` JWKS refetch throttle (60 s) is injectable for tests; the refetch-after-rotation path is now covered.
+
 ### Added
 - Admin OIDC SSO enforcement (ADR-086, slice 6 of `admin-oidc-sso`): new `PATCH /admin/v1/account {sso_required}` (Owner only).
   Enabling needs an enabled provider on the account and a link of the calling Owner to it (else 422

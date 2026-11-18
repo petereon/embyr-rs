@@ -61,7 +61,7 @@ use embyr_server::{
         stripe_gateway::StripeGateway,
         system_db::SystemDb,
     },
-    admin::router::build_admin_router,
+    admin::router::build_admin_router_with_sso_client,
     middleware::signin_rate_limit::SigninRateLimiter,
 };
 
@@ -207,6 +207,26 @@ impl AdminTestContext {
         signin_limiter: Arc<SigninRateLimiter>,
         stripe_key: &str,
         public_base: Option<Option<String>>,
+    ) -> Self {
+        Self::build_with(signin_limiter, stripe_key, public_base, None).await
+    }
+
+    /// `with_sso` with a short unknown-`kid` JWKS refetch throttle (production: 60 s), so a test
+    /// can wait the window out.
+    pub async fn with_sso_jwks_refetch_min_age(
+        signin_limiter: Arc<SigninRateLimiter>,
+        min_age: std::time::Duration,
+    ) -> Self {
+        std::env::set_var("EMBYR_ALLOW_PRIVATE_DSN_HOSTS", "true");
+        Self::build_with(signin_limiter, "stripe-secret-key-not-configured", Some(None), Some(min_age)).await
+    }
+
+    /// `jwks_refetch_min_age`: `Some` injects an `SsoClient` with that forced-refetch throttle.
+    async fn build_with(
+        signin_limiter: Arc<SigninRateLimiter>,
+        stripe_key: &str,
+        public_base: Option<Option<String>>,
+        jwks_refetch_min_age: Option<std::time::Duration>,
     ) -> Self {
         // ── 1. Start Postgres container ───────────────────────────────────────
         let container = Postgres::default()
@@ -465,7 +485,11 @@ impl AdminTestContext {
             StripeGateway::new(stripe_key)
                 .with_public_base_url(public_base.map(|b| b.unwrap_or_else(|| base_url.clone()))),
         );
-        let router = build_admin_router(
+        let sso_client = Arc::new(match jwks_refetch_min_age {
+            Some(d) => embyr_server::adapters::sso_client::SsoClient::with_forced_refetch_min_age(d),
+            None => Default::default(),
+        });
+        let router = build_admin_router_with_sso_client(
             system_db,
             "test-admin-key-from-env".to_string(),
             None,
@@ -485,6 +509,7 @@ impl AdminTestContext {
             Arc::new(CapStatusCache::new()),
             signin_limiter,
             86_400,
+            sso_client,
         );
 
         tokio::spawn(async move {
