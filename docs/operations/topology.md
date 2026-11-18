@@ -1,7 +1,7 @@
 # Recommended Production Topology (V1)
 
 Closes the topology half of go-live finding O4
-([`go-live-assessment-2026-11-13.md`](../product/go-live-assessment-2026-11-13.md)).
+([`gaps.md`](../product/gaps.md)).
 
 ## Status
 

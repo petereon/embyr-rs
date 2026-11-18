@@ -4,7 +4,7 @@
 
 ## Context
 
-Finding #17 (High) of `docs/product/production-readiness-audit-2026-09-08.md`: all four mirrored
+Finding #17 (High) of `docs/product/gaps.md`: all four mirrored
 `all_descendants=true` predicate-construction sites in `crates/embyr-pg-storage/src/backend_adapter.rs`
 (`run_query` 598-608; `run_aggregation_query`'s `Count`/`Sum`/`Avg` arms 811-820/859-868/910-919 — line
 numbers point-in-time per DISCUSS's own re-verification) build `collection_path = $1 OR collection_path

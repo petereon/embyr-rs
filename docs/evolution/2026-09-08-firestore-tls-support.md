@@ -127,7 +127,7 @@ gap found and fixed along the way — see Lessons Learned.
   feature's own locked scope.
 - **ACME/Let's Encrypt automation** — deferred, operator provides pre-issued PEM files.
 
-Carried forward, unchanged, from `docs/product/known-gaps.md`: #7 (`secrets_management`
+Carried forward, unchanged, from `docs/product/gaps.md`: #7 (`secrets_management`
 Docker/LocalStack timing flakiness), #8 (CEL "chaining" construct-detection gap). Gap #6 (no
 graceful shutdown) was found stale/already-closed during this feature's own DISCUSS — see
-`docs/product/known-gaps.md` row 6's own correction note.
+`docs/product/gaps.md` row 6's own correction note.

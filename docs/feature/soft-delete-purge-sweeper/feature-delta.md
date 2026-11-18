@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` finding #6 confirmed by direct reading:
+✓ `docs/product/gaps.md` finding #6 confirmed by direct reading:
 "Documented 168h soft-delete purge sweeper does not exist. `deleted_at` is write-only (set once on
 soft-delete, never read anywhere else) — soft-deleted projects, including ECIES-encrypted customer
 DSNs/credentials, persist forever, contradicting an explicit admin-UI promise." Location cited:
@@ -702,7 +702,7 @@ dependency, no new query, no new column) — named explicitly, not silently adde
 4. `crates/embyr-server/src/main.rs` — one new `spawn(...)` call block inserted after the existing
    `transaction_sweeper::spawn(...)` block (after line 280), before `── Step 11 ──`:
 ```rust
-// soft-delete-purge-sweeper (Blocker finding #6, production-readiness-audit-2026-09-08.md):
+// soft-delete-purge-sweeper (Blocker finding #6, gaps.md):
 // background purge of the 3 sensitive encrypted-credential columns on a
 // `'deleted'` project's own row, once the configured grace window (default
 // 168h/7 days, matching the admin-UI's own unchanged promise) has elapsed.

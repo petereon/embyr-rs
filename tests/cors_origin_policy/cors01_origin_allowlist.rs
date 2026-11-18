@@ -1,6 +1,6 @@
 // @real-io @US-01 @finding-21
 //! cors-origin-policy — env-var-driven origin allowlist on the :8081
-//! REST/gRPC-Web/BrowserChannel surface (production-readiness-audit-2026-09-08.md
+//! REST/gRPC-Web/BrowserChannel surface (gaps.md
 //! finding #21, Medium/Security). Closes the landmine risk of an
 //! unrestricted or accidentally-permissive CORS policy while preserving
 //! today's fails-closed-by-default behavior.

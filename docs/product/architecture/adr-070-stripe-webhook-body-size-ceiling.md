@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-`docs/product/production-readiness-audit-2026-09-08.md` finding #3 (Blocker):
+`docs/product/gaps.md` finding #3 (Blocker):
 `stripe_signature_middleware` (`crates/embyr-server/src/admin/middleware/stripe_signature.rs:44`)
 calls `axum::body::to_bytes(body, usize::MAX)` to buffer the raw request body for HMAC verification —
 necessary because Stripe's signature is computed over the exact raw bytes, so no streaming/

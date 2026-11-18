@@ -1,5 +1,5 @@
 // @driving_port @real-io
-//! Audit findings #59 / #60 (docs/product/production-readiness-audit-2026-09-08.md).
+//! Audit findings #59 / #60 (docs/product/gaps.md).
 //! #58 (OIDC callback disabled) is covered by the updated
 //! `oidc_callback_with_valid_id_token_is_refused_while_disabled` in b06_oidc_billing.rs.
 //!

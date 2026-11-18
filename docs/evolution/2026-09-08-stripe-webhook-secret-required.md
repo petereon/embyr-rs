@@ -6,7 +6,7 @@ secret) instead of silently accepting an unauthenticated attacker's HMAC.
 **Job:** JOB-13 (`production-deployment`) — reused, persona P2 Sam Chen.
 **ADRs:** none new — decisions embedded in this feature's own `feature-delta.md`.
 
-## This closes finding #1 from `docs/product/production-readiness-audit-2026-09-08.md` — the sharpest of 8 blockers
+## This closes finding #1 from `docs/product/gaps.md` — the sharpest of 8 blockers
 
 ## Business Context
 

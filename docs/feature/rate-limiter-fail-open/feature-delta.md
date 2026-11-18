@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` read for finding #20 (Medium, Security),
+✓ `docs/product/gaps.md` read for finding #20 (Medium, Security),
 confirmed verbatim: *"Rate limiter fails open on database errors and conflates 'DB error' with
 'allowed' (`.ok().flatten()` discards the error, `.unwrap_or(false)` on the exists-check). An
 attacker who degrades the system DB (see #14) turns off rate limiting globally as a side effect."*
@@ -787,7 +787,7 @@ of the decision path as "`Ok(Err(sqlx_error))` (hard DB error) → log WARN → 
 The 2026-08-08 implementation of this ADR did not build that arm: `check_pg` instead collapsed
 `sqlx::Error` internally via `.ok().flatten()` (atomic UPDATE) and `.unwrap_or(false)` (EXISTS check),
 so a real Postgres error was silently treated as "row absent," inserting a fresh full-capacity bucket
-and unconditionally allowing the request — production-readiness-audit-2026-09-08 finding #20 (Medium,
+and unconditionally allowing the request — gaps.md finding #20 (Medium,
 Security).
 
 `rate-limiter-fail-open` (2026-09-15) brings the code into conformance with this ADR's own

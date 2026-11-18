@@ -6,7 +6,7 @@ RPC now returns a clean `INVALID_ARGUMENT` instead of panicking the handling tas
 **Job:** JOB-11 (`fair-multitenancy`) — reused, persona P2 Sam Chen.
 **ADRs:** none new — narrow validation fix, no new architectural pattern.
 
-## This closes finding #9 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #9 from `docs/product/gaps.md`
 
 ## Business Context
 

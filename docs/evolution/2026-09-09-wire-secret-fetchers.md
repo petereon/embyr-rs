@@ -7,7 +7,7 @@ instead of always failing with `Status::internal`.
 **Job:** JOB-05 (`cloud-secret`) — reused, persona P3 Morgan (Tenant Admin-DevOps Lead).
 **ADRs:** none new — reused/confirmed ADR-054 §D7's already-specified pattern.
 
-## This closes finding #7 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #7 from `docs/product/gaps.md`
 
 ## Business Context
 

@@ -1,6 +1,6 @@
 # tls-startup-warning
 
-Closes Medium finding #22 (Security/Ops) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes Medium finding #22 (Security/Ops) from `docs/product/gaps.md`.
 DELIVER commit `562e9a3025e605f22b1cb54c488fc0ab5f6ad40a`.
 
 ## Business Context

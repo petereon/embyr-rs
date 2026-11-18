@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` read in full. Finding #18 (Database /
+✓ `docs/product/gaps.md` read in full. Finding #18 (Database /
 DevOps, High) confirmed verbatim: *"No backup/disaster-recovery documentation exists anywhere in
 the repo — RTO/RPO, PITR guarantees, and backup ownership (embyr's vs. customer's for
 BYOC/`direct_pg`) are entirely unstated."* Location cited as `docs/` — "absence confirmed via
@@ -53,7 +53,7 @@ key itself is **never stored in Postgres** — it is not derivable from a System
 genuine, previously-undocumented DR dependency (see Investigation 3 below), not restated from any
 existing doc.
 
-✓ `docs/product/known-gaps.md` read — confirms this finding is a fresh, independent scan item, no
+✓ `docs/product/gaps.md` read — confirms this finding is a fresh, independent scan item, no
 overlap with the prior 8-item closed list.
 
 ✓ `docs/product/jobs.yaml` read in full (JOB-01 through JOB-20), with particular attention to

@@ -7,7 +7,7 @@ with a clean error instead of a 30s tail-latency hang, without changing any exis
 constructor signature.
 **ADR:** `docs/product/architecture/adr-079-pool-sizing-and-limits.md`
 
-## This closes finding #16 AND finding #30 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #16 AND finding #30 from `docs/product/gaps.md`
 
 Same root cause, confirmed by DESIGN's own reading of #30's cited lines against this
 story's scope before claiming the closure.

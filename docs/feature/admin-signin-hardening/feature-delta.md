@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` read for findings #12 and #13, both
+✓ `docs/product/gaps.md` read for findings #12 and #13, both
 **High** severity, same route/handler. Finding #12 confirmed verbatim: *"Argon2id (64 MiB/t=3/p=4)
 runs inline on tokio async worker threads (no `spawn_blocking` anywhere) on the admin signin route,
 which has zero rate-limit middleware and a password-failure lockout that never increments (only

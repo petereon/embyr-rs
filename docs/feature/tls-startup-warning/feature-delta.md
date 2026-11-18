@@ -1,6 +1,6 @@
 # tls-startup-warning
 
-Closes finding #22 (Medium, Security/Ops), `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes finding #22 (Medium, Security/Ops), `docs/product/gaps.md`.
 
 ## Problem
 

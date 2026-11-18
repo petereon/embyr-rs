@@ -1,7 +1,7 @@
 # Env-Var Documentation
 
 **Status:** FINALIZED 2026-09-19
-**Closes:** Medium finding #28 (DevOps), `docs/product/production-readiness-audit-2026-09-08.md`
+**Closes:** Medium finding #28 (DevOps), `docs/product/gaps.md`
 
 ## Business Context
 

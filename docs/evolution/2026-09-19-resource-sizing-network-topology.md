@@ -1,7 +1,7 @@
 # 2026-09-19: Resource Sizing + Network Topology Operator Docs
 
 Closes Medium findings #52 and #53 from
-[`docs/product/production-readiness-audit-2026-09-08.md`](../product/production-readiness-audit-2026-09-08.md).
+[`docs/product/gaps.md`](../product/gaps.md).
 Pure documentation — no code changes.
 
 ## #52 — Resource sizing guidance

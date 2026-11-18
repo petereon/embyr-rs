@@ -1,7 +1,7 @@
 # Evolution: rate-limiter-fail-open
 
 **Date**: 2026-09-15
-**Closes**: Medium finding #20 (Security), `docs/product/production-readiness-audit-2026-09-08.md`
+**Closes**: Medium finding #20 (Security), `docs/product/gaps.md`
 
 ## Business Context
 

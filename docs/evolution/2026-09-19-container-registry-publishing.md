@@ -4,7 +4,7 @@
 **Feature:** CI now pushes `embyr-server` and `embyr-agent` container images to GitHub Container
 Registry (ghcr.io) on every merge to `master`, tagged `:master` and `:vX.Y.Z`.
 **Closes:** findings #42 and #43 (both Blocker) from
-`docs/product/production-readiness-audit-2026-09-08.md`'s Follow-Up Scan — 2026-09-19.
+`docs/product/gaps.md`'s Follow-Up Scan — 2026-09-19.
 
 ## Business Context
 
@@ -31,7 +31,7 @@ directly, which is finding #43's own restatement of the same root cause.
 
 - `.github/workflows/ci.yml` — `docker` job: version-extraction step, `docker/login-action`, swapped `docker build` for `docker/build-push-action@v6` with `push`/`tags` gated on master. `agent` job: same pattern for `crates/embyr-agent/Dockerfile`.
 - `docs/operations/release-process.md` — new "Container Registry" section documenting the ghcr.io location, tag scheme, and pull command.
-- `docs/product/production-readiness-audit-2026-09-08.md` — rows #42/#43 marked CLOSED.
+- `docs/product/gaps.md` — rows #42/#43 marked CLOSED.
 
 No Dockerfile changes — this is CI-wrapper-only, per findings #42/#43's own scope.
 

@@ -1,6 +1,6 @@
 # structured-json-logging
 
-Closes finding #25 (Medium, Reliability) — `docs/product/production-readiness-audit-2026-09-08.md`:
+Closes finding #25 (Medium, Reliability) — `docs/product/gaps.md`:
 plain-text `tracing_subscriber::fmt()` output is unreliable to parse at scale for Loki/CloudWatch/Datadog.
 
 Combined DISCUSS+DESIGN pass (token-budget mode). Design-only wave — no production code changed.

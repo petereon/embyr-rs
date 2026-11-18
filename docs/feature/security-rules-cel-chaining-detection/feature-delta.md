@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/known-gaps.md`, gap #8 — read in full. Exact current wording: "CEL rule-import
+✓ `docs/product/gaps.md`, gap #8 — read in full. Exact current wording: "CEL rule-import
 'chaining' construct (a `get()` whose path is built from another `get()`'s own result) isn't
 detected as an offending import — only 1 of 3 expected offending blocks named"; location
 `tests/security_rules_cel_parity/acceptance/cp04_reject_out_of_scope_imports.rs:264`, underlying
@@ -132,7 +132,7 @@ requirements and does not prescribe a mechanism.
 
 ## Wave: DISCUSS / [REF] Business Context
 
-This closes the LAST remaining row in `docs/product/known-gaps.md` (gap #8 of 8; gaps 1–7 are all
+This closes the LAST remaining row in `docs/product/gaps.md` (gap #8 of 8; gaps 1–7 are all
 CLOSED). Unlike gap #7 (`secrets-management` test flakiness, infrastructure-only, no real-client
 impact), gap #8 is a genuine product gap reachable by a real Alex: if he writes a chaining `get()` in
 a real `.rules` file, whether he is warned depends on what ELSE is in that same file — an
@@ -320,7 +320,7 @@ And no previously-rejected construct becomes wrongly accepted
 ### Feature: security-rules-cel-chaining-detection
 
 ### Objective
-Close the last remaining known gap in `docs/product/known-gaps.md` — make chaining-`get()` rejection
+Close the last remaining known gap in `docs/product/gaps.md` — make chaining-`get()` rejection
 reliable in every import shape, not just isolated ones — completing this session's full 8-gap
 production-readiness/parity sweep.
 
@@ -355,7 +355,7 @@ codebase ships today.
 - Unit tests for any new/changed pure detection logic written during DELIVER; mutation-testing pass
   per this project's `per-feature` strategy.
 - Code reviewed and merged to master.
-- `docs/product/known-gaps.md` row 8 updated to CLOSED at FINALIZE, with a link to this feature's own
+- `docs/product/gaps.md` row 8 updated to CLOSED at FINALIZE, with a link to this feature's own
   evolution doc.
 - Story demoable in a single session: one `curl`/HTTP call showing the multi-block rejection now
   names all 3 constructs.
@@ -425,10 +425,10 @@ not diagnose.
 `docs/product/jobs.yaml`, JOB-17 entry: append a new dated NOTE (mirroring this job's own established
 NOTE-append convention) recording this feature's own scope — reliable, consistent detection/naming of
 a chaining `get()` construct across single- and multi-block imports, closing gap #8 of
-`docs/product/known-gaps.md`, the last gap in this session's full 8-gap sweep. Applied in this same
+`docs/product/gaps.md`, the last gap in this session's full 8-gap sweep. Applied in this same
 DISCUSS pass (see the NOTE itself in `jobs.yaml`).
 
-`docs/product/known-gaps.md`, row 8: Status column updated to "IN PROGRESS —
+`docs/product/gaps.md`, row 8: Status column updated to "IN PROGRESS —
 `security-rules-cel-chaining-detection`" (not closed — CLOSED happens at this feature's own FINALIZE).
 Applied in this same DISCUSS pass.
 
@@ -496,7 +496,7 @@ against real Postgres via testcontainers, to get ground truth rather than hand-t
 Actual panic: `assertion 'left == right' failed: AC-17-191: every offending block must be named, not
 just the first — left: 1, right: 3`. This is the single most important fact this DESIGN rests on: the
 CURRENT behavior is not "2 of 3 named" (the paraphrase this feature was scoped from) — it is **1 of
-3 named**, matching `known-gaps.md` gap #8's own original wording exactly.
+3 named**, matching `gaps.md` gap #8's own original wording exactly.
 
 ## Wave: DESIGN / [REF] Root Cause Analysis
 

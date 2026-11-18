@@ -713,7 +713,7 @@ async fn end_cursor_bounds_results_for_integer_and_double_field_types() {
     assert_eq!(prices, vec![2.5, 3.5], "startAt(2.5) on a Double field must exclude 1.5, got {prices:?}");
 }
 
-/// finding #44 (production-readiness-audit-2026-09-08, Follow-Up Scan
+/// finding #44 (gaps.md, Follow-Up Scan
 /// 2026-09-19): a Timestamp-valued cursor must genuinely bound the result
 /// set, the same way Integer/Double cursors already do (see the sibling
 /// test above). Before the fix, the startAt/endAt SQL builder's `_ => {}`

@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` — read in full. Finding #8 confirmed
+✓ `docs/product/gaps.md` — read in full. Finding #8 confirmed
 verbatim: *"No build/release path exists for `embyr-agent` at all — no Dockerfile, no CI build
 target, nothing in `.github/workflows/ci.yml` references it. The customer-VPC agent (the product's
 core privacy boundary) cannot currently be distributed to a customer."* Category: DevOps. Severity:
@@ -415,7 +415,7 @@ Scenario: A compile-breaking change scoped only to embyr-agent fails cleanly and
 5. Mutation testing runs after DELIVER, per this repo's own `per-feature` strategy (root `CLAUDE.md`)
    — scoped to any new Rust code the chosen mechanism introduces (e.g., a build-verification test
    harness), not to CI YAML itself.
-6. Evolution doc written; `docs/product/production-readiness-audit-2026-09-08.md` row 8 updated to
+6. Evolution doc written; `docs/product/gaps.md` row 8 updated to
    CLOSED at FINALIZE (this DISCUSS advances it to IN PROGRESS — see § Next Wave). This closes the
    LAST of the 8 Blocker findings from the 2026-09-08 audit.
 7. Memory updated.

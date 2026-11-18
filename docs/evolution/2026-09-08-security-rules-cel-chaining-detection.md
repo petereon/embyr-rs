@@ -115,7 +115,7 @@ end-to-end through the actual code, not assumed). Zero real gaps.
 
 ## Follow-Up Work
 
-None specific to this feature. **This closes the LAST item in `docs/product/known-gaps.md`** —
+None specific to this feature. **This closes the LAST item in `docs/product/gaps.md`** —
 the entire 8-item production-readiness/parity sweep from the 2026-09-06 scan is now FULLY
 RESOLVED:
 

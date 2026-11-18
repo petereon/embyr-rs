@@ -107,4 +107,4 @@ explicitly anticipated this ("a pure timing-constant change may not produce mean
 ## Follow-Up Work
 
 None specific to this feature. **Gap #8 (CEL "chaining" construct-detection gap) is now the
-LAST remaining item in `docs/product/known-gaps.md`** after this closes.
+LAST remaining item in `docs/product/gaps.md`** after this closes.

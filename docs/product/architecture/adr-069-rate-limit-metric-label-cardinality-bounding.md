@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-`docs/product/production-readiness-audit-2026-09-08.md` finding #2 (Blocker): `RateLimiter::check()`
+`docs/product/gaps.md` finding #2 (Blocker): `RateLimiter::check()`
 (`crates/embyr-server/src/middleware/rate_limit.rs:140-150`) unconditionally records
 `metrics::counter!("embyr_rate_limit_requests_total", "project_id" => project_id.to_owned(), "outcome"
 => outcome)` using the raw, attacker-controllable `project_id` string extracted from the gRPC resource

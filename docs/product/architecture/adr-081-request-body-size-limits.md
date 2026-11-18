@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-`docs/product/production-readiness-audit-2026-09-08.md` finding #24 (Medium, Reliability):
+`docs/product/gaps.md` finding #24 (Medium, Reliability):
 no explicit message/request-body size limit is configured anywhere in `embyr-server`
 (`crates/embyr-server/src/lib.rs:348,447-448`) — zero hits for
 `max_decoding_message_size`/`DefaultBodyLimit`. The system relies entirely on tonic's and

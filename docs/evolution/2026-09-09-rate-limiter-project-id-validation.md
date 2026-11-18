@@ -7,7 +7,7 @@ vector.
 **Job:** JOB-12 (`observability`) — reused, persona P2 Sam Chen.
 **ADRs:** ADR-069 (new) — rate-limit metric label cardinality bounding. ADR-016 amended (note only).
 
-## This closes finding #2 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #2 from `docs/product/gaps.md`
 
 ## Business Context
 

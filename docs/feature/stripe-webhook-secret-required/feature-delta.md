@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` — read in full (all 41 findings + bloat
+✓ `docs/product/gaps.md` — read in full (all 41 findings + bloat
 list + notes). Finding #1's exact wording confirmed: "Stripe webhook signing secret defaults to
 empty string when unset; webhook route stays mounted, HMAC becomes forgeable (empty key is a
 valid HMAC key). Unauthenticated attacker can set any tenant's subscription status/plan."
@@ -46,7 +46,7 @@ whether `stripe_secret_key` is configured at all — the unconditional-mount hal
 finding, confirmed directly rather than assumed. No further code investigation performed; the
 precise mechanism for "how do we know Stripe billing is enabled at all" is explicitly left to
 DESIGN, per this task's own scope limit.
-✓ Confirmed `docs/product/known-gaps.md` is NOT touched by this DISCUSS (that list is closed,
+✓ Confirmed `docs/product/gaps.md` is NOT touched by this DISCUSS (that list is closed,
 this is a separate audit, per this task's own explicit instruction).
 
 ## Wave: DISCUSS / [REF] Orchestrator Decisions (not re-litigated)
@@ -339,7 +339,7 @@ Scenario: Existing webhook and billing tests continue to pass unmodified
 5. Mutation testing runs after DELIVER, per this repo's own `per-feature` strategy
    (root `CLAUDE.md`) — 100% effective kill rate on the new/changed startup-validation and
    route-mount/reject logic.
-6. Evolution doc written; `docs/product/production-readiness-audit-2026-09-08.md` row 1 updated to
+6. Evolution doc written; `docs/product/gaps.md` row 1 updated to
    CLOSED at FINALIZE (this DISCUSS only updates it to IN PROGRESS — see § Next Wave).
 7. Memory updated.
 

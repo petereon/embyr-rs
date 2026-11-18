@@ -54,4 +54,4 @@ independent runs), full suite (37/37) unaffected.
   the same already-documented external `cargo-sweep` interference class hit repeatedly this
   session — confirmed via `cargo-sweep.log` and an isolated 15/15 rerun).
 
-This closes the LAST of the 8 Blockers from `docs/product/production-readiness-audit-2026-09-08.md`.
+This closes the LAST of the 8 Blockers from `docs/product/gaps.md`.

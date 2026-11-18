@@ -1,6 +1,6 @@
 # Feature: dependency-version-dedup
 
-Closes finding #27 (Medium, Dependencies) — `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes finding #27 (Medium, Dependencies) — `docs/product/gaps.md`.
 Combined DISCUSS+DESIGN, token-budget mode. No implementation performed — architect role only;
 recommendations below are handed to DELIVER.
 

@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/known-gaps.md` #7 — exact current wording confirmed: "`secrets_management`
+✓ `docs/product/gaps.md` #7 — exact current wording confirmed: "`secrets_management`
 sm01/sm02 tests fail consistently — server+LocalStack container doesn't exit within the test's
 own 10s wait... Test-only — Docker/AWS-SDK timing, not a runtime code path a real client
 hits... Test flakiness/reliability, not a production data/crash risk... Not started — found as
@@ -68,7 +68,7 @@ expecting the server to exit 1 within a 10-second test-level `wait_for_exit` tim
 own existing hypothesis: the server+LocalStack container doesn't exit within that 10s wait —
 not investigated further here (DESIGN's own job).
 
-**Evidenced recurring cost**: known-gaps.md #7 documents this was first found and
+**Evidenced recurring cost**: gaps.md #7 documents this was first found and
 bisection-confirmed pre-existing as a byproduct of `firestore-transaction-read-consistency`'s
 own regression testing (2026-09-06) — a feature whose own diff never touched
 `secrets_management` at all, proving the failure is independent of feature work, not a symptom
@@ -270,11 +270,11 @@ Scenario: The fix does not mask a genuine fetch-failure-detection regression
 - **Does what**: runs a full-workspace regression suite and trusts a clean pass/fail signal
   from the `secrets_management` binary without manual triage of 2 known-failing tests.
 - **By how much**: from 0/5 reliable (tests fail consistently enough to require triage every
-  run, per known-gaps.md #7) to 5/5 consecutive passes for both tests, with 0 regressions
+  run, per gaps.md #7) to 5/5 consecutive passes for both tests, with 0 regressions
   elsewhere.
 - **Measured by**: 5 consecutive local runs of each named test (AC-STR-01); one full-workspace
   regression run pre- and post-fix diffed for new failures (AC-STR-02).
-- **Baseline**: 0/5 — both tests are documented as failing consistently today (known-gaps.md
+- **Baseline**: 0/5 — both tests are documented as failing consistently today (gaps.md
   #7), first bisection-confirmed pre-existing 2026-09-06.
 
 ## Wave: DISCUSS / [REF] Definition of Done
@@ -285,13 +285,13 @@ Scenario: The fix does not mask a genuine fetch-failure-detection regression
 3. The mechanism is proven to preserve correctness — it does not silently mask a genuine
    fetch-failure-detection bug (AC-STR-03), and uses a bounded, rationale-backed wait/retry
    value, not an open-ended one (AC-STR-04).
-4. Full regression suite clean (any OTHER pre-existing flake, e.g. known-gaps.md #8's CEL
+4. Full regression suite clean (any OTHER pre-existing flake, e.g. gaps.md #8's CEL
    rule-import gap, is unrelated and out of scope — triaged not assumed, per this session's own
    established `feedback_triage_before_dismissing_as_flaky` practice).
 5. Mutation testing: per this project's `per-feature` strategy — applied to whatever new/changed
    test-harness logic DESIGN introduces, if any is non-trivial enough to warrant it (a pure
    timing-constant change may not produce meaningful mutants; DELIVER/QUALITY_GATE decide).
-6. Evolution doc written; `docs/product/known-gaps.md` #7 updated to CLOSED.
+6. Evolution doc written; `docs/product/gaps.md` #7 updated to CLOSED.
 7. Memory updated.
 
 ## Wave: DISCUSS / [REF] Out of Scope
@@ -300,7 +300,7 @@ Scenario: The fix does not mask a genuine fetch-failure-detection regression
   AWS SDK retry/backoff behavior vs. something else) — DESIGN's own job, this DISCUSS
   deliberately did not investigate `startup_localstack()`'s own implementation or the AWS SDK's
   own retry configuration.
-- **known-gaps.md #8** (CEL rule-import chaining-`get()` detection gap) — a separate, unrelated
+- **gaps.md #8** (CEL rule-import chaining-`get()` detection gap) — a separate, unrelated
   pre-existing issue found alongside #7 in the same regression run; not addressed by this
   feature.
 - **Any production code change** — unless DESIGN's own investigation surfaces a genuine
@@ -342,7 +342,7 @@ limit).
    hypothetical-regression scenario for the correctness trap).
 7. [x] Out of Scope explicitly named (4 items, each reasoned).
 8. [x] Outcome KPIs have numeric targets (0/5 → 5/5) and measurement methods.
-9. [x] Prior-wave artifacts read and reconciled (known-gaps.md #7's exact wording, both test
+9. [x] Prior-wave artifacts read and reconciled (gaps.md #7's exact wording, both test
    files read in full, this project's own feature-delta.md convention confirmed).
 
 ### DoR Status: **PASSED**
@@ -353,7 +353,7 @@ This story is intentionally `@infrastructure` with no Elevator Pitch, per the ta
 explicit instruction that Elevator Pitch is mandatory only for non-`@infrastructure` stories.
 The `infrastructure_rationale` field substitutes for it here, providing the same "why does this
 deserve to exist" grounding an Elevator Pitch would for a user-facing story. Reviewer should
-verify the rationale is specific and evidenced (it cites known-gaps.md #7, the exact failing
+verify the rationale is specific and evidenced (it cites gaps.md #7, the exact failing
 test names, and the recurring-triage-cost argument from § Business Context), not a generic
 placeholder.
 
@@ -482,7 +482,7 @@ DISCUSS:**
 The `sm02-bad-length-key` scenario (sm02:208-227) is the decisive control: it uses the *same*
 10-second `wait_for_exit` bound as the two failing tests, against the *same* LocalStack
 container-startup mechanism, but it calls `create_raw_secret` first — and it passes reliably
-(it is not named in known-gaps.md #7). The only structural difference between it and the two
+(it is not named in gaps.md #7). The only structural difference between it and the two
 failing tests is the warm-up call. This isolates the variable: **10 seconds is already
 sufficient once the Secrets Manager backend is warm; it is not sufficient when the server's own
 `GetSecretValue` call is also the first-ever Secrets Manager call against that LocalStack
@@ -496,7 +496,7 @@ server subprocess's own `AwsSecretFetcher::get_raw_secret` → `client.get_secre
 backend has ever seen in that container's lifetime — landing the lazy-initialization cost
 squarely inside the same 10-second window that must also cover subprocess spawn, Tokio runtime
 init, and `aws_config::load_defaults()`'s credential-chain resolution. On a loaded dev/CI
-machine this combination reliably exceeds 10s. This matches known-gaps.md #7's own framing
+machine this combination reliably exceeds 10s. This matches gaps.md #7's own framing
 ("server+LocalStack container doesn't exit within the test's own 10s wait") precisely, and
 explains why it reproduces consistently rather than randomly: the missing warm-up call is a
 structural property of these 2 tests, not an environment fluke.
@@ -690,7 +690,7 @@ technology-stack ADR, which are correctly out of scope for this size of change.
   the original "no reviewer pass" note (this section) with this actual review record.
 
 **Priority validation** (from reviewer YAML): Q1 largest-bottleneck = YES (evidenced by
-known-gaps.md #7 recurrence across 4+ FINALIZE gates). Q2 simple-alternatives = ADEQUATE. Q3
+gaps.md #7 recurrence across 4+ FINALIZE gates). Q2 simple-alternatives = ADEQUATE. Q3
 constraint-prioritization = CORRECT. Q4 data-justified = JUSTIFIED.
 
 No revisions required — approved on iteration 1.

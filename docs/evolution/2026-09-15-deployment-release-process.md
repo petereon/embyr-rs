@@ -6,7 +6,7 @@ git-tag convention, and a CHANGELOG, plus a `docker-compose.yml` for local/singl
 evaluation. K8s manifests/Helm/ECS explicitly deferred to a separate future finding.
 **ADR:** None — confirmed by checking (no new component/pattern/tech), not by default.
 
-## This closes finding #19 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #19 from `docs/product/gaps.md`
 
 ## Business Context
 
