@@ -1391,3 +1391,8 @@ path = "../../tests/admin_oidc_sso/acceptance/s04_sso_invitations.rs"
 [[test]]
 name = "admin_oidc_sso_s05_self_link"
 path = "../../tests/admin_oidc_sso/acceptance/s05_self_link_unlink.rs"
+
+# admin-oidc-sso slice 6 (CI-only, Docker-backed).
+[[test]]
+name = "admin_oidc_sso_s06_sso_required"
+path = "../../tests/admin_oidc_sso/acceptance/s06_sso_required.rs"

@@ -217,7 +217,7 @@ the chosen second IdP) with a throwaway client.
 | 3 (done, PR "slice 3", stacked on slices 1-2) | `start` + discovery/JWKS caches + `callback` for intent `signin`; provider create/enable validation; `ServerKeys` for provider secret + `PUT .../secret` | L | 1, 2 |
 | 4 (done, PR "slices 4-5", stacked on slice 3) | Invitation `auth_method='sso'` (create, lookup, callback intent `invite`) | M | 3, `account-bootstrap-and-invitations` (landed) |
 | 5 (done, same PR) | Self-link/unlink (intent `link`, re-auth) | S | 3 |
-| 6 | `sso_required` + session fields + Owner exemption | S | 3 |
+| 6 (done, PR "slice 6", stacked on slices 4-5) | `sso_required` + session fields + Owner exemption | S | 3 |
 | 7 | SPA: sign-in start, Settings section, invite dialog/accept, banners | M | 3 (sign-in, Settings), 4-6 for their parts |
 
 Slice 1 delivered: migration 0051; core modules `embyr_core::admin::sso::{pkce, claims, url_policy}` and `admin::audit`; server
@@ -276,6 +276,29 @@ guarantee of never touching `users` or e-mail), pure `embyr_core::admin::sso::en
 - The account-deletion re-auth already refused a NULL-password Owner (s02 test); SSO-only members are never Owners and get 403
   (s04 and s05 tests).
 - The members list reports `auth_method: "sso"` for members without a password.
+
+Slice 6 delivered (no migration; `accounts.sso_required` and the session columns came with 0051): pure
+`embyr_core::admin::sso::policy` (`may_use_password`, `password_invite_allowed`, `may_enable_sso_required`, exhaustive table
+tests), `PATCH /admin/v1/account {sso_required}` in `handlers/account.rs`, enforcement in `signin`, `invite_member` and both
+password-reset endpoints, and `auth_method` / `sso_linked` / `sso_required` on `GET /auth/session`. Details settled while building:
+
+- **Lock-out guard (the design said "enabled provider and the caller has a link"):** enabling needs an enabled provider on the
+  account AND a link of the calling Owner to one of the account's enabled providers; otherwise 422
+  `{error:"sso_required_prerequisites"}` (audited as `failed` with reason `no_enabled_provider` or `caller_not_linked`).
+  Disabling is Owner-only, immediate and unconditional (no prerequisite, so it works after the provider was deleted).
+  A repeat of the current value is a 200 no-op that writes no audit row. `deny_unknown_fields`: only `sso_required` is accepted.
+- **Sign-in:** the member's role and the account flag are read in the same query as the user; for a non-Owner of a required
+  account the request continues as an SSO-only user (no hash, no lockout state), so the answer is the generic 401 after one dummy
+  Argon2 verify, same body and timing as a wrong password, and no lockout counters move. The former separate role query (step 6)
+  is gone; a missing member row still answers 500 after verification.
+- **Invitations:** `auth_method='password'` (explicit or default) for Admin/Viewer is 422 while required; Owner password invitations
+  (exempt) and SSO invitations are unaffected.
+- **Password reset:** `request` treats a non-Owner of a required account like an unknown address; `confirm` answers the usual 404 for
+  a token that was issued before the flag was switched on.
+- **Session probe:** `auth_method` is the session's own (`password` | `sso`; a Bearer admin key reports `password`), `sso_linked`
+  is "this user has at least one link", `sso_required` is the account flag.
+- Not handled (deliberate, small): demoting an Owner to Admin while required leaves that user without a password path until
+  linked; existing non-Owner password sessions are not ended when the flag is turned on (they expire after 24 h as usual).
 
 Slices 1-3 deliver working SSO for pre-linked users only if a link exists, so 4 or 5 is required before any real use; ship 1-5 together.
 Total roughly 4-5 weeks of one engineer including the mock IdP.

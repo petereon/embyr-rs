@@ -9,6 +9,7 @@ pub mod claims;
 pub mod discovery;
 pub mod enroll;
 pub mod pkce;
+pub mod policy;
 pub mod url_policy;
 
 #[cfg(test)]

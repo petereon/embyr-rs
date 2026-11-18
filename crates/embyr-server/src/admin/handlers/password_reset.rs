@@ -16,14 +16,21 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+use embyr_core::admin::account::Role;
 use embyr_core::admin::invitation::{
-    generate_token, hash_token, is_well_formed_token, password_acceptable,
+    generate_token, hash_token, is_well_formed_token, parse_role, password_acceptable,
 };
 use embyr_core::admin::password_reset::{normalize_email, reset_email};
+use embyr_core::admin::sso::policy::may_use_password;
 
 use super::auth::{check_lockout, verify_second_factor, UserSecrets};
 use super::invitations::{internal, message, throttle, too_many_attempts};
 use crate::admin::state::UserAdminState;
+
+/// A member without a role row is treated as the least privileged one (never exempt).
+fn member_role(role: Option<&str>) -> Role {
+    role.and_then(parse_role).unwrap_or(Role::Viewer)
+}
 
 /// Unknown / expired / used / malformed tokens are indistinguishable.
 fn invalid_reset() -> Response {
@@ -64,9 +71,11 @@ pub async fn request_password_reset(
     }
 
     // Same lookup and token generation/hashing for known and unknown emails. An SSO-only user
-    // (NULL password_hash, ADR-086) has no password to reset: treated as an unknown address.
-    let user_id: Option<Uuid> = match sqlx::query_scalar(
-        "SELECT u.id FROM users u JOIN accounts a ON a.id = u.account_id \
+    // (NULL password_hash, ADR-086) has no password to reset, and neither has a non-Owner member
+    // of an account that requires SSO: both are treated as an unknown address.
+    let user_id: Option<Uuid> = match sqlx::query_as::<_, (Uuid, bool, Option<String>)>(
+        "SELECT u.id, a.sso_required, am.role FROM users u JOIN accounts a ON a.id = u.account_id \
+         LEFT JOIN account_members am ON am.user_id = u.id AND am.account_id = u.account_id \
          WHERE lower(u.email) = $1 AND a.deleted_at IS NULL \
            AND u.password_hash IS NOT NULL LIMIT 1",
     )
@@ -74,7 +83,9 @@ pub async fn request_password_reset(
     .fetch_optional(state.system_db.pool())
     .await
     {
-        Ok(id) => id,
+        Ok(row) => row
+            .filter(|(_, required, role)| may_use_password(member_role(role.as_deref()), *required, true))
+            .map(|(id, _, _)| id),
         Err(e) => return internal("password reset: lookup user", e),
     };
     let token = generate_token();
@@ -148,9 +159,11 @@ async fn confirm_inner(state: &UserAdminState, body: &ConfirmBody) -> Result<Res
     let pool = state.system_db.pool();
     let token_hash = hash_token(&body.token);
 
-    let user_id: Uuid = sqlx::query_scalar(
-        "SELECT t.user_id FROM password_reset_tokens t \
+    // A token issued before `sso_required` was switched on must stop working for non-Owners.
+    let (user_id, sso_required, role): (Uuid, bool, Option<String>) = sqlx::query_as(
+        "SELECT t.user_id, a.sso_required, am.role FROM password_reset_tokens t \
          JOIN users u ON u.id = t.user_id JOIN accounts a ON a.id = u.account_id \
+         LEFT JOIN account_members am ON am.user_id = u.id AND am.account_id = u.account_id \
          WHERE t.token_hash = $1 AND t.expires_at > now() AND a.deleted_at IS NULL \
            AND u.password_hash IS NOT NULL",
     )
@@ -159,6 +172,9 @@ async fn confirm_inner(state: &UserAdminState, body: &ConfirmBody) -> Result<Res
     .await
     .map_err(|e| internal("password reset: lookup token", e))?
     .ok_or_else(invalid_reset)?;
+    if !may_use_password(member_role(role.as_deref()), sso_required, true) {
+        return Err(invalid_reset());
+    }
     let user = UserSecrets::fetch_by_id(pool, user_id)
         .await
         .map_err(|e| internal("password reset: load user", e))?

@@ -1,4 +1,6 @@
 //! DELETE /admin/v1/account — Owner-only account deletion (account-deletion feature).
+//! PATCH  /admin/v1/account — Owner-only account settings; today `{sso_required}` (admin-oidc-sso,
+//! ADR-086 decision 6): see `patch_account`.
 //!
 //! Soft delete mirroring projects: `accounts.deleted_at` is set, projects are
 //! soft-deleted, sessions/keys/invitations are cut off, and the purge sweeper
@@ -20,6 +22,10 @@ use uuid::Uuid;
 
 use embyr_core::admin::account::Role;
 use embyr_core::admin::account_deletion::purge_after;
+use embyr_core::admin::audit::{events, AuditEvent, AuditOutcome};
+use embyr_core::admin::sso::policy::may_enable_sso_required;
+
+use crate::adapters::admin_audit::record;
 
 use super::auth::{extract_cookie, verify_credentials, UserSecrets};
 use crate::admin::extractors::session_context::SessionContext;
@@ -49,6 +55,82 @@ fn message(status: StatusCode, msg: &str) -> Response {
 fn internal(context: &str, e: impl std::fmt::Display) -> Response {
     tracing::error!("delete_account: {context}: {e}");
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PatchAccountRequest {
+    pub sso_required: bool,
+}
+
+/// PATCH /admin/v1/account `{sso_required}` — Owner only (cookie session: the guard needs the
+/// caller's own links). Disabling is immediate and unconditional. Enabling is refused with 422
+/// `{error:"sso_required_prerequisites"}` unless the account has an enabled provider AND the
+/// caller already has a link to one (lock-out guard). Owners stay exempt from the effect (O3).
+/// Every change is audited (labels only); a no-op repeat writes nothing.
+pub async fn patch_account(
+    session: SessionContext,
+    State(state): State<UserAdminState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<PatchAccountRequest>,
+) -> Response {
+    let pool = state.system_db.pool();
+    if session.role != Role::Owner {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let mut ev = AuditEvent::new(events::SSO_REQUIRED_TOGGLED, AuditOutcome::Ok);
+    ev.account_id = Some(session.account_id);
+    ev.actor_user_id = Some(session.user_id).filter(|u| !u.is_nil());
+    ev.source_ip = Some(state.signin_rate_limiter.source_ip(peer, &headers));
+
+    if body.sso_required {
+        let facts: Result<(bool, bool), sqlx::Error> = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM oidc_providers p WHERE p.account_id = $1 AND p.enabled), \
+                    EXISTS(SELECT 1 FROM admin_sso_identities i \
+                           JOIN oidc_providers p ON p.id = i.provider_id \
+                           WHERE i.user_id = $2 AND p.account_id = $1 AND p.enabled)",
+        )
+        .bind(session.account_id)
+        .bind(session.user_id)
+        .fetch_one(pool)
+        .await;
+        let (has_provider, caller_linked) = match facts {
+            Ok(f) => f,
+            Err(e) => return internal("sso_required guard", e),
+        };
+        if !may_enable_sso_required(has_provider, caller_linked) {
+            ev.outcome = AuditOutcome::Failed;
+            ev.reason = Some(if has_provider { "caller_not_linked" } else { "no_enabled_provider" });
+            record(pool, &ev).await;
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": "sso_required_prerequisites" })),
+            )
+                .into_response();
+        }
+    }
+
+    // `IS DISTINCT FROM` makes a repeat a no-op that returns no row (nothing to audit).
+    let changed: Result<Option<bool>, sqlx::Error> = sqlx::query_scalar(
+        "UPDATE accounts SET sso_required = $2 \
+         WHERE id = $1 AND deleted_at IS NULL AND sso_required IS DISTINCT FROM $2 \
+         RETURNING sso_required",
+    )
+    .bind(session.account_id)
+    .bind(body.sso_required)
+    .fetch_optional(pool)
+    .await;
+    match changed {
+        Ok(Some(_)) => {
+            ev.reason = Some(if body.sso_required { "enabled" } else { "disabled" });
+            record(pool, &ev).await;
+        }
+        Ok(None) => {}
+        Err(e) => return internal("update sso_required", e),
+    }
+    Json(serde_json::json!({ "sso_required": body.sso_required })).into_response()
 }
 
 pub async fn delete_account(
