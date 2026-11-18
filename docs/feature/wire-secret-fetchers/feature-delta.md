@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` — read (finding #7 row + surrounding
+✓ `docs/product/gaps.md` — read (finding #7 row + surrounding
 findings #6-8). Exact wording confirmed: "`aws_secret`/`gcp_secret` backend modes are hardcoded to
 `None` fetchers in the real composition root — every request for a project in that mode returns
 `Status::internal`. Admin provisioning API still allows creating such projects. Pre-existing, named
@@ -467,7 +467,7 @@ Scenario: Provisioning a new gcp_secret project is rejected with a clear error w
 4. Full regression suite clean (pre-existing flakes triaged, not assumed, per this session's own
    `feedback_triage_before_dismissing_as_flaky` practice).
 5. Mutation testing runs after DELIVER, per this repo's own `per-feature` strategy (root `CLAUDE.md`).
-6. Evolution doc written; `docs/product/production-readiness-audit-2026-09-08.md` row 7 updated to
+6. Evolution doc written; `docs/product/gaps.md` row 7 updated to
    CLOSED at FINALIZE (this DISCUSS only advances it to IN PROGRESS — see § Next Wave).
 7. Memory updated.
 

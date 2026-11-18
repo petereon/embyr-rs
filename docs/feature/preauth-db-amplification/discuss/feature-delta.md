@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` read for finding #14 (High, Reliability),
+✓ `docs/product/gaps.md` read for finding #14 (High, Reliability),
 confirmed verbatim: *"Pre-authentication 3-round-trip amplification against the shared system DB —
 an unknown `project_id` triggers UPDATE + SELECT EXISTS + INSERT before `authenticate()` ever runs,
 on the same pool auth/sessions/admin API depend on."* Cites

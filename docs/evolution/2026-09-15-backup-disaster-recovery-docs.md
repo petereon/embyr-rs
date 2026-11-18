@@ -6,7 +6,7 @@ states backup ownership across all 4 backend modes, System DB recovery procedure
 RTO/RPO targets, and a previously-undocumented encryption-key recovery precondition.
 **ADR:** None new — pure documentation, no code/architecture change.
 
-## This closes finding #18 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #18 from `docs/product/gaps.md`
 
 ## Business Context
 

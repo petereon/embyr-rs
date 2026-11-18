@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` finding #3 confirmed by direct reading of
+✓ `docs/product/gaps.md` finding #3 confirmed by direct reading of
 `crates/embyr-server/src/admin/middleware/stripe_signature.rs` (55 lines, read in full). The exact
 vulnerable line is present unchanged: `axum::body::to_bytes(body, usize::MAX)` (line 44), called
 BEFORE the `Stripe-Signature` HMAC check (line 50) — the signature header presence is checked first
@@ -382,7 +382,7 @@ Scenario: Existing webhook and billing tests continue to pass unmodified
    own established `feedback_triage_before_dismissing_as_flaky` practice).
 5. Mutation testing runs after DELIVER, per this repo's own `per-feature` strategy (root `CLAUDE.md`)
    — 100% effective kill rate on the new/changed body-limit logic.
-6. Evolution doc written; `docs/product/production-readiness-audit-2026-09-08.md` row 3 updated to
+6. Evolution doc written; `docs/product/gaps.md` row 3 updated to
    CLOSED at FINALIZE (this DISCUSS only updates it to IN PROGRESS — see § Next Wave).
 7. Memory updated.
 

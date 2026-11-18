@@ -7,7 +7,7 @@ driver/schema error text — across 26 call sites in both `embyr-server` and `em
 **Job:** JOB-11 (`fair-multitenancy`) — reused, persona P2 Sam Chen.
 **ADRs:** ADR-075 (new) — backend error message sanitization boundary.
 
-## This closes finding #10 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #10 from `docs/product/gaps.md`
 
 ## Business Context
 

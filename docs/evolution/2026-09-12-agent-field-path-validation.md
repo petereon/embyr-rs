@@ -7,7 +7,7 @@ genuine SQL-injection path into the customer's own Postgres.
 **Job:** JOB-04 (`credential-isolation`) — reused, persona P4 Riley Nakamura.
 **ADRs:** none new — narrow validator-swap fix, no new pattern.
 
-## This closes finding #11 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #11 from `docs/product/gaps.md`
 
 ## Business Context
 

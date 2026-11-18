@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` — read in full (all 41 findings + bloat
+✓ `docs/product/gaps.md` — read in full (all 41 findings + bloat
 list + notes). Finding #2's exact wording confirmed: "Unbounded Prometheus label cardinality
 driven by an unauthenticated, unvalidated `project_id` — rate limiter runs *before* `authenticate()`,
 `extract_project_id` accepts any non-empty string, registry has no eviction. Unauthenticated remote
@@ -378,7 +378,7 @@ Scenario: Full regression suite passes
    own established `feedback_triage_before_dismissing_as_flaky` practice).
 4. Mutation testing runs after DELIVER, per this repo's own `per-feature` strategy (root `CLAUDE.md`)
    — 100% effective kill rate on the new/changed cardinality-bounding logic.
-5. Evolution doc written; `docs/product/production-readiness-audit-2026-09-08.md` row 2 updated to
+5. Evolution doc written; `docs/product/gaps.md` row 2 updated to
    CLOSED at FINALIZE (this DISCUSS only updates it to IN PROGRESS — see § Next Wave).
 6. Memory updated.
 

@@ -4,7 +4,7 @@ Token-budget mode: DISCUSS + DESIGN combined in one pass.
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` finding #24 (Medium, Reliability)
+✓ `docs/product/gaps.md` finding #24 (Medium, Reliability)
 confirmed: no explicit message/request-body size limit anywhere in `embyr-server`
 (`crates/embyr-server/src/lib.rs:348,447-448`), zero hits for
 `max_decoding_message_size`/`DefaultBodyLimit`.
@@ -159,7 +159,7 @@ enforcement rationale recorded there — not duplicated here.
 3. `crates/embyr-server/src/admin/router.rs` — `MAX_ADMIN_BODY_BYTES` constant; `DefaultBodyLimit`
    layer on the returned admin `Router`.
 4. `docs/product/architecture/adr-081-request-body-size-limits.md` — new (this wave).
-5. `docs/product/production-readiness-audit-2026-09-08.md` — finding #24 row to be updated to
+5. `docs/product/gaps.md` — finding #24 row to be updated to
    CLOSED at FINALIZE (not this wave).
 
 **Files confirmed to need NO change:**

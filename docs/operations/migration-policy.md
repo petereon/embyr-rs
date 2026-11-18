@@ -1,6 +1,6 @@
 # Migration Policy
 
-Closes go-live assessment item O2 (`docs/product/go-live-assessment-2026-11-13.md`): the
+Closes go-live assessment item O2 (`docs/product/gaps.md`): the
 forward-only migrations in `migrations/` run on every replica start, and until now there was no
 written rule about what a migration may do or how a bad release is rolled back.
 

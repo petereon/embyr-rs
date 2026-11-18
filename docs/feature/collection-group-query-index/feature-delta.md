@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` finding #17 confirmed by direct reading:
+✓ `docs/product/gaps.md` finding #17 confirmed by direct reading:
 "Collection-group queries (`all_descendants=true`) build a leading-`%` `LIKE` that can't use the
 `(project_id, collection_path)` btree — every collection-group query scans the entire project, not
 just the target collection group. Compounds #5." Severity: **High**. Status (at DISCUSS start):
@@ -38,7 +38,7 @@ finding is confirmed to be a pure PERFORMANCE gap, not a correctness bug** — s
 just via a full scan instead of an index. No dynamic index-hint or query-rewrite mechanism exists
 anywhere in `embyr-pg-storage` (confirmed by the same full-module read `composite-index-real-creation`
 already performed) that this feature could accidentally break.
-✓ Finding #5 (`docs/product/production-readiness-audit-2026-09-08.md` line 15) read directly and
+✓ Finding #5 (`docs/product/gaps.md` line 15) read directly and
 cross-checked against `[[project_composite_index_real_creation]]` (FINALIZED 2026-09-09, ADR-072):
 composite indexes now provision REAL Postgres indexes via `CREATE INDEX CONCURRENTLY` against the
 `fields` JSONB column, keyed on `(project_id, collection_path, field...)`-shaped expressions. **The

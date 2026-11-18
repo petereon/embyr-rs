@@ -6,7 +6,7 @@ embyr-server ships as a single workspace-versioned binary (`version.workspace = 
 every crate). This document defines what "a release" means: a version bump, a `CHANGELOG.md`
 entry, and a `vMAJOR.MINOR.PATCH` git tag on the merge commit — so an operator can always answer
 "what version is running" and "what changed since the last deploy" without reading raw git
-history. See `docs/product/production-readiness-audit-2026-09-08.md` finding #19.
+history. See `docs/product/gaps.md` finding #19.
 
 ## When to Bump
 
@@ -53,7 +53,7 @@ later `master` merge. Never move or re-push an existing git tag — cut a new PA
 
 Both images are published to [GitHub Container Registry](https://ghcr.io) (never from pull
 requests, to avoid registry pollution) — see finding #42/#43 in
-`docs/product/production-readiness-audit-2026-09-08.md`.
+`docs/product/gaps.md`.
 
 - `ghcr.io/petereon/embyr-server`
 - `ghcr.io/petereon/embyr-agent`

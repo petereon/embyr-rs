@@ -12,7 +12,7 @@
 //! Driving port: Docker CLI subprocess — `docker build`, `docker run`, `docker image inspect`.
 //!
 //! All tests stay #[ignore]d (triaged 2026-11-13, see
-//! `docs/product/ignored-test-triage-2026-11-13.md`): they build/inspect one shared
+//! `docs/product/gaps.md`): they build/inspect one shared
 //! image tag, which races when run in parallel and is too slow for the default run
 //! (the CI `docker` job already builds the image). `docker_image_under_100mb` also
 //! documents a REAL GAP (image is ~150 MB).
@@ -132,7 +132,7 @@ fn docker_image_runs_as_non_root() {
 ///
 /// @US-PR-02 @AC-PR-02-03
 #[test]
-#[ignore = "REAL GAP: built image is 150 MB, documented limit is <100 MB (AC-PR-02-03) — see docs/product/ignored-test-triage-2026-11-13.md"]
+#[ignore = "REAL GAP: built image is 150 MB, documented limit is <100 MB (AC-PR-02-03) — see docs/product/gaps.md G-015"]
 fn docker_image_under_100mb() {
     if !docker_available() {
         eprintln!("SKIP: docker not available");

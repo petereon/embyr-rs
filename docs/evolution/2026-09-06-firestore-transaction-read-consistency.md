@@ -16,7 +16,7 @@ crash-elimination arc — were all already FINALIZED) ranked this gap #1 above e
 including the just-closed crash-elimination arc: a panic is loud — the request fails visibly, a
 correctly-written client sees an error and retries. An unenforced transactional read is **silent**
 — both concurrent commits report success, and the data is simply wrong, discovered later if at
-all. `docs/product/known-gaps.md` tracked this as row #1; this FINALIZE closes it.
+all. `docs/product/gaps.md` tracked this as row #1; this FINALIZE closes it.
 
 ## Business Context
 
@@ -76,7 +76,7 @@ default fail-fast behavior silently never reached this test file at all — see 
 `secrets_management`'s `sm01`/`sm02` (spawns a real server + LocalStack container with only a 10s
 exit-wait — pure Docker/AWS-SDK timing) and `security_rules_cel_parity_cp04` (a CEL rule-import
 "chaining" construct isn't detected as offending — a pre-existing gap in rule-import validation,
-unrelated to document reads/transactions). Both added to `docs/product/known-gaps.md` as separate,
+unrelated to document reads/transactions). Both added to `docs/product/gaps.md` as separate,
 low-priority tracked items.
 
 **QUALITY_GATE**: 20 mutants (scoped down from 63 via `--exclude-re`, covering every line this
@@ -146,7 +146,7 @@ kill rate on every viable mutant, first pass.
   narrative, 3 slice briefs.
 - `docs/feature/firestore-transaction-read-consistency/deliver/mutation/mutation-report.md`.
 - `docs/product/jobs.yaml`, JOB-01 — new NOTE appended (during DISCUSS).
-- `docs/product/known-gaps.md` — row #1 closed; 2 new rows for the pre-existing, unrelated issues
+- `docs/product/gaps.md` — row #1 closed; 2 new rows for the pre-existing, unrelated issues
   found during regression (`secrets_management` Docker/LocalStack timing; `security_rules_cel_
   parity_cp04` CEL chaining-detection gap).
 
@@ -165,8 +165,8 @@ kill rate on every viable mutant, first pass.
 - **`secrets_management` Docker/LocalStack timing flakiness** and **`security_rules_cel_parity_cp04`
   CEL "chaining" construct-detection gap** — both discovered as a byproduct of this feature's own
   regression testing, both confirmed pre-existing and unrelated (bisected against the Slice-01-only
-  commit), both now tracked in `docs/product/known-gaps.md` for someone else to pick up.
+  commit), both now tracked in `docs/product/gaps.md` for someone else to pick up.
 
-Carried forward, unchanged, from `docs/product/known-gaps.md`: #2 (`endAt`/`endBefore` cursor
+Carried forward, unchanged, from `docs/product/gaps.md`: #2 (`endAt`/`endBefore` cursor
 silently dropped), #3 (`Filter.or()` composite OR rejected), #4 (`IS_NULL`/`IS_NOT_NULL` unary
 filter rejected), #5 (no TLS/mTLS on any listener), #6 (no graceful shutdown).

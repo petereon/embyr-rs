@@ -1,6 +1,6 @@
 # cors-origin-policy
 
-Closes Medium finding #21 (Security) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes Medium finding #21 (Security) from `docs/product/gaps.md`.
 DELIVER commit `f54335d00c400525e31a11cced511b4bceaab3de`.
 
 ## Business Context

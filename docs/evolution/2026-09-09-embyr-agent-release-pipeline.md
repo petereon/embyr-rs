@@ -8,7 +8,7 @@ acceptance tests, uploads it as a GitHub Actions artifact, and packages it into 
 downstream beneficiary.
 **ADRs:** ADR-074 (new) — agent release pipeline (musl target, dual CI job/artifact mechanism).
 
-## This closes finding #8 from `docs/product/production-readiness-audit-2026-09-08.md` — the LAST of 8 Blockers
+## This closes finding #8 from `docs/product/gaps.md` — the LAST of 8 Blockers
 
 ## Business Context
 
@@ -86,7 +86,7 @@ dispatch after the first hit a session rate limit mid-flight:
    CI job in this repo: default to independence unless there's a genuine reason to gate on another
    job's success.
 3. **This closes the entire 8-Blocker production-readiness-audit arc**, mirroring the earlier
-   8-item `known-gaps.md` arc closed earlier this session — both fully closed via the same nWave
+   8-item `gaps.md` arc closed earlier this session — both fully closed via the same nWave
    subagent pipeline discipline, with the orchestrator's own independent re-verification catching
    real, distinct gaps in 4 of the 8 features (realtime-listener-reconnect's poisoned-connection
    hang, composite-index-real-creation's asymmetric-mutation gap, soft-delete-purge-sweeper's
@@ -104,7 +104,7 @@ dispatch after the first hit a session rate limit mid-flight:
 
 ## Follow-Up Work
 
-**All 8 Blockers from `docs/product/production-readiness-audit-2026-09-08.md` are now CLOSED.**
+**All 8 Blockers from `docs/product/gaps.md` are now CLOSED.**
 Findings #9-#20+ (High/Medium/Low severity, plus the 9-item bloat list) remain, documented in the
 audit doc's own table — not blockers for launch, but real findings worth working through next if
 continuing down the list. Findings #9-#14 (already listed in the audit table, all "Not started")

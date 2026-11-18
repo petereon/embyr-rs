@@ -5,7 +5,7 @@
 `--in-diff` scoped to the DELIVER commit (`git diff 97f1638..f54335d00c400525e31a11cced511b4bceaab3de
 -- crates/embyr-server/src/config.rs crates/embyr-server/src/lib.rs`).
 
-Closes Medium finding #21 (Security) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes Medium finding #21 (Security) from `docs/product/gaps.md`.
 
 ## Command
 

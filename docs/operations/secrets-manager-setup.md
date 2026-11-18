@@ -1,6 +1,6 @@
 # Secrets Manager Setup (AWS / GCP)
 
-Closes High finding #46 from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes High finding #46 from `docs/product/gaps.md`.
 
 ## Scope
 

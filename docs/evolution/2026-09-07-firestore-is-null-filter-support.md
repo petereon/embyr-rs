@@ -118,6 +118,6 @@ None specific to this feature. This closes the **last** unary-filter-shape gap: 
 deferred (its own internal proto has no unary-filter equivalent at all) — unchanged from the
 pre-existing `IS_NAN`/`IS_NOT_NAN` deferral, not a new gap.
 
-Carried forward, unchanged, from `docs/product/known-gaps.md`: #5 (no TLS/mTLS on any listener),
+Carried forward, unchanged, from `docs/product/gaps.md`: #5 (no TLS/mTLS on any listener),
 #6 (no graceful shutdown), #7 (`secrets_management` Docker/LocalStack timing flakiness), #8 (CEL
 "chaining" construct-detection gap).

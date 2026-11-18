@@ -12,7 +12,7 @@ call sites' wiring to `push_all_descendants_predicate`). Excludes the 4 new test
 migration SQL, and `tests/common/mod.rs` — cargo-mutants only mutates Rust production code, and
 `--in-diff` naturally restricts to the diff's touched spans.
 
-Closes finding #17 (High, Database) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes finding #17 (High, Database) from `docs/product/gaps.md`.
 DELIVER commit: `b32ebfb`.
 
 **RAM constraint discipline followed** (8GB machine, Docker VM reserves 4GB fixed):

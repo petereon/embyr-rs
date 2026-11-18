@@ -4,7 +4,7 @@
 **Scope**: `crates/embyr-server/src/main.rs`, `--in-diff` scoped to the DELIVER commit
 (`git diff e01ab7d 39bd8a9 -- crates/embyr-server/src/main.rs`).
 
-Closes High finding #19 (DevOps) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes High finding #19 (DevOps) from `docs/product/gaps.md`.
 
 ## Command
 

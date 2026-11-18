@@ -1,7 +1,7 @@
 # Evolution: observability-runbook
 
 **Date:** 2026-09-19
-**Closes:** Medium finding #29 (DevOps), `docs/product/production-readiness-audit-2026-09-08.md`
+**Closes:** Medium finding #29 (DevOps), `docs/product/gaps.md`
 — the LAST Medium-severity finding. All Medium items (#20–#29, 10 findings) are now closed,
 alongside the already-closed High-severity arc (#9–#19).
 
@@ -62,7 +62,7 @@ ADR-078 moved/redefined them.
 - `docs/operations/grafana-dashboard.json` (new)
 - `docs/operations/alert-rules.yml` (new)
 - `docs/operations/runbook.md` (new)
-- `docs/product/production-readiness-audit-2026-09-08.md` — row #29 updated to CLOSED
+- `docs/product/gaps.md` — row #29 updated to CLOSED
 
 ## Follow-Up
 

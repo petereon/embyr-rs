@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-`production-readiness-audit-2026-09-08.md` findings #12 and #13 (both High) confirm
+`gaps.md` findings #12 and #13 (both High) confirm
 `POST /admin/v1/auth/signin` (`crates/embyr-server/src/admin/handlers/auth.rs`) has zero
 rate-limit protection: an unthrottled flood of wrong-password requests can (a) consume ~6GB of
 memory and starve the async reactor (finding #12 — compounded by Argon2id running inline instead

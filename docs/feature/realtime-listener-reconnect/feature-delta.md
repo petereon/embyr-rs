@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` row 4 confirmed by direct reading, exact
+✓ `docs/product/gaps.md` row 4 confirmed by direct reading, exact
 wording: "Real-time LISTEN/NOTIFY has no reconnect logic and the dead-listener map entry is never
 evicted — one transient Postgres blip permanently and silently kills realtime delivery for that
 project for the life of the process, while its dedicated connection pool leaks forever. Confirmed
@@ -505,7 +505,7 @@ Scenario: Full regression suite passes
    established `feedback_triage_before_dismissing_as_flaky` practice).
 5. Mutation testing runs after DELIVER, per this repo's own `per-feature` strategy (root `CLAUDE.md`) —
    100% effective kill rate on the new/changed reconnect/backoff/cleanup logic.
-6. Evolution doc written; `docs/product/production-readiness-audit-2026-09-08.md` row 4 updated to CLOSED
+6. Evolution doc written; `docs/product/gaps.md` row 4 updated to CLOSED
    at FINALIZE (this DISCUSS only leaves it "Not started" — DESIGN/DELIVER move it to IN PROGRESS/CLOSED).
 7. `docs/product/jobs.yaml`'s JOB-03 record gets a NOTE recording this extension and the recommended
    `secondary_persona: P2` annotation (see § Wave Decisions Summary, Upstream Changes) — applied at
@@ -988,7 +988,7 @@ or implemented:
 - `tests/security_rules_realtime/**` (8 slices) — exercises `fetch_event`/`fan_out` on the identical
   code path; must stay green (AC-RLR-07).
 - New acceptance test file recommended (DISTILL's own naming call): this is finding #4 of
-  `docs/product/production-readiness-audit-2026-09-08.md`, whose findings #1-#3 already established the
+  `docs/product/gaps.md`, whose findings #1-#3 already established the
   `tests/production_readiness/acceptance/prNN_*.rs` sequential-numbering convention (pr06 = finding #1,
   pr07 = finding #3's body-limit sibling) — `pr08_realtime_listener_reconnect.rs` would continue that
   sequence and is the natural home for AC-RLR-01 through 07's own real-Postgres-kill/restore scenarios

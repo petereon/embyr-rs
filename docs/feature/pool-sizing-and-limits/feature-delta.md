@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` read for finding #16 (High, Reliability),
+✓ `docs/product/gaps.md` read for finding #16 (High, Reliability),
 confirmed verbatim: *"Postgres pool sizing is hardcoded tiny (`max_connections(5)` or `(2)`)
 everywhere with no env override, and most pools have no `acquire_timeout` (sqlx 30s default) —
 saturated tenants see 30s tail latency before a clean error instead of a fast fail. No concurrency

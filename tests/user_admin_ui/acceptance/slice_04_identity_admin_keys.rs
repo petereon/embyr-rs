@@ -192,7 +192,7 @@ fn create_service_account_appends_to_model() {
 
 /// AC-010-03: DeleteServiceAccount removes the SA and its associated admin keys.
 #[test]
-#[ignore = "REAL GAP: update(Msg::DeleteServiceAccount) does not cascade-remove the SA admin keys (AC-010-03) — see docs/product/ignored-test-triage-2026-11-13.md"]
+#[ignore = "REAL GAP: update(Msg::DeleteServiceAccount) does not cascade-remove the SA admin keys (AC-010-03) — see docs/product/gaps.md G-014"]
 fn delete_service_account_cascades_admin_keys() {
     // AC-010-03
     let mut m = make_model_with_db();

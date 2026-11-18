@@ -5,7 +5,7 @@
 own 3-round-trip Postgres check runs, eliminating pre-authentication DB amplification
 against the shared system pool. No new ADR — a call-order fix reusing an existing check.
 
-## This closes finding #14 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #14 from `docs/product/gaps.md`
 
 ## Business Context
 

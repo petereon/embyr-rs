@@ -7,7 +7,7 @@ checked.
 **Job:** JOB-13 (`production-deployment`) — reused, persona P2 Sam Chen.
 **ADRs:** ADR-070 (new) — Stripe webhook body-size ceiling.
 
-## This closes finding #3 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This closes finding #3 from `docs/product/gaps.md`
 
 ## Business Context
 

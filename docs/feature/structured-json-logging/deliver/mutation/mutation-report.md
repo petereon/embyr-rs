@@ -4,7 +4,7 @@
 **Scope**: `crates/embyr-server/src/main.rs`, `--in-diff` scoped to the DELIVER commit
 (`git diff 5114146 e9bbad9 -- crates/embyr-server/src/main.rs`).
 
-Closes Medium finding #25 (Reliability) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes Medium finding #25 (Reliability) from `docs/product/gaps.md`.
 
 ## Command
 

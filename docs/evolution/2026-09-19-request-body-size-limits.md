@@ -1,7 +1,7 @@
 # request-body-size-limits (finding #24)
 
 **Status:** FINALIZED 2026-09-19
-**Closes:** Medium/Reliability finding #24 from `docs/product/production-readiness-audit-2026-09-08.md`
+**Closes:** Medium/Reliability finding #24 from `docs/product/gaps.md`
 
 ## Business Context
 

@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` — read in full. Finding #11 confirmed
+✓ `docs/product/gaps.md` — read in full. Finding #11 confirmed
 verbatim: *"`embyr-agent`'s own field-path validator only rejects consecutive dots — doesn't call
 `embyr_core::validate_field_path` (the real charset guard the server uses). Feeds the same
 raw-interpolating SQL builder. SQL injection reachable via a client-cert holder into the *customer's
@@ -128,7 +128,7 @@ Per task item 4, grepped `fn validate_`, `fn.*sanitize`, `fn.*escape` across all
 `crates/embyr-agent/src/` (the crate's own complete source tree, confirmed via `Glob`): the only two
 hits are `validate_field_path` (this finding's own subject) and `sanitize_backend_error`
 (`server.rs:91`) — already fixed correctly in the prior `sanitize-backend-error-messages` feature
-(FINALIZED 2026-09-12, confirmed in `docs/product/production-readiness-audit-2026-09-08.md`'s own
+(FINALIZED 2026-09-12, confirmed in `docs/product/gaps.md`'s own
 row #10). A further grep for every `format!(` call site across the same 8 files found zero SQL-shaped
 string building (`SELECT`/`INSERT`/`UPDATE`/`WHERE`/`->'`) anywhere outside `server.rs`'s own
 `validate_field_path`/`proto_filter_to_domain` — every other `format!(` call in the crate builds an

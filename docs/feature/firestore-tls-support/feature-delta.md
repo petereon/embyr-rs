@@ -8,7 +8,7 @@ startup errors as the shape of "deploy embyr to production correctly" — TLS te
 direct extension of that same shape (a new pair of optional env vars, same fail-fast-with-a-
 named-error startup discipline as `DATABASE_URL`/`EMBYR_ADMIN_KEY`/`EMBYR_ENCRYPTION_KEY`
 already established), not a new concern.
-✓ `docs/product/known-gaps.md` #5 — exact current wording confirmed: "No TLS/mTLS on any of
+✓ `docs/product/gaps.md` #5 — exact current wording confirmed: "No TLS/mTLS on any of
 the 3 listeners (:8080 gRPC, :8081 REST/gRPC-Web, :9090 Admin)... grep across
 `embyr-server/src`: zero `rustls`/`TlsAcceptor` hits... Depends on deploy topology (fine if a
 TLS-terminating LB sits in front)... Blocks production unless mitigated at the LB... Status:
@@ -65,7 +65,7 @@ unaffected.
 
 ## Wave: DISCUSS / [REF] Business Context
 
-Gap #5 from `docs/product/known-gaps.md`: none of the 3 TCP listeners (gRPC :8080, REST/
+Gap #5 from `docs/product/gaps.md`: none of the 3 TCP listeners (gRPC :8080, REST/
 gRPC-Web :8081, Admin :9090) offer any in-process TLS option. Today, a Sam-Chen-shaped operator
 running embyr WITHOUT a TLS-terminating LB in front (a common self-hosted/bare-metal deployment
 shape — e.g. a single VPS, an on-prem box behind a corporate firewall but not behind a managed
@@ -315,14 +315,14 @@ Scenario: Startup fails fast when the configured PEM content is unparseable
   load balancer in front.
 - **Does what**: Enables in-process TLS encryption on all 3 listeners using a 2-variable config
   change, with no reverse-proxy layer to build or operate.
-- **By how much**: from 0% (zero in-process TLS option exists today, per known-gaps.md #5's own
+- **By how much**: from 0% (zero in-process TLS option exists today, per gaps.md #5's own
   `rustls`/`TlsAcceptor` grep finding of zero hits) to 100% of correctly-configured deployments
   serving TLS on all 3 listeners; 0% regression on the existing plaintext/LB-fronted deployment
   shape.
 - **Measured by**: real TLS handshake success against all 3 listeners in integration tests
   (AC-TLS-02/03/04); zero regressions in the existing plaintext-mode test suite (AC-TLS-01).
 - **Baseline**: 0% — confirmed zero `rustls`/`TlsAcceptor` usage anywhere in `embyr-server/src`
-  (known-gaps.md #5's own grep finding, not re-verified independently by this DISCUSS per its
+  (gaps.md #5's own grep finding, not re-verified independently by this DISCUSS per its
   explicit scope limit against deep codebase investigation).
 
 #### Technical Notes
@@ -355,7 +355,7 @@ Scenario: Startup fails fast when the configured PEM content is unparseable
    session's own established `feedback_triage_before_dismissing_as_flaky` practice).
 6. Mutation testing: 100% effective kill rate on the new/changed startup-validation and
    listener-wrapping logic.
-7. Evolution doc written; `docs/product/known-gaps.md` #5 updated to CLOSED.
+7. Evolution doc written; `docs/product/gaps.md` #5 updated to CLOSED.
 8. Memory updated.
 
 ## Wave: DISCUSS / [REF] Out of Scope

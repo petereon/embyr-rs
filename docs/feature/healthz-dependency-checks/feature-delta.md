@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` read for finding #15 (High, DevOps/SRE),
+✓ `docs/product/gaps.md` read for finding #15 (High, DevOps/SRE),
 confirmed verbatim: *"`/healthz` is a hardcoded `200 OK` with zero dependency checks — no
 liveness/readiness split. An orchestrator has no way to detect a pod whose Postgres connection died
 mid-flight. Confirmed independently by 2 agents (DevOps + SRE)."* Cites

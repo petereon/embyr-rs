@@ -1,7 +1,7 @@
 # api-key-rotation — Feature Delta (combined DISCUSS + DESIGN)
 
 ADR: `docs/product/architecture/adr-085-api-key-rotation.md` (supersedes ADR-014 in full and the signing-key custody and enable-time `api_key` parts of ADR-036).
-Closes go-live finding X2 (`docs/product/go-live-assessment-2026-11-13.md`).
+Closes go-live finding X2 (`docs/product/gaps.md`).
 Touches `admin-ui-api-wiring` slice 08 (the Keys tab). Depends on `dsn-single-store` slices 1-2 for slice 4 only.
 
 ## 1. Problem and evidence

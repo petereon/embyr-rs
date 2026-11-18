@@ -4,7 +4,7 @@
 
 ## Context
 
-Finding #5 (Blocker) of `docs/product/production-readiness-audit-2026-09-08.md`: `create_composite_index`
+Finding #5 (Blocker) of `docs/product/gaps.md`: `create_composite_index`
 (`crates/embyr-server/src/admin/handlers/composite_indexes.rs:118-123`) writes a `composite_indexes`
 metadata row with `status` hardcoded to the SQL literal `'ready'` on every INSERT — no Postgres DDL is
 ever built or executed. `IndexManager::is_index_ready` reads only that row. The Firestore-parity

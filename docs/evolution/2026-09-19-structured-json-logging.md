@@ -1,6 +1,6 @@
 # Evolution: structured-json-logging
 
-Closes Medium finding #25 (Reliability) from `docs/product/production-readiness-audit-2026-09-08.md`.
+Closes Medium finding #25 (Reliability) from `docs/product/gaps.md`.
 
 ## Business Context
 
@@ -32,4 +32,4 @@ without changing what gets logged.
 ## Follow-Up
 
 - Finding #26 (field-path SQL interpolation defense-in-depth) and later Medium/Low items in
-  `docs/product/production-readiness-audit-2026-09-08.md` remain open.
+  `docs/product/gaps.md` remain open.

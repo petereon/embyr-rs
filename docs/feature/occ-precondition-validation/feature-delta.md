@@ -2,7 +2,7 @@
 
 ## Wave: DISCUSS / [REF] Prior Wave Consultation — Reading Confirmation
 
-✓ `docs/product/production-readiness-audit-2026-09-08.md` — read in full. Finding #9 confirmed
+✓ `docs/product/gaps.md` — read in full. Finding #9 confirmed
 verbatim: *"Client-controlled OCC precondition timestamp panics the write path —
 `Precondition.update_time.{seconds,nanos}` flows unvalidated from the client into a
 `.expect("valid timestamp")` on out-of-range/malformed input, dropping the RPC ungracefully instead

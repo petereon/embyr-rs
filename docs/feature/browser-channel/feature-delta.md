@@ -1,6 +1,6 @@
 # browser-channel — feature delta
 
-Closes go-live finding **P3** (`docs/product/go-live-assessment-2026-11-13.md`): `rest/browser_channel.rs` was a stub (`/channel`, opaque bytes), so the Firestore web SDK's long-polling fallback got no real-time. Scope: make `onSnapshot` (collection query) and `setDoc` work over BrowserChannel. Wire reference: Closure WebChannel as used by firebase-js-sdk `webchannel_connection.ts`.
+Closes go-live finding **P3** (`docs/product/gaps.md`): `rest/browser_channel.rs` was a stub (`/channel`, opaque bytes), so the Firestore web SDK's long-polling fallback got no real-time. Scope: make `onSnapshot` (collection query) and `setDoc` work over BrowserChannel. Wire reference: Closure WebChannel as used by firebase-js-sdk `webchannel_connection.ts`.
 
 ## Design
 

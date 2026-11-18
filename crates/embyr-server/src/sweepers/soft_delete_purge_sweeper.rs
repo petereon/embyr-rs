@@ -2,8 +2,8 @@
 //! encrypted-credential columns (`ecies_encrypted_dsn`, `backend_pg_dsn_enc`,
 //! `agent_tls_bundle_enc`) on a `'deleted'` project's own row, once the
 //! configured grace window (default 168h/7 days, matching the admin-UI's own
-//! unchanged promise) has elapsed (ADR-073, production-readiness-audit-
-//! 2026-09-08.md finding #6).
+//! unchanged promise) has elapsed (ADR-073, docs/product/gaps.md
+//! finding #6).
 //!
 //! `SystemDb`-only — no customer-database connection, no DSN resolution
 //! (unlike `TransactionSweeper`): the target columns live on the `projects`

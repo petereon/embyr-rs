@@ -8,7 +8,7 @@
 
 ---
 
-## This addresses finding #19 from `docs/product/production-readiness-audit-2026-09-08.md`
+## This addresses finding #19 from `docs/product/gaps.md`
 
 > No deployment automation beyond the Dockerfile itself (no K8s manifests, Helm chart, ECS
 > task def, or docker-compose), and no release process — crate version frozen at `0.1.0`, no
