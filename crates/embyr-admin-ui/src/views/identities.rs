@@ -107,7 +107,11 @@ fn MembersTab() -> impl IntoView {
     let inviting = move || model.with(|m| m.pending.contains(&CallKind::MemberInvite));
     let loading = move || model.with(|m| m.pending.contains(&CallKind::Members));
     let sso_offered = move || model.with(|m| m.can_invite_sso()) && invite_role.get() != "Owner";
-    let sso_chosen = move || invite_sso.get() && sso_offered();
+    // While SSO is required a password invitation is refused for Admin/Viewer: SSO is the only choice.
+    let password_blocked =
+        move || model.with(|m| !m.password_invite_allowed(&role_from_label(&invite_role.get())));
+    let sso_chosen = move || (invite_sso.get() || password_blocked()) && sso_offered();
+    let cannot_invite = move || password_blocked() && !sso_offered();
 
     let on_invite_submit = move |_| {
         let email = invite_email.get();
@@ -210,9 +214,14 @@ fn MembersTab() -> impl IntoView {
                             prop:value=move || if sso_chosen() { "sso" } else { "password" }
                             on:change=move |e| invite_sso.set(event_target_value(&e) == "sso")
                         >
-                            <option value="password">"Password + authenticator"</option>
+                            <option value="password" disabled=password_blocked>"Password + authenticator"</option>
                             <option value="sso" disabled=move || !sso_offered()>"Single sign-on"</option>
                         </select>
+                        <Show when=password_blocked fallback=|| ()>
+                            <span style="font-size:12px;color:var(--text-3)">
+                                "Your account requires SSO for non-Owner members, so Admins and Viewers can only be invited with single sign-on."
+                            </span>
+                        </Show>
                         <Show when=move || !sso_offered() fallback=|| ()>
                             <span style="font-size:12px;color:var(--text-3)">
                                 "SSO needs an enabled provider (Settings) and a role below Owner."
@@ -223,7 +232,7 @@ fn MembersTab() -> impl IntoView {
                         <button class="btn btn-ghost" type="button" on:click=move |_| invite_open.set(false)>
                             "Cancel"
                         </button>
-                        <button class="btn btn-primary" type="button" on:click=on_invite_submit>
+                        <button class="btn btn-primary" type="button" disabled=cannot_invite on:click=on_invite_submit>
                             "Create invitation"
                         </button>
                     </div>

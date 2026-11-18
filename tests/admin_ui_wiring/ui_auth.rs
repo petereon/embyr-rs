@@ -44,6 +44,7 @@ fn user() -> CurrentUser {
         email: "ada@example.com".into(),
         display_name: "Ada".into(),
         role: Role::Admin,
+        ..Default::default()
     }
 }
 

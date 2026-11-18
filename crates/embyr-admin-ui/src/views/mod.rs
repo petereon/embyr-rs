@@ -48,7 +48,7 @@ pub use shell::ShellView;
 /// `model.nav.section`.
 #[cfg(feature = "csr")]
 mod shell {
-    use crate::components::{SecretModal, Sidebar, SuspensionBanner, Topbar};
+    use crate::components::{SecretModal, Sidebar, SsoBanner, SuspensionBanner, Topbar};
     use crate::model::{AppModel, Section};
     use crate::views::api_keys::ApiKeysView;
     use crate::views::billing::BillingView;
@@ -78,6 +78,7 @@ mod shell {
                     // content, unconditional of the active Section — visible
                     // on every page whenever `read_only()` is true.
                     <SuspensionBanner />
+                    <SsoBanner />
                     <main class="content">
                         {move || match section.get() {
                             Section::Databases   => view! { <DatabasesView /> }.into_any(),

@@ -52,6 +52,8 @@ pub enum Msg {
     SsoReturned(SsoReturn),
     /// `DELETE /auth/sso_identity` succeeded.
     SsoUnlinked,
+    /// `PATCH /account {sso_required}` succeeded with this value.
+    SsoRequiredSet(bool),
     /// `GET /oidc_providers` (Owner): replace the provider list.
     SetOidcProviders(Vec<OidcProvider>),
     /// A provider was created or its secret rotated.

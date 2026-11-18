@@ -597,6 +597,60 @@ pub struct CurrentUser {
     pub email: String,
     pub display_name: String,
     pub role: Role,
+    /// How this session was minted. Servers before `sso_required` omit it: `Password`.
+    pub auth_method: AuthMethod,
+    /// The user has at least one SSO link. Absent from older servers: `false`.
+    pub sso_linked: bool,
+    /// The account requires SSO for non-Owner members. Absent from older servers: `false`.
+    pub sso_required: bool,
+}
+
+/// How the current session was established (`auth_method` of `GET /auth/session`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuthMethod {
+    #[default]
+    Password,
+    Sso,
+}
+
+/// What the "Your single sign-on" card offers the signed-in member (`AppModel::link_control`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkControl {
+    /// No link yet: the re-authenticate-and-link form.
+    Link,
+    /// Linked and signed in with a password: the Unlink button.
+    Unlink,
+    /// Signed in through SSO: no password to re-enter, so neither Link nor Unlink (decision O4).
+    SsoSession,
+    /// Linked, non-Owner, and the account requires SSO: unlinking would lock them out.
+    RequiredByAccount,
+}
+
+/// The persistent SSO-policy notice above the page (`AppModel::sso_notice`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SsoNotice {
+    /// Non-Owner, linked: informational, no action.
+    MembersUseSso,
+    /// Non-Owner, not linked (a password session that predates the policy): link before it ends.
+    LinkNow,
+    /// Owner: reminder that the policy does not apply to them.
+    OwnerExempt,
+}
+
+impl SsoNotice {
+    pub fn message(self) -> &'static str {
+        match self {
+            SsoNotice::MembersUseSso => {
+                "Your account requires single sign-on. You sign in through your identity provider."
+            }
+            SsoNotice::LinkNow => {
+                "Your account now requires single sign-on, but your login is not linked to it. Link it under Account Settings before this session ends, or you will be locked out."
+            }
+            SsoNotice::OwnerExempt => {
+                "SSO is required for members. As an Owner you are exempt and can still sign in with your password and authenticator."
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -813,6 +867,41 @@ impl AppModel {
     /// Only the account Owner manages SSO providers (the server enforces the same rule).
     pub fn can_manage_sso(&self) -> bool {
         self.can_manage_billing()
+    }
+
+    /// The account requires SSO for non-Owner members (from the session probe).
+    pub fn sso_required(&self) -> bool {
+        self.current_user.as_ref().is_some_and(|u| u.sso_required)
+    }
+
+    /// Whether a password invitation may be created for `role`: while SSO is required only Owners (who
+    /// are exempt) may get one; the server answers 422 otherwise.
+    pub fn password_invite_allowed(&self, role: &Role) -> bool {
+        !self.sso_required() || *role == Role::Owner
+    }
+
+    /// Which link control the signed-in member sees. `None` when signed out.
+    pub fn link_control(&self) -> Option<LinkControl> {
+        let u = self.current_user.as_ref()?;
+        Some(if u.auth_method == AuthMethod::Sso {
+            LinkControl::SsoSession
+        } else if !u.sso_linked {
+            LinkControl::Link
+        } else if u.sso_required && u.role != Role::Owner {
+            LinkControl::RequiredByAccount
+        } else {
+            LinkControl::Unlink
+        })
+    }
+
+    /// The SSO-policy banner for the signed-in member; `None` while the account does not require SSO.
+    pub fn sso_notice(&self) -> Option<SsoNotice> {
+        let u = self.current_user.as_ref().filter(|u| u.sso_required)?;
+        Some(match (&u.role, u.sso_linked) {
+            (Role::Owner, _) => SsoNotice::OwnerExempt,
+            (_, true) => SsoNotice::MembersUseSso,
+            (_, false) => SsoNotice::LinkNow,
+        })
     }
 
     /// Whether the invite dialog may offer SSO. The provider list is Owner-only, so an Admin cannot see

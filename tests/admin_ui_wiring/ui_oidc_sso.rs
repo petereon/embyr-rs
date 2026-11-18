@@ -12,7 +12,8 @@ use embyr_admin_ui::api::{
     sso_sign_in_link, to_request, ApiCall, CallKind, HttpResponse, Method, SsoIntent,
 };
 use embyr_admin_ui::model::{
-    AppModel, AuthScreen, CurrentUser, InviteStep, OidcProvider, Role, Section, SsoReturn, ToastLevel, UserId,
+    AppModel, AuthMethod, AuthScreen, CurrentUser, InviteStep, LinkControl, OidcProvider, Role, Section, SsoNotice,
+    SsoReturn, ToastLevel, UserId,
 };
 use embyr_admin_ui::msg::{Effect, Msg};
 use embyr_admin_ui::update::update;
@@ -36,6 +37,7 @@ fn user(role: Role) -> CurrentUser {
         email: "ada@example.com".into(),
         display_name: "Ada".into(),
         role,
+        ..Default::default()
     }
 }
 
@@ -536,4 +538,148 @@ fn unlinking_confirms_with_a_toast_and_explains_the_sso_only_refusal() {
     apply(&mut model, &ApiCall::UnlinkSso, response(404, ""));
     assert!(model.toasts[2].message.contains("No SSO identity"), "{}", model.toasts[2].message);
     assert!(model.authed);
+}
+
+// ── sso_required (slice 7b) ──────────────────────────────────────────────────
+
+fn model_with(role: Role, auth_method: AuthMethod, sso_linked: bool, sso_required: bool) -> AppModel {
+    let mut model = model_as(role);
+    let u = model.current_user.as_mut().unwrap();
+    (u.auth_method, u.sso_linked, u.sso_required) = (auth_method, sso_linked, sso_required);
+    model
+}
+
+const SESSION_BASE: &str = r#""account_id":"a-1","account_name":"Acme","user_id":"u-1","email":"ada@example.com","display_name":"Ada","role":"Admin""#;
+
+fn session_user(extra: &str) -> CurrentUser {
+    let body = format!("{{{SESSION_BASE}{extra}}}");
+    match decode(&ApiCall::LoadSession, response(200, &body)).as_slice() {
+        [Msg::Settled(CallKind::Session), Msg::SessionEstablished(u)] => u.clone(),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
+fn the_session_probe_reports_how_the_session_started_and_the_sso_policy() {
+    let u = session_user(r#","auth_method":"sso","sso_linked":true,"sso_required":true"#);
+    assert_eq!((u.auth_method, u.sso_linked, u.sso_required), (AuthMethod::Sso, true, true));
+    let u = session_user(r#","auth_method":"password","sso_linked":false,"sso_required":false"#);
+    assert_eq!((u.auth_method, u.sso_linked, u.sso_required), (AuthMethod::Password, false, false));
+}
+
+#[test]
+fn an_older_server_without_the_new_fields_decodes_as_password_unlinked_not_required() {
+    let u = session_user("");
+    assert_eq!((u.auth_method, u.sso_linked, u.sso_required), (AuthMethod::Password, false, false));
+    // An unknown method is never treated as SSO (which would hide the link controls).
+    assert_eq!(session_user(r#","auth_method":"saml""#).auth_method, AuthMethod::Password);
+}
+
+#[test]
+fn requiring_sso_patches_the_account_with_the_flag_only() {
+    for on in [true, false] {
+        let req = to_request(&ApiCall::SetSsoRequired(on));
+        assert_eq!((req.method, req.path.as_str()), (Method::Patch, "/admin/v1/account"));
+        assert_eq!(req.body.unwrap(), serde_json::json!({ "sso_required": on }));
+    }
+    assert_eq!(ApiCall::SetSsoRequired(true).kind(), CallKind::SsoRequired);
+}
+
+#[test]
+fn a_confirmed_toggle_updates_the_session_flag_and_toasts() {
+    let mut model = model_with(Role::Owner, AuthMethod::Password, true, false);
+    let on = ApiCall::SetSsoRequired(true);
+    update(&mut model, Msg::Request(on.clone()));
+    assert!(model.pending.contains(&CallKind::SsoRequired));
+    apply(&mut model, &on, response(200, r#"{"sso_required":true}"#));
+    assert!(model.sso_required() && model.pending.is_empty());
+    assert!(model.toasts[0].message.contains("now required"), "{}", model.toasts[0].message);
+
+    apply(&mut model, &ApiCall::SetSsoRequired(false), response(200, r#"{"sso_required":false}"#));
+    assert!(!model.sso_required());
+    assert!(model.toasts[1].message.contains("no longer required"), "{}", model.toasts[1].message);
+}
+
+#[test]
+fn unmet_prerequisites_tell_the_owner_to_link_first_and_change_nothing() {
+    let mut model = model_with(Role::Owner, AuthMethod::Password, false, false);
+    let call = ApiCall::SetSsoRequired(true);
+    apply(&mut model, &call, response(422, r#"{"error":"sso_required_prerequisites"}"#));
+    assert!(model.authed && !model.sso_required(), "not a sign-out, flag unchanged");
+    let toast = &model.toasts[0];
+    assert_eq!(toast.level, ToastLevel::Error);
+    assert!(toast.message.contains("link your own SSO identity"), "{}", toast.message);
+    assert!(!toast.message.contains("sso_required_prerequisites"));
+}
+
+#[test]
+fn a_non_owner_is_told_only_the_owner_can_change_it_without_losing_the_session() {
+    let mut model = model_with(Role::Admin, AuthMethod::Password, true, false);
+    apply(&mut model, &ApiCall::SetSsoRequired(true), response(403, ""));
+    assert!(model.authed);
+    assert!(model.toasts[0].message.contains("Only the account Owner"), "{}", model.toasts[0].message);
+}
+
+#[test]
+fn unlinking_clears_the_linked_flag() {
+    let mut model = model_with(Role::Viewer, AuthMethod::Password, true, false);
+    apply(&mut model, &ApiCall::UnlinkSso, response(204, ""));
+    assert!(!model.current_user.unwrap().sso_linked);
+}
+
+#[test]
+fn link_controls_follow_the_session_fields() {
+    use LinkControl::*;
+    let cases = [
+        // (role, auth_method, linked, required) -> control
+        (Role::Viewer, AuthMethod::Password, false, false, Link),
+        (Role::Viewer, AuthMethod::Password, true, false, Unlink),
+        (Role::Viewer, AuthMethod::Sso, true, false, SsoSession),
+        // SSO-only users cannot self-link (O4), even if the link flag lags behind.
+        (Role::Viewer, AuthMethod::Sso, false, false, SsoSession),
+        (Role::Admin, AuthMethod::Password, true, true, RequiredByAccount),
+        (Role::Admin, AuthMethod::Password, false, true, Link),
+        // Owners keep both controls while SSO is required.
+        (Role::Owner, AuthMethod::Password, true, true, Unlink),
+        (Role::Owner, AuthMethod::Password, false, true, Link),
+        (Role::Owner, AuthMethod::Sso, true, true, SsoSession),
+    ];
+    for (role, method, linked, required, expected) in cases {
+        let model = model_with(role.clone(), method, linked, required);
+        assert_eq!(model.link_control(), Some(expected), "{role:?} {method:?} linked={linked} required={required}");
+    }
+    assert_eq!(AppModel::default().link_control(), None);
+}
+
+#[test]
+fn the_banner_depends_on_the_policy_role_and_link() {
+    use SsoNotice::*;
+    let cases = [
+        (Role::Viewer, true, true, Some(MembersUseSso)),
+        (Role::Admin, true, true, Some(MembersUseSso)),
+        (Role::Admin, false, true, Some(LinkNow)),
+        (Role::Owner, true, true, Some(OwnerExempt)),
+        (Role::Owner, false, true, Some(OwnerExempt)),
+        (Role::Viewer, true, false, None),
+        (Role::Owner, true, false, None),
+    ];
+    for (role, linked, required, expected) in cases {
+        let model = model_with(role.clone(), AuthMethod::Password, linked, required);
+        assert_eq!(model.sso_notice(), expected, "{role:?} linked={linked} required={required}");
+    }
+    assert_eq!(AppModel::default().sso_notice(), None);
+    assert!(OwnerExempt.message().contains("exempt") && LinkNow.message().contains("Link"));
+}
+
+#[test]
+fn password_invitations_are_blocked_below_owner_only_while_required() {
+    let required = model_with(Role::Owner, AuthMethod::Password, true, true);
+    assert!(required.password_invite_allowed(&Role::Owner));
+    assert!(!required.password_invite_allowed(&Role::Admin));
+    assert!(!required.password_invite_allowed(&Role::Viewer));
+    let open = model_with(Role::Owner, AuthMethod::Password, true, false);
+    assert!(open.password_invite_allowed(&Role::Admin) && open.password_invite_allowed(&Role::Viewer));
+    // Admins see the flag too, so their dialog blocks the same way.
+    let admin = model_with(Role::Admin, AuthMethod::Password, true, true);
+    assert!(!admin.password_invite_allowed(&Role::Viewer));
 }

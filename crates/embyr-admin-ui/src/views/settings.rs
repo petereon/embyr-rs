@@ -18,7 +18,7 @@ use crate::api::{
     sso_provider_from_input, sso_redirect_uri, sso_sign_in_link, ApiCall, CallKind, SignInCode, SsoIntent,
 };
 #[cfg(feature = "csr")]
-use crate::model::{confirms_account_delete, AppModel, OidcProvider};
+use crate::model::{confirms_account_delete, AppModel, LinkControl, OidcProvider};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -68,6 +68,7 @@ pub fn SettingsView() -> impl IntoView {
 
             <Show when=can_manage_sso fallback=|| ()>
                 <SsoProvidersSection />
+                <RequireSsoSection />
             </Show>
 
             <YourSsoSection />
@@ -343,6 +344,8 @@ fn YourSsoSection() -> impl IntoView {
         }));
     };
 
+    let control = move || model.with(|m| m.link_control());
+
     view! {
         <div class="card" style="margin-bottom: 18px">
             <div class="card-head">
@@ -352,42 +355,127 @@ fn YourSsoSection() -> impl IntoView {
                 </div>
             </div>
             <div class="card-pad col" style="gap: 12px">
-                <div class="field">
-                    <label class="field-label">"SSO sign-in link (or provider ID)"</label>
-                    <input class="input" type="text" autocomplete="off" placeholder="https://console.example.com/admin/?sso=…"
-                        prop:value=move || link.get()
-                        on:input=move |e| link.set(event_target_value(&e))/>
-                    <Show when=move || !link.get().trim().is_empty() && provider().is_none() fallback=|| ()>
-                        <span class="field-err">"That is not an SSO sign-in link or provider ID"</span>
-                    </Show>
+                {move || match control() {
+                    Some(LinkControl::Link) => view! {
+                        <div class="field">
+                            <label class="field-label">"SSO sign-in link (or provider ID)"</label>
+                            <input class="input" type="text" autocomplete="off" placeholder="https://console.example.com/admin/?sso=…"
+                                prop:value=move || link.get()
+                                on:input=move |e| link.set(event_target_value(&e))/>
+                            <Show when=move || !link.get().trim().is_empty() && provider().is_none() fallback=|| ()>
+                                <span class="field-err">"That is not an SSO sign-in link or provider ID"</span>
+                            </Show>
+                        </div>
+                        <div class="field">
+                            <label class="field-label">"Your password"</label>
+                            <input class="input" type="password" autocomplete="current-password"
+                                prop:value=move || password.get()
+                                on:input=move |e| password.set(event_target_value(&e))/>
+                        </div>
+                        <div class="field">
+                            <label class="field-label">"Authenticator code"</label>
+                            <input class="input" type="text" autocomplete="one-time-code" inputmode="numeric"
+                                prop:value=move || code.get()
+                                on:input=move |e| code.set(event_target_value(&e))/>
+                        </div>
+                        <Show when=move || error().is_some() fallback=|| ()>
+                            <span class="field-err" role="alert">{move || error().unwrap_or_default()}</span>
+                        </Show>
+                        <div class="row" style="gap: 8px">
+                            <button class="btn btn-primary" type="button" disabled=move || !ready() on:click=submit>
+                                {move || if busy() { "Opening…" } else { "Link SSO" }}
+                            </button>
+                        </div>
+                    }.into_any(),
+                    Some(LinkControl::Unlink) => view! {
+                        <p style="font-size: 13px; color: var(--text-2)">
+                            "Your account is linked to single sign-on. Unlinking removes the link and ends the sessions started through it."
+                        </p>
+                        <div class="row">
+                            <button class="btn btn-ghost" type="button" disabled=unlinking
+                                on:click=move |_| { dispatch.run(Msg::Request(ApiCall::UnlinkSso)); }>
+                                "Unlink SSO"
+                            </button>
+                        </div>
+                    }.into_any(),
+                    Some(LinkControl::SsoSession) => view! {
+                        <p style="font-size: 13px; color: var(--text-2)">
+                            "You are signed in with single sign-on. Linking or unlinking needs a password and authenticator code, so it is not available in this session. If you have no password, ask an Owner."
+                        </p>
+                    }.into_any(),
+                    Some(LinkControl::RequiredByAccount) => view! {
+                        <p style="font-size: 13px; color: var(--text-2)">
+                            "Your account requires single sign-on, so your link cannot be removed while that is on."
+                        </p>
+                    }.into_any(),
+                    None => ().into_any(),
+                }}
+            </div>
+        </div>
+    }
+}
+
+// ── RequireSsoSection ────────────────────────────────────────────────────────
+
+/// "Require SSO for members" — Owner only (`SettingsView` mounts it only then). Enabling asks for
+/// confirmation, because non-Owner members lose password sign-in at once; disabling is immediate.
+#[cfg(feature = "csr")]
+#[component]
+fn RequireSsoSection() -> impl IntoView {
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
+
+    let confirm_open = RwSignal::new(false);
+    let required = move || model.with(|m| m.sso_required());
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::SsoRequired));
+
+    view! {
+        <div class="card" style="margin-bottom: 18px">
+            <div class="card-head">
+                <div class="col" style="gap: 2px">
+                    <h3>"Require SSO for members"</h3>
+                    <span class="sub">"Admins and Viewers must sign in through single sign-on"</span>
                 </div>
-                <div class="field">
-                    <label class="field-label">"Your password"</label>
-                    <input class="input" type="password" autocomplete="current-password"
-                        prop:value=move || password.get()
-                        on:input=move |e| password.set(event_target_value(&e))/>
-                </div>
-                <div class="field">
-                    <label class="field-label">"Authenticator code"</label>
-                    <input class="input" type="text" autocomplete="one-time-code" inputmode="numeric"
-                        prop:value=move || code.get()
-                        on:input=move |e| code.set(event_target_value(&e))/>
-                </div>
-                <Show when=move || error().is_some() fallback=|| ()>
-                    <span class="field-err" role="alert">{move || error().unwrap_or_default()}</span>
-                </Show>
-                <div class="row" style="gap: 8px">
-                    <button class="btn btn-primary" type="button" disabled=move || !ready() on:click=submit>
-                        {move || if busy() { "Opening…" } else { "Link SSO" }}
-                    </button>
-                    <button class="btn btn-ghost" type="button" disabled=unlinking
-                        title="Removes your SSO link and ends the sessions started through it"
-                        on:click=move |_| { dispatch.run(Msg::Request(ApiCall::UnlinkSso)); }>
-                        "Unlink SSO"
+            </div>
+            <div class="card-pad col" style="gap: 12px">
+                <p style="font-size: 13px; color: var(--text-2)">
+                    "While this is on, non-Owner members can no longer sign in with a password, and new Admin and Viewer invitations must use SSO. Owners are exempt: they always keep password and two-factor sign-in as a break-glass way in. Link your own SSO identity first, under \"Your single sign-on\"."
+                </p>
+                <div class="row" style="gap: 10px; align-items: center">
+                    <span style="font-weight: 550; font-size: 13.5px">
+                        {move || if required() { "SSO is required" } else { "SSO is not required" }}
+                    </span>
+                    <button class="btn btn-ghost" type="button" disabled=busy
+                        on:click=move |_| {
+                            if required() {
+                                dispatch.run(Msg::Request(ApiCall::SetSsoRequired(false)));
+                            } else {
+                                confirm_open.set(true);
+                            }
+                        }>
+                        {move || if required() { "Stop requiring SSO" } else { "Require SSO" }}
                     </button>
                 </div>
             </div>
         </div>
+
+        <Show when=move || confirm_open.get() fallback=|| ()>
+            <Modal title="Require SSO for members?" on_close=Callback::new(move |_| confirm_open.set(false))>
+                <p style="font-size: 13px; color: var(--text-2)">
+                    "Admins and Viewers will not be able to sign in with a password any more. They must already be linked to SSO, or you must invite them again with SSO. Owners keep password and two-factor sign-in."
+                </p>
+                <div class="modal-footer">
+                    <button class="btn btn-ghost" type="button" on:click=move |_| confirm_open.set(false)>"Cancel"</button>
+                    <button class="btn btn-primary" type="button" disabled=busy
+                        on:click=move |_| {
+                            confirm_open.set(false);
+                            dispatch.run(Msg::Request(ApiCall::SetSsoRequired(true)));
+                        }>
+                        "Require SSO"
+                    </button>
+                </div>
+            </Modal>
+        </Show>
     }
 }
 
