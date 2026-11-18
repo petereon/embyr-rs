@@ -9,8 +9,11 @@ mod inner {
         decode, decode_network_failure, to_request, HttpRequest, HttpResponse, Method,
     };
     use crate::components::ToastStack;
-    use crate::api::{checkout_return_from_query, invite_token_from_query, reset_token_from_query};
-    use crate::model::{AppModel, AuthScreen, CheckoutReturn};
+    use crate::api::{
+        checkout_return_from_query, invite_token_from_query, reset_token_from_query, sso_provider_from_query,
+        sso_return_from_query, ApiCall, SsoIntent,
+    };
+    use crate::model::{AppModel, AuthScreen, CheckoutReturn, SsoReturn};
     use crate::msg::{Effect, Msg};
     use crate::update::update as tea_update;
     use crate::views::{AcceptInviteView, AuthView, ForgotPasswordView, ResetPasswordView, ShellView};
@@ -95,18 +98,21 @@ mod inner {
         Invite,
     }
 
-    /// Link parameters the SPA consumes at start: the emailed `?reset=` / `?invite=` tokens and
-    /// Stripe's `?checkout=` return.
+    /// Link parameters the SPA consumes at start: the emailed `?reset=` / `?invite=` tokens, Stripe's
+    /// `?checkout=` return, the Owner's `?sso=<provider id>` sign-in link and the SSO callback's
+    /// `?error=sso_failed` / `?sso_linked=1` markers.
     struct UrlParams {
         reset: Option<String>,
         invite: Option<String>,
         checkout: Option<CheckoutReturn>,
+        sso: Option<String>,
+        sso_return: Option<SsoReturn>,
     }
 
     /// Read the link parameters and, if any is present, replace the URL with the bare path right
     /// away so a token cannot linger in the address bar, history, or a later Referer.
     fn take_url_params() -> UrlParams {
-        let none = UrlParams { reset: None, invite: None, checkout: None };
+        let none = UrlParams { reset: None, invite: None, checkout: None, sso: None, sso_return: None };
         let Some(window) = web_sys::window() else { return none };
         let location = window.location();
         let search = location.search().unwrap_or_default();
@@ -114,8 +120,15 @@ mod inner {
             reset: reset_token_from_query(&search),
             invite: invite_token_from_query(&search),
             checkout: checkout_return_from_query(&search),
+            sso: sso_provider_from_query(&search),
+            sso_return: sso_return_from_query(&search),
         };
-        if params.reset.is_some() || params.invite.is_some() || params.checkout.is_some() {
+        if params.reset.is_some()
+            || params.invite.is_some()
+            || params.checkout.is_some()
+            || params.sso.is_some()
+            || params.sso_return.is_some()
+        {
             let path = location.pathname().unwrap_or_else(|_| "/".into());
             if let Ok(history) = window.history() {
                 let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&path));
@@ -142,11 +155,21 @@ mod inner {
         if let Some(outcome) = params.checkout {
             dispatch(model, Msg::CheckoutReturned(outcome));
         }
+        if let Some(outcome) = params.sso_return {
+            dispatch(model, Msg::SsoReturned(outcome));
+        }
         // An invitation outranks a reset link if both are somehow present.
-        if invite_token.get_untracked().is_some() {
+        if let Some(token) = invite_token.get_untracked() {
             dispatch(model, Msg::ShowAuth(AuthScreen::AcceptInvite));
+            // Password or SSO invitation? The answer picks the form.
+            dispatch(model, Msg::Request(ApiCall::LookupInvitation { token }));
         } else if reset_token.get_untracked().is_some() {
             dispatch(model, Msg::ShowAuth(AuthScreen::ResetPassword));
+        }
+        // The Owner's SSO link: start the round trip now. The provider id goes straight into the request
+        // and is never stored; a failure shows on the sign-in screen once the boot check settles.
+        if let Some(provider_id) = params.sso {
+            dispatch(model, Msg::Request(ApiCall::StartSso { provider_id, intent: SsoIntent::SignIn }));
         }
         dispatch(model, Msg::Boot);
 

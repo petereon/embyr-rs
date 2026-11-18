@@ -9,8 +9,8 @@ use serde::Deserialize;
 
 use crate::model::{
     AdminKey, CapUsage, CheckoutReturn, Connection, ConnectionSummary, CurrentUser, Database, DbBackendMode, DbId,
-    DbMetrics, DbStatus, Enrolment, KeyId, LatencyStats, LogRetention, Member, MetricsSummaryRow, MetricsWindow, Plan,
-    ProjectApiKeyInfo, QueryLogEntry, RecoveryCodes, RevealedSecret, Role, SecretKind, SeriesPoint, ServiceAccount,
+    DbMetrics, DbStatus, Enrolment, InviteKind, KeyId, LatencyStats, LogRetention, Member, MetricsSummaryRow,
+    MetricsWindow, OidcProvider, Plan, ProjectApiKeyInfo, ProviderIds, SsoReturn, QueryLogEntry, RecoveryCodes, RevealedSecret, Role, SecretKind, SeriesPoint, ServiceAccount,
     ServiceAccountId, Subscription, SubscriptionStatus, UsageStats, UsageTableRow, UserId,
 };
 use crate::msg::Msg;
@@ -53,6 +53,13 @@ pub enum CallKind {
     AdminKeys,
     /// Create and revoke share a kind: one admin-key operation at a time.
     AdminKeyWrite,
+    /// `POST /auth/oidc/start`, whatever the intent: one SSO redirect at a time.
+    SsoStart,
+    InviteLookup,
+    SsoUnlink,
+    OidcProviders,
+    /// Create, enable/disable, rotate and delete share a kind: one provider operation at a time.
+    OidcProviderWrite,
 }
 
 /// How the second factor was supplied. Exactly one reaches the server.
@@ -60,6 +67,26 @@ pub enum CallKind {
 pub enum SignInCode {
     Totp(String),
     Recovery(String),
+}
+
+/// What an SSO round trip is for. Secrets live only inside this value; `Debug` redacts them.
+#[derive(Clone, PartialEq, Eq)]
+pub enum SsoIntent {
+    SignIn,
+    /// Redeem an SSO invitation (the emailed token).
+    Invite { token: String },
+    /// Link the signed-in user's account: re-authenticates with password + authenticator code.
+    Link { password: String, totp_code: String },
+}
+
+impl SsoIntent {
+    fn label(&self) -> &'static str {
+        match self {
+            SsoIntent::SignIn => "signin",
+            SsoIntent::Invite { .. } => "invite",
+            SsoIntent::Link { .. } => "link",
+        }
+    }
 }
 
 /// New connection secrets for `PUT /projects/:id/connection`. Only ever inside an `ApiCall`.
@@ -186,6 +213,24 @@ pub enum ApiCall {
     CreateAdminKey { name: String, role: Role, service_account_id: Option<ServiceAccountId> },
     /// `DELETE /admin_keys/:id`.
     RevokeAdminKey(KeyId),
+    /// `POST /members/invite` with `auth_method: "sso"` (non-Owner role; needs an enabled provider).
+    InviteSsoMember { email: String, role: Role },
+    /// `POST /auth/oidc/start`: answers the IdP's authorization URL, which the browser then opens.
+    StartSso { provider_id: String, intent: SsoIntent },
+    /// `POST /auth/invitations/lookup`: is this emailed token a password or an SSO invitation?
+    LookupInvitation { token: String },
+    /// `DELETE /auth/sso_identity`: unlink the caller's own SSO identity.
+    UnlinkSso,
+    /// `GET /oidc_providers` (Owner).
+    LoadOidcProviders,
+    /// `POST /oidc_providers` (Owner). The secret is write-only.
+    CreateOidcProvider { issuer: String, client_id: String, client_secret: String },
+    /// `PATCH /oidc_providers/:id` (Owner).
+    SetOidcProviderEnabled { id: String, enabled: bool },
+    /// `PUT /oidc_providers/:id/secret` (Owner): rotate the client secret.
+    RotateOidcSecret { id: String, client_secret: String },
+    /// `DELETE /oidc_providers/:id` (Owner): also ends the sessions minted through it.
+    DeleteOidcProvider(String),
 }
 
 impl ApiCall {
@@ -223,6 +268,15 @@ impl ApiCall {
             ApiCall::CreateServiceAccount { .. } | ApiCall::DeleteServiceAccount(_) => CallKind::ServiceAccountWrite,
             ApiCall::LoadAdminKeys => CallKind::AdminKeys,
             ApiCall::CreateAdminKey { .. } | ApiCall::RevokeAdminKey(_) => CallKind::AdminKeyWrite,
+            ApiCall::InviteSsoMember { .. } => CallKind::MemberInvite,
+            ApiCall::StartSso { .. } => CallKind::SsoStart,
+            ApiCall::LookupInvitation { .. } => CallKind::InviteLookup,
+            ApiCall::UnlinkSso => CallKind::SsoUnlink,
+            ApiCall::LoadOidcProviders => CallKind::OidcProviders,
+            ApiCall::CreateOidcProvider { .. }
+            | ApiCall::SetOidcProviderEnabled { .. }
+            | ApiCall::RotateOidcSecret { .. }
+            | ApiCall::DeleteOidcProvider(_) => CallKind::OidcProviderWrite,
         }
     }
 
@@ -314,6 +368,30 @@ impl std::fmt::Debug for ApiCall {
             ApiCall::LoadAdminKeys => f.write_str("LoadAdminKeys"),
             ApiCall::CreateAdminKey { name, role, .. } => write!(f, "CreateAdminKey({name}, {role:?})"),
             ApiCall::RevokeAdminKey(id) => write!(f, "RevokeAdminKey({})", id.0),
+            ApiCall::InviteSsoMember { email, role } => write!(f, "InviteSsoMember({email}, {role:?})"),
+            ApiCall::StartSso { intent, .. } => f
+                .debug_struct("StartSso")
+                .field("provider_id", &"<redacted>")
+                .field("intent", &intent.label())
+                .finish(),
+            ApiCall::LookupInvitation { .. } => {
+                f.debug_struct("LookupInvitation").field("token", &"<redacted>").finish()
+            }
+            ApiCall::UnlinkSso => f.write_str("UnlinkSso"),
+            ApiCall::LoadOidcProviders => f.write_str("LoadOidcProviders"),
+            ApiCall::CreateOidcProvider { issuer, client_id, .. } => f
+                .debug_struct("CreateOidcProvider")
+                .field("issuer", issuer)
+                .field("client_id", client_id)
+                .field("client_secret", &"<redacted>")
+                .finish(),
+            ApiCall::SetOidcProviderEnabled { id, enabled } => write!(f, "SetOidcProviderEnabled({id}, {enabled})"),
+            ApiCall::RotateOidcSecret { id, .. } => f
+                .debug_struct("RotateOidcSecret")
+                .field("id", id)
+                .field("client_secret", &"<redacted>")
+                .finish(),
+            ApiCall::DeleteOidcProvider(id) => write!(f, "DeleteOidcProvider({id})"),
         }
     }
 }
@@ -513,6 +591,52 @@ pub fn to_request(call: &ApiCall) -> HttpRequest {
         ApiCall::RevokeAdminKey(id) => {
             HttpRequest { method: Method::Delete, path: format!("/admin/v1/admin_keys/{}", id.0), body: None }
         }
+        ApiCall::InviteSsoMember { email, role } => HttpRequest {
+            method: Method::Post,
+            path: "/admin/v1/members/invite".into(),
+            body: Some(serde_json::json!({ "email": email.trim(), "role": role_value(role), "auth_method": "sso" })),
+        },
+        ApiCall::StartSso { provider_id, intent } => {
+            let mut body = serde_json::json!({ "provider_id": provider_id, "intent": intent.label() });
+            match intent {
+                SsoIntent::SignIn => {}
+                SsoIntent::Invite { token } => body["invite_token"] = token.as_str().into(),
+                SsoIntent::Link { password, totp_code } => {
+                    body["password"] = password.as_str().into();
+                    body["totp_code"] = totp_code.as_str().into();
+                }
+            }
+            HttpRequest { method: Method::Post, path: "/admin/v1/auth/oidc/start".into(), body: Some(body) }
+        }
+        ApiCall::LookupInvitation { token } => HttpRequest {
+            method: Method::Post,
+            path: "/admin/v1/auth/invitations/lookup".into(),
+            body: Some(serde_json::json!({ "token": token })),
+        },
+        ApiCall::UnlinkSso => {
+            HttpRequest { method: Method::Delete, path: "/admin/v1/auth/sso_identity".into(), body: None }
+        }
+        ApiCall::LoadOidcProviders => get("/admin/v1/oidc_providers"),
+        ApiCall::CreateOidcProvider { issuer, client_id, client_secret } => HttpRequest {
+            method: Method::Post,
+            path: "/admin/v1/oidc_providers".into(),
+            body: Some(serde_json::json!({
+                "issuer": issuer.trim(),
+                "client_id": client_id.trim(),
+                "client_secret": client_secret,
+            })),
+        },
+        ApiCall::SetOidcProviderEnabled { id, enabled } => {
+            patch(format!("/admin/v1/oidc_providers/{id}"), serde_json::json!({ "enabled": enabled }))
+        }
+        ApiCall::RotateOidcSecret { id, client_secret } => HttpRequest {
+            method: Method::Put,
+            path: format!("/admin/v1/oidc_providers/{id}/secret"),
+            body: Some(serde_json::json!({ "client_secret": client_secret })),
+        },
+        ApiCall::DeleteOidcProvider(id) => {
+            HttpRequest { method: Method::Delete, path: format!("/admin/v1/oidc_providers/{id}"), body: None }
+        }
     }
 }
 
@@ -529,6 +653,16 @@ fn role_value(role: &Role) -> &'static str {
 /// (`window.location.origin`), so the link points at the deployment the admin is using.
 pub fn invite_link(origin: &str, token: &str) -> String {
     format!("{}/admin/?invite={token}", origin.trim_end_matches('/'))
+}
+
+/// The link the Owner shares for SSO sign-in: the SPA turns `?sso=<provider id>` into a start call.
+pub fn sso_sign_in_link(origin: &str, provider_id: &str) -> String {
+    format!("{}/admin/?sso={provider_id}", origin.trim_end_matches('/'))
+}
+
+/// The redirect URI to register at the IdP (the server's fixed callback on the console origin).
+pub fn sso_redirect_uri(origin: &str) -> String {
+    format!("{}/admin/v1/auth/oidc/callback", origin.trim_end_matches('/'))
 }
 
 fn post(path: String) -> HttpRequest {
@@ -698,11 +832,17 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
         ApiCall::EnableHostedIdentity(id) => Ok(vec![Msg::HostedIdentityEnabled(id.clone())]),
         ApiCall::LoadMembers => {
             let rows: Vec<MemberDto> = parse(body)?;
-            Ok(vec![Msg::SetMembers(rows.into_iter().map(Member::try_from).collect::<Result<_, _>>()?)])
+            let sso = rows
+                .iter()
+                .filter(|r| r.auth_method == "sso")
+                .map(|r| parse_uuid("id", &r.id).map(UserId))
+                .collect::<Result<_, _>>()?;
+            let members = rows.into_iter().map(Member::try_from).collect::<Result<_, _>>()?;
+            Ok(vec![Msg::SetMembers(members), Msg::SetSsoMembers(sso)])
         }
         // The token comes back once: reveal it so the admin can share the link when mail is not
         // delivered. The pending row is built from the server's own invitation id.
-        ApiCall::InviteMember { .. } => {
+        ApiCall::InviteMember { .. } | ApiCall::InviteSsoMember { .. } => {
             let dto: InvitationDto = parse(body)?;
             let pending = Member {
                 id: UserId(parse_uuid("invitation_id", &dto.invitation_id)?),
@@ -759,7 +899,52 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
             Ok(vec![Msg::AdminKeyCreated(key), Msg::SecretRevealed(RevealedSecret::other(SecretKind::AdminKey, dto.name, dto.key))])
         }
         ApiCall::RevokeAdminKey(id) => Ok(vec![Msg::RevokeAdminKey(id.clone())]),
+        ApiCall::StartSso { .. } => {
+            let dto: SsoStartDto = parse(body)?;
+            // `{error:"sso_unavailable"}` is a 200 on purpose (no oracle); anything without a URL is the same.
+            let Some(url) = dto.authorization_url else { return Err(ApiError::Invalid(SSO_UNAVAILABLE.into())) };
+            if !is_idp_url(&url) {
+                return Err(ApiError::Decode("authorization URL is not https".into()));
+            }
+            Ok(vec![Msg::RedirectToHosted(url)])
+        }
+        ApiCall::LookupInvitation { .. } => {
+            let dto: LookupDto = parse(body)?;
+            let kind = match dto.auth_method.as_str() {
+                "password" => InviteKind::Password,
+                "sso" => InviteKind::Sso(ProviderIds(
+                    dto.sso_provider_ids.into_iter().filter(|id| uuid::Uuid::parse_str(id).is_ok()).collect(),
+                )),
+                other => return Err(ApiError::Decode(format!("unknown auth method '{other}'"))),
+            };
+            Ok(vec![Msg::InviteLooked(kind)])
+        }
+        ApiCall::UnlinkSso => Ok(vec![Msg::SsoUnlinked]),
+        ApiCall::LoadOidcProviders => {
+            let rows: Vec<OidcProviderDto> = parse(body)?;
+            Ok(vec![Msg::SetOidcProviders(
+                rows.into_iter()
+                    .map(|p| OidcProvider { id: p.id, issuer: p.issuer, client_id: p.client_id, enabled: p.enabled })
+                    .collect(),
+            )])
+        }
+        ApiCall::CreateOidcProvider { .. } => {
+            Ok(vec![Msg::OidcProviderSaved, Msg::Request(ApiCall::LoadOidcProviders)])
+        }
+        ApiCall::RotateOidcSecret { .. } => Ok(vec![Msg::OidcProviderSaved]),
+        ApiCall::SetOidcProviderEnabled { .. } | ApiCall::DeleteOidcProvider(_) => {
+            Ok(vec![Msg::Request(ApiCall::LoadOidcProviders)])
+        }
     }
+}
+
+/// Shown for `sso_unavailable`: unknown, disabled or foreign provider, or SSO not configured on the server.
+const SSO_UNAVAILABLE: &str =
+    "Single sign-on is not available for this link. Ask your account Owner for the current link.";
+
+/// Only follow an IdP link that is https (plain http only to a local mock IdP in development).
+fn is_idp_url(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("http://localhost") || url.starts_with("http://127.0.0.1")
 }
 
 /// Call-specific wording for statuses that carry no body of their own.
@@ -815,13 +1000,46 @@ fn refine(call: &ApiCall, error: ApiError, body: &str) -> ApiError {
         (ApiCall::EnableHostedIdentity(_), ApiError::Forbidden) if body.contains("HOSTED_IDENTITY_UNAVAILABLE") => {
             ApiError::Invalid("Hosted identity is not available for agent-mode databases".into())
         }
+        (ApiCall::InviteSsoMember { .. }, ApiError::Invalid(_)) => ApiError::Invalid(
+            "SSO invitations need an enabled SSO provider and a role below Owner. Check Settings, or invite with a password.".into(),
+        ),
+        (ApiCall::StartSso { .. }, ApiError::Conflict(_)) => {
+            ApiError::Conflict("That SSO provider is already linked to your account".into())
+        }
+        // An SSO-only member has no password or authenticator to re-enter, so cannot self-link.
+        (ApiCall::StartSso { intent: SsoIntent::Link { .. }, .. }, ApiError::Forbidden) => ApiError::Invalid(
+            "Linking needs a password and authenticator code, which your account does not have".into(),
+        ),
+        (ApiCall::LookupInvitation { .. }, ApiError::NotFound) => ApiError::Invalid(
+            "This invitation link is invalid or has expired. Ask an admin to send a new one.".into(),
+        ),
+        (ApiCall::UnlinkSso, ApiError::Conflict(_)) => ApiError::Conflict(
+            "You sign in only with SSO, so the link cannot be removed. Ask an Owner to reset your access.".into(),
+        ),
+        (ApiCall::UnlinkSso, ApiError::NotFound) => {
+            ApiError::Invalid("No SSO identity is linked to your account".into())
+        }
+        (ApiCall::CreateOidcProvider { .. }, ApiError::Conflict(_)) => {
+            ApiError::Conflict("A provider with that issuer and client ID already exists".into())
+        }
+        (
+            ApiCall::CreateOidcProvider { .. } | ApiCall::SetOidcProviderEnabled { .. } | ApiCall::RotateOidcSecret { .. },
+            ApiError::Invalid(_),
+        ) => ApiError::Invalid(provider_message(body)),
+        (
+            ApiCall::SetOidcProviderEnabled { .. } | ApiCall::RotateOidcSecret { .. } | ApiCall::DeleteOidcProvider(_),
+            ApiError::NotFound,
+        ) => ApiError::Invalid("That provider no longer exists. Refresh the list.".into()),
+        (ApiCall::InviteSsoMember { .. }, ApiError::Conflict(_)) => {
+            ApiError::Conflict("That email already belongs to a member or has an open invitation".into())
+        }
         (ApiCall::InviteMember { .. }, ApiError::Conflict(_)) => {
             ApiError::Conflict("That email already belongs to a member or has an open invitation".into())
         }
         (ApiCall::InviteMember { .. }, ApiError::Invalid(_)) => {
             ApiError::Invalid("Enter a valid email address and choose a role".into())
         }
-        (ApiCall::InviteMember { .. }, ApiError::Forbidden) => {
+        (ApiCall::InviteMember { .. } | ApiCall::InviteSsoMember { .. }, ApiError::Forbidden) => {
             ApiError::Invalid("You cannot invite someone to a role above your own".into())
         }
         (ApiCall::ChangeMemberRole { .. }, ApiError::Forbidden) => ApiError::Invalid(
@@ -849,6 +1067,20 @@ fn refine(call: &ApiCall, error: ApiError, body: &str) -> ApiError {
             ApiError::Invalid("That key no longer exists. Refresh the list.".into())
         }
         _ => error,
+    }
+}
+
+/// User-facing text for a provider 422: `{error:"issuer_invalid", reason}` or `{error:"invalid_request", reason}`.
+fn provider_message(body: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    let reason = value.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+    match (value.get("error").and_then(|e| e.as_str()), reason) {
+        (Some("issuer_invalid"), reason) => format!(
+            "The issuer was rejected ({reason}). It must be an https OIDC issuer whose discovery document names itself."
+        ),
+        (_, "client_id_invalid") => "Enter a client ID (1 to 1024 bytes)".into(),
+        (_, "client_secret_invalid") => "Enter a client secret (1 to 1024 bytes)".into(),
+        _ => "The provider details were rejected".into(),
     }
 }
 
@@ -906,6 +1138,35 @@ pub fn checkout_return_from_query(search: &str) -> Option<CheckoutReturn> {
     }
 }
 
+/// The provider id of a `?sso=<provider id>` sign-in link, if it is a well-formed UUID.
+pub fn sso_provider_from_query(search: &str) -> Option<String> {
+    query_param(search, "sso").and_then(|id| uuid_text(&id))
+}
+
+/// A provider id from what a person pasted: the bare id or a whole `/admin/?sso=<id>` link.
+pub fn sso_provider_from_input(input: &str) -> Option<String> {
+    let input = input.trim();
+    uuid_text(input).or_else(|| {
+        let query = input.split_once('?').map_or("", |(_, q)| q);
+        sso_provider_from_query(query.split('#').next().unwrap_or(""))
+    })
+}
+
+fn uuid_text(value: &str) -> Option<String> {
+    uuid::Uuid::parse_str(value).ok().map(|u| u.to_string())
+}
+
+/// The SSO round trip's return markers: `?error=sso_failed` (callback failed) or `?sso_linked=1`.
+pub fn sso_return_from_query(search: &str) -> Option<SsoReturn> {
+    if query_param(search, "error").as_deref() == Some("sso_failed") {
+        Some(SsoReturn::Failed)
+    } else if query_param(search, "sso_linked").as_deref() == Some("1") {
+        Some(SsoReturn::Linked)
+    } else {
+        None
+    }
+}
+
 fn query_param(search: &str, key: &str) -> Option<String> {
     search
         .trim_start_matches('?')
@@ -955,6 +1216,27 @@ fn error_for(response: &HttpResponse) -> ApiError {
 }
 
 // ── DTOs (private: only this module knows the API's field names) ────────────────
+
+#[derive(Deserialize)]
+struct SsoStartDto {
+    #[serde(default)]
+    authorization_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LookupDto {
+    auth_method: String,
+    #[serde(default)]
+    sso_provider_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct OidcProviderDto {
+    id: String,
+    issuer: String,
+    client_id: String,
+    enabled: bool,
+}
 
 #[derive(Deserialize)]
 struct SessionDto {
