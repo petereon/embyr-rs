@@ -269,6 +269,24 @@ by the background `TtlSweeper` (`crates/embyr-server/src/sweepers/ttl_sweeper.rs
 - **Rollback**: set `enabled=false` or `DELETE` the policy. Deleted documents are gone; they can only
   be restored from the customer's own backups.
 
+## Operations: query-log retention
+
+Each project's `log_retention_days` (admin API, 1..=3650; NULL = 90 days) is enforced by the daily
+`QueryLogSweeper` (`adapters/query_log.rs`), under its advisory lock:
+
+- Whole daily `query_logs_YYYY_MM_DD` partitions older than the **longest** retention among live
+  projects are dropped.
+- Every project (deleted ones included) whose retention is shorter than that gets its older rows
+  deleted in batches of 5 000, at most 100 000 rows per project per run (the rest is finished by the
+  next run). Index `query_logs_project_created_idx` (migration 0052) serves the delete.
+- Enforcement granularity is the sweep interval: a row can outlive its retention by up to ~1 day,
+  more while a backlog is being worked off. Metric: `embyr_query_logs_purged_total` (rows deleted).
+  Failures: `embyr_sweeper_error_total{sweeper="query_log_sweeper"}`, log lines `query_log retention
+  purge failed` / `cannot read project retentions`. If project retentions cannot be read the whole
+  sweep is skipped rather than guessing the partition horizon.
+- No environment variables. The first run after upgrading may delete a large backlog for
+  short-retention projects; expect elevated system-DB write load for that run.
+
 ## Known limitations: real-time Listen in `backend_mode=agent`
 
 Listen works in agent mode via the agent's `Subscribe` stream (see

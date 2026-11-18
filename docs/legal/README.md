@@ -35,9 +35,9 @@ Derived from `migrations/` and `.env.example` on master, 2026-11-17:
   (client IP as an in-memory/DB key for sign-in throttling), server logs.
 - **Retention:** project soft-delete 7 days, account deletion 7 days grace
   (`EMBYR_SOFT_DELETE_GRACE_DAYS`, `EMBYR_ACCOUNT_DELETE_GRACE_DAYS`).
-- **Gaps to resolve:** there is **no sweeper for `query_logs` retention** that I could find
-  (a per-project `log_retention_days` column exists); decide the real default and make the
-  policy text match. Backups: the policy says backups are purged on the provider's schedule;
+- **Gaps to resolve:** per-project `log_retention_days` is now enforced (daily sweeper deletes
+  rows older than the project's setting; NULL = 90 days; see `docs/operations/runbook.md`);
+  decide whether 90 days stays the default and fill `[LOG_RETENTION]` to match. Backups: the policy says backups are purged on the provider's schedule;
   confirm with `docs/operations/backup-disaster-recovery.md` once hosting is chosen.
 - **Trademark:** "Firestore" and "Google" belong to Google. The terms state the service is
   independent and API-compatible only. Check your use of the name in marketing.

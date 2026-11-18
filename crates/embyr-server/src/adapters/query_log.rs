@@ -6,8 +6,10 @@
 //! to the caller.
 //!
 //! QueryLogSweeper: daily tokio task that acquires `pg_try_advisory_lock`
-//! (lock id `SWEEP_ADVISORY_LOCK`) before dropping expired partitions,
-//! preventing concurrent sweep races across multiple embyr-server instances.
+//! (lock id `SWEEP_ADVISORY_LOCK`) before dropping expired partitions and
+//! row-purging projects whose own `log_retention_days` is shorter than the
+//! partition horizon, preventing concurrent sweep races across multiple
+//! embyr-server instances.
 
 use std::sync::Arc;
 
@@ -23,6 +25,46 @@ const QUERY_LOG_CHANNEL_CAPACITY: usize = 1_000;
 
 /// Sweep task interval in seconds (24 hours).
 const SWEEP_INTERVAL_SECS: u64 = 86_400;
+
+/// Instance default for a project whose `log_retention_days` is NULL.
+const DEFAULT_RETENTION_DAYS: i32 = 90;
+/// Admin API's validated range for `log_retention_days` (admin/handlers/projects.rs).
+const MAX_RETENTION_DAYS: i32 = 3650;
+/// Rows deleted per statement, and per project per sweep run. A project whose
+/// backlog exceeds the cap is finished by the next run.
+const PURGE_BATCH_ROWS: i64 = 5_000;
+const PURGE_MAX_ROWS_PER_PROJECT: i64 = 100_000;
+
+/// Effective retention for a project: NULL means the instance default; values
+/// outside the validated 1..=3650 range (should not exist) are clamped.
+fn resolve_retention_days(configured: Option<i32>) -> i32 {
+    configured
+        .unwrap_or(DEFAULT_RETENTION_DAYS)
+        .clamp(1, MAX_RETENTION_DAYS)
+}
+
+/// `(partition horizon, projects needing a row-level purge)` from
+/// `(project_id, log_retention_days, is_deleted)` rows.
+///
+/// The horizon is the longest retention among live projects (the partition
+/// drop must never remove rows a live project still keeps; default when
+/// there are none). Any project, deleted or not, keeping logs for less than
+/// the horizon needs its own rows deleted: the partition drop alone would
+/// hold them for the whole horizon.
+fn plan_retention(projects: &[(String, Option<i32>, bool)]) -> (i32, Vec<(&str, i32)>) {
+    let horizon = projects
+        .iter()
+        .filter(|(_, _, deleted)| !deleted)
+        .map(|(_, days, _)| resolve_retention_days(*days))
+        .max()
+        .unwrap_or(DEFAULT_RETENTION_DAYS);
+    let purge = projects
+        .iter()
+        .map(|(id, days, _)| (id.as_str(), resolve_retention_days(*days)))
+        .filter(|(_, days)| *days < horizon)
+        .collect();
+    (horizon, purge)
+}
 
 // ---------------------------------------------------------------------------
 // PostgresQueryLogAdapter
@@ -175,50 +217,142 @@ impl QueryLogSweeper {
             return;
         }
 
-        // Max retention across all live projects (default 90 days when none set).
-        let retention_days: i32 = sqlx::query_scalar::<_, Option<i32>>(
-            "SELECT MAX(COALESCE(log_retention_days, 90)) \
-             FROM projects WHERE status != 'deleted'",
-        )
-        .fetch_one(pool)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(90);
-        let cutoff =
-            chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
-        let cutoff_date = cutoff.format("%Y_%m_%d").to_string();
-
-        // Find all query_logs_* partitions whose date prefix is older than cutoff.
-        let partitions: Vec<String> = sqlx::query_scalar(
-            "SELECT tablename FROM pg_tables \
-             WHERE schemaname = 'public' \
-               AND tablename LIKE 'query_logs_%' \
-               AND tablename < $1",
-        )
-        .bind(format!("query_logs_{cutoff_date}"))
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-
-        for partition in partitions {
-            if !partition.starts_with("query_logs_") {
-                continue; // extra safety guard
-            }
-            let drop_sql = format!("DROP TABLE IF EXISTS {partition}");
-            match sqlx::query(&drop_sql).execute(pool).await {
-                Ok(_) => {
-                    tracing::info!("dropped expired query_log partition: {partition}");
-                }
-                Err(e) => {
-                    tracing::error!("failed to drop partition {partition}: {e}");
-                }
-            }
-        }
+        sweep(pool).await;
 
         let _ = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
             .bind(SWEEP_ADVISORY_LOCK)
             .fetch_one(pool)
             .await;
+    }
+}
+
+/// One locked sweep: partition drop at the horizon, then the per-project row purge.
+async fn sweep(pool: &sqlx::PgPool) {
+    let projects: Vec<(String, Option<i32>, bool)> = match sqlx::query_as(
+        "SELECT id, log_retention_days, status = 'deleted' FROM projects",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            // Never guess the horizon: a wrong (default) one could drop a
+            // longer-retention project's partitions.
+            tracing::warn!("query_log sweep: cannot read project retentions, skipping: {e}");
+            crate::sweepers::record_sweeper_error("query_log_sweeper");
+            return;
+        }
+    };
+    let (retention_days, per_project) = plan_retention(&projects);
+    let cutoff =
+        chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
+    let cutoff_date = cutoff.format("%Y_%m_%d").to_string();
+
+    // Find all query_logs_* partitions whose date prefix is older than cutoff.
+    let partitions: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_tables \
+         WHERE schemaname = 'public' \
+           AND tablename LIKE 'query_logs_%' \
+           AND tablename < $1",
+    )
+    .bind(format!("query_logs_{cutoff_date}"))
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    for partition in partitions {
+        if !partition.starts_with("query_logs_") {
+            continue; // extra safety guard
+        }
+        let drop_sql = format!("DROP TABLE IF EXISTS {partition}");
+        match sqlx::query(&drop_sql).execute(pool).await {
+            Ok(_) => {
+                tracing::info!("dropped expired query_log partition: {partition}");
+            }
+            Err(e) => {
+                tracing::error!("failed to drop partition {partition}: {e}");
+            }
+        }
+    }
+
+    // Row-level purge for projects with a shorter retention than the horizon.
+    for (project_id, days) in per_project {
+        purge_project(pool, project_id, days).await;
+    }
+}
+
+/// Delete `project_id`'s rows older than `days`, in `PURGE_BATCH_ROWS` batches
+/// (bounded by `PURGE_MAX_ROWS_PER_PROJECT`). Selects by the primary key so
+/// each batch is one indexed scan on `(project_id, created_at)`.
+async fn purge_project(pool: &sqlx::PgPool, project_id: &str, days: i32) {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+    let mut purged: i64 = 0;
+    while purged < PURGE_MAX_ROWS_PER_PROJECT {
+        let result = sqlx::query(
+            "DELETE FROM query_logs WHERE (id, created_at) IN ( \
+                 SELECT id, created_at FROM query_logs \
+                 WHERE project_id = $1 AND created_at < $2 LIMIT $3)",
+        )
+        .bind(project_id)
+        .bind(cutoff)
+        .bind(PURGE_BATCH_ROWS)
+        .execute(pool)
+        .await;
+        match result {
+            Ok(done) => {
+                let n = done.rows_affected() as i64;
+                purged += n;
+                metrics::counter!("embyr_query_logs_purged_total").increment(n as u64);
+                if n < PURGE_BATCH_ROWS {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("query_log retention purge failed for project {project_id}: {e}");
+                crate::sweepers::record_sweeper_error("query_log_sweeper");
+                return;
+            }
+        }
+    }
+    if purged > 0 {
+        tracing::info!(project_id, days, rows_purged = purged, "query_log retention purge");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(id: &str, days: Option<i32>, deleted: bool) -> (String, Option<i32>, bool) {
+        (id.to_string(), days, deleted)
+    }
+
+    #[test]
+    fn null_retention_is_the_default_and_out_of_range_is_clamped() {
+        assert_eq!(resolve_retention_days(None), 90);
+        assert_eq!(resolve_retention_days(Some(7)), 7);
+        assert_eq!(resolve_retention_days(Some(0)), 1);
+        assert_eq!(resolve_retention_days(Some(-5)), 1);
+        assert_eq!(resolve_retention_days(Some(100_000)), 3650);
+    }
+
+    #[test]
+    fn horizon_is_the_longest_live_retention_and_shorter_projects_get_a_row_purge() {
+        let projects = [
+            p("short", Some(7), false),
+            p("default", None, false),
+            p("long", Some(365), false),
+            p("gone", Some(3), true),
+            p("gone-long", Some(3650), true),
+        ];
+        let (horizon, purge) = plan_retention(&projects);
+        assert_eq!(horizon, 365, "deleted project must not stretch the horizon");
+        assert_eq!(purge, vec![("short", 7), ("default", 90), ("gone", 3)]);
+    }
+
+    #[test]
+    fn no_live_projects_means_default_horizon() {
+        assert_eq!(plan_retention(&[]), (90, vec![]));
+        assert_eq!(plan_retention(&[p("gone", Some(3), true)]).0, 90);
     }
 }
