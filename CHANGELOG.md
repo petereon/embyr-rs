@@ -7,6 +7,13 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- Admin OIDC SSO groundwork (ADR-086, slices 1-2 of `admin-oidc-sso`; no sign-in route yet, the callback stays disabled).
+  Migration 0051: nullable `users.password_hash` (NULL = SSO-only user; `signin`, account-deletion re-auth and password
+  reset treat it as "no password" with the usual generic responses), `admin_sso_identities`, `sso_auth_requests`,
+  `admin_audit_events` (12-month retention, swept by the `signin_rate_limit_sweeper` cycle), `sessions.auth_method` and
+  `sessions.sso_provider_id`. Removing a member now also deletes their SSO links; disabling an OIDC provider deletes the
+  sessions minted through it (deleting it does so by cascade). Pure SSO core (PKCE, ID-token claim validation, outbound URL
+  and IP policy) in `embyr-core`.
 - TTL policies (go-live P5): `GET`/`PUT /admin/v1/projects/:id/ttl_policies` and `DELETE .../ttl_policies/:collection_group`
   (Admin+ to change, any role to list) configure a per-collection-group Timestamp field; a background `TtlSweeper`
   (`EMBYR_TTL_SWEEP_INTERVAL_SECS`, default 3600; `EMBYR_TTL_MAX_DELETES_PER_RUN`, default 10000 per policy per sweep)

@@ -1360,3 +1360,16 @@ path = "../../tests/ttl_policies/acceptance/ttl01_policy_admin_api.rs"
 [[test]]
 name = "ttl_policies_ttl02_sweeper"
 path = "../../tests/ttl_policies/acceptance/ttl02_sweeper.rs"
+
+# admin-oidc-sso (ADR-086) slices 1-2. The self-test needs no Docker; the s02 targets are CI-only.
+[[test]]
+name = "admin_oidc_sso_mock_idp_selftest"
+path = "../../tests/admin_oidc_sso/acceptance/mock_idp_selftest.rs"
+
+[[test]]
+name = "admin_oidc_sso_s02_sso_only_users"
+path = "../../tests/admin_oidc_sso/acceptance/s02_sso_only_users_and_member_removal.rs"
+
+[[test]]
+name = "admin_oidc_sso_s02_audit_events"
+path = "../../tests/admin_oidc_sso/acceptance/s02_audit_events.rs"

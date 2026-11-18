@@ -5,6 +5,7 @@
 
 pub mod account;
 pub mod account_deletion;
+pub mod audit;
 pub mod billing;
 pub mod email;
 pub mod invitation;
@@ -12,6 +13,7 @@ pub mod password_reset;
 pub mod query_log;
 pub mod rbac;
 pub mod session;
+pub mod sso;
 
 pub use account::{AccountId, AccountMember, Role, User, UserId};
 pub use billing::{

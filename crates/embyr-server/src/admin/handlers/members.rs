@@ -331,6 +331,7 @@ pub async fn change_member_role(
 /// On success → 204. Cascade (in one transaction):
 ///   - All sessions for the member are expired (expires_at = now()).
 ///   - All admin_api_keys for the member have revoked_at set.
+///   - All admin_sso_identities rows (and pending sso_auth_requests) for the member are deleted.
 ///   - The account_members row is deleted.
 pub async fn remove_member(
     Path(member_id): Path<String>,
@@ -414,6 +415,29 @@ pub async fn remove_member(
     .await
     {
         tracing::error!("remove_member: revoke admin keys: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    // ADR-086: the member's SSO links (and any in-flight link request) go with the member row —
+    // the `users` row survives, so without this a removed member could still be signed in by a
+    // surviving link (AC-SSO-10).
+    if let Err(e) = sqlx::query(
+        "DELETE FROM admin_sso_identities WHERE user_id = $1 AND account_id = $2",
+    )
+    .bind(target_user_id)
+    .bind(session.account_id)
+    .execute(&mut *tx)
+    .await
+    {
+        tracing::error!("remove_member: delete sso identities: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if let Err(e) = sqlx::query("DELETE FROM sso_auth_requests WHERE user_id = $1")
+        .bind(target_user_id)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::error!("remove_member: delete sso auth requests: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
