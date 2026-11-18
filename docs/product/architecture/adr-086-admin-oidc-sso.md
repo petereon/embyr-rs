@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (design wave; becomes Accepted when slice 3 merges). Closes the design half of audit #58 (the callback was disabled in PR #14;
+Proposed (design wave; product-owner decisions O1-O7 recorded 2026-11-18, see "Product decisions"; becomes Accepted when slice 3 merges). Closes the design half of audit #58 (the callback was disabled in PR #14;
 this ADR defines its replacement). Depends on ADR-083 (`ServerKeys` encrypt/decrypt with rotation) and ADR-076 (sign-in rate limiter).
 Feature detail, ACs, schema and slices: `docs/feature/admin-oidc-sso/feature-delta.md`.
 
@@ -75,9 +75,13 @@ Feature detail, ACs, schema and slices: `docs/feature/admin-oidc-sso/feature-del
    a value that decrypts with the previous key is re-encrypted lazily, as `connection_secrets` does for DSNs); decrypted only in memory
    for the token call. `PUT /admin/v1/oidc_providers/:id/secret` (Owner) replaces it. Never returned, never logged. Replaces the
    hand-rolled AES in `oidc_providers.rs`.
-8. **Session.** One shared `issue_session` (extracted from `signin` steps 7-9) inserts the `sessions` row and builds the identical cookie;
+8. **Session.** One shared `issue_session` (extracted from `signin` steps 7-8; `SessionOrigin::{Password, Sso{provider_id}}`) inserts the `sessions` row and builds the identical cookie;
    the callback answers `302 /admin/` with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, clears `embyr_sso`, and puts
-   nothing in the URL. The static page needs no cookie; the SPA then calls `GET /auth/session`.
+   nothing in the URL. The static page needs no cookie; the SPA then calls `GET /auth/session`. **Sessions know their provider:**
+   `sessions.auth_method` plus a nullable `sessions.sso_provider_id REFERENCES oidc_providers(id) ON DELETE CASCADE` (CHECK: set exactly
+   for `sso`). Disabling a provider deletes its SSO sessions in the same transaction; deleting it removes them by cascade; password
+   sessions and other providers' sessions are untouched; removing a member expires all their sessions and deletes their links. There
+   is no back-channel logout and SSO sessions keep the 24 h lifetime (product decision O6).
 9. **Abuse, errors, audit.** `start` and `callback` use `SigninRateLimiter` under a distinct key (`sso:{ip}`); `start` also caps live
    rows per provider (200) and opportunistically deletes expired rows (bounded) because it is unauthenticated and writes (cf. #14).
    Every failure after the state row is read, and every IdP-originated `error`, redirects to the same `/admin/?error=sso_failed`
@@ -85,7 +89,21 @@ Feature detail, ACs, schema and slices: `docs/feature/admin-oidc-sso/feature-del
    is the only handle, so there is no account-exists oracle). Granular reasons go to a new `admin_audit_events` table
    (`sso_signin_ok`, `sso_signin_failed{reason}`, link created/removed, provider created/enabled/disabled/secret_rotated/deleted,
    `sso_required` toggled; actor, account, provider, source IP, time; no tokens or claims) and to an `embyr_sso_signin_total{result}`
-   counter. A read API/UI for the audit table is not part of V1.
+   counter. A read API/UI for the audit table is not part of V1 and none is planned for launch; rows are retained 12 months by one extra
+   DELETE in the existing `signin_rate_limit_sweeper` cycle (O5). The writer (`adapters::admin_audit::write_audit_event`) accepts
+   labels only (`[a-z0-9_.:-]`, at most 64 characters) for event and reason, so a token, claim or e-mail address cannot be stored.
+
+## Product decisions (2026-11-18)
+
+Answers to the questions this ADR raised; the feature delta (section 9) carries the same list.
+
+- **O1** Generic OIDC; test against Google plus one more IdP (to be named; Entra with a tenant-specific issuer recommended).
+- **O2** No just-in-time provisioning in V1 (decision 5).
+- **O3** Owners always keep password + TOTP and are exempt from `sso_required` (decision 6).
+- **O4** SSO-only members cannot delete the account or self-link (decision 6).
+- **O5** Audit rows written in V1; no owner-facing view at launch; 12-month retention (decision 9).
+- **O6** Disabling or deleting a provider ends its SSO sessions; removing a member ends their sessions; no back-channel logout (decision 8).
+- **O7** Multi-account membership out of scope.
 
 ## Alternatives Considered
 
@@ -99,18 +117,22 @@ Feature detail, ACs, schema and slices: `docs/feature/admin-oidc-sso/feature-del
 
 ## Consequences
 
-- One migration (0051, number provisional) adds three tables, three columns and two composite-FK anchor unique indexes; `users.password_hash` becomes nullable. Every
+- One migration (`0051_admin_sso.sql`, number verified) adds three tables, four columns (`invitations.auth_method`, `accounts.sso_required`,
+  `sessions.auth_method`, `sessions.sso_provider_id`) and two composite-FK anchor unique indexes; `users.password_hash` becomes nullable. Every
   reader must treat NULL as "no password": `signin` (constant-time dummy verify, generic 401), `verify_credentials`, password reset.
   Old binaries decode NULL as an error, but no NULL exists until the feature code is deployed (expand-then-use ordering).
 - Members who are SSO-only can use the console but not delete the account or self-link (they have no password to re-enter).
 - Microsoft Entra is supported only with a **tenant-specific issuer** (`/common` returns a templated issuer that fails exact match), and
   its `email` claim is not verified, which is acceptable only because email is never the lookup key (it is checked against an invitation
-  the invitee already holds). Product must confirm (open decision O1).
+  the invitee already holds). Confirmed by product (O1: generic OIDC, contract-checked against Google and one more IdP).
 - Outbound fetches from an unauthenticated-triggered path exist (cached, bounded, SSRF-policed); a misconfigured corporate egress proxy
   makes SSO unavailable, not insecure.
 
 ## Enforcement
 
-- Pure functions in `embyr-core` (PKCE, state/nonce, claim validation, link-intent rules) with property tests; no IO crates there.
+- Pure functions in `embyr-core::admin::sso` (PKCE, state/nonce, claim validation, outbound URL/IP policy) and `admin::audit` (labels) with
+  exhaustive unit tests; no IO crates there. DNS resolution lives in `embyr-server::adapters::outbound_policy`; the DSN SSRF predicate
+  `is_forbidden_ip` moved to core and is shared (`dsn_policy` re-exports it, behaviour unchanged). The SSO outbound check additionally refuses
+  `0.0.0.0/8`, CGNAT `100.64.0.0/10`, broadcast and multicast.
 - A source-scan test: the callback module contains no `SELECT ... FROM users` that is not joined from `admin_sso_identities`.
 - Acceptance tests against the real router and an in-process mock IdP with fault injection (feature-delta section 7).

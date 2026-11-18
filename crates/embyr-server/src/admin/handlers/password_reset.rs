@@ -63,10 +63,12 @@ pub async fn request_password_reset(
         return too_many_attempts(retry_after_ms);
     }
 
-    // Same lookup and token generation/hashing for known and unknown emails.
+    // Same lookup and token generation/hashing for known and unknown emails. An SSO-only user
+    // (NULL password_hash, ADR-086) has no password to reset: treated as an unknown address.
     let user_id: Option<Uuid> = match sqlx::query_scalar(
         "SELECT u.id FROM users u JOIN accounts a ON a.id = u.account_id \
-         WHERE lower(u.email) = $1 AND a.deleted_at IS NULL LIMIT 1",
+         WHERE lower(u.email) = $1 AND a.deleted_at IS NULL \
+           AND u.password_hash IS NOT NULL LIMIT 1",
     )
     .bind(&email)
     .fetch_optional(state.system_db.pool())
@@ -149,7 +151,8 @@ async fn confirm_inner(state: &UserAdminState, body: &ConfirmBody) -> Result<Res
     let user_id: Uuid = sqlx::query_scalar(
         "SELECT t.user_id FROM password_reset_tokens t \
          JOIN users u ON u.id = t.user_id JOIN accounts a ON a.id = u.account_id \
-         WHERE t.token_hash = $1 AND t.expires_at > now() AND a.deleted_at IS NULL",
+         WHERE t.token_hash = $1 AND t.expires_at > now() AND a.deleted_at IS NULL \
+           AND u.password_hash IS NOT NULL",
     )
     .bind(&token_hash)
     .fetch_optional(pool)

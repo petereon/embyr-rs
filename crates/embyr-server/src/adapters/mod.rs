@@ -1,3 +1,4 @@
+pub mod admin_audit;
 pub mod argon2_blocking;
 pub mod agent_backend;
 pub mod aws_secret_fetcher;
@@ -22,6 +23,8 @@ pub mod gcp_secret_fetcher;
 pub mod google_jwks_cache;
 pub mod index_manager;
 pub mod metrics_adapter;
+// admin-oidc-sso (ADR-086 decision 3): resolve + vet outbound discovery/JWKS/token targets.
+pub mod outbound_policy;
 pub mod postgres_backend;
 pub mod postgres_notify_listener;
 // client-auth-hosted-identity (ADR-036 Decision 7): resolve_customer_db_adapter.

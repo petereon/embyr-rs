@@ -7,7 +7,7 @@
 //! the signin route — an attacker rotating source IPs would otherwise grow
 //! this table without bound, becoming a storage-exhaustion vector in its own
 //! right. Mirrors `SoftDeletePurgeSweeper`'s exact spawn/run_cycle/
-//! advisory-lock shape.
+//! advisory-lock shape. Also purges `admin_audit_events` past its 12-month retention.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +26,9 @@ pub const LOCK_KEY_NAME: &str = "embyr_signin_rate_limit_sweep";
 /// swept-then-reinserted row never hands a returning attacker more tokens
 /// than a continuously-tracked row would have.
 const RETENTION_HOURS: i64 = 24;
+
+/// `admin_audit_events` retention (ADR-086, O5): 12 months.
+const AUDIT_RETENTION_MONTHS: i32 = 12;
 
 /// Whether this instance should run the purge cycle: only when
 /// `pg_try_advisory_lock` genuinely returned `true`.
@@ -91,6 +94,29 @@ pub async fn run_cycle(system_db: &Arc<SystemDb>) {
         Ok(_) => {}
         Err(e) => {
             tracing::warn!(error = %e, "SigninRateLimitSweeper: purge query failed");
+            super::record_sweeper_error("signin_rate_limit_sweeper");
+        }
+    }
+    purge_audit_events(system_db).await;
+}
+
+/// Admin-auth table hygiene rides this cycle (ADR-086, O5): one idempotent DELETE of audit rows past
+/// retention, so no fifth sweeper is needed. `now() - interval` keeps calendar-month arithmetic in SQL.
+async fn purge_audit_events(system_db: &Arc<SystemDb>) {
+    let result = sqlx::query(
+        "DELETE FROM admin_audit_events WHERE at < now() - make_interval(months => $1)",
+    )
+    .bind(AUDIT_RETENTION_MONTHS)
+    .execute(system_db.pool())
+    .await;
+    match result {
+        Ok(qr) if qr.rows_affected() > 0 => {
+            metrics::counter!("embyr_admin_audit_purged_total").increment(qr.rows_affected());
+            tracing::info!(rows_purged = qr.rows_affected(), "SigninRateLimitSweeper: purged expired audit rows");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "SigninRateLimitSweeper: audit purge failed");
             super::record_sweeper_error("signin_rate_limit_sweeper");
         }
     }

@@ -9,10 +9,11 @@
 //!   201 { id, issuer, client_id, enabled: true }. client_secret absent.
 //!
 //! patch_oidc_provider (PATCH /admin/v1/oidc_providers/:provider_id):
-//!   Session auth, Owner only. Partial update. Disabling does not invalidate sessions.
+//!   Session auth, Owner only. Partial update. Disabling ends the provider's SSO sessions
+//!   (ADR-086, O6); password sessions are untouched.
 //!
 //! delete_oidc_provider (DELETE /admin/v1/oidc_providers/:provider_id):
-//!   Session auth, Owner only. 204. Does not invalidate sessions.
+//!   Session auth, Owner only. 204. Its SSO sessions end by FK cascade; password sessions are untouched.
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -184,7 +185,7 @@ pub async fn create_oidc_provider(
 /// PATCH /admin/v1/oidc_providers/:provider_id
 ///
 /// Owner-only. Partial update: `enabled` field via COALESCE.
-/// Does not invalidate existing user sessions on disable.
+/// Disabling deletes the sessions minted through this provider (`sessions.sso_provider_id`).
 /// Returns 200 + updated OidcProviderResponse. 404 if provider not found.
 pub async fn patch_oidc_provider(
     Path(provider_id): Path<String>,
@@ -200,6 +201,11 @@ pub async fn patch_oidc_provider(
 
     let pool = state.system_db.pool();
 
+    let db_err = |e: sqlx::Error| {
+        tracing::error!("patch_oidc_provider: DB error: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    let mut tx = pool.begin().await.map_err(db_err)?;
     let row = sqlx::query(
         "UPDATE oidc_providers \
          SET enabled = COALESCE($3, enabled) \
@@ -209,13 +215,20 @@ pub async fn patch_oidc_provider(
     .bind(provider_uuid)
     .bind(session.account_id)
     .bind(body.enabled)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| {
-        tracing::error!("patch_oidc_provider: UPDATE error: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?
+    .map_err(db_err)?
     .ok_or(StatusCode::NOT_FOUND)?;
+
+    // O6: a disabled provider must not leave signed-in SSO sessions behind.
+    if body.enabled == Some(false) {
+        sqlx::query("DELETE FROM sessions WHERE sso_provider_id = $1")
+            .bind(provider_uuid)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    }
+    tx.commit().await.map_err(db_err)?;
 
     Ok(Json(OidcProviderResponse {
         id: row.try_get("id").unwrap_or_default(),
@@ -231,7 +244,7 @@ pub async fn patch_oidc_provider(
 /// DELETE /admin/v1/oidc_providers/:provider_id
 ///
 /// Owner-only. Returns 204 on success. 404 if provider not found or belongs to a
-/// different account. Does not invalidate existing user sessions.
+/// different account. Sessions minted through the provider are deleted by the FK cascade.
 pub async fn delete_oidc_provider(
     Path(provider_id): Path<String>,
     State(state): State<UserAdminState>,

@@ -2,7 +2,6 @@
 //! connects to that host, so reject targets inside our own network and plaintext transports, unless
 //! `EMBYR_ALLOW_PRIVATE_DSN_HOSTS=true` (docker-compose, dev, tests).
 
-use std::net::IpAddr;
 use std::str::FromStr;
 
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
@@ -34,24 +33,9 @@ pub fn allow_private() -> bool {
     std::env::var("EMBYR_ALLOW_PRIVATE_DSN_HOSTS").is_ok_and(|v| v.eq_ignore_ascii_case("true"))
 }
 
-/// Pure: true for addresses a customer DSN must not point at.
-pub fn is_forbidden_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-        }
-        IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_forbidden_ip(IpAddr::V4(mapped));
-            }
-            let first = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || first & 0xfe00 == 0xfc00 // unique-local fc00::/7
-                || first & 0xffc0 == 0xfe80 // link-local fe80::/10
-        }
-    }
-}
+/// Pure: true for addresses a customer DSN must not point at. Shared with the SSO outbound policy
+/// (`embyr_core::admin::sso::url_policy`, where the predicate now lives).
+pub use embyr_core::admin::sso::url_policy::is_forbidden_ip;
 
 /// Pure: sslmode acceptable for a customer connection.
 pub fn tls_acceptable(mode: PgSslMode) -> bool {

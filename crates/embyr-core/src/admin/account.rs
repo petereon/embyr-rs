@@ -26,8 +26,9 @@ pub struct User {
     pub account_id: AccountId,
     pub email: String,
     pub display_name: String,
-    /// Argon2id hash of the password (stored; never the plaintext).
-    pub password_hash: String,
+    /// Argon2id hash of the password (stored; never the plaintext). `None` = SSO-only user
+    /// (ADR-086): there is no password to verify, reset or re-enter.
+    pub password_hash: Option<String>,
     /// AES-GCM encrypted TOTP shared secret.
     pub totp_secret_enc: Option<Vec<u8>>,
     pub failed_totp_attempts: u32,

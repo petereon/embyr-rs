@@ -138,12 +138,67 @@ macro_rules! try_get_or_err {
     };
 }
 
+// ── Session issuing (signin + SSO callback) ──────────────────────────────────
+
+/// How the session's owner proved who they are. SSO sessions remember their provider so that
+/// disabling the provider can end them (ADR-086, O6).
+pub(crate) enum SessionOrigin {
+    Password,
+    // ponytail: constructed by the SSO callback in slice 3.
+    #[allow(dead_code)]
+    Sso { provider_id: Uuid },
+}
+
+/// A freshly minted session. The raw token exists only here and in the cookie; the DB has its hash.
+pub(crate) struct IssuedSession {
+    token: String,
+}
+
+impl IssuedSession {
+    /// The `Set-Cookie` value, identical for every origin.
+    pub(crate) fn set_cookie(&self) -> String {
+        build_session_cookie(&self.token)
+    }
+}
+
+/// Signin steps 7-8: 32 random bytes → base64url token, store BLAKE3(token) with a 24 h expiry.
+/// AC-7: the raw token is NEVER written to the DB. Takes any executor so a caller can mint the
+/// session inside its own transaction.
+pub(crate) async fn issue_session<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    user_id: Uuid,
+    account_id: Uuid,
+    origin: SessionOrigin,
+) -> Result<IssuedSession, sqlx::Error> {
+    let mut token_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut token_bytes);
+    let token = URL_SAFE_NO_PAD.encode(token_bytes);
+    let token_hash = blake3::hash(token.as_bytes()).as_bytes().to_vec();
+    let (auth_method, provider_id) = match origin {
+        SessionOrigin::Password => ("password", None),
+        SessionOrigin::Sso { provider_id } => ("sso", Some(provider_id)),
+    };
+    sqlx::query(
+        "INSERT INTO sessions (user_id, account_id, token_hash, expires_at, auth_method, sso_provider_id) \
+         VALUES ($1, $2, $3, now() + interval '24 hours', $4, $5)",
+    )
+    .bind(user_id)
+    .bind(account_id)
+    .bind(&token_hash)
+    .bind(auth_method)
+    .bind(provider_id)
+    .execute(executor)
+    .await?;
+    Ok(IssuedSession { token })
+}
+
 // ── Shared credential verification (signin + account deletion) ───────────────
 
 /// The `users` columns credential verification needs.
 pub(crate) struct UserSecrets {
     id: Uuid,
-    password_hash: String,
+    /// `None` = SSO-only user (ADR-086): no password to verify.
+    pub(crate) password_hash: Option<String>,
     totp_secret_enc: Option<Vec<u8>>,
     failed_totp_attempts: i32,
     locked_until: Option<chrono::DateTime<chrono::Utc>>,
@@ -177,6 +232,11 @@ impl UserSecrets {
     }
 }
 
+/// A valid Argon2id hash (production parameters) of a random password nobody knows; verified in
+/// place of a missing hash so SSO-only users cost the same as password users.
+const DUMMY_PASSWORD_HASH: &str =
+    "$argon2id$v=19$m=65536,t=3,p=4$BVBrAvsju03hsmQ50WVy5Q$hFNARucdse6Kkw3F3uWQtkwnXxAQ7uBZh8UmuZh/j6U";
+
 /// Signin steps 2-5, shared verbatim with account deletion so re-entry is never
 /// a weaker or lockout-bypassing path: lockout check (429), Argon2id password
 /// (401), TOTP / recovery code with attempt counting (401, lockout after 3),
@@ -193,14 +253,12 @@ pub(crate) async fn verify_credentials(
     // ── 3. Argon2id password verification ────────────────────────────────────
     // AC-3: wrong password → identical 401 shape to unknown email (oracle protection).
     // AC-ASH-01: runs on the blocking pool via `argon2_blocking`.
-    match crate::adapters::argon2_blocking::verify_password(
-        password.as_bytes(),
-        &user.password_hash,
-    )
-    .await
-    {
-        Ok(true) => {}
-        Ok(false) => return Err(invalid_credentials()),
+    // AC-SSO-14: an SSO-only user (NULL hash) gets the same 401 after one dummy verify, so
+    // neither body nor timing says "this account has no password".
+    let phc = user.password_hash.as_deref().unwrap_or(DUMMY_PASSWORD_HASH);
+    match crate::adapters::argon2_blocking::verify_password(password.as_bytes(), phc).await {
+        Ok(true) if user.password_hash.is_some() => {}
+        Ok(_) => return Err(invalid_credentials()),
         Err(e) => return Err(internal_err("verify password hash", e)),
     }
 
@@ -440,31 +498,15 @@ pub async fn signin(
     };
     let role: String = try_get_or_err!(role_row, "role", "read role");
 
-    // ── 7. Generate session token ─────────────────────────────────────────────
-    // 32 random bytes → base64url (no padding) → opaque token string.
-    let mut token_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut token_bytes);
-    let token = URL_SAFE_NO_PAD.encode(token_bytes);
-
-    // ── 8. Store BLAKE3(token) in sessions ───────────────────────────────────
-    // AC-7: raw plaintext token is NEVER written to the DB.
-    let token_hash = blake3::hash(token.as_bytes()).as_bytes().to_vec();
-    if let Err(e) = sqlx::query(
-        "INSERT INTO sessions (user_id, account_id, token_hash, expires_at) \
-         VALUES ($1, $2, $3, now() + interval '24 hours')",
-    )
-    .bind(user_id)
-    .bind(account_id)
-    .bind(&token_hash)
-    .execute(pool)
-    .await
-    {
-        return internal_err("insert session row", e);
-    }
+    // ── 7-8. Mint the session (shared with the SSO callback) ──────────────────
+    let session = match issue_session(pool, user_id, account_id, SessionOrigin::Password).await {
+        Ok(s) => s,
+        Err(e) => return internal_err("insert session row", e),
+    };
 
     // ── 9. Return 200 + Set-Cookie ────────────────────────────────────────────
     // AC-1: cookie attributes per spec.
-    let cookie = build_session_cookie(&token);
+    let cookie = session.set_cookie();
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
@@ -586,4 +628,23 @@ fn oidc_failed_redirect() -> Response {
 pub async fn oidc_callback() -> Response {
     tracing::warn!("oidc_callback: OIDC sign-in is disabled (audit finding #58); refusing");
     oidc_failed_redirect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DUMMY_PASSWORD_HASH;
+
+    /// The dummy must cost what a real verify costs (same Argon2id parameters as production
+    /// hashes) and must never verify.
+    #[tokio::test]
+    async fn dummy_hash_has_production_parameters_and_verifies_nothing() {
+        let real = crate::adapters::argon2_blocking::hash_password(b"pw").await.unwrap();
+        let params = |h: &str| h.split('$').take(4).collect::<Vec<_>>().join("$");
+        assert_eq!(params(DUMMY_PASSWORD_HASH), params(&real));
+        for guess in [&b""[..], b"pw", b"password", b"dummy"] {
+            assert!(!crate::adapters::argon2_blocking::verify_password(guess, DUMMY_PASSWORD_HASH)
+                .await
+                .unwrap());
+        }
+    }
 }
