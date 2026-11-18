@@ -7,6 +7,11 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- Per-project `log_retention_days` is now enforced (G-003): besides dropping `query_logs_*` partitions older than the longest
+  live retention, the daily sweeper deletes a shorter-retention project's own older rows (batches of 5 000, 100 000 rows per
+  project per run, NULL = 90 days, clamped to 1..=3650). Migration 0052 adds `query_logs (project_id, created_at)`. New metric
+  `embyr_query_logs_purged_total`; if project retentions cannot be read the sweep is skipped instead of defaulting the horizon.
+  No new environment variables.
 - Hosted-identity REST requests (sign-up, sign-in with password, sendOobCode, reset) no longer build a new Postgres pool to the
   customer DB on every credential-cache hit (G-002, go-live X11): they reuse the per-project tenant pool the gRPC path caches
   (`CachedEntry.pg`), with the same 60 s TTL, `EMBYR_TENANT_DB_MAX_CONNECTIONS` / acquire-timeout bounds and eviction on

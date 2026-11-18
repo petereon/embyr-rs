@@ -78,6 +78,7 @@ fn describe_metrics() {
         ("embyr_dsn_convert_divergent_total", "Connection secret conversions whose result diverged"),
         ("embyr_rollup_dropped_total", "Metric rollup events dropped"),
         ("embyr_rollup_flush_total", "Metric rollup flushes"),
+        ("embyr_query_logs_purged_total", "Query log rows deleted by per-project retention"),
         ("embyr_hourly_metrics_retention_purged_total", "Hourly metric rows purged by the retention sweeper"),
         ("embyr_soft_delete_purge_sweeper_purged_total", "Soft-deleted projects purged"),
         ("embyr_account_purge_sweeper_purged_total", "Soft-deleted accounts purged"),
