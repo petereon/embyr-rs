@@ -175,6 +175,10 @@ async fn last_audit(s: &Sso) -> (String, String, Option<String>) {
     row
 }
 
+async fn clear_sso_sessions(s: &Sso) {
+    sqlx::query("DELETE FROM sessions WHERE auth_method = 'sso'").execute(&s.ctx.pool).await.unwrap();
+}
+
 async fn assert_failed_with(s: &Sso, r: &reqwest::Response, reason: &str) {
     assert_failed(r).await;
     assert_eq!(last_audit(s).await, ("sso_signin".into(), "failed".into(), Some(reason.into())));
@@ -502,6 +506,7 @@ async fn a_bad_signature_is_refused() {
     assert_eq!(location_of(&login(&s).await), "/admin/", "primes the JWKS cache with the first key");
     // the IdP replaces the key under the SAME kid: the cached key no longer verifies
     s.idp.rotate_rsa_key("rsa-1");
+    clear_sso_sessions(&s).await; // the first sign-in left one; the failure helper expects none
     assert_failed_with(&s, &login(&s).await, "token_bad_signature").await;
 }
 
@@ -512,6 +517,7 @@ async fn an_unknown_kid_refetches_at_most_once_a_minute() {
     assert_eq!(location_of(&login(&s).await), "/admin/");
     assert_eq!(s.idp.hits("jwks"), 1);
     s.idp.rotate_rsa_key("rsa-2");
+    clear_sso_sessions(&s).await;
     // fresh cache (< 60 s): no refetch, the unknown kid fails
     assert_failed_with(&s, &login(&s).await, "token_unknown_key").await;
     assert_eq!(s.idp.hits("jwks"), 1, "no forced refetch inside the minute");
@@ -556,9 +562,9 @@ async fn a_slow_jwks_times_out() {
 async fn a_discovery_issuer_mismatch_makes_the_provider_unavailable() {
     let s = setup().await;
     s.idp.set(|b| b.discovery_issuer = Some("https://evil.example".into()));
-    // a provider whose discovery was never cached
-    let fresh = insert_provider(&s.ctx, uuid(&s.ctx.account_id), &s.idp.issuer(), "other-client", true).await;
-    let r = start_raw(&s.ctx, &fresh.to_string()).await;
+    // the seeded provider: its discovery has never been fetched, so nothing is cached
+    // ((account, issuer) is unique, so no second provider can share the mock's issuer)
+    let r = start_raw(&s.ctx, &s.provider.to_string()).await;
     assert_eq!(r.json::<Value>().await.unwrap(), json!({"error": "sso_unavailable"}));
     assert_eq!(count(&s, "SELECT count(*) FROM sso_auth_requests").await, 0);
 }
@@ -567,9 +573,9 @@ async fn a_discovery_issuer_mismatch_makes_the_provider_unavailable() {
 async fn a_discovery_redirect_is_not_followed() {
     let s = setup().await;
     s.idp.set(|b| b.discovery_redirect_to = Some(s.idp.redirect_target()));
-    let fresh = insert_provider(&s.ctx, uuid(&s.ctx.account_id), &s.idp.issuer(), "other-client", true).await;
-    let r = start_raw(&s.ctx, &fresh.to_string()).await;
+    let r = start_raw(&s.ctx, &s.provider.to_string()).await;
     assert_eq!(r.json::<Value>().await.unwrap(), json!({"error": "sso_unavailable"}));
+    assert_eq!(s.idp.hits("discovery"), 1, "fetched once, the redirect was not followed");
 }
 
 #[tokio::test]
@@ -768,13 +774,14 @@ async fn live_requests_per_provider_are_capped_and_expired_ones_are_purged() {
     .unwrap();
     let r = start_raw(&s.ctx, &s.provider.to_string()).await;
     assert_eq!(r.status(), 429, "cap of 200 live rows");
-    // expired rows do not count and are purged by start
+    // expired rows do not count; start deletes at most 100 of them per call (the sweeper does the rest)
     sqlx::query("UPDATE sso_auth_requests SET expires_at = now() - interval '1 minute'")
         .execute(&s.ctx.pool)
         .await
         .unwrap();
     assert_eq!(start_raw(&s.ctx, &s.provider.to_string()).await.status(), 200);
-    assert_eq!(count(&s, "SELECT count(*) FROM sso_auth_requests").await, 1);
+    assert_eq!(count(&s, "SELECT count(*) FROM sso_auth_requests WHERE expires_at > now()").await, 1);
+    assert_eq!(count(&s, "SELECT count(*) FROM sso_auth_requests").await, 101, "200 expired - 100 purged + 1 new");
 }
 
 // ── AC-SSO-17: provider secret ───────────────────────────────────────────────
