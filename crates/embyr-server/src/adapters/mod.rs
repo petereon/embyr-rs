@@ -30,6 +30,8 @@ pub mod postgres_notify_listener;
 // client-auth-hosted-identity (ADR-036 Decision 7): resolve_customer_db_adapter.
 pub mod project_auth;
 pub mod query_log;
+// admin-oidc-sso (ADR-086 decision 3): capped, policed discovery/JWKS/token fetches + caches.
+pub mod sso_client;
 pub mod stripe_gateway;
 pub mod system_db;
 // firestore-tls-support: shared accept_maybe_tls() handshake helper.

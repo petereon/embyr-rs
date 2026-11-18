@@ -1,4 +1,4 @@
-//! Auth handlers: signin, signout, oidc_callback.
+//! Auth handlers: signin, signout, session probe.
 //!
 //! POST /admin/v1/auth/signin
 //!   Validates email + Argon2id password + TOTP code (or recovery code).
@@ -12,8 +12,7 @@
 //!   Session-authed. Returns who the cookie belongs to so the SPA can restore its
 //!   signed-in shell after a reload (admin-ui-api-wiring, AC-AUW-24).
 //!
-//! GET /admin/v1/auth/oidc/callback
-//!   Disabled (audit finding #58) — always 302 /admin/?error=oidc_failed.
+//! OIDC SSO start/callback live in `oidc_sso.rs` (ADR-086); they mint sessions through `issue_session`.
 
 use axum::{
     extract::{ConnectInfo, Json, State},
@@ -81,7 +80,7 @@ fn invalid_code() -> Response {
 
 /// admin-signin-hardening (AC-ASH-03/06, ADR-076): per-source-IP rate limit
 /// exceeded. `retry-after-ms` header lets a well-behaved client back off.
-fn signin_throttled(retry_after_ms: u64) -> Response {
+pub(crate) fn signin_throttled(retry_after_ms: u64) -> Response {
     let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         axum::Json(ErrorBody {
@@ -144,8 +143,6 @@ macro_rules! try_get_or_err {
 /// disabling the provider can end them (ADR-086, O6).
 pub(crate) enum SessionOrigin {
     Password,
-    // ponytail: constructed by the SSO callback in slice 3.
-    #[allow(dead_code)]
     Sso { provider_id: Uuid },
 }
 
@@ -602,32 +599,6 @@ pub async fn session_info(
         display_name: read("display_name")?,
         role: read("role")?,
     }))
-}
-
-// ── OIDC callback ─────────────────────────────────────────────────────────────
-
-fn oidc_failed_redirect() -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::LOCATION,
-        HeaderValue::from_static("/admin/?error=oidc_failed"),
-    );
-    (StatusCode::FOUND, headers).into_response()
-}
-
-/// GET /admin/v1/auth/oidc/callback
-///
-/// DISABLED (audit finding #58). The previous implementation validated the
-/// id_token but then ignored its identity and minted a session for an
-/// arbitrary member of the provider's account. Until a real
-/// authorization-code + PKCE flow with identity binding ships (future feature
-/// `admin-oidc-sso`), every request is refused with the same
-/// `/admin/?error=oidc_failed` redirect the UI already handles. No session is
-/// ever created. Query parameters (which may carry an id_token) are
-/// deliberately not read or logged.
-pub async fn oidc_callback() -> Response {
-    tracing::warn!("oidc_callback: OIDC sign-in is disabled (audit finding #58); refusing");
-    oidc_failed_redirect()
 }
 
 #[cfg(test)]

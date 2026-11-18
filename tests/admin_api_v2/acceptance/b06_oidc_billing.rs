@@ -14,7 +14,10 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+#[path = "../../common/mock_oidc_idp.rs"]
+mod mock_oidc_idp;
 use common::AdminTestContext;
+use mock_oidc_idp::MockIdp;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AC-B06-01: GET /admin/v1/oidc_providers — list without client_secret
@@ -104,6 +107,11 @@ async fn viewer_cannot_list_oidc_providers() {
 // @US-B06 @AC-B06-02 @driving_port @real-io
 #[tokio::test]
 async fn owner_creates_oidc_provider_and_secret_encrypted() {
+    // admin-oidc-sso (AC-SSO-07): create validates the issuer's discovery document, so the
+    // provider points at the in-process mock IdP (loopback needs the dev flag).
+    std::env::set_var("EMBYR_ALLOW_PRIVATE_DSN_HOSTS", "true");
+    let idp = MockIdp::start().await;
+    let issuer = idp.issuer();
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_as_owner(&ctx).await;
 
@@ -112,7 +120,7 @@ async fn owner_creates_oidc_provider_and_secret_encrypted() {
         .post(ctx.url("/admin/v1/oidc_providers"))
         .header("Cookie", &session_cookie)
         .json(&serde_json::json!({
-            "issuer":        "https://accounts.google.com",
+            "issuer":        &issuer,
             "client_id":     "my-client-id.apps.googleusercontent.com",
             "client_secret": "plaintext-secret-that-must-not-be-stored"
         }))
@@ -130,7 +138,7 @@ async fn owner_creates_oidc_provider_and_secret_encrypted() {
 
     assert_eq!(
         body["issuer"].as_str(),
-        Some("https://accounts.google.com"),
+        Some(issuer.as_str()),
         "AC-B06-02: issuer must be returned"
     );
     assert_eq!(
@@ -154,9 +162,10 @@ async fn owner_creates_oidc_provider_and_secret_encrypted() {
     let account_uuid = uuid::Uuid::parse_str(&ctx.account_id).unwrap();
     let enc_bytes: Vec<u8> = sqlx::query_scalar(
         "SELECT client_secret_enc FROM oidc_providers \
-         WHERE issuer = 'https://accounts.google.com' AND account_id = $1",
+         WHERE issuer = $2 AND account_id = $1",
     )
     .bind(account_uuid)
+    .bind(&issuer)
     .fetch_one(&ctx.pool)
     .await
     .expect("fetch client_secret_enc");
@@ -280,15 +289,16 @@ async fn owner_deletes_oidc_provider_and_existing_sessions_remain_valid() {
 
 /// OIDC callback with a valid id_token from a configured provider.
 /// Originally AC-B06-05 (302 /admin/ + session cookie). Superseded by audit
-/// finding #58: the callback is disabled until `admin-oidc-sso` ships, so it
-/// must redirect to /admin/?error=oidc_failed with NO session cookie.
+/// finding #58 and then by `admin-oidc-sso` (ADR-086): a client-supplied id_token is never read,
+/// the flow needs a server-issued `state` + binding cookie, so this request must redirect to
+/// /admin/?error=sso_failed with NO session cookie. Kept as the #58 regression.
 ///
 /// Uses a local mock JWKS endpoint via axum test server.
 ///
 /// AC-B06-05
 // @US-B06 @AC-B06-05 @real-io @adapter-integration
 #[tokio::test]
-async fn oidc_callback_with_valid_id_token_is_refused_while_disabled() {
+async fn oidc_callback_with_a_client_supplied_id_token_is_refused() {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -342,25 +352,19 @@ async fn oidc_callback_with_valid_id_token_is_refused_while_disabled() {
     tokio::task::yield_now().await;
 
     // ── 3. Register OIDC provider pointing at local JWKS server ──────────────
+    // (directly: this local server has no discovery document, so create-time validation would refuse it)
     let client_id = "test-oidc-client-id";
-    let create_resp = ctx
-        .client
-        .post(ctx.url("/admin/v1/oidc_providers"))
-        .header("Cookie", &owner_cookie)
-        .json(&serde_json::json!({
-            "issuer":        &jwks_issuer,
-            "client_id":     client_id,
-            "client_secret": "test-client-secret"
-        }))
-        .send()
-        .await
-        .expect("POST oidc_provider failed");
-    assert_eq!(
-        create_resp.status().as_u16(),
-        201,
-        "must create OIDC provider; got: {}",
-        create_resp.status()
-    );
+    let _ = &owner_cookie;
+    sqlx::query(
+        "INSERT INTO oidc_providers (account_id, issuer, client_id, client_secret_enc) \
+         VALUES ($1, $2, $3, '\\x00'::bytea)",
+    )
+    .bind(uuid::Uuid::parse_str(&ctx.account_id).unwrap())
+    .bind(&jwks_issuer)
+    .bind(client_id)
+    .execute(&ctx.pool)
+    .await
+    .expect("insert OIDC provider");
 
     // ── 4. Generate a valid JWT signed with the private key ───────────────────
     let private_pem = private_key
@@ -407,12 +411,12 @@ async fn oidc_callback_with_valid_id_token_is_refused_while_disabled() {
         .expect("OIDC callback request failed");
 
     // ── 6. Assertions ─────────────────────────────────────────────────────────
-    // Audit finding #58: the callback is disabled — even a correctly signed
+    // Audit finding #58: no flow, no session — even a correctly signed
     // id_token must be refused and must never yield a session.
     assert_eq!(
         resp.status().as_u16(),
         302,
-        "#58: disabled OIDC callback must redirect; got status {}",
+        "#58: refused OIDC callback must redirect; got status {}",
         resp.status().as_u16()
     );
 
@@ -422,8 +426,8 @@ async fn oidc_callback_with_valid_id_token_is_refused_while_disabled() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(
-        location, "/admin/?error=oidc_failed",
-        "#58: disabled OIDC callback must redirect to the sign-in failure URL"
+        location, "/admin/?error=sso_failed",
+        "#58: refused OIDC callback must redirect to the sign-in failure URL"
     );
 
     let cookie_header = resp
@@ -433,7 +437,7 @@ async fn oidc_callback_with_valid_id_token_is_refused_while_disabled() {
         .unwrap_or("");
     assert!(
         !cookie_header.contains("embyr_session="),
-        "#58: disabled OIDC callback must not set a session cookie; got: {}",
+        "#58: refused OIDC callback must not set a session cookie; got: {}",
         cookie_header
     );
 
@@ -453,7 +457,7 @@ async fn oidc_callback_with_valid_id_token_is_refused_while_disabled() {
 
 // @US-B06 @AC-B06-05 @error @driving_port @real-io
 #[tokio::test]
-async fn oidc_callback_with_invalid_signature_redirects_with_oidc_failed() {
+async fn oidc_callback_with_invalid_signature_redirects_with_sso_failed() {
     let ctx = AdminTestContext::new().await;
     let session_cookie = sign_in_as_owner(&ctx).await;
     // Register a provider so the issuer is known.
@@ -475,7 +479,7 @@ async fn oidc_callback_with_invalid_signature_redirects_with_oidc_failed() {
         .await
         .expect("OIDC callback request failed");
 
-    // Must redirect to /admin/?error=oidc_failed (or return 401 if no redirect)
+    // Must redirect to /admin/?error=sso_failed (or return 401 if no redirect)
     let status = resp.status().as_u16();
     assert!(
         status == 302 || status == 401,
@@ -490,8 +494,8 @@ async fn oidc_callback_with_invalid_signature_redirects_with_oidc_failed() {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(
-            location.contains("error=oidc_failed"),
-            "AC-B06-05: redirect must include error=oidc_failed; got Location: {}",
+            location.contains("error=sso_failed"),
+            "AC-B06-05: redirect must include error=sso_failed; got Location: {}",
             location
         );
     }
@@ -779,34 +783,15 @@ async fn sign_in_as_viewer(ctx: &AdminTestContext) -> String {
         .expect("no cookie in sign-in as viewer response")
 }
 
-/// Create a test OIDC provider and return its ID.
-///
-/// # Panics (RED scaffold)
-async fn create_oidc_provider(ctx: &AdminTestContext, session_cookie: &str) -> String {
-    let resp = ctx
-        .client
-        .post(ctx.url("/admin/v1/oidc_providers"))
-        .header("Cookie", session_cookie)
-        .json(&serde_json::json!({
-            "issuer":        "https://accounts.google.com",
-            "client_id":     "test-client-id",
-            "client_secret": "test-client-secret"
-        }))
-        .send()
-        .await
-        .expect("POST oidc_provider in helper failed");
-
-    if resp.status().as_u16() != 201 {
-        panic!(
-            "Not yet implemented -- RED scaffold: \
-            create_oidc_provider helper requires working POST /admin/v1/oidc_providers"
-        )
-    }
-
-    resp.json::<serde_json::Value>()
-        .await
-        .expect("oidc_provider response must be JSON")["id"]
-        .as_str()
-        .expect("oidc_provider id must be present")
-        .to_string()
+/// Create a test OIDC provider and return its ID. Inserted directly: these tests exercise PATCH and
+/// DELETE, not create-time issuer validation (covered in `admin_oidc_sso`).
+async fn create_oidc_provider(ctx: &AdminTestContext, _session_cookie: &str) -> String {
+    sqlx::query_scalar(
+        "INSERT INTO oidc_providers (account_id, issuer, client_id, client_secret_enc) \
+         VALUES ($1, 'https://accounts.google.com', 'test-client-id', '\\x00'::bytea) RETURNING id::text",
+    )
+    .bind(uuid::Uuid::parse_str(&ctx.account_id).unwrap())
+    .fetch_one(&ctx.pool)
+    .await
+    .expect("insert OIDC provider")
 }

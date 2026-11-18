@@ -46,3 +46,11 @@ pub async fn write_audit_event<'e>(
     .map(|_| ())
     .map_err(AuditError::Db)
 }
+
+/// Best-effort write for request paths where an audit failure must not change the response
+/// (the outcome already happened). Failures are logged (labels only, never the row's contents).
+pub async fn record<'e>(executor: impl PgExecutor<'e>, ev: &AuditEvent<'_>) {
+    if let Err(e) = write_audit_event(executor, ev).await {
+        tracing::error!(event = ev.event, "audit write failed: {e}");
+    }
+}

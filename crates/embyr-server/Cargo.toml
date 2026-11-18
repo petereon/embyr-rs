@@ -1373,3 +1373,12 @@ path = "../../tests/admin_oidc_sso/acceptance/s02_sso_only_users_and_member_remo
 [[test]]
 name = "admin_oidc_sso_s02_audit_events"
 path = "../../tests/admin_oidc_sso/acceptance/s02_audit_events.rs"
+
+# admin-oidc-sso slice 3 (CI-only, Docker-backed).
+[[test]]
+name = "admin_oidc_sso_s03_start_callback"
+path = "../../tests/admin_oidc_sso/acceptance/s03_start_and_callback.rs"
+
+[[test]]
+name = "admin_oidc_sso_s03_ssrf_policy"
+path = "../../tests/admin_oidc_sso/acceptance/s03_ssrf_policy.rs"

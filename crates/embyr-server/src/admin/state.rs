@@ -101,6 +101,8 @@ pub struct UserAdminState {
     /// starts with a full `rate_buckets` row.
     pub server_keys: crate::adapters::connection_secrets::ServerKeys,
     pub rate_limit_capacity: f64,
+    /// admin-oidc-sso (ADR-086): outbound client + discovery/JWKS caches (per instance).
+    pub sso_client: Arc<crate::adapters::sso_client::SsoClient>,
 }
 
 /// State for the Stripe webhook sub-router (US-203). No session/operator

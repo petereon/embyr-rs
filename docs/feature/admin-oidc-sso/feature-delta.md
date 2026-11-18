@@ -176,7 +176,7 @@ is generic so later features (key rotation, member changes) can reuse it; its 12
 | `POST /admin/v1/auth/oidc/start` `{provider_id, invite_token?, intent?, password?, totp_code?}` | public; `link` needs session | returns `{authorization_url}` or `{error}`; rate-limited |
 | `GET /admin/v1/auth/oidc/callback?code&state` | public | replaces the disabled stub; always a 302 |
 | `DELETE /admin/v1/auth/sso_identity` | session | unlink own identity |
-| `PUT /admin/v1/oidc_providers/:id/secret` `{client_secret}` | Owner | rotate client secret |
+| `PUT /admin/v1/oidc_providers/:id/secret` `{client_secret}` | Owner | rotate client secret; 204, never echoed |
 | `PATCH /admin/v1/account` `{sso_required}` | Owner | new; existing provider routes keep their shapes, create/enable gain issuer validation |
 | `GET /admin/v1/auth/session` | session | add `auth_method`, `sso_linked` (bool), `sso_required` for the SPA |
 | Invitation create/lookup | existing | `auth_method` on create (`sso` rejected for Owner or when no enabled provider); lookup returns `sso_provider_id` when `sso` |
@@ -213,7 +213,7 @@ the chosen second IdP) with a throwaway client.
 |---|---|---|---|
 | 1 (done, PR "slices 1-2") | Migration 0051 (next free at implementation time); pure core (PKCE, state/nonce, claim validator, URL/IP policy extracted from `dsn_policy`); `issue_session` extraction; mock IdP harness | M | none |
 | 2 (done, same PR) | Nullable `password_hash` in `signin`, `verify_credentials`, password reset; `admin_audit_events` writer; `remove_member` deletes links; SSO-session revocation on provider disable (O6) | S | 1 |
-| 3 | `start` + discovery/JWKS caches + `callback` for intent `signin`; provider create/enable validation; `ServerKeys` for provider secret + `PUT .../secret` | L | 1, 2 |
+| 3 (done, PR "slice 3", stacked on slices 1-2) | `start` + discovery/JWKS caches + `callback` for intent `signin`; provider create/enable validation; `ServerKeys` for provider secret + `PUT .../secret` | L | 1, 2 |
 | 4 | Invitation `auth_method='sso'` (create, lookup, callback intent `invite`) | M | 3, `account-bootstrap-and-invitations` (landed) |
 | 5 | Self-link/unlink (intent `link`, re-auth) | S | 3 |
 | 6 | `sso_required` + session fields + Owner exemption | S | 3 |
@@ -224,6 +224,29 @@ Slice 1 delivered: migration 0051; core modules `embyr_core::admin::sso::{pkce, 
 `SessionOrigin` in `handlers/auth.rs`; mock IdP `tests/common/mock_oidc_idp.rs` with a Docker-free self-test. Slice 2 delivered:
 NULL-safe `signin`/`verify_credentials`/password reset, `adapters::admin_audit::write_audit_event`, `remove_member` link cleanup,
 provider disable/delete ending SSO sessions, audit retention purge.
+
+Slice 3 delivered: `handlers/oidc_sso.rs` (`start`, `callback`; the old stub and its `oidc_failed` redirect are gone),
+`adapters/sso_client.rs` (capped, SSRF-policed fetches pinned to the vetted address, no redirects, no proxy, 5 s;
+discovery and JWKS caches), pure `embyr_core::admin::sso::discovery` (issuer match, endpoint policy, authorization URL),
+provider create/enable validation (422 `{error:"issuer_invalid", reason}`), `PUT /oidc_providers/:id/secret` (204), provider
+secrets via `ServerKeys` with lazy re-encryption from the previous key, provider lifecycle audit events, expired-request
+purge in the `signin_rate_limit_sweeper` cycle, and the `AdminTestContext::with_sso` / `with_public_base_url` harness
+variants. Details settled while building (they refine, not change, the design above):
+
+- The per-provider cap of 200 live requests answers `429` with `retry-after-ms: 60000` (not `sso_unavailable`); it is one
+  conditional `INSERT`, so it is race-free enough for an abuse bound. `start` also deletes up to 100 of the provider's expired rows.
+- `start` and `callback` share one limiter key `sso:{ip}` on the existing sign-in limiter. A throttled callback redirects to
+  `sso_failed` before touching the database: its state row is not consumed (it expires and is swept) and no audit row is written,
+  like a callback without any `state`, so a flood cannot become a write amplifier.
+- `start` answers `400` for an `intent` other than `signin` until slices 4 and 5; the state table, the CHECK constraint and the
+  callback's `intent` match already carry `invite` and `link`.
+- `redirect_uri` needs an `https` `EMBYR_PUBLIC_BASE_URL` unless `EMBYR_ALLOW_PRIVATE_DSN_HOSTS=true`; otherwise `sso_unavailable`.
+- The forced JWKS refetch on an unknown `kid` happens at most once a minute per provider; inside that minute an unknown `kid` fails.
+- Outbound calls build one client per request with `no_proxy()` so the connection really goes to the vetted address; an egress
+  proxy therefore makes SSO unavailable (as the ADR already accepts).
+- Create and the secret route reject an empty or over-1024-byte `client_id` / `client_secret` with 422 (new, cheap hygiene).
+- Not done in this slice: the manual contract check against Google and the second IdP (O1); the unauthenticated `invite`
+  and `link` intents (slices 4-5); SPA work (slice 7).
 
 Slices 1-3 deliver working SSO for pre-linked users only if a link exists, so 4 or 5 is required before any real use; ship 1-5 together.
 Total roughly 4-5 weeks of one engineer including the mock IdP.

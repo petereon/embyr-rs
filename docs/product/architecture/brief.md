@@ -2092,7 +2092,7 @@ C4Component
 
         Component(operatorRouter, "Operator Sub-Router", "embyr-server::admin (operator routes)", "Routes: POST /projects, POST .../suspend, POST .../activate, DELETE /projects/:id. Layer: OperatorAuthMiddleware.")
         Component(sessionRouter, "Session Sub-Router", "embyr-server::admin (session routes)", "Routes: all 22 new user-facing routes. Layer: SessionAuthMiddleware.")
-        Component(publicRouter, "Public Sub-Router", "embyr-server::admin (public routes)", "Routes: POST /auth/signin, GET /auth/oidc/callback. No auth middleware.")
+        Component(publicRouter, "Public Sub-Router", "embyr-server::admin (public routes)", "Routes: POST /auth/signin, POST /auth/oidc/start, GET /auth/oidc/callback. No auth middleware.")
         Component(dualAuthRouter, "Dual-Auth Sub-Router", "embyr-server::admin (dual-auth route)", "Route: GET /projects/:id. Layer: DualAuthMiddleware.")
 
         Component(operatorAuthMw, "OperatorAuthMiddleware", "embyr-server::admin::middleware::operator_auth", "Tower from_fn_with_state. Validates Bearer EMBYR_ADMIN_KEY. Returns 401 if absent or mismatched.")
