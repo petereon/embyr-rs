@@ -115,7 +115,19 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
         Msg::SsoReturned(SsoReturn::Linked) => {
             push_toast(model, "SSO is now linked to your account".into(), ToastLevel::Info)
         }
-        Msg::SsoUnlinked => push_toast(model, "SSO identity unlinked".into(), ToastLevel::Info),
+        Msg::SsoUnlinked => {
+            if let Some(u) = model.current_user.as_mut() {
+                u.sso_linked = false;
+            }
+            push_toast(model, "SSO identity unlinked".into(), ToastLevel::Info)
+        }
+        Msg::SsoRequiredSet(on) => {
+            if let Some(u) = model.current_user.as_mut() {
+                u.sso_required = on;
+            }
+            let text = if on { "SSO is now required for non-Owner members" } else { "SSO is no longer required" };
+            push_toast(model, text.into(), ToastLevel::Info);
+        }
         Msg::SetOidcProviders(providers) => model.oidc_providers = providers,
         Msg::OidcProviderSaved => {
             model.oidc_provider_saves += 1;

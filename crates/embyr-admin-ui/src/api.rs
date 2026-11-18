@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::model::{
-    AdminKey, CapUsage, CheckoutReturn, Connection, ConnectionSummary, CurrentUser, Database, DbBackendMode, DbId,
+    AdminKey, AuthMethod, CapUsage, CheckoutReturn, Connection, ConnectionSummary, CurrentUser, Database, DbBackendMode, DbId,
     DbMetrics, DbStatus, Enrolment, InviteKind, KeyId, LatencyStats, LogRetention, Member, MetricsSummaryRow,
     MetricsWindow, OidcProvider, Plan, ProjectApiKeyInfo, ProviderIds, SsoReturn, QueryLogEntry, RecoveryCodes, RevealedSecret, Role, SecretKind, SeriesPoint, ServiceAccount,
     ServiceAccountId, Subscription, SubscriptionStatus, UsageStats, UsageTableRow, UserId,
@@ -60,6 +60,8 @@ pub enum CallKind {
     OidcProviders,
     /// Create, enable/disable, rotate and delete share a kind: one provider operation at a time.
     OidcProviderWrite,
+    /// `PATCH /account {sso_required}`.
+    SsoRequired,
 }
 
 /// How the second factor was supplied. Exactly one reaches the server.
@@ -231,6 +233,8 @@ pub enum ApiCall {
     RotateOidcSecret { id: String, client_secret: String },
     /// `DELETE /oidc_providers/:id` (Owner): also ends the sessions minted through it.
     DeleteOidcProvider(String),
+    /// `PATCH /account {sso_required}` (Owner): require SSO for non-Owner members, or stop requiring it.
+    SetSsoRequired(bool),
 }
 
 impl ApiCall {
@@ -277,6 +281,7 @@ impl ApiCall {
             | ApiCall::SetOidcProviderEnabled { .. }
             | ApiCall::RotateOidcSecret { .. }
             | ApiCall::DeleteOidcProvider(_) => CallKind::OidcProviderWrite,
+            ApiCall::SetSsoRequired(_) => CallKind::SsoRequired,
         }
     }
 
@@ -392,6 +397,7 @@ impl std::fmt::Debug for ApiCall {
                 .field("client_secret", &"<redacted>")
                 .finish(),
             ApiCall::DeleteOidcProvider(id) => write!(f, "DeleteOidcProvider({id})"),
+            ApiCall::SetSsoRequired(on) => write!(f, "SetSsoRequired({on})"),
         }
     }
 }
@@ -637,6 +643,7 @@ pub fn to_request(call: &ApiCall) -> HttpRequest {
         ApiCall::DeleteOidcProvider(id) => {
             HttpRequest { method: Method::Delete, path: format!("/admin/v1/oidc_providers/{id}"), body: None }
         }
+        ApiCall::SetSsoRequired(on) => patch("/admin/v1/account".into(), serde_json::json!({ "sso_required": on })),
     }
 }
 
@@ -920,6 +927,8 @@ fn decode_success(call: &ApiCall, body: &str) -> Result<Vec<Msg>, ApiError> {
             Ok(vec![Msg::InviteLooked(kind)])
         }
         ApiCall::UnlinkSso => Ok(vec![Msg::SsoUnlinked]),
+        // 200 `{sso_required}` echoes the stored value; the request is what was applied.
+        ApiCall::SetSsoRequired(on) => Ok(vec![Msg::SsoRequiredSet(*on)]),
         ApiCall::LoadOidcProviders => {
             let rows: Vec<OidcProviderDto> = parse(body)?;
             Ok(vec![Msg::SetOidcProviders(
@@ -1019,6 +1028,13 @@ fn refine(call: &ApiCall, error: ApiError, body: &str) -> ApiError {
         (ApiCall::UnlinkSso, ApiError::NotFound) => {
             ApiError::Invalid("No SSO identity is linked to your account".into())
         }
+        (ApiCall::SetSsoRequired(_), ApiError::Forbidden) => {
+            ApiError::Invalid("Only the account Owner can change whether SSO is required".into())
+        }
+        // 422 `{error:"sso_required_prerequisites"}`: no enabled provider, or the Owner has no link yet.
+        (ApiCall::SetSsoRequired(_), ApiError::Invalid(_)) => ApiError::Invalid(
+            "Cannot require SSO yet. Add and enable a provider, then link your own SSO identity under \"Your single sign-on\" so you cannot lock yourself out.".into(),
+        ),
         (ApiCall::CreateOidcProvider { .. }, ApiError::Conflict(_)) => {
             ApiError::Conflict("A provider with that issuer and client ID already exists".into())
         }
@@ -1246,6 +1262,13 @@ struct SessionDto {
     email: String,
     display_name: String,
     role: String,
+    // The three fields below arrive with `sso_required`; an older server omits them.
+    #[serde(default)]
+    auth_method: String,
+    #[serde(default)]
+    sso_linked: bool,
+    #[serde(default)]
+    sso_required: bool,
 }
 
 impl TryFrom<SessionDto> for CurrentUser {
@@ -1258,6 +1281,9 @@ impl TryFrom<SessionDto> for CurrentUser {
             email: dto.email,
             display_name: dto.display_name,
             role: parse_role(&dto.role)?,
+            auth_method: if dto.auth_method == "sso" { AuthMethod::Sso } else { AuthMethod::Password },
+            sso_linked: dto.sso_linked,
+            sso_required: dto.sso_required,
         })
     }
 }

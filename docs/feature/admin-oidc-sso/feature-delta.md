@@ -194,6 +194,13 @@ No audit read endpoint in V1 (O5). New config: none beyond `EMBYR_PUBLIC_BASE_UR
 - Invite dialog: "Sign-in method" (Password + authenticator | SSO) shown only for non-Owner roles when a provider is enabled; invite accept
   screen shows "Continue with SSO" for SSO invitations. The GitHub button stays dropped (G-13); AC-AUW-28 lifts only after slice 6.
 
+SPA status: slice 7a (sign-in start, providers, SSO invitations, link/unlink) shipped in PR #88. Slice 7b (this section's `sso_required`
+parts, needs the slice 6 server at runtime) adds: session fields `auth_method` / `sso_linked` / `sso_required` (absent on older servers:
+password / false / false); Settings "Require SSO for members" (Owner only, confirm before enabling, 422 `sso_required_prerequisites` and
+403 mapped to plain sentences); a persistent banner (non-Owner linked: informational; non-Owner not linked: link before the session
+ends; Owner: reminder of the exemption); Link / Unlink driven by the session (SSO-session users see neither, per O4; non-Owners cannot
+unlink while required); invite dialog allows only SSO invitations for Admin/Viewer while required.
+
 ## 7. Test plan
 
 Pure unit/property tests in `embyr-core`: PKCE vector (RFC 7636 appendix B), state/nonce entropy and uniqueness, claim validator (every

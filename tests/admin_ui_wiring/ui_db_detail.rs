@@ -65,6 +65,7 @@ fn user(role: Role) -> CurrentUser {
         email: "ada@example.com".into(),
         display_name: "Ada".into(),
         role,
+        ..Default::default()
     }
 }
 
