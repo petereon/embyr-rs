@@ -137,9 +137,9 @@ requests may still hold the old one, so connection churn and brief overlap are e
 a **customer-facing requirement** to document, and it is why a low-limit managed DB (e.g. a
 serverless or free tier) can be exhausted by a single project.
 
-Hosted-identity REST sign-in/sign-up on a cache hit builds a new Postgres pool to the customer DB
-per request (go-live finding X11, not listed as fixed); treat it as extra connection and
-handshake load until verified.
+Hosted-identity REST requests (sign-up, sign-in, OOB code, reset) share the same cached tenant pool
+as gRPC (`CachedEntry.pg`), so they add no per-request connections or handshakes (go-live finding
+X11, fixed); the pool follows the same TTL and eviction rules.
 
 ### PgBouncer and other connection poolers
 

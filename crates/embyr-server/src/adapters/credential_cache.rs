@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use embyr_core::domain::project::CredentialCacheKey;
 use embyr_core::storage::backend_adapter::BackendAdapter;
 
+use crate::adapters::postgres_backend::PostgresBackendAdapter;
 use crate::middleware::rate_limit::TokenBucket;
 
 pub type SharedBackendAdapter = Arc<dyn BackendAdapter + Send + Sync>;
@@ -40,6 +41,12 @@ pub struct CachedEntry {
     /// Decrypted customer DSN — stored so the Listen handler can start
     /// `PostgresNotifyListener` without re-decrypting on each stream open.
     pub dsn: String,
+    /// The same adapter as `adapter`, as its concrete type, when the backend
+    /// is Postgres (`None` for agent mode). REST hosted-identity handlers run
+    /// raw SQL through its `pool()`; sharing this one `Arc` means they reuse
+    /// the gRPC path's tenant pool (same size / acquire-timeout, same TTL,
+    /// same eviction) instead of dialing the customer DB on every request.
+    pub pg: Option<Arc<PostgresBackendAdapter>>,
 }
 
 struct Inner<V> {
@@ -83,6 +90,42 @@ impl<V> CredentialCache<V> {
             return None;
         }
         guard.entries.get(key).map(|(_, value)| read(value))
+    }
+
+    /// Read from the fresh entry for `key`, or `build` one on a miss/expiry,
+    /// insert it and read from that. `build` runs only when nothing fresh is
+    /// cached, so N requests inside one TTL build the entry (and the tenant
+    /// pool inside it) once. Concurrent misses may each build; the last
+    /// insert wins and the losers' pools drop with their last `Arc`.
+    pub async fn get_or_try_build<T, E, Fut>(
+        &self,
+        key: &CredentialCacheKey,
+        read: impl Fn(&V) -> T,
+        build: impl FnOnce() -> Fut,
+    ) -> Result<T, E>
+    where
+        Fut: std::future::Future<Output = Result<V, E>>,
+    {
+        self.get_or_try_build_at(key, Instant::now(), read, build).await
+    }
+
+    async fn get_or_try_build_at<T, E, Fut>(
+        &self,
+        key: &CredentialCacheKey,
+        now: Instant,
+        read: impl Fn(&V) -> T,
+        build: impl FnOnce() -> Fut,
+    ) -> Result<T, E>
+    where
+        Fut: std::future::Future<Output = Result<V, E>>,
+    {
+        if let Some(hit) = self.fresh_at(key, now, &read).await {
+            return Ok(hit);
+        }
+        let entry = build().await?;
+        let out = read(&entry);
+        self.insert(key.clone(), entry).await;
+        Ok(out)
     }
 
     /// Insert or replace the entry for `key`, restarting its TTL.
@@ -165,6 +208,41 @@ mod tests {
 
     async fn served(cache: &TestCache, k: &CredentialCacheKey, age: Duration) -> Option<&'static str> {
         cache.fresh_at(k, Instant::now() + age, |v| *v).await
+    }
+
+    #[tokio::test]
+    async fn entry_is_built_once_per_ttl_window_and_rebuilt_after_eviction_or_expiry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = TestCache::new(8);
+        let k = key("acme", "good-key");
+        let builds = AtomicUsize::new(0);
+        let get = |now: Instant| {
+            cache.get_or_try_build_at::<_, (), _>(&k, now, |v| *v, || async {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Ok("active")
+            })
+        };
+
+        for _ in 0..5 {
+            assert_eq!(get(Instant::now()).await, Ok("active"));
+        }
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "5 requests, one build");
+
+        cache.evict_project("acme").await;
+        assert_eq!(get(Instant::now()).await, Ok("active"));
+        assert_eq!(builds.load(Ordering::SeqCst), 2, "rebuilt after eviction");
+
+        assert_eq!(get(Instant::now() + CREDENTIAL_TTL).await, Ok("active"));
+        assert_eq!(builds.load(Ordering::SeqCst), 3, "rebuilt after TTL");
+    }
+
+    #[tokio::test]
+    async fn failed_build_caches_nothing() {
+        let cache = TestCache::new(8);
+        let k = key("acme", "good-key");
+        let r = cache.get_or_try_build(&k, |v| *v, || async { Err::<&str, _>("boom") }).await;
+        assert_eq!(r, Err("boom"));
+        assert_eq!(served(&cache, &k, Duration::ZERO).await, None);
     }
 
     /// Bad keys admitted for `project` before the budget refuses one.

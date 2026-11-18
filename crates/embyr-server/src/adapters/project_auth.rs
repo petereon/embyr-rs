@@ -14,14 +14,12 @@
 //! (`Arc<dyn BackendAdapter>`), but this function's callers need the
 //! CONCRETE `PostgresBackendAdapter` type to run raw SQL against
 //! `hosted_identity_accounts` (a table outside the `BackendAdapter` trait's
-//! document-CRUD surface) via its own `pool()` accessor. Reconciled by using
-//! the cache's existing `dsn` field (already present in `CachedEntry` for
-//! the Listen-handler's own reuse) as the fast-path payload: a cache hit
-//! skips Argon2id + the System DB round trip + ECIES decryption entirely,
-//! then builds a fresh concrete adapter from the cached DSN. A cache MISS
-//! populates the SAME shared cache other callers (`authenticate()`) already
-//! read from — a second consumer of one already-established cache, not a
-//! new caching mechanism.
+//! document-CRUD surface) via its own `pool()` accessor. `CachedEntry.pg`
+//! carries that concrete `Arc` (same object as `adapter`), so a cache hit
+//! reuses the gRPC path's tenant pool: no per-request pool build / handshake
+//! to the customer DB (G-002, go-live X11). A cache MISS populates the SAME
+//! shared cache `authenticate()` reads from, with the same TTL and
+//! `evict_project` semantics.
 //!
 //! Structurally cannot resolve `backend_mode=agent`: the `agent` branch
 //! (folded into the fallback arm below) returns
@@ -85,23 +83,46 @@ pub async fn resolve_customer_db_adapter(
         api_key_blake3,
     };
 
-    // Cache hit — skip Argon2id + System DB + ECIES entirely (the identical
-    // fast-path discipline `authenticate()` already established), then
-    // build a fresh concrete adapter from the cached DSN.
-    if let Some((_, status, dsn)) = credential_cache.get(&cache_key).await {
-        if status == "suspended" || status == "deleted" {
-            return Err(ProjectAuthError::ProjectNotFound);
-        }
-        let adapter = PostgresBackendAdapter::with_pool_config(
-            &dsn,
-            tenant_db_max_connections,
-            tenant_db_acquire_timeout,
+    // One path for hit and miss: a fresh entry hands back the SAME tenant
+    // adapter (and pool) the gRPC path built; only a miss/expiry runs the
+    // System DB read + Argon2id + secret fetch + pool build below, and the
+    // result is cached for both callers (G-002).
+    let (pg, status) = credential_cache
+        .get_or_try_build(
+            &cache_key,
+            |e| (e.pg.clone(), e.project_status.clone()),
+            || {
+                build_entry(
+                    system_db,
+                    aws_secret_fetcher,
+                    gcp_secret_fetcher,
+                    project_id,
+                    api_key,
+                    tenant_db_max_connections,
+                    tenant_db_acquire_timeout,
+                    server_keys,
+                )
+            },
         )
-            .await
-            .map_err(|e| ProjectAuthError::Internal(e.to_string()))?;
-        return Ok(Arc::new(adapter));
+        .await?;
+    if status == "suspended" || status == "deleted" {
+        return Err(ProjectAuthError::ProjectNotFound);
     }
+    // `None`: the entry came from an agent-mode project via the gRPC path.
+    pg.ok_or(ProjectAuthError::HostedIdentityUnavailable)
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn build_entry(
+    system_db: &SystemDb,
+    aws_secret_fetcher: Option<&AwsSecretFetcher>,
+    gcp_secret_fetcher: Option<&GcpSecretFetcher>,
+    project_id: &str,
+    api_key: &str,
+    tenant_db_max_connections: u32,
+    tenant_db_acquire_timeout: std::time::Duration,
+    server_keys: &ServerKeys,
+) -> Result<CachedEntry, ProjectAuthError> {
     let row = system_db
         .get_project_for_auth(project_id)
         .await
@@ -188,16 +209,10 @@ pub async fn resolve_customer_db_adapter(
     }
     let concrete = Arc::new(concrete);
     let shared: SharedBackendAdapter = concrete.clone();
-    credential_cache
-        .insert(
-            cache_key,
-            CachedEntry {
-                adapter: shared,
-                project_status: row.status.clone(),
-                dsn,
-            },
-        )
-        .await;
-
-    Ok(concrete)
+    Ok(CachedEntry {
+        adapter: shared,
+        project_status: row.status.clone(),
+        dsn,
+        pg: Some(concrete),
+    })
 }
