@@ -80,7 +80,7 @@ x509-parser.workspace = true
 # admin-ui-api-wiring (ADR-082): promoted from dev-dependencies -- static_ui hashes the
 # Trunk bootstrap script for the CSP in PRODUCTION code.
 sha2.workspace = true
-lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls", "hostname"] }
+lettre = { version = "0.11.24", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls", "hostname"] }
 
 [[test]]
 name = "us_13_browser_transport"

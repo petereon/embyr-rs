@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
-    AppModel, AuthScreen, Database, DbPatch, DbStatus, InviteStep, Member, MetricsWindow, Role, Section, Toast,
-    ToastId, ToastLevel,
+    AppModel, AuthScreen, Database, DbPatch, DbStatus, InviteKind, InviteStep, Member, MetricsWindow, Role, Section,
+    SsoReturn, Toast, ToastId, ToastLevel,
 };
 use crate::msg::{Effect, Msg};
 
@@ -21,6 +21,8 @@ const ACCOUNT_LOCKED: &str = "Account locked - try again in 15 minutes";
 const RESET_LINK_SENT: &str = "If that address belongs to an account, a reset link is on its way. It expires in 1 hour.";
 const PASSWORD_UPDATED: &str = "Password updated. Sign in with your new password.";
 const ACCOUNT_CREATED: &str = "Your account is ready. Sign in with your password and an authenticator code.";
+/// The SSO callback failed. One neutral sentence for every cause: the server says nothing more on purpose.
+const SSO_FAILED: &str = "Single sign-on did not complete. Try again, or ask your account Owner.";
 /// G-11: the session cookie is `Secure`, so a plain-HTTP non-localhost origin silently drops it.
 const COOKIE_REJECTED: &str =
     "Signed in, but the browser did not keep the session. The console needs HTTPS or localhost.";
@@ -52,6 +54,15 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
                     model.auth_notice = None;
                 }
                 ApiCall::DeleteAccount { .. } => model.account_delete_error = None,
+                ApiCall::LookupInvitation { .. } => {
+                    model.reset_error = None;
+                    model.invite_step = InviteStep::Checking;
+                }
+                ApiCall::StartSso { .. } => {
+                    model.sign_in_error = None;
+                    model.reset_error = None;
+                    model.sso_link_error = None;
+                }
                 _ => {}
             }
             effects.extend(begin(model, call));
@@ -90,6 +101,25 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
             model.invite_step = InviteStep::Details;
             model.auth_screen = AuthScreen::SignIn;
             model.auth_notice = Some(ACCOUNT_CREATED.into());
+        }
+        // A late answer must not flip a screen the person already left (`ShowAuth` resets the step).
+        Msg::InviteLooked(kind) => {
+            if model.invite_step == InviteStep::Checking {
+                model.invite_step = match kind {
+                    InviteKind::Password => InviteStep::Details,
+                    InviteKind::Sso(ids) => InviteStep::Sso(ids),
+                };
+            }
+        }
+        Msg::SsoReturned(SsoReturn::Failed) => model.sign_in_error = Some(SSO_FAILED.into()),
+        Msg::SsoReturned(SsoReturn::Linked) => {
+            push_toast(model, "SSO is now linked to your account".into(), ToastLevel::Info)
+        }
+        Msg::SsoUnlinked => push_toast(model, "SSO identity unlinked".into(), ToastLevel::Info),
+        Msg::SetOidcProviders(providers) => model.oidc_providers = providers,
+        Msg::OidcProviderSaved => {
+            model.oidc_provider_saves += 1;
+            push_toast(model, "Single sign-on provider saved".into(), ToastLevel::Info);
         }
         Msg::OpenDeleteAccount => {
             model.delete_account_modal_open = model.can_delete_account();
@@ -247,6 +277,7 @@ pub fn update(model: &mut AppModel, msg: Msg) -> Vec<Effect> {
 
         // ── US-009: Members ────────────────────────────────────────────────
         Msg::SetMembers(members) => model.members = members,
+        Msg::SetSsoMembers(ids) => model.sso_members = ids,
         Msg::InvitationRevoked(id) => model.members.retain(|m| !(m.pending && m.id == id)),
         Msg::MemberInvited(member) => {
             model.members.push(member);
@@ -347,11 +378,18 @@ fn begin(model: &mut AppModel, call: ApiCall) -> Option<Effect> {
 
 /// The loads a section needs when it opens.
 fn section_loads(model: &mut AppModel) -> Vec<Effect> {
+    // The provider list is Owner-only: the invite dialog and the Settings section need it.
+    let owner = model.can_manage_sso();
     let calls = match model.nav.section.clone() {
         Section::Dashboard => vec![ApiCall::LoadProjects, ApiCall::LoadMetricsSummary],
         Section::Databases => vec![ApiCall::LoadProjects],
         Section::Billing => vec![ApiCall::LoadSubscription, ApiCall::LoadUsage],
-        Section::Identities => vec![ApiCall::LoadMembers, ApiCall::LoadServiceAccounts],
+        Section::Identities => {
+            let mut calls = vec![ApiCall::LoadMembers, ApiCall::LoadServiceAccounts];
+            calls.extend(owner.then_some(ApiCall::LoadOidcProviders));
+            calls
+        }
+        Section::Settings if owner => vec![ApiCall::LoadOidcProviders],
         Section::ApiKeys => vec![ApiCall::LoadAdminKeys, ApiCall::LoadServiceAccounts],
         Section::DbDetail(id) => vec![
             ApiCall::LoadProject(id.clone()),
@@ -379,6 +417,12 @@ fn api_failed(model: &mut AppModel, call: CallKind, error: ApiError) {
             reset_failed(model, error)
         }
         CallKind::DeleteAccount => account_delete_failed(model, error),
+        CallKind::SsoStart => sso_start_failed(model, error),
+        // A dead invitation: back to the form (its submit shows the same error), not a blank screen.
+        CallKind::InviteLookup => {
+            model.invite_step = InviteStep::Details;
+            reset_failed(model, error)
+        }
         // G-52: without a Stripe key the first call answers 502. Say so on the Billing screen, no toast
         // (it also runs at every sign-in).
         CallKind::Subscription if matches!(error, ApiError::Upstream) => model.billing.unavailable = true,
@@ -412,6 +456,25 @@ fn reset_failed(model: &mut AppModel, error: ApiError) {
         ApiError::Throttled { retry_after_ms: None } => ACCOUNT_LOCKED.into(),
         other => other.to_string(),
     });
+}
+
+/// Where an SSO start failure shows depends on who asked: a signed-in user linking (wrong password or
+/// code is a 401, not an expired session), an invitee, or someone signing in.
+fn sso_start_failed(model: &mut AppModel, error: ApiError) {
+    let message = match error {
+        ApiError::Throttled { retry_after_ms: Some(ms) } => {
+            format!("Too many attempts, retry in {} s", ms.div_ceil(1000))
+        }
+        ApiError::Throttled { retry_after_ms: None } => "Too many attempts, try again later".to_string(),
+        other => other.to_string(),
+    };
+    if model.authed {
+        model.sso_link_error = Some(message);
+    } else if model.auth_screen == AuthScreen::AcceptInvite {
+        model.reset_error = Some(message);
+    } else {
+        model.sign_in_error = Some(message);
+    }
 }
 
 /// A wrong password or second factor is a 401 here, not an expired session: the modal stays open.
