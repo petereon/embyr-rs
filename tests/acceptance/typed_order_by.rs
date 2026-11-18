@@ -502,12 +502,23 @@ async fn implicit_name_order_follows_the_last_order_direction() {
     let sq = StructuredQuery { from: from("ties"), limit: Some(4), ..Default::default() };
     assert_eq!(run_ids(&mut client, &env, sq).await, strs(&["hi_a", "hi_b", "hi_c", "lo_a"]));
 
-    // Explicit mixed directions: score DESC, then name ASC (last explicit order wins).
+    // Explicit mixed directions (score DESC, then name ASC) need a composite
+    // index, exactly as in Firestore: the gate sees two explicit orders and
+    // refuses without one. (The implicit name order above never trips it.)
     let sq = StructuredQuery {
         from: from("ties"),
         order_by: vec![order("score", Direction::Descending), order("__name__", Direction::Ascending)],
         limit: Some(5),
         ..Default::default()
     };
-    assert_eq!(run_ids(&mut client, &env, sq).await, strs(&["hi_a", "hi_b", "hi_c", "mid_a", "mid_b"]));
+    let req = authed(
+        RunQueryRequest {
+            parent: format!("projects/{}/databases/(default)/documents", env.project_id),
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+    let status = client.run_query(req).await.expect_err("mixed-direction orders need an index");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
 }
