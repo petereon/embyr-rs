@@ -297,8 +297,47 @@ impl std::fmt::Debug for RecoveryCodes {
 pub enum InviteStep {
     #[default]
     Details,
+    /// `invitations/lookup` is in flight: neither form shows yet.
+    Checking,
+    /// An SSO invitation: no password or authenticator steps, just "Continue with SSO".
+    Sso(ProviderIds),
     Enrol(Enrolment),
     Codes(RecoveryCodes),
+}
+
+/// SSO provider ids an invitation may be redeemed through. `Debug` hides them: they come from a
+/// public lookup keyed by the invitation token, so they stay out of logged model dumps.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderIds(pub Vec<String>);
+
+impl std::fmt::Debug for ProviderIds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ProviderIds(<{} redacted>)", self.0.len())
+    }
+}
+
+/// What `invitations/lookup` says about an invitation token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InviteKind {
+    Password,
+    Sso(ProviderIds),
+}
+
+/// Where the browser came back from an SSO round trip (`?error=sso_failed`, `?sso_linked=1`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SsoReturn {
+    Failed,
+    Linked,
+}
+
+/// One SSO provider of the account (`GET /oidc_providers`, Owner only). The client secret is
+/// write-only: the API never returns it and this type has no field for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OidcProvider {
+    pub id: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub enabled: bool,
 }
 
 // ── DbPatch — partial update to database backend config ────────────────────
@@ -760,9 +799,32 @@ pub struct AppModel {
     pub delete_account_modal_open: bool,
     /// Error inside the delete-account modal (a wrong password is not a session expiry).
     pub account_delete_error: Option<String>,
+    /// The account's SSO providers (Owner only; empty for everyone else).
+    pub oidc_providers: Vec<OidcProvider>,
+    /// Bumped on every confirmed provider create / secret rotation; views clear their secret fields on change.
+    pub oidc_provider_saves: u32,
+    /// Members who sign in through SSO (no password), from `GET /members`.
+    pub sso_members: HashSet<UserId>,
+    /// Error on the "Link SSO" form (a wrong password or code is not a session expiry).
+    pub sso_link_error: Option<String>,
 }
 
 impl AppModel {
+    /// Only the account Owner manages SSO providers (the server enforces the same rule).
+    pub fn can_manage_sso(&self) -> bool {
+        self.can_manage_billing()
+    }
+
+    /// Whether the invite dialog may offer SSO. The provider list is Owner-only, so an Admin cannot see
+    /// it: for them the server decides (422 without an enabled provider). Viewers cannot invite at all.
+    pub fn can_invite_sso(&self) -> bool {
+        match self.current_user.as_ref().map(|u| &u.role) {
+            Some(Role::Owner) => self.oidc_providers.iter().any(|p| p.enabled),
+            Some(Role::Admin) => true,
+            _ => false,
+        }
+    }
+
     /// Owner and Admin may change databases; Viewers see disabled controls (AC-AUW-21).
     /// The server enforces the same rule.
     pub fn can_manage_databases(&self) -> bool {

@@ -100,20 +100,30 @@ fn MembersTab() -> impl IntoView {
     let invite_open = RwSignal::new(false);
     let invite_email = RwSignal::new(String::new());
     let invite_role = RwSignal::new(String::from("Viewer"));
+    // true = SSO invitation. Only offered while a provider is enabled and the role is below Owner.
+    let invite_sso = RwSignal::new(false);
 
     let can_manage = move || model.with(|m| m.can_manage_identities());
     let inviting = move || model.with(|m| m.pending.contains(&CallKind::MemberInvite));
     let loading = move || model.with(|m| m.pending.contains(&CallKind::Members));
+    let sso_offered = move || model.with(|m| m.can_invite_sso()) && invite_role.get() != "Owner";
+    let sso_chosen = move || invite_sso.get() && sso_offered();
 
     let on_invite_submit = move |_| {
         let email = invite_email.get();
         if email.trim().is_empty() {
             return;
         }
-        dispatch.run(Msg::Request(ApiCall::InviteMember { email, role: role_from_label(&invite_role.get()) }));
+        let role = role_from_label(&invite_role.get());
+        dispatch.run(Msg::Request(if sso_chosen() {
+            ApiCall::InviteSsoMember { email, role }
+        } else {
+            ApiCall::InviteMember { email, role }
+        }));
         invite_open.set(false);
         invite_email.set(String::new());
         invite_role.set(String::from("Viewer"));
+        invite_sso.set(false);
     };
 
     view! {
@@ -193,6 +203,22 @@ fn MembersTab() -> impl IntoView {
                             {role_options(model)}
                         </select>
                     </div>
+                    <div class="modal-field">
+                        <label class="modal-label">"Sign-in method"</label>
+                        <select
+                            class="modal-select"
+                            prop:value=move || if sso_chosen() { "sso" } else { "password" }
+                            on:change=move |e| invite_sso.set(event_target_value(&e) == "sso")
+                        >
+                            <option value="password">"Password + authenticator"</option>
+                            <option value="sso" disabled=move || !sso_offered()>"Single sign-on"</option>
+                        </select>
+                        <Show when=move || !sso_offered() fallback=|| ()>
+                            <span style="font-size:12px;color:var(--text-3)">
+                                "SSO needs an enabled provider (Settings) and a role below Owner."
+                            </span>
+                        </Show>
+                    </div>
                     <div class="modal-footer">
                         <button class="btn btn-ghost" type="button" on:click=move |_| invite_open.set(false)>
                             "Cancel"
@@ -219,6 +245,7 @@ fn render_member_row(
     let id = member.id.clone();
     let id_role = member.id.clone();
     let pending = member.pending;
+    let sso = model.with(|m| m.sso_members.contains(&member.id));
     let is_sole_owner = member.role == Role::Owner && !pending && owners == 1;
     let editable = model.with(|m| m.can_edit_member(&member));
     let busy = move || model.with(|m| m.pending.contains(&CallKind::MemberChange));
@@ -263,6 +290,7 @@ fn render_member_row(
             <td>
                 {member.email.clone()}
                 {pending.then(|| view! { <span class="badge badge-neutral" style="margin-left:6px">"pending"</span> })}
+                {sso.then(|| view! { <span class="badge badge-neutral" style="margin-left:6px" title="Signs in with single sign-on">"SSO"</span> })}
             </td>
             <td>{role_cell}</td>
             <td>{last_login_display}</td>

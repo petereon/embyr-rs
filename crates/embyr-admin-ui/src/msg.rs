@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use crate::api::{ApiCall, ApiError, CallKind};
 use crate::model::{
     AdminKey, Card, CapUsage, CheckoutReturn, Connection, CurrentUser, Database, DbBackendMode, DbId, DbMetrics,
-    DbPatch, Enrolment, Invoice, KeyId, LogRetention, Member, MetricsSummaryRow, Plan,
-    ProjectApiKeyInfo, QueryLogEntry, RecoveryCodes, RevealedSecret, Role, ServiceAccount, ServiceAccountId, Subscription,
+    DbPatch, Enrolment, InviteKind, Invoice, KeyId, LogRetention, Member, MetricsSummaryRow, OidcProvider, Plan,
+    ProjectApiKeyInfo, SsoReturn, QueryLogEntry, RecoveryCodes, RevealedSecret, Role, ServiceAccount, ServiceAccountId, Subscription,
     SubscriptionStatus, Toast, ToastId, UsageTableRow, UserId,
 };
 
@@ -46,6 +46,16 @@ pub enum Msg {
     InviteFinished,
     /// `DELETE /account` accepted (202): the session is gone, show the purge date on sign-in.
     AccountDeleted(DateTime<Utc>),
+    /// `invitations/lookup` answered: password invitations show the usual form, SSO ones the SSO step.
+    InviteLooked(InviteKind),
+    /// The browser came back from an SSO round trip (`?error=sso_failed` / `?sso_linked=1`).
+    SsoReturned(SsoReturn),
+    /// `DELETE /auth/sso_identity` succeeded.
+    SsoUnlinked,
+    /// `GET /oidc_providers` (Owner): replace the provider list.
+    SetOidcProviders(Vec<OidcProvider>),
+    /// A provider was created or its secret rotated.
+    OidcProviderSaved,
     /// Open the delete-account modal (Owner only).
     OpenDeleteAccount,
     CloseDeleteAccount,
@@ -114,6 +124,8 @@ pub enum Msg {
     SetMembers(Vec<Member>),
     /// A pending invitation was revoked on the server.
     InvitationRevoked(UserId),
+    /// Which of the listed members sign in through SSO (shown as a badge).
+    SetSsoMembers(std::collections::HashSet<UserId>),
     /// Append a newly invited member (or pending member).
     MemberInvited(Member),
     /// Change a member's role (subject to sole-Owner invariant).

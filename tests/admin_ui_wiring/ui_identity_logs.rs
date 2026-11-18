@@ -203,7 +203,8 @@ fn the_invite_link_points_at_the_console_origin() {
 fn opening_identities_loads_members_and_service_accounts() {
     let mut model = model_as(Role::Owner, Section::Dashboard);
     let loads = calls(update(&mut model, Msg::NavigateTo(Section::Identities)));
-    assert_eq!(loads, vec![ApiCall::LoadMembers, ApiCall::LoadServiceAccounts]);
+    // The Owner also loads the SSO providers: the invite dialog offers SSO only while one is enabled.
+    assert_eq!(loads, vec![ApiCall::LoadMembers, ApiCall::LoadServiceAccounts, ApiCall::LoadOidcProviders]);
 }
 
 #[test]

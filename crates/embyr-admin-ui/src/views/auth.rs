@@ -3,9 +3,9 @@
 #[cfg(feature = "csr")]
 use crate::components::Icon;
 #[cfg(feature = "csr")]
-use crate::api::{ApiCall, CallKind, SignInCode};
+use crate::api::{ApiCall, CallKind, SignInCode, SsoIntent};
 #[cfg(feature = "csr")]
-use crate::model::{AppModel, AuthScreen, Enrolment, InviteStep, RecoveryCodes};
+use crate::model::{AppModel, AuthScreen, Enrolment, InviteStep, ProviderIds, RecoveryCodes};
 #[cfg(feature = "csr")]
 use crate::msg::Msg;
 #[cfg(feature = "csr")]
@@ -45,7 +45,6 @@ pub fn AuthView() -> impl IntoView {
                         <p class="field-label" role="status" style="margin:0 0 14px">{move || notice().unwrap_or_default()}</p>
                     </Show>
 
-                    // SSO sign-in is hidden until `admin-oidc-sso` lands (G-13, AC-AUW-28).
                     <form class="col" style="gap:14px" on:submit=submit>
                         <div class="field">
                             <label class="field-label">"Email"</label>
@@ -79,6 +78,14 @@ pub fn AuthView() -> impl IntoView {
                             {move || if busy() { "Signing in…" } else { "Continue" }}
                         </button>
                     </form>
+
+                    // No provider list and no email box: nothing here tells a stranger which accounts use SSO.
+                    <details style="margin-top:18px;font-size:12.5px;color:var(--text-2)">
+                        <summary style="cursor:pointer">"Sign in with SSO"</summary>
+                        <p style="margin:8px 0 0;line-height:1.5">
+                            "Single sign-on starts from a link. Ask your account Owner for the SSO sign-in link and open it here."
+                        </p>
+                    </details>
 
                     <p style="text-align:center;font-size:12.5px;color:var(--text-3);margin-top:18px">
                         "Protected by mandatory MFA"
@@ -283,11 +290,74 @@ pub fn AcceptInviteView(token: RwSignal<Option<String>>) -> impl IntoView {
     view! {
         <AuthFrame>
             {move || match step() {
+                InviteStep::Checking => view! {
+                    <p style="color:var(--text-3)">"Checking your invitation…"</p>
+                }
+                .into_any(),
+                InviteStep::Sso(ids) => view! { <InviteSsoStep token=token ids=ids /> }.into_any(),
                 InviteStep::Details => view! { <InviteDetailsForm token=token /> }.into_any(),
                 InviteStep::Enrol(enrolment) => view! { <InviteEnrolForm token=token enrolment=enrolment /> }.into_any(),
                 InviteStep::Codes(codes) => view! { <InviteCodes codes=codes /> }.into_any(),
             }}
         </AuthFrame>
+    }
+}
+
+/// An SSO invitation: no password and no authenticator steps. The IdP proves who the invitee is; the
+/// server matches the verified email to the invitation. One button per enabled provider of the account
+/// (usually one); the token stays in this component's props and is sent only inside the start call.
+#[cfg(feature = "csr")]
+#[component]
+fn InviteSsoStep(token: RwSignal<Option<String>>, ids: ProviderIds) -> impl IntoView {
+    let dispatch = use_context::<Callback<Msg>>().expect("dispatch context missing");
+    let model = use_context::<RwSignal<AppModel>>().expect("model context missing");
+
+    let busy = move || model.with(|m| m.pending.contains(&CallKind::SsoStart));
+    let error = move || model.with(|m| m.reset_error.clone());
+    let many = ids.0.len() > 1;
+    let ids_empty = ids.0.is_empty();
+    let buttons = ids
+        .0
+        .into_iter()
+        .enumerate()
+        .map(|(i, provider_id)| {
+            let label = if many { format!("Continue with SSO ({})", i + 1) } else { "Continue with SSO".to_string() };
+            view! {
+                <button class="btn btn-primary btn-block btn-lg" type="button" disabled=busy
+                    on:click=move |_| {
+                        let Some(token) = token.get_untracked() else { return };
+                        dispatch.run(Msg::Request(ApiCall::StartSso {
+                            provider_id: provider_id.clone(),
+                            intent: SsoIntent::Invite { token },
+                        }));
+                    }>
+                    {label}
+                </button>
+            }
+        })
+        .collect_view();
+    let empty = ids_empty;
+
+    view! {
+        <h1 style="font-size:23px;font-weight:620;letter-spacing:-0.02em;margin:0 0 6px">"Accept your invitation"</h1>
+        <p style="color:var(--text-2);font-size:13.5px;margin:0 0 24px">
+            "Your account uses single sign-on. Continue with your organisation's identity provider: there is no password or authenticator to set up here."
+        </p>
+        <div class="col" style="gap:14px">
+            {buttons}
+            {empty.then(|| view! {
+                <span class="field-err" role="alert">
+                    "No sign-in provider is enabled for this invitation. Ask an admin to check the SSO settings."
+                </span>
+            })}
+            <Show when=move || error().is_some()>
+                <span class="field-err" role="alert">{move || error().unwrap_or_default()}</span>
+            </Show>
+            <button class="btn btn-ghost" type="button"
+                on:click=move |_| dispatch.run(Msg::ShowAuth(AuthScreen::SignIn))>
+                "Back to sign in"
+            </button>
+        </div>
     }
 }
 
