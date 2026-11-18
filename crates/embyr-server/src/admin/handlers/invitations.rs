@@ -121,6 +121,7 @@ pub(super) async fn issue_invitation(
     email: &str,
     role: &str,
     invited_by: Option<Uuid>,
+    auth_method: &str,
 ) -> Result<IssuedInvitation, IssueError> {
     sqlx::query(
         "UPDATE invitations SET revoked_at = now() \
@@ -142,8 +143,8 @@ pub(super) async fn issue_invitation(
 
     let token = generate_token();
     let row = sqlx::query(
-        "INSERT INTO invitations (account_id, email, role, expires_at, token_hash, invited_by) \
-         VALUES ($1, $2, $3, now() + interval '7 days', $4, $5) \
+        "INSERT INTO invitations (account_id, email, role, expires_at, token_hash, invited_by, auth_method) \
+         VALUES ($1, $2, $3, now() + interval '7 days', $4, $5, $6) \
          RETURNING id, expires_at",
     )
     .bind(account_id)
@@ -151,6 +152,7 @@ pub(super) async fn issue_invitation(
     .bind(role)
     .bind(hash_token(&token))
     .bind(invited_by)
+    .bind(auth_method)
     .fetch_one(&mut *conn)
     .await?;
     Ok(IssuedInvitation {
@@ -166,8 +168,15 @@ pub(super) async fn send_invite_email(
     state: &UserAdminState,
     to: &str,
     role: &str,
+    auth_method: &str,
     issued: &IssuedInvitation,
 ) {
+    let how = if auth_method == "sso" {
+        "and choose \"Continue with SSO\" to sign in with your organisation's identity provider \
+         (no password or authenticator is needed; the e-mail address of your identity must match this one)"
+    } else {
+        "to set a password and enrol an authenticator"
+    };
     let result = state
         .email_sender
         .send(EmailMessage {
@@ -175,8 +184,8 @@ pub(super) async fn send_invite_email(
             subject: format!("You've been invited to join as {role}"),
             body_text: format!(
                 "You have been invited to join with role '{role}'. \
-                 Open /admin/?invite={} on your embyr admin host to set a password \
-                 and enrol an authenticator. This invitation expires at {}.",
+                 Open /admin/?invite={} on your embyr admin host {how}. \
+                 This invitation expires at {}.",
                 issued.token, issued.expires_at
             ),
             body_html: None,
@@ -228,7 +237,7 @@ pub async fn create_account(
             Err(e) => return internal("insert account", e),
         };
     let issued =
-        match issue_invitation(&mut tx, account_id, &body.owner_email, "Owner", None).await {
+        match issue_invitation(&mut tx, account_id, &body.owner_email, "Owner", None, "password").await {
             Ok(i) => i,
             Err(IssueError::EmailTaken) => {
                 return message(StatusCode::CONFLICT, "Email already registered or invited")
@@ -238,7 +247,7 @@ pub async fn create_account(
     if let Err(e) = tx.commit().await {
         return internal("commit", e);
     }
-    send_invite_email(&state, &body.owner_email, "Owner", &issued).await;
+    send_invite_email(&state, &body.owner_email, "Owner", "password", &issued).await;
     (
         StatusCode::CREATED,
         Json(CreateAccountResponse {
@@ -315,8 +324,69 @@ struct AcceptResponse {
     enrolment_expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Open PASSWORD invitation. An `auth_method = 'sso'` invitation can only be redeemed through the
+/// OIDC callback (ADR-086 decision 5a), never with a password and TOTP (AC-SSO-11).
 const OPEN_INVITATION: &str = "token_hash = $1 AND accepted_at IS NULL \
-                               AND revoked_at IS NULL AND expires_at > now()";
+                               AND revoked_at IS NULL AND expires_at > now() AND auth_method = 'password'";
+
+// ── POST /admin/v1/auth/invitations/lookup ────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct LookupBody {
+    pub token: String,
+}
+
+/// How an open invitation is redeemed, so the SPA can branch before asking for a password. The
+/// token travels in the body (never a URL); unknown / expired / revoked / used / malformed tokens
+/// are the same 404 as everywhere else (AC-ABI-07). For `sso` the enabled providers of the
+/// invitation's account are listed so the SPA can offer "Continue with SSO". No e-mail or role is
+/// echoed.
+pub async fn lookup_invitation(
+    State(state): State<UserAdminState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<LookupBody>,
+) -> Response {
+    if let Some(throttled) = throttle(&state, peer, &headers).await {
+        return throttled;
+    }
+    if !is_well_formed_token(&body.token) {
+        return invalid_invitation();
+    }
+    let pool = state.system_db.pool();
+    let row = match sqlx::query(
+        "SELECT account_id, auth_method FROM invitations \
+         WHERE token_hash = $1 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now()",
+    )
+    .bind(hash_token(&body.token))
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return invalid_invitation(),
+        Err(e) => return internal("lookup invitation", e),
+    };
+    let (account_id, auth_method): (Uuid, String) = match (row.try_get("account_id"), row.try_get("auth_method")) {
+        (Ok(a), Ok(m)) => (a, m),
+        (Err(e), _) | (_, Err(e)) => return internal("read invitation", e),
+    };
+    let mut out = serde_json::json!({ "auth_method": auth_method });
+    if auth_method == "sso" {
+        let ids: Vec<Uuid> = match sqlx::query_scalar(
+            "SELECT p.id FROM oidc_providers p JOIN accounts a ON a.id = p.account_id \
+             WHERE p.account_id = $1 AND p.enabled AND a.deleted_at IS NULL ORDER BY p.created_at, p.id",
+        )
+        .bind(account_id)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return internal("list providers", e),
+        };
+        out["sso_provider_ids"] = serde_json::json!(ids);
+    }
+    (StatusCode::OK, Json(out)).into_response()
+}
 
 /// Step 1: validate the token, hash the password (under the process-wide
 /// Argon2 gate inside `embyr_core::auth::argon2`), issue a TOTP secret and

@@ -179,7 +179,8 @@ is generic so later features (key rotation, member changes) can reuse it; its 12
 | `PUT /admin/v1/oidc_providers/:id/secret` `{client_secret}` | Owner | rotate client secret; 204, never echoed |
 | `PATCH /admin/v1/account` `{sso_required}` | Owner | new; existing provider routes keep their shapes, create/enable gain issuer validation |
 | `GET /admin/v1/auth/session` | session | add `auth_method`, `sso_linked` (bool), `sso_required` for the SPA |
-| Invitation create/lookup | existing | `auth_method` on create (`sso` rejected for Owner or when no enabled provider); lookup returns `sso_provider_id` when `sso` |
+| Invitation create | existing | `auth_method` on create (`sso` rejected for Owner or when no enabled provider) |
+| `POST /admin/v1/auth/invitations/lookup` `{token}` | public, rate-limited | new in slice 4: `{auth_method, sso_provider_ids?}` (see slice 4-5 notes) |
 
 No audit read endpoint in V1 (O5). New config: none beyond `EMBYR_PUBLIC_BASE_URL` (already exists; note it must be the console origin that proxies `/admin/v1`).
 
@@ -214,8 +215,8 @@ the chosen second IdP) with a throwaway client.
 | 1 (done, PR "slices 1-2") | Migration 0051 (next free at implementation time); pure core (PKCE, state/nonce, claim validator, URL/IP policy extracted from `dsn_policy`); `issue_session` extraction; mock IdP harness | M | none |
 | 2 (done, same PR) | Nullable `password_hash` in `signin`, `verify_credentials`, password reset; `admin_audit_events` writer; `remove_member` deletes links; SSO-session revocation on provider disable (O6) | S | 1 |
 | 3 (done, PR "slice 3", stacked on slices 1-2) | `start` + discovery/JWKS caches + `callback` for intent `signin`; provider create/enable validation; `ServerKeys` for provider secret + `PUT .../secret` | L | 1, 2 |
-| 4 | Invitation `auth_method='sso'` (create, lookup, callback intent `invite`) | M | 3, `account-bootstrap-and-invitations` (landed) |
-| 5 | Self-link/unlink (intent `link`, re-auth) | S | 3 |
+| 4 (done, PR "slices 4-5", stacked on slice 3) | Invitation `auth_method='sso'` (create, lookup, callback intent `invite`) | M | 3, `account-bootstrap-and-invitations` (landed) |
+| 5 (done, same PR) | Self-link/unlink (intent `link`, re-auth) | S | 3 |
 | 6 | `sso_required` + session fields + Owner exemption | S | 3 |
 | 7 | SPA: sign-in start, Settings section, invite dialog/accept, banners | M | 3 (sign-in, Settings), 4-6 for their parts |
 
@@ -247,6 +248,34 @@ variants. Details settled while building (they refine, not change, the design ab
 - Create and the secret route reject an empty or over-1024-byte `client_id` / `client_secret` with 422 (new, cheap hygiene).
 - Not done in this slice: the manual contract check against Google and the second IdP (O1); the unauthenticated `invite`
   and `link` intents (slices 4-5); SPA work (slice 7).
+
+Slices 4-5 delivered (no migration; slice 1 created the tables): `handlers/oidc_sso_links.rs` (`complete_invite`, `complete_link`,
+`DELETE /auth/sso_identity`; the only code that reads the e-mail claim or writes `users`, while `oidc_sso.rs` keeps its source-scan
+guarantee of never touching `users` or e-mail), pure `embyr_core::admin::sso::enroll` (e-mail rule, Owner rule, display name),
+`start` intents `invite` and `link`, `issue_invitation`/`send_invite_email` carrying `auth_method`, public
+`POST /auth/invitations/lookup`, audit event `sso_invite_accepted`. Details settled while building:
+
+- **Lookup is a new route.** No invitation lookup existed; `POST /admin/v1/auth/invitations/lookup {token}` (body, not URL;
+  rate-limited like accept/confirm; same 404 as every dead token) returns `{auth_method}` and, for `sso`,
+  `sso_provider_ids` (all enabled providers of the invitation's account; an array, not the single `sso_provider_id` of section 5,
+  because an account can have several).
+- **Password redemption of an SSO invitation is refused** (`accept`/`confirm` match only `auth_method='password'`): otherwise the
+  invitee could bypass the Owner's choice with a password.
+- `start` for `invite` answers `sso_unavailable` for every bad case (unknown, expired, revoked, used, password-method, Owner
+  invitation, malformed or missing token, provider of another account), so there is no invitation-state oracle. For `link` it
+  answers 401 without a valid session cookie or with failed `verify_credentials` (401/429, same as account deletion), the usual
+  `sso_unavailable` for another account's provider, and `409 {error:"already_linked"}` when the user already has a link at that provider.
+- `callback` `link` success is `302 /admin/?sso_linked=1` and mints no session (the user keeps theirs); every failure is the
+  same `sso_failed` redirect, audited as `sso_link_created` / `sso_invite_accepted` with outcome `failed` and a reason
+  (`invite_email_unverified|missing|mismatch`, `invitation_unavailable`, `owner_invitation`, `email_taken`, `link_conflict`, `member_removed`, ...).
+- The invitation e-mail must also not belong to any existing user (case-insensitive, checked inside the transaction): an IdP
+  login can never take over or merge into an existing user.
+- SSO invitees get `display_name` = local part of the invitation e-mail (they enter no profile).
+- Unlink: optional `?provider_id=`; removes the caller's link(s), ends the caller's other sessions minted through them, 404 when
+  nothing was linked, 409 for an SSO-only user (user row locked so concurrent unlinks cannot race the check).
+- The account-deletion re-auth already refused a NULL-password Owner (s02 test); SSO-only members are never Owners and get 403
+  (s04 and s05 tests).
+- The members list reports `auth_method: "sso"` for members without a password.
 
 Slices 1-3 deliver working SSO for pre-linked users only if a link exists, so 4 or 5 is required before any real use; ship 1-5 together.
 Total roughly 4-5 weeks of one engineer including the mock IdP.

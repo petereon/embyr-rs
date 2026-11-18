@@ -13,6 +13,7 @@ pub mod events {
     pub const SSO_SIGNIN: &str = "sso_signin";
     pub const SSO_LINK_CREATED: &str = "sso_link_created";
     pub const SSO_LINK_REMOVED: &str = "sso_link_removed";
+    pub const SSO_INVITE_ACCEPTED: &str = "sso_invite_accepted";
     pub const SSO_PROVIDER_CREATED: &str = "sso_provider_created";
     pub const SSO_PROVIDER_ENABLED: &str = "sso_provider_enabled";
     pub const SSO_PROVIDER_DISABLED: &str = "sso_provider_disabled";
@@ -97,7 +98,7 @@ mod tests {
     fn every_defined_event_name_is_a_label() {
         use events::*;
         for e in [
-            SSO_SIGNIN, SSO_LINK_CREATED, SSO_LINK_REMOVED, SSO_PROVIDER_CREATED, SSO_PROVIDER_ENABLED,
+            SSO_SIGNIN, SSO_LINK_CREATED, SSO_LINK_REMOVED, SSO_INVITE_ACCEPTED, SSO_PROVIDER_CREATED, SSO_PROVIDER_ENABLED,
             SSO_PROVIDER_DISABLED, SSO_PROVIDER_SECRET_ROTATED, SSO_PROVIDER_DELETED, SSO_REQUIRED_TOGGLED,
         ] {
             assert!(is_label(e), "{e}");

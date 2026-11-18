@@ -7,6 +7,7 @@
 
 pub mod claims;
 pub mod discovery;
+pub mod enroll;
 pub mod pkce;
 pub mod url_policy;
 

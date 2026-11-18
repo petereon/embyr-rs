@@ -1382,3 +1382,12 @@ path = "../../tests/admin_oidc_sso/acceptance/s03_start_and_callback.rs"
 [[test]]
 name = "admin_oidc_sso_s03_ssrf_policy"
 path = "../../tests/admin_oidc_sso/acceptance/s03_ssrf_policy.rs"
+
+# admin-oidc-sso slices 4 and 5 (CI-only, Docker-backed).
+[[test]]
+name = "admin_oidc_sso_s04_sso_invitations"
+path = "../../tests/admin_oidc_sso/acceptance/s04_sso_invitations.rs"
+
+[[test]]
+name = "admin_oidc_sso_s05_self_link"
+path = "../../tests/admin_oidc_sso/acceptance/s05_self_link_unlink.rs"

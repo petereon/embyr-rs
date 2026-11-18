@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use embyr_core::admin::account::{AccountId, AccountMember, Role, UserId};
 use embyr_core::admin::invitation::{parse_role, validate_invite, InviteError};
+use embyr_core::admin::sso::enroll::sso_invite_role_allowed;
 use embyr_core::admin::rbac::{check_rbac, RbacAction, RbacError};
 
 use crate::admin::extractors::session_context::SessionContext;
@@ -57,6 +58,10 @@ pub struct MemberResponse {
 pub struct InviteMemberBody {
     pub email: String,
     pub role: String,
+    /// `password` (default) or `sso` (admin-oidc-sso slice 4): 422 for an Owner invitation or when
+    /// the account has no enabled provider.
+    #[serde(default)]
+    pub auth_method: Option<String>,
 }
 
 /// Response body for POST /admin/v1/members/invite (202).
@@ -65,6 +70,7 @@ pub struct InvitationResponse {
     pub invitation_id: String,
     pub email: String,
     pub role: String,
+    pub auth_method: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
     /// Shown once; only its BLAKE3 hash is stored.
     pub invite_token: String,
@@ -138,7 +144,8 @@ pub async fn list_members(
     let member_rows = sqlx::query(
         "SELECT u.id::text AS id, u.email, u.display_name, \
          am.role, am.joined_at, \
-         (u.totp_secret_enc IS NOT NULL) AS mfa_enabled \
+         (u.totp_secret_enc IS NOT NULL) AS mfa_enabled, \
+         CASE WHEN u.password_hash IS NULL THEN 'sso' ELSE 'password' END AS auth_method \
          FROM account_members am \
          JOIN users u ON u.id = am.user_id \
          WHERE am.account_id = $1 \
@@ -159,7 +166,7 @@ pub async fn list_members(
             email: row.try_get("email").unwrap_or_default(),
             display_name: row.try_get("display_name").ok(),
             role: row.try_get("role").unwrap_or_default(),
-            auth_method: "password".to_string(),
+            auth_method: row.try_get("auth_method").unwrap_or_else(|_| "password".to_string()),
             mfa_enabled: row.try_get("mfa_enabled").unwrap_or(false),
             last_login_at: None,
             joined_at: row.try_get("joined_at").unwrap_or(None),
@@ -222,13 +229,34 @@ pub async fn invite_member(
         InviteError::InvalidRole | InviteError::InvalidEmail => StatusCode::UNPROCESSABLE_ENTITY,
     })?;
 
+    let auth_method = body.auth_method.as_deref().unwrap_or("password");
+    match auth_method {
+        "password" => {}
+        "sso" => {
+            let has_provider: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM oidc_providers WHERE account_id = $1 AND enabled)",
+            )
+            .bind(session.account_id)
+            .fetch_one(state.system_db.pool())
+            .await
+            .map_err(|e| {
+                tracing::error!("invite_member: provider check: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            if !sso_invite_role_allowed(&body.role) || !has_provider {
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        }
+        _ => return Err(StatusCode::UNPROCESSABLE_ENTITY),
+    }
+
     let mut tx = state.system_db.pool().begin().await.map_err(|e| {
         tracing::error!("invite_member: begin: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     // Service-account keys carry the nil user id, which has no users row.
     let invited_by = Some(session.user_id).filter(|id| !id.is_nil());
-    let issued = issue_invitation(&mut tx, session.account_id, &body.email, &body.role, invited_by)
+    let issued = issue_invitation(&mut tx, session.account_id, &body.email, &body.role, invited_by, auth_method)
         .await
         .map_err(|e| match e {
             IssueError::EmailTaken => StatusCode::CONFLICT,
@@ -242,7 +270,7 @@ pub async fn invite_member(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    send_invite_email(&state, &body.email, &body.role, &issued).await;
+    send_invite_email(&state, &body.email, &body.role, auth_method, &issued).await;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -250,6 +278,7 @@ pub async fn invite_member(
             invitation_id: issued.id.to_string(),
             email: body.email,
             role: body.role,
+            auth_method: auth_method.to_string(),
             expires_at: issued.expires_at,
             invite_token: issued.token,
         }),
