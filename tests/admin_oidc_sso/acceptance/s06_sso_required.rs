@@ -466,7 +466,14 @@ async fn enabling_ends_non_owner_password_sessions_only() {
 
     // a repeat is a no-op: nothing more ended, no second audit row
     assert_eq!(patch_account(&s, &owner, json!({"sso_required": true})).await.0, 200);
-    assert_eq!(toggle_audits(&s).await.len(), 1);
+    // (the earlier refused enable left its own failed row, so the whole trail is exactly these two)
+    assert_eq!(
+        toggle_audits(&s).await,
+        vec![
+            ("failed".to_string(), Some("no_enabled_provider".to_string())),
+            ("ok".to_string(), Some("enabled:sessions_ended_2".to_string())),
+        ]
+    );
 
     // turning it off ends nothing
     assert_eq!(patch_account(&s, &owner, json!({"sso_required": false})).await.0, 200);
