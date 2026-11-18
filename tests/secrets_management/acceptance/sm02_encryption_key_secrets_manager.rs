@@ -23,6 +23,11 @@
 
 use std::time::Duration;
 
+// admin-oidc-sso (AC-SSO-07): provider creation validates the issuer's discovery document, so this
+// scenario points the provider at the in-process mock IdP (the server subprocess gets the dev flag).
+#[path = "../../common/mock_oidc_idp.rs"]
+mod mock_oidc_idp;
+
 use crate::common::{
     create_raw_secret, localstack_aws_env, make_sm_client, nonexistent_secret_arn,
     seed_signed_in_session, start_localstack, start_postgres_container, ServerProcess,
@@ -98,6 +103,8 @@ async fn oidc_client_secret_encryption_succeeds_with_secrets_manager_sourced_key
     let mut env: Vec<(&str, String)> = localstack_aws_env(&endpoint_url);
     env.push(("EMBYR_ENCRYPTION_KEY_AWS_SECRET_ARN", arn));
     env.push(("EMBYR_ADMIN_KEY", "testkey-0123456789-0123456789-abcdef".to_string()));
+    env.push(("EMBYR_ALLOW_PRIVATE_DSN_HOSTS", "true".to_string()));
+    let idp = mock_oidc_idp::MockIdp::start().await;
 
     let mut server = ServerProcess::start_owned(&db_url, &env);
 
@@ -126,7 +133,7 @@ async fn oidc_client_secret_encryption_succeeds_with_secrets_manager_sourced_key
         ))
         .header("Cookie", format!("embyr_session={cookie_value}"))
         .json(&serde_json::json!({
-            "issuer": "https://sm02-oidc-test.okta.com",
+            "issuer": idp.issuer(),
             "client_id": "sm02-oidc-client-id",
             "client_secret": client_secret_plaintext,
         }))

@@ -1,5 +1,5 @@
 use axum::{
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use std::sync::Arc;
@@ -15,7 +15,8 @@ use crate::adapters::{
 
 use super::handlers::account::delete_account;
 use super::handlers::admin_keys::{create_admin_key, list_admin_keys, revoke_admin_key};
-use super::handlers::auth::{oidc_callback, session_info, signin, signout};
+use super::handlers::auth::{session_info, signin, signout};
+use super::handlers::oidc_sso::{oidc_callback, oidc_start};
 use super::handlers::password_reset::{confirm_password_reset, request_password_reset};
 use super::handlers::invitations::{
     accept_invitation, confirm_invitation, create_account, revoke_invitation,
@@ -27,6 +28,7 @@ use super::handlers::billing_subscription::{
 };
 use super::handlers::oidc_providers::{
     create_oidc_provider, delete_oidc_provider, list_oidc_providers, patch_oidc_provider,
+    put_oidc_provider_secret,
 };
 // client-auth (US-01/US-03/US-04, ADR-025): credential register/rotate/verify.
 use super::handlers::client_identity::{
@@ -208,6 +210,7 @@ pub fn build_admin_router(
         reset_ip_limiter: SigninRateLimiter::new(10.0, 1.0 / 60.0),
         reset_email_limiter: SigninRateLimiter::new(3.0, 1.0 / 1200.0),
         api_key_rotation_window_secs,
+        sso_client: crate::adapters::sso_client::SsoClient::new(),
     };
 
     // Operator sub-router: mutating operator routes + GET /metrics, all guarded by
@@ -253,6 +256,8 @@ pub fn build_admin_router(
     let public_router = Router::<UserAdminState>::new()
         .route("/admin/v1/auth/signin", post(signin))
         .route("/admin/v1/auth/signout", post(signout))
+        // admin-oidc-sso (ADR-086): JSON start (never a redirect), 302-only callback.
+        .route("/admin/v1/auth/oidc/start", post(oidc_start))
         .route("/admin/v1/auth/oidc/callback", get(oidc_callback))
         .route("/admin/v1/auth/invitations/accept", post(accept_invitation))
         .route("/admin/v1/auth/invitations/confirm", post(confirm_invitation))
@@ -481,6 +486,10 @@ pub fn build_admin_router(
         .route(
             "/admin/v1/oidc_providers/:provider_id",
             patch(patch_oidc_provider).delete(delete_oidc_provider),
+        )
+        .route(
+            "/admin/v1/oidc_providers/:provider_id/secret",
+            put(put_oidc_provider_secret),
         )
         // Billing route (step 06-03).
         .route("/admin/v1/billing", get(get_billing))

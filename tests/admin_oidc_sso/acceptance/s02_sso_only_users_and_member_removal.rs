@@ -8,6 +8,8 @@
 
 #[path = "../../admin_api_v2/common/mod.rs"]
 mod common;
+#[path = "../../common/mock_oidc_idp.rs"]
+mod mock_oidc_idp;
 use common::{totp_code_for_secret, AdminTestContext};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -276,9 +278,12 @@ async fn removing_a_member_deletes_their_links_and_ends_their_sessions_only() {
 
 #[tokio::test]
 async fn disabling_a_provider_ends_its_sso_sessions_but_not_password_sessions() {
+    // Enabling validates the issuer (slice 3, AC-SSO-07), so `other` points at the in-process mock IdP.
+    std::env::set_var("EMBYR_ALLOW_PRIVATE_DSN_HOSTS", "true");
+    let idp = mock_oidc_idp::MockIdp::start().await;
     let ctx = AdminTestContext::new().await;
     let provider = make_provider(&ctx, "https://idp.example.test").await;
-    let other = make_provider(&ctx, "https://other-idp.example.test").await;
+    let other = make_provider(&ctx, &idp.issuer()).await;
     let viewer_sso = sso_session(&ctx, &ctx.viewer_id, provider).await;
     let admin_sso_other = sso_session(&ctx, &ctx.admin_id, other).await;
     let owner = owner_cookie(&ctx).await; // password session

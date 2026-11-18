@@ -165,6 +165,26 @@ impl AdminTestContext {
         Self::build(
             SigninRateLimiter::new(150.0, 10.0 / 60.0),
             "stripe-secret-key-not-configured",
+            None,
+        )
+        .await
+    }
+
+    /// Same as `new()` for admin SSO scenarios (admin-oidc-sso, ADR-086): `EMBYR_PUBLIC_BASE_URL`
+    /// is this server's own origin (so the IdP's redirect lands back on it) and the process is
+    /// allowed to reach the loopback mock IdP (`EMBYR_ALLOW_PRIVATE_DSN_HOSTS=true`).
+    pub async fn with_sso(signin_limiter: Arc<SigninRateLimiter>) -> Self {
+        std::env::set_var("EMBYR_ALLOW_PRIVATE_DSN_HOSTS", "true");
+        Self::build(signin_limiter, "stripe-secret-key-not-configured", Some(None)).await
+    }
+
+    /// `EMBYR_PUBLIC_BASE_URL` set to a fixed (https) origin, dev flag untouched: SSO start
+    /// reaches its outbound policy checks without the process-wide private-host override.
+    pub async fn with_public_base_url(url: &str) -> Self {
+        Self::build(
+            SigninRateLimiter::new(150.0, 10.0 / 60.0),
+            "stripe-secret-key-not-configured",
+            Some(Some(url.to_string())),
         )
         .await
     }
@@ -172,16 +192,22 @@ impl AdminTestContext {
     /// Same as `new()` with a caller-supplied Stripe key (account-deletion
     /// scenarios that need a real test-mode gateway).
     pub async fn new_with_stripe_key(stripe_key: &str) -> Self {
-        Self::build(SigninRateLimiter::new(150.0, 10.0 / 60.0), stripe_key).await
+        Self::build(SigninRateLimiter::new(150.0, 10.0 / 60.0), stripe_key, None).await
     }
 
     /// Same as `new()` with a caller-supplied sign-in limiter (e.g. a tiny
     /// burst + `with_trusted_proxy_hops`, to observe throttle keying).
     pub async fn with_signin_limiter(signin_limiter: Arc<SigninRateLimiter>) -> Self {
-        Self::build(signin_limiter, "stripe-secret-key-not-configured").await
+        Self::build(signin_limiter, "stripe-secret-key-not-configured", None).await
     }
 
-    async fn build(signin_limiter: Arc<SigninRateLimiter>, stripe_key: &str) -> Self {
+    /// `public_base`: `None` = `EMBYR_PUBLIC_BASE_URL` unset; `Some(None)` = this server's own
+    /// origin; `Some(Some(url))` = a fixed origin.
+    async fn build(
+        signin_limiter: Arc<SigninRateLimiter>,
+        stripe_key: &str,
+        public_base: Option<Option<String>>,
+    ) -> Self {
         // ── 1. Start Postgres container ───────────────────────────────────────
         let container = Postgres::default()
             .with_tag("15-alpine")
@@ -428,7 +454,17 @@ impl AdminTestContext {
         let prometheus_handle = embyr_server::observability::get_or_install_prometheus_handle();
         // admin_api_v2 predates card-payments-backend and never exercises
         // billing routes — placeholder StripeGateway (no I/O at construction).
-        let stripe_gateway = Arc::new(StripeGateway::new(stripe_key));
+        // Bound before the router is built so SSO tests can use the server's own origin as
+        // `EMBYR_PUBLIC_BASE_URL` (the redirect_uri the mock IdP sends the browser back to).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+        let stripe_gateway = Arc::new(
+            StripeGateway::new(stripe_key)
+                .with_public_base_url(public_base.map(|b| b.unwrap_or_else(|| base_url.clone()))),
+        );
         let router = build_admin_router(
             system_db,
             "test-admin-key-from-env".to_string(),
@@ -450,12 +486,6 @@ impl AdminTestContext {
             signin_limiter,
             86_400,
         );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ephemeral port");
-        let addr = listener.local_addr().expect("local_addr");
-        let base_url = format!("http://127.0.0.1:{}", addr.port());
 
         tokio::spawn(async move {
             // admin-signin-hardening (D-ASH-5, ADR-076): signin's own

@@ -62,11 +62,13 @@ admin_router =
 - `GET /admin/v1/oidc_providers`
 - `POST /admin/v1/oidc_providers`
 - `PATCH /admin/v1/oidc_providers/:oidc_id`
+- `PUT /admin/v1/oidc_providers/:oidc_id/secret` (admin-oidc-sso, ADR-086)
 - `DELETE /admin/v1/oidc_providers/:oidc_id`
 - `GET /admin/v1/billing`
 
 **Public sub-router** (no auth):
 - `POST /admin/v1/auth/signin`
+- `POST /admin/v1/auth/oidc/start` (admin-oidc-sso, ADR-086)
 - `GET /admin/v1/auth/oidc/callback`
 
 **Dual-auth sub-router** (dual_auth_middleware layer — accepts operator key OR session credential; sets `AuthPrincipal` request extension):

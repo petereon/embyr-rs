@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (design wave; product-owner decisions O1-O7 recorded 2026-11-18, see "Product decisions"; becomes Accepted when slice 3 merges). Closes the design half of audit #58 (the callback was disabled in PR #14;
+Proposed (design wave; product-owner decisions O1-O7 recorded 2026-11-18, see "Product decisions"; slice 3 implemented, becomes Accepted when it merges). Closes the design half of audit #58 (the callback was disabled in PR #14;
 this ADR defines its replacement). Depends on ADR-083 (`ServerKeys` encrypt/decrypt with rotation) and ADR-076 (sign-in rate limiter).
 Feature detail, ACs, schema and slices: `docs/feature/admin-oidc-sso/feature-delta.md`.
 

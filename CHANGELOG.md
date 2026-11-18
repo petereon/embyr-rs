@@ -7,7 +7,17 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Added
-- Admin OIDC SSO groundwork (ADR-086, slices 1-2 of `admin-oidc-sso`; no sign-in route yet, the callback stays disabled).
+- Admin OIDC SSO sign-in (ADR-086, slice 3 of `admin-oidc-sso`): `POST /admin/v1/auth/oidc/start` (JSON, returns the IdP
+  authorization URL; authorization code + PKCE + `state` + `nonce`, `embyr_sso` browser-binding cookie, single-use state rows
+  expiring in 10 minutes, 200 live rows per provider) and `GET /admin/v1/auth/oidc/callback`, which replaces the disabled stub:
+  server-side code exchange, ID-token validation against the provider's own discovery/JWKS (RS256/ES256, exact issuer, aud/azp,
+  nonce, clock), and a session only for the user linked to `(provider, sub)`, never by e-mail. Every failure is the same
+  `302 /admin/?error=sso_failed`. Discovery/JWKS/token fetches are https-only, SSRF-policed, unredirected, 5 s and size-capped.
+  Provider create and enable now validate the issuer (422 `issuer_invalid`); `PUT /admin/v1/oidc_providers/:id/secret` rotates
+  the client secret (stored under the server key, never returned); provider lifecycle events are audited. Needs
+  `EMBYR_PUBLIC_BASE_URL` (the console origin); without it SSO answers `sso_unavailable`. No new environment variables.
+  Users can only sign in once linked (invitation and self-link arrive in slices 4-5).
+- Admin OIDC SSO groundwork (ADR-086, slices 1-2 of `admin-oidc-sso`).
   Migration 0051: nullable `users.password_hash` (NULL = SSO-only user; `signin`, account-deletion re-auth and password
   reset treat it as "no password" with the usual generic responses), `admin_sso_identities`, `sso_auth_requests`,
   `admin_audit_events` (12-month retention, swept by the `signin_rate_limit_sweeper` cycle), `sessions.auth_method` and

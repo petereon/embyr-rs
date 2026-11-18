@@ -6,6 +6,7 @@
 //! `embyr-server`.
 
 pub mod claims;
+pub mod discovery;
 pub mod pkce;
 pub mod url_policy;
 

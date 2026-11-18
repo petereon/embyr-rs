@@ -7,7 +7,7 @@
 //! the signin route — an attacker rotating source IPs would otherwise grow
 //! this table without bound, becoming a storage-exhaustion vector in its own
 //! right. Mirrors `SoftDeletePurgeSweeper`'s exact spawn/run_cycle/
-//! advisory-lock shape. Also purges `admin_audit_events` past its 12-month retention.
+//! advisory-lock shape. Also purges `admin_audit_events` past its 12-month retention and expired `sso_auth_requests`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,6 +98,7 @@ pub async fn run_cycle(system_db: &Arc<SystemDb>) {
         }
     }
     purge_audit_events(system_db).await;
+    purge_sso_auth_requests(system_db).await;
 }
 
 /// Admin-auth table hygiene rides this cycle (ADR-086, O5): one idempotent DELETE of audit rows past
@@ -117,6 +118,25 @@ async fn purge_audit_events(system_db: &Arc<SystemDb>) {
         Ok(_) => {}
         Err(e) => {
             tracing::warn!(error = %e, "SigninRateLimitSweeper: audit purge failed");
+            super::record_sweeper_error("signin_rate_limit_sweeper");
+        }
+    }
+}
+
+/// Expired SSO authorization requests (10-minute TTL, ADR-086 decision 9). Rows are single use and
+/// deleted when consumed; only abandoned ones (started, never returned from the IdP) reach here.
+async fn purge_sso_auth_requests(system_db: &Arc<SystemDb>) {
+    match sqlx::query("DELETE FROM sso_auth_requests WHERE expires_at < now()")
+        .execute(system_db.pool())
+        .await
+    {
+        Ok(qr) if qr.rows_affected() > 0 => {
+            metrics::counter!("embyr_sso_auth_requests_purged_total").increment(qr.rows_affected());
+            tracing::info!(rows_purged = qr.rows_affected(), "SigninRateLimitSweeper: purged expired SSO requests");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "SigninRateLimitSweeper: SSO request purge failed");
             super::record_sweeper_error("signin_rate_limit_sweeper");
         }
     }
