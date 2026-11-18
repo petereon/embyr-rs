@@ -7,6 +7,13 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- Admin OIDC SSO enforcement (ADR-086, slice 6 of `admin-oidc-sso`): new `PATCH /admin/v1/account {sso_required}` (Owner only).
+  Enabling needs an enabled provider on the account and a link of the calling Owner to it (else 422
+  `sso_required_prerequisites`); disabling is immediate. While required, password sign-in for non-Owner members is the same
+  generic 401 as a wrong password, `POST /members/invite` with `auth_method=password` for Admin/Viewer is 422, and password reset
+  is a neutral no-op for them (reset tokens issued earlier stop working). Owners are always exempt and keep password + TOTP.
+  Toggles are audited (`sso_required_toggled`, labels only). `GET /admin/v1/auth/session` now also returns `auth_method`
+  (`password`|`sso`), `sso_linked` and `sso_required`. No migration, no new environment variables.
 - Admin OIDC SSO invitations and self-link (ADR-086, slices 4-5 of `admin-oidc-sso`). `POST /admin/v1/members/invite` accepts
   `auth_method` (`password` default, or `sso`: 422 for an Owner invitation or when the account has no enabled provider; the
   response echoes it and the invite e-mail is worded for SSO). A password enrolment (`accept`/`confirm`) of an SSO invitation

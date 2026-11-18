@@ -118,7 +118,7 @@ api.{$DOMAIN} {
 #   *    /admin/v1/members[/...]            team + invitations (session)
 #   *    /admin/v1/service_accounts[/...]   (session)
 #   *    /admin/v1/admin_keys[/...]         customer API keys for the admin API (session)
-#   *    /admin/v1/account                  account deletion (session + password + TOTP)
+#   *    /admin/v1/account                  account deletion (session + password + TOTP); PATCH sso_required (Owner)
 #   *    /admin/v1/metrics/summary          per-project usage summary (session)
 #   *    /admin/v1/billing                  GET billing view
 #   *    /admin/v1/billing/{subscription,checkout_session,portal_session}   (session)

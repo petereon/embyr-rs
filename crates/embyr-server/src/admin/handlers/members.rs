@@ -28,6 +28,7 @@ use uuid::Uuid;
 use embyr_core::admin::account::{AccountId, AccountMember, Role, UserId};
 use embyr_core::admin::invitation::{parse_role, validate_invite, InviteError};
 use embyr_core::admin::sso::enroll::sso_invite_role_allowed;
+use embyr_core::admin::sso::policy::password_invite_allowed;
 use embyr_core::admin::rbac::{check_rbac, RbacAction, RbacError};
 
 use crate::admin::extractors::session_context::SessionContext;
@@ -231,7 +232,21 @@ pub async fn invite_member(
 
     let auth_method = body.auth_method.as_deref().unwrap_or("password");
     match auth_method {
-        "password" => {}
+        "password" => {
+            // ADR-086 decision 6: while the account requires SSO, only Owners may be invited
+            // with a password (they are exempt).
+            let required: bool = sqlx::query_scalar("SELECT sso_required FROM accounts WHERE id = $1")
+                .bind(session.account_id)
+                .fetch_one(state.system_db.pool())
+                .await
+                .map_err(|e| {
+                    tracing::error!("invite_member: sso_required check: {e}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            if !password_invite_allowed(&body.role, required) {
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        }
         "sso" => {
             let has_provider: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM oidc_providers WHERE account_id = $1 AND enabled)",

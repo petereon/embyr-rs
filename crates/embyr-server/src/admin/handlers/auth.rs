@@ -27,6 +27,10 @@ use std::net::SocketAddr;
 use totp_rs::{Algorithm as TotpAlgorithm, TOTP};
 use uuid::Uuid;
 
+use embyr_core::admin::account::Role;
+use embyr_core::admin::invitation::parse_role;
+use embyr_core::admin::sso::policy::may_use_password;
+
 use crate::adapters::encryption::{decrypt_with_rotation, RotationDecryptError};
 use crate::admin::extractors::session_context::SessionContext;
 use crate::admin::state::UserAdminState;
@@ -441,8 +445,9 @@ pub async fn signin(
     // account-deletion: users of a soft-deleted account are unknown emails.
     let row = match sqlx::query(
         "SELECT u.id, u.account_id, u.display_name, u.password_hash, u.totp_secret_enc, \
-         u.failed_totp_attempts, u.locked_until \
+         u.failed_totp_attempts, u.locked_until, a.sso_required, am.role \
          FROM users u JOIN accounts a ON a.id = u.account_id \
+         LEFT JOIN account_members am ON am.user_id = u.id AND am.account_id = u.account_id \
          WHERE u.email = $1 AND a.deleted_at IS NULL",
     )
     .bind(&body.email)
@@ -456,11 +461,22 @@ pub async fn signin(
 
     let account_id: Uuid = try_get_or_err!(row, "account_id", "read account_id");
     let display_name: String = try_get_or_err!(row, "display_name", "read display_name");
-    let user = match UserSecrets::from_row(&row) {
+    let mut user = match UserSecrets::from_row(&row) {
         Ok(u) => u,
         Err(e) => return internal_err("read user credentials", e),
     };
     let user_id = user.id;
+    let sso_required: bool = try_get_or_err!(row, "sso_required", "read sso_required");
+    let role: Option<String> = try_get_or_err!(row, "role", "read role");
+
+    // ── 1b. sso_required (ADR-086, O3): non-Owner members of such an account cannot use a
+    // password. Run the normal path as an SSO-only user (no hash, no lockout state) so body,
+    // status and timing equal a wrong password: the generic 401 after one dummy Argon2 verify.
+    let member_role = role.as_deref().and_then(parse_role).unwrap_or(Role::Viewer);
+    if !may_use_password(member_role, sso_required, user.password_hash.is_some()) {
+        user.password_hash = None;
+        user.locked_until = None;
+    }
 
     // ── 2-5. Lockout, password, second factor, counter reset ─────────────────
     if let Err(response) = verify_credentials(
@@ -475,25 +491,11 @@ pub async fn signin(
         return response;
     }
 
-    // ── 6. Fetch member role ──────────────────────────────────────────────────
-    let role_row = match sqlx::query(
-        "SELECT role FROM account_members WHERE user_id = $1 AND account_id = $2",
-    )
-    .bind(user_id)
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            tracing::error!(
-                "signin: no account_member row for user={user_id} account={account_id}"
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-        Err(e) => return internal_err("fetch member role", e),
+    // ── 6. Member role (read in step 1) ───────────────────────────────────────
+    let Some(role) = role else {
+        tracing::error!("signin: no account_member row for user={user_id} account={account_id}");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let role: String = try_get_or_err!(role_row, "role", "read role");
 
     // ── 7-8. Mint the session (shared with the SSO callback) ──────────────────
     let session = match issue_session(pool, user_id, account_id, SessionOrigin::Password).await {
@@ -558,6 +560,12 @@ pub struct SessionInfo {
     email: String,
     display_name: String,
     role: String,
+    /// How this session was minted: `password` or `sso` (ADR-086 O6).
+    auth_method: String,
+    /// The user has at least one SSO link.
+    sso_linked: bool,
+    /// The account requires SSO for non-Owner members.
+    sso_required: bool,
 }
 
 /// GET /admin/v1/auth/session
@@ -569,7 +577,9 @@ pub async fn session_info(
     session: SessionContext,
 ) -> Result<Json<SessionInfo>, StatusCode> {
     let row = sqlx::query(
-        "SELECT u.email, u.display_name, a.name AS account_name, am.role \
+        "SELECT u.email, u.display_name, a.name AS account_name, am.role, a.sso_required, \
+         COALESCE((SELECT s.auth_method FROM sessions s WHERE s.id = $3), 'password') AS auth_method, \
+         EXISTS(SELECT 1 FROM admin_sso_identities i WHERE i.user_id = u.id) AS sso_linked \
          FROM users u \
          JOIN accounts a ON a.id = u.account_id \
          JOIN account_members am ON am.user_id = u.id AND am.account_id = u.account_id \
@@ -577,6 +587,7 @@ pub async fn session_info(
     )
     .bind(session.user_id)
     .bind(session.account_id)
+    .bind(session.session_id)
     .fetch_optional(state.system_db.pool())
     .await
     .map_err(|e| {
@@ -591,6 +602,12 @@ pub async fn session_info(
             StatusCode::INTERNAL_SERVER_ERROR
         })
     };
+    let flag = |col: &str| {
+        row.try_get::<bool, _>(col).map_err(|e| {
+            tracing::error!("session_info: read {col}: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+    };
     Ok(Json(SessionInfo {
         account_id: session.account_id.to_string(),
         account_name: read("account_name")?,
@@ -598,6 +615,9 @@ pub async fn session_info(
         email: read("email")?,
         display_name: read("display_name")?,
         role: read("role")?,
+        auth_method: read("auth_method")?,
+        sso_linked: flag("sso_linked")?,
+        sso_required: flag("sso_required")?,
     }))
 }
 
