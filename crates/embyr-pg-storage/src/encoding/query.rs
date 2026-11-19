@@ -233,17 +233,17 @@ pub(crate) fn push_scalar_comparison(
     let t = format!("fields->'{field_path}'->>'t'");
     let v = format!("fields->'{field_path}'->>'v'");
     match value {
-        // Integer and Double are one numeric class, compared numerically
-        // against each other (Firestore semantics) — both via float8.
-        // ponytail: float8 loses exactness for integers beyond 2^53; add a
-        // numeric/bigint tiebreak if such magnitudes matter.
-        FieldValue::Integer(i) => {
-            qb.push(format!("CASE WHEN {t} IN ('I','D') THEN ({v})::float8 END {op} "));
-            qb.push_bind(*i as f64);
-        }
-        FieldValue::Double(d) => {
-            qb.push(format!("CASE WHEN {t} IN ('I','D') THEN ({v})::float8 END {op} "));
-            qb.push_bind(*d);
+        // Integer and Double are one numeric class, compared by exact numeric
+        // value (G-001): the two-part key `(float8, residual)` of
+        // `numeric_key_exprs`, never a lossy float8 alone.
+        FieldValue::Integer(_) | FieldValue::Double(_) => {
+            let (f, r) = numeric_sort_key(value).expect("numeric value has a sort key");
+            let (primary, residual) = numeric_key_exprs(field_path);
+            qb.push(format!("ROW({primary}, {residual}) {op} ROW("));
+            qb.push_bind(f);
+            qb.push(", ");
+            qb.push_bind(r);
+            qb.push("::numeric)");
         }
         // `COLLATE "C"`: Firestore compares strings by UTF-8 byte order,
         // which C collation gives on a UTF8 database (ORDER BY matches).
@@ -385,12 +385,17 @@ pub fn equality_key_expr(field_path: &str) -> String {
 /// rank group's own type discriminates. `__name__` orders by document id
 /// (byte order) — it is not a stored field.
 ///
+/// The numbers (integer + double together) take TWO keys, see
+/// `numeric_key_exprs` (exact int64 vs double ordering, G-001).
+///
 /// Single source of truth: `order_by_expr` appends the direction to each key
 /// for queries, and the composite-index DDL wraps each key as an index
 /// expression, so index and ORDER BY can never drift apart. Every function
-/// and cast used is IMMUTABLE (jsonb operators, `float8`/`boolean` text
-/// input, jsonb->bigint/int, `decode`, `COLLATE "C"`), as index expressions
-/// require.
+/// and cast used is IMMUTABLE (jsonb operators, `float8`/`numeric`/`boolean`
+/// text input, float8->bigint->numeric, jsonb->bigint/int, `decode`,
+/// `COLLATE "C"`), as index expressions require. Changing any key here
+/// changes the index expressions: indexes built on an older expression must
+/// be dropped and re-created (docs/operations/runbook.md).
 pub fn order_key_exprs(field_path: &str) -> Vec<String> {
     // field-path-defense-in-depth (finding #26): see `append_field_filter`'s
     // own identical guard comment for the full rationale.
@@ -411,6 +416,7 @@ pub fn order_key_exprs(field_path: &str) -> Vec<String> {
     let fp = field_path;
     let t = format!("fields->'{fp}'->>'t'");
     let v = format!("fields->'{fp}'->>'v'");
+    let (num_primary, num_residual) = numeric_key_exprs(fp);
     vec![
         format!(
             "CASE {t} WHEN 'N' THEN 0 WHEN 'B' THEN 1 \
@@ -419,13 +425,155 @@ pub fn order_key_exprs(field_path: &str) -> Vec<String> {
              WHEN 'A' THEN 8 WHEN 'M' THEN 9 END"
         ),
         format!("CASE WHEN {t} = 'B' THEN ({v})::boolean END"),
-        format!("CASE WHEN {t} IN ('I','D') THEN ({v})::float8 END"),
+        num_primary,
+        num_residual,
         format!("CASE WHEN {t} = 'TS' THEN (fields->'{fp}'->'s')::bigint END"),
         format!("CASE WHEN {t} = 'TS' THEN (fields->'{fp}'->'n')::int END"),
         format!("CASE WHEN {t} IN ('S','R') THEN {v} COLLATE \"C\" END"),
         format!("CASE WHEN {t} = 'BY' THEN decode({v}, 'base64') END"),
         format!("CASE WHEN {t} IN ('A','M') THEN fields->'{fp}'->'v' END"),
     ]
+}
+
+/// Two-part sort key of the numeric class (integer + double), as SQL
+/// expressions `(primary, residual)`; both are NULL outside the class.
+///
+/// * `primary`: the value as `float8` (a double exactly; an integer rounded to
+///   the nearest double, as `i64 as f64`). NaN is ranked below every number by
+///   the type-rank key, `-0` and `0` are equal, +-Infinity are the extremes.
+/// * `residual`: 0 for a double; for an integer `i - primary` (exact, `numeric`,
+///   |residual| <= 1024). Integers that round to the same double above 2^53 are
+///   thus ordered by their own int64 value, and sit on the correct side of that
+///   double. `primary` >= 2^63 (i64::MAX rounds there) cannot be cast to
+///   `bigint`, so 2^63 is substituted.
+///
+/// Lexicographic `(primary, residual)` order is the exact numeric order: rounding
+/// to the nearest double is monotone and a double is its own rounding. All
+/// functions are IMMUTABLE, so the keys are valid index expressions.
+pub(crate) fn numeric_key_exprs(fp: &str) -> (String, String) {
+    let t = format!("fields->'{fp}'->>'t'");
+    let v = format!("fields->'{fp}'->>'v'");
+    let f = format!("({v})::float8");
+    (
+        format!("CASE WHEN {t} IN ('I','D') THEN {f} END"),
+        format!(
+            "CASE WHEN {t} = 'I' THEN ({v})::numeric - \
+             CASE WHEN {f} >= 9223372036854775808::float8 THEN 9223372036854775808::numeric \
+             ELSE ({f})::bigint::numeric END \
+             WHEN {t} = 'D' THEN 0::numeric END"
+        ),
+    )
+}
+
+/// Rust mirror of `numeric_key_exprs` for a bound value: `(primary, residual)`
+/// of an integer or double, `None` for any other type.
+pub fn numeric_sort_key(v: &FieldValue) -> Option<(f64, i64)> {
+    match v {
+        FieldValue::Integer(i) => {
+            let f = *i as f64;
+            Some((f, (i128::from(*i) - f as i128) as i64))
+        }
+        FieldValue::Double(d) => Some((*d, 0)),
+        _ => None,
+    }
+}
+
+/// The query's ORDER BY with Firestore's implicit `__name__` appended, in the
+/// direction of the last explicit order (ascending when there is none) —
+/// unless the last explicit order already is `__name__`. Makes every ordering
+/// total, so limits, offsets and cursors page deterministically.
+pub fn effective_order_by(order_by: &[OrderBy]) -> Vec<OrderBy> {
+    let mut out = order_by.to_vec();
+    if order_by.last().is_none_or(|o| o.field_path != "__name__") {
+        let direction = order_by.last().map_or(OrderDirection::Ascending, |o| o.direction.clone());
+        out.push(OrderBy { field_path: "__name__".to_string(), direction });
+    }
+    out
+}
+
+/// Full `ORDER BY` list (without the keyword) for a query: every clause of
+/// `effective_order_by`.
+pub fn order_by_clause(order_by: &[OrderBy]) -> String {
+    effective_order_by(order_by).iter().map(order_by_expr).collect::<Vec<_>>().join(", ")
+}
+
+/// One cursor comparison `<key of field> op <value>`: `__name__` compares the
+/// document name, every other field its typed value.
+fn push_cursor_cmp(
+    qb: &mut QueryBuilder<Postgres>,
+    field_path: &str,
+    op: &str,
+    value: &FieldValue,
+) -> Result<(), String> {
+    if field_path == "__name__" {
+        return match value {
+            FieldValue::Reference(r) => push_name_comparison(qb, op, r),
+            _ => None,
+        }
+        .map(|_| ())
+        .ok_or_else(|| "a __name__ cursor value must be a document reference".to_string());
+    }
+    push_scalar_comparison(qb, field_path, op, value);
+    Ok(())
+}
+
+/// Cursor bound over the effective order list `orders` (explicit orders plus
+/// the implicit `__name__`, see `effective_order_by`): `values[k]` positions
+/// `orders[k]`, and fewer values than orders is a prefix. Lexicographic
+/// OR-of-AND expansion honouring each order's own direction.
+///
+/// `is_end`: `endAt`/`endBefore` (docs before the cursor) vs `startAt`/
+/// `startAfter` (docs after it). `before`: the cursor's own flag. The bound is
+/// inclusive for `startAt` and `endAt`; a prefix cursor `startAfter(v)` skips
+/// every document whose leading values equal `v`.
+pub fn push_cursor_predicate(
+    qb: &mut QueryBuilder<Postgres>,
+    orders: &[OrderBy],
+    values: &[FieldValue],
+    is_end: bool,
+    before: bool,
+) -> Result<(), String> {
+    if values.len() > orders.len() {
+        return Err(format!(
+            "cursor has {} values but the query orders by only {} fields",
+            values.len(),
+            orders.len()
+        ));
+    }
+    if values.is_empty() {
+        qb.push("TRUE");
+        return Ok(());
+    }
+    let inclusive = before != is_end;
+    let strict = |dir: &OrderDirection| match (is_end, dir) {
+        (false, OrderDirection::Ascending) | (true, OrderDirection::Descending) => ">",
+        _ => "<",
+    };
+    let last = values.len() - 1;
+    qb.push("(");
+    for i in 0..values.len() {
+        if i > 0 {
+            qb.push(" OR ");
+        }
+        if values.len() > 1 {
+            qb.push("(");
+        }
+        for k in 0..i {
+            push_cursor_cmp(qb, &orders[k].field_path, "=", &values[k])?;
+            qb.push(" AND ");
+        }
+        let op = match (i == last && inclusive, strict(&orders[i].direction)) {
+            (true, ">") => ">=",
+            (true, _) => "<=",
+            (false, s) => s,
+        };
+        push_cursor_cmp(qb, &orders[i].field_path, op, &values[i])?;
+        if values.len() > 1 {
+            qb.push(")");
+        }
+    }
+    qb.push(")");
+    Ok(())
 }
 
 /// Split a Firestore reference value (`projects/p/databases/d/documents/c/id`)
@@ -468,7 +616,7 @@ pub fn push_name_comparison(
 /// one total order.
 ///
 /// ponytail: array/map fall back to jsonb's own stable ordering, not
-/// Firestore's element-wise rule; numbers go through float8 (exact to 2^53).
+/// Firestore's element-wise rule.
 pub fn order_by_expr(ob: &OrderBy) -> String {
     let dir = match ob.direction {
         OrderDirection::Ascending => "ASC",
@@ -1124,5 +1272,226 @@ mod tests {
     #[should_panic(expected = "invalid field path")]
     fn aggregation_select_list_panics_on_unvalidated_malicious_field_path() {
         aggregation_select_list(&[agg("x", AggregationKind::Sum("x'); DROP TABLE documents; --".into()))]);
+    }
+
+    // ─── G-001: exact numeric order + implicit `__name__` tiebreak ─────────
+
+    /// Exact comparison of two numbers (integer or double, never NaN),
+    /// written independently of the key: integers are widened to i128, a
+    /// double is split into its integer part and fraction.
+    fn exact_cmp(a: &FieldValue, b: &FieldValue) -> std::cmp::Ordering {
+        use std::cmp::Ordering::*;
+        // Value as (integer part, fraction sign) with infinities clamped far out.
+        fn parts(v: &FieldValue) -> (i128, i8) {
+            match v {
+                FieldValue::Integer(i) => (i128::from(*i), 0),
+                FieldValue::Double(d) if *d == f64::INFINITY => (i128::MAX, 0),
+                FieldValue::Double(d) if *d == f64::NEG_INFINITY => (i128::MIN, 0),
+                FieldValue::Double(d) => {
+                    let fl = d.floor();
+                    (fl as i128, if *d > fl { 1 } else { 0 })
+                }
+                _ => unreachable!(),
+            }
+        }
+        let (ai, af) = parts(a);
+        let (bi, bf) = parts(b);
+        match ai.cmp(&bi) {
+            Equal => af.cmp(&bf),
+            o => o,
+        }
+    }
+
+    fn key_cmp(a: &FieldValue, b: &FieldValue) -> std::cmp::Ordering {
+        let (af, ar) = numeric_sort_key(a).unwrap();
+        let (bf, br) = numeric_sort_key(b).unwrap();
+        af.partial_cmp(&bf).unwrap().then(ar.cmp(&br))
+    }
+
+    /// The `(primary, residual)` key orders every integer/double pair exactly:
+    /// around 2^53, i64::MAX against `i64::MAX as f64` (2^63), i64::MIN, mixed
+    /// near-equal int/double, -0 == 0, +-Infinity.
+    #[test]
+    fn numeric_sort_key_orders_integers_and_doubles_exactly() {
+        const P53: i64 = 1 << 53;
+        let mut sample: Vec<FieldValue> = vec![
+            FieldValue::Integer(i64::MIN),
+            FieldValue::Integer(i64::MIN + 1),
+            FieldValue::Integer(-P53 - 1),
+            FieldValue::Integer(-P53),
+            FieldValue::Integer(-1),
+            FieldValue::Integer(0),
+            FieldValue::Integer(1),
+            FieldValue::Integer(P53 - 1),
+            FieldValue::Integer(i64::MAX),
+            FieldValue::Integer(i64::MAX - 1),
+            FieldValue::Integer(i64::MAX - 511),
+            FieldValue::Integer(i64::MAX - 512),
+            FieldValue::Double(f64::NEG_INFINITY),
+            FieldValue::Double(f64::INFINITY),
+            FieldValue::Double(-0.0),
+            FieldValue::Double(0.0),
+            FieldValue::Double(0.5),
+            FieldValue::Double(-0.5),
+            FieldValue::Double(9_223_372_036_854_775_808.0), // 2^63 == i64::MAX as f64
+            FieldValue::Double(-9_223_372_036_854_775_808.0), // -2^63 == i64::MIN
+            FieldValue::Double(1.0e30),
+        ];
+        for k in -5..=5i64 {
+            sample.push(FieldValue::Integer(P53 + k));
+            sample.push(FieldValue::Integer(-P53 + k));
+            sample.push(FieldValue::Double((P53 + k) as f64));
+        }
+        for a in &sample {
+            for b in &sample {
+                assert_eq!(key_cmp(a, b), exact_cmp(a, b), "{a:?} vs {b:?}");
+            }
+        }
+        // The cases the old float8-only key got wrong.
+        assert_eq!(key_cmp(&FieldValue::Integer(P53 + 1), &FieldValue::Integer(P53)), std::cmp::Ordering::Greater);
+        assert_eq!(
+            key_cmp(&FieldValue::Integer(i64::MAX), &FieldValue::Double(i64::MAX as f64)),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(key_cmp(&FieldValue::Double(-0.0), &FieldValue::Double(0.0)), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn numeric_sort_key_is_none_outside_the_numeric_class() {
+        assert_eq!(numeric_sort_key(&FieldValue::String("1".into())), None);
+        assert_eq!(numeric_sort_key(&FieldValue::Integer(-3)), Some((-3.0, 0)));
+        assert_eq!(numeric_sort_key(&FieldValue::Integer(i64::MAX)), Some((9_223_372_036_854_775_808.0, -1)));
+    }
+
+    #[test]
+    fn order_key_exprs_has_two_numeric_keys_and_stays_cast_guarded() {
+        let keys = order_key_exprs("n");
+        assert_eq!(keys.len(), 9, "{keys:?}");
+        let (primary, residual) = numeric_key_exprs("n");
+        assert_eq!(keys[2], primary);
+        assert_eq!(keys[3], residual);
+        assert_eq!(primary, "CASE WHEN fields->'n'->>'t' IN ('I','D') THEN (fields->'n'->>'v')::float8 END");
+        // Residual is exact `numeric` arithmetic; the 2^63 case is substituted
+        // before the float8 -> bigint cast (which would overflow).
+        assert!(residual.contains("(fields->'n'->>'v')::numeric -"), "{residual}");
+        assert!(residual.contains(">= 9223372036854775808::float8 THEN 9223372036854775808::numeric"), "{residual}");
+        assert!(residual.contains("::bigint::numeric"), "{residual}");
+        assert!(residual.ends_with("WHEN fields->'n'->>'t' = 'D' THEN 0::numeric END"), "{residual}");
+    }
+
+    #[test]
+    fn numeric_range_filter_compares_the_two_part_key_row_wise() {
+        let sql = generated_sql(&filter("n", FilterOp::GreaterThan, FieldValue::Integer(5)));
+        let (primary, residual) = numeric_key_exprs("n");
+        assert_eq!(sql, format!("ROW({primary}, {residual}) > ROW($1, $2::numeric)"));
+        // Same shape for a double bound (residual bound as 0).
+        let sql = generated_sql(&filter("n", FilterOp::LessThanOrEqual, FieldValue::Double(1.5)));
+        assert!(sql.starts_with(&format!("ROW({primary}, {residual}) <= ROW(")), "{sql}");
+    }
+
+    fn effective_names(order_by: &[OrderBy]) -> Vec<(String, OrderDirection)> {
+        effective_order_by(order_by).into_iter().map(|o| (o.field_path, o.direction)).collect()
+    }
+
+    #[test]
+    fn effective_order_by_appends_name_in_the_direction_of_the_last_order() {
+        use OrderDirection::{Ascending as A, Descending as D};
+        assert_eq!(effective_names(&[]), vec![("__name__".into(), A)]);
+        assert_eq!(effective_names(&[ob("x", A)]), vec![("x".into(), A), ("__name__".into(), A)]);
+        assert_eq!(effective_names(&[ob("x", D)]), vec![("x".into(), D), ("__name__".into(), D)]);
+        // Only the LAST explicit order decides the implicit direction.
+        assert_eq!(
+            effective_names(&[ob("x", D), ob("y", A)]),
+            vec![("x".into(), D), ("y".into(), A), ("__name__".into(), A)]
+        );
+        // An explicit trailing `__name__` is kept as is, never doubled.
+        assert_eq!(effective_names(&[ob("x", A), ob("__name__", D)]), vec![("x".into(), A), ("__name__".into(), D)]);
+    }
+
+    #[test]
+    fn order_by_clause_ends_with_the_name_tiebreak() {
+        let sql = order_by_clause(&[ob("n", OrderDirection::Descending)]);
+        assert!(
+            sql.ends_with("collection_path COLLATE \"C\" DESC, document_id COLLATE \"C\" DESC"),
+            "{sql}"
+        );
+        assert_eq!(
+            order_by_clause(&[]),
+            "collection_path COLLATE \"C\" ASC, document_id COLLATE \"C\" ASC"
+        );
+        assert_eq!(order_by_clause(&[ob("__name__", OrderDirection::Ascending)]).matches("document_id").count(), 1);
+    }
+
+    fn cursor_sql(orders: &[OrderBy], values: &[FieldValue], is_end: bool, before: bool) -> Result<String, String> {
+        let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("");
+        push_cursor_predicate(&mut qb, &effective_order_by(orders), values, is_end, before)?;
+        Ok(qb.sql().to_string())
+    }
+
+
+    /// SPEC.md §Cursors table, ASC and DESC, single value: the pre-G-001
+    /// operator per cursor kind (the bound is one comparison on the field).
+    #[test]
+    fn single_value_cursor_uses_the_spec_operator_table() {
+        use OrderDirection::{Ascending as A, Descending as D};
+        // (is_end, before, direction, expected operator)
+        for (is_end, before, dir, want) in [
+            (false, true, A, ">="),  // startAt
+            (false, false, A, ">"),  // startAfter
+            (true, false, A, "<="),  // endAt
+            (true, true, A, "<"),    // endBefore
+            (false, true, D, "<="),
+            (false, false, D, "<"),
+            (true, false, D, ">="),
+            (true, true, D, ">"),
+        ] {
+            let sql = cursor_sql(&[ob("s", dir.clone())], &[FieldValue::String("v".into())], is_end, before).unwrap();
+            assert_eq!(
+                sql,
+                format!("(CASE WHEN fields->'s'->>'t' = 'S' THEN fields->'s'->>'v' COLLATE \"C\" END {want} $1)"),
+                "is_end={is_end} before={before} dir={dir:?}"
+            );
+        }
+    }
+
+    /// A cursor ending with the document reference expands lexicographically
+    /// over (field, __name__) with each order's own direction.
+    #[test]
+    fn cursor_with_name_expands_or_of_and_in_the_last_orders_direction() {
+        let name = FieldValue::Reference("projects/p/databases/d/documents/c/id1".into());
+        let vals = [FieldValue::String("v".into()), name];
+        let key = "CASE WHEN fields->'s'->>'t' = 'S' THEN fields->'s'->>'v' COLLATE \"C\" END";
+        let row = "ROW(collection_path COLLATE \"C\", document_id COLLATE \"C\")";
+        // startAfter, DESC: field < v OR (field = v AND name < ref).
+        let sql = cursor_sql(&[ob("s", OrderDirection::Descending)], &vals, false, false).unwrap();
+        assert_eq!(sql, format!("(({key} < $1) OR ({key} = $2 AND {row} < ROW($3, $4)))"));
+        // startAt, ASC: last comparison is inclusive.
+        let sql = cursor_sql(&[ob("s", OrderDirection::Ascending)], &vals, false, true).unwrap();
+        assert_eq!(sql, format!("(({key} > $1) OR ({key} = $2 AND {row} >= ROW($3, $4)))"));
+        // endBefore, ASC: strictly before on both parts.
+        let sql = cursor_sql(&[ob("s", OrderDirection::Ascending)], &vals, true, true).unwrap();
+        assert_eq!(sql, format!("(({key} < $1) OR ({key} = $2 AND {row} < ROW($3, $4)))"));
+    }
+
+    #[test]
+    fn cursor_without_name_is_a_prefix_and_never_touches_the_name_key() {
+        let sql = cursor_sql(&[ob("s", OrderDirection::Ascending)], &[FieldValue::String("v".into())], false, false).unwrap();
+        assert!(!sql.contains("document_id"), "{sql}");
+    }
+
+    #[test]
+    fn cursor_on_name_order_alone_compares_the_document_name() {
+        let r = FieldValue::Reference("projects/p/databases/d/documents/c/id1".into());
+        let sql = cursor_sql(&[], &[r], false, true).unwrap();
+        assert_eq!(sql, "(ROW(collection_path COLLATE \"C\", document_id COLLATE \"C\") >= ROW($1, $2))");
+    }
+
+    #[test]
+    fn cursor_with_more_values_than_orders_or_a_non_reference_name_is_rejected() {
+        let s = FieldValue::String("v".into());
+        let e = cursor_sql(&[ob("s", OrderDirection::Ascending)], &[s.clone(), s.clone(), s.clone()], false, true).unwrap_err();
+        assert!(e.contains("3 values") && e.contains("2 fields"), "{e}");
+        let e = cursor_sql(&[], &[s], false, true).unwrap_err();
+        assert!(e.contains("document reference"), "{e}");
     }
 }

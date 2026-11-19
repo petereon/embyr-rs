@@ -7,6 +7,17 @@ All notable changes to embyr-server are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- Query ordering (G-001, `fix/g001-numeric-order-name-tiebreak`; no migration, no new environment variables):
+  - Integers and doubles are ordered and range-compared by exact numeric value (two-part key `(float8, exact residual)`),
+    not through `float8` alone: integers above 2^53, `i64::MAX` next to `2^63` as a double, `-0`, `NaN`, infinities.
+  - Every query now ends its ORDER BY with the implicit `__name__` order (direction of the last explicit order), so ties
+    page deterministically across limits, offsets and Listen windows.
+  - Cursors accept one value per order, including a trailing document reference (lexicographic expansion, per-order
+    direction); previously only the first value was used and a trailing reference was ignored, so a document-snapshot
+    cursor could skip or repeat tied rows. A cursor with more values than orders is `InvalidArgument`.
+  - Operational: the composite-index key list gained one expression, so composite indexes created by earlier builds no
+    longer match the query ORDER BY and must be re-created (see `docs/operations/runbook.md`, "composite indexes created
+    before exact numeric ordering"). Results stay correct meanwhile, queries just lose the index.
 - Per-project `log_retention_days` is now enforced (G-003): besides dropping `query_logs_*` partitions older than the longest
   live retention, the daily sweeper deletes a shorter-retention project's own older rows (batches of 5 000, 100 000 rows per
   project per run, NULL = 90 days, clamped to 1..=3650). Migration 0052 adds `query_logs (project_id, created_at)`. New metric

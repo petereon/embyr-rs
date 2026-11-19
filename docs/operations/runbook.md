@@ -115,6 +115,23 @@ the query side). For each pre-existing composite index: delete it via the admin 
 (`DELETE /admin/v1/projects/{id}/indexes/{index_id}`) and create it again with the same
 fields. No automatic migration touches customer databases.
 
+## Maintenance: composite indexes created before exact numeric ordering (G-001)
+
+The numbers (integer + double) in the typed `ORDER BY` key used a single `float8`
+expression, inexact above 2^53. They now use two key expressions, `(float8, exact
+residual)`, so an integer and a double compare by exact value, and every query also
+sorts by document name last (implicit `__name__` tiebreak). The composite-index DDL is
+built from the same key list (`order_key_exprs`), so the key list of a new index is one
+expression longer (9 instead of 8 per sort field). Postgres cannot use an index built on
+the old expressions for the new `ORDER BY`: queries on collections that have one fall
+back to a seq scan plus sort until it is replaced. Results stay correct; only speed
+differs. No automatic migration touches customer databases. For each composite index
+created by an earlier build: delete it
+(`DELETE /admin/v1/projects/{id}/indexes/{index_id}`) and create it again with the same
+fields (`CREATE INDEX CONCURRENTLY`, no write lock). Do the new one first if you cannot
+tolerate a slow window: create the index again, wait for `READY`, then delete the old
+index.
+
 ## Incident: customer API-key compromise (finding #33)
 
 **Why this is here:** every backend DSN / TOTP secret / OIDC client secret is

@@ -15,7 +15,7 @@
 //!     project_id,
 //!     collection_path,
 //!     (<equality_key_expr(f_1)>), ..., (<equality_key_expr(f_{n-1})>),
-//!     (<order_key_exprs(f_n)[0]>) {ASC|DESC}, ..., (<order_key_exprs(f_n)[7]>) {ASC|DESC}
+//!     (<order_key_exprs(f_n)[0]>) {ASC|DESC}, ..., (<order_key_exprs(f_n)[8]>) {ASC|DESC}
 //!   )
 //!   WHERE NOT deleted;
 //! ```
@@ -24,8 +24,10 @@
 //! expression; the last field as EVERY typed ORDER BY key with the direction.
 //! Both key builders live in `embyr_pg_storage::encoding::query` and are the
 //! SAME functions the query side calls, so the planner can match the index.
-//! Indexes created before typed-order-by (old `->>'v'` text key) no longer
-//! match ORDER BY and must be dropped and re-created.
+//! Indexes created before typed-order-by (old `->>'v'` text key) or before the
+//! exact numeric two-part key (G-001; the numbers' single float8 key became a
+//! `(float8, residual)` pair) no longer match ORDER BY and must be dropped and
+//! re-created.
 
 use uuid::Uuid;
 
@@ -127,8 +129,8 @@ mod tests {
              (CASE fields->'score'->>'t' WHEN 'N'"
         ));
         assert!(sql.ends_with(") DESC) WHERE NOT deleted"));
-        // 8 typed ORDER BY keys, all descending; equality column carries no direction.
-        assert_eq!(sql.matches(") DESC").count(), 8);
+        // 9 typed ORDER BY keys, all descending; equality column carries no direction.
+        assert_eq!(sql.matches(") DESC").count(), 9);
         assert!(!sql.contains("(fields->'category') ASC"));
     }
 
@@ -195,7 +197,7 @@ mod tests {
              ON documents (project_id, collection_path, (CASE fields->'category'->>'t' WHEN 'N'"
         ));
         assert!(sql.ends_with(") ASC) WHERE NOT deleted"));
-        assert_eq!(sql.matches(") ASC").count(), 8);
+        assert_eq!(sql.matches(") ASC").count(), 9);
     }
 
     #[test]

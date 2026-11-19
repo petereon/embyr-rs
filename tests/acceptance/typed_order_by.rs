@@ -231,3 +231,294 @@ async fn mixed_type_order_by_follows_firestore_type_order_and_excludes_missing_f
     expected.reverse();
     assert_eq!(desc, expected);
 }
+
+// ─── G-001: exact numeric order + implicit `__name__` tiebreak ────────────
+
+use embyr_proto::firestore::structured_query::{
+    field_filter::Operator as FieldOp, filter::FilterType, FieldFilter, Filter,
+};
+
+async fn client_for(env: &TestEnv) -> FirestoreClient<tonic::transport::Channel> {
+    FirestoreClient::new(
+        tonic::transport::Channel::from_shared(format!("http://{}", env.server.grpc_addr))
+            .unwrap()
+            .connect_lazy(),
+    )
+}
+
+/// RunQuery with an arbitrary `StructuredQuery`; document ids in result order.
+async fn run_ids(
+    client: &mut FirestoreClient<tonic::transport::Channel>,
+    env: &TestEnv,
+    sq: StructuredQuery,
+) -> Vec<String> {
+    use tokio_stream::StreamExt;
+    let req = authed(
+        RunQueryRequest {
+            parent: format!("projects/{}/databases/(default)/documents", env.project_id),
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+    let stream = client.run_query(req).await.expect("RunQuery should succeed").into_inner();
+    let responses: Vec<_> = stream.collect().await;
+    responses
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .filter_map(|r| r.document)
+        .map(|d| d.name.rsplit('/').next().unwrap().to_string())
+        .collect()
+}
+
+fn order(field: &str, direction: Direction) -> Order {
+    Order { field: Some(FieldReference { field_path: field.to_string() }), direction: direction as i32 }
+}
+
+fn from(collection: &str) -> Vec<CollectionSelector> {
+    vec![CollectionSelector { collection_id: collection.to_string(), all_descendants: false }]
+}
+
+/// Integers around 2^53 and at i64::MAX sort by exact value, also against
+/// doubles; equal values (integer 2^53 vs double 2^53, -0 vs 0) tie and fall
+/// back to document-name order; infinities are the extremes.
+#[tokio::test]
+async fn integers_and_doubles_beyond_two_pow_53_sort_and_filter_exactly() {
+    const P53: i64 = 1 << 53;
+    let env = setup("test-sk-g001-num-01", "g001-num-project-01").await;
+    let mut client = client_for(&env).await;
+    for (id, v) in [
+        ("i64max", ValueType::IntegerValue(i64::MAX)),
+        ("i64max_1", ValueType::IntegerValue(i64::MAX - 1)),
+        ("d2p63", ValueType::DoubleValue(9_223_372_036_854_775_808.0)), // i64::MAX as f64
+        ("i53p3", ValueType::IntegerValue(P53 + 3)),
+        ("d53p2", ValueType::DoubleValue((P53 + 2) as f64)),
+        ("i53p1", ValueType::IntegerValue(P53 + 1)),
+        ("i53", ValueType::IntegerValue(P53)),
+        ("d53", ValueType::DoubleValue(P53 as f64)),
+        ("im53m1", ValueType::IntegerValue(-P53 - 1)),
+        ("i0", ValueType::IntegerValue(0)),
+        ("d_zero", ValueType::DoubleValue(0.0)),
+        ("d_negzero", ValueType::DoubleValue(-0.0)),
+        ("d_neginf", ValueType::DoubleValue(f64::NEG_INFINITY)),
+        ("d_inf", ValueType::DoubleValue(f64::INFINITY)),
+        ("nan", ValueType::DoubleValue(f64::NAN)),
+    ] {
+        seed(&mut client, &env, "big", id, vec![("score", val(v))]).await;
+    }
+
+    let sq = StructuredQuery {
+        from: from("big"),
+        order_by: vec![order("score", Direction::Ascending)],
+        ..Default::default()
+    };
+    assert_eq!(
+        run_ids(&mut client, &env, sq).await,
+        strs(&[
+            "nan", "d_neginf", "im53m1", "d_negzero", "d_zero", "i0", "d53", "i53", "i53p1", "d53p2", "i53p3",
+            "i64max_1", "i64max", "d2p63", "d_inf",
+        ])
+    );
+
+    // DESC: exact reverse, equal values by name descending.
+    let sq = StructuredQuery {
+        from: from("big"),
+        order_by: vec![order("score", Direction::Descending)],
+        ..Default::default()
+    };
+    assert_eq!(
+        run_ids(&mut client, &env, sq).await,
+        strs(&[
+            "d_inf", "d2p63", "i64max", "i64max_1", "i53p3", "d53p2", "i53p1", "i53", "d53", "i0", "d_zero",
+            "d_negzero", "im53m1", "d_neginf", "nan",
+        ])
+    );
+
+    // Range filters are exact too (NaN rows are left out of the assertions:
+    // their range-filter behaviour is unchanged by this fix).
+    let filtered = |v: ValueType, op: FieldOp| StructuredQuery {
+        from: from("big"),
+        r#where: Some(Filter {
+            filter_type: Some(FilterType::FieldFilter(FieldFilter {
+                field: Some(FieldReference { field_path: "score".to_string() }),
+                op: op as i32,
+                value: Some(val(v)),
+            })),
+        }),
+        order_by: vec![order("score", Direction::Ascending)],
+        ..Default::default()
+    };
+    // > integer 2^53 drops both 2^53 values but keeps 2^53 + 1 (float8 dropped it).
+    let got: Vec<String> = run_ids(&mut client, &env, filtered(ValueType::IntegerValue(P53), FieldOp::GreaterThan))
+        .await
+        .into_iter()
+        .filter(|id| id != "nan")
+        .collect();
+    assert_eq!(got, strs(&["i53p1", "d53p2", "i53p3", "i64max_1", "i64max", "d2p63", "d_inf"]));
+    // < i64::MAX as a double: i64::MAX itself is below it, the double is not.
+    let got = run_ids(
+        &mut client,
+        &env,
+        filtered(ValueType::DoubleValue(9_223_372_036_854_775_808.0), FieldOp::LessThan),
+    )
+    .await;
+    assert!(got.ends_with(&strs(&["i53p3", "i64max_1", "i64max"])), "{got:?}");
+    assert!(!got.contains(&"d2p63".to_string()) && !got.contains(&"d_inf".to_string()), "{got:?}");
+}
+
+fn doc_ref(env: &TestEnv, collection: &str, id: &str) -> Value {
+    val(ValueType::ReferenceValue(format!(
+        "projects/{}/databases/(default)/documents/{collection}/{id}",
+        env.project_id
+    )))
+}
+
+fn score_of(id: &str) -> i64 {
+    if id.starts_with("lo") {
+        1
+    } else if id.starts_with("mid") {
+        2
+    } else {
+        3
+    }
+}
+
+async fn seed_ties(client: &mut FirestoreClient<tonic::transport::Channel>, env: &TestEnv) {
+    // Seeded out of name order on purpose; ties of 3 and 4 docs span page boundaries.
+    for id in ["mid_d", "hi_b", "lo_b", "mid_a", "hi_a", "lo_a", "mid_c", "lo_c", "mid_b", "hi_c"] {
+        seed(client, env, "ties", id, vec![("score", val(ValueType::IntegerValue(score_of(id))))]).await;
+    }
+}
+
+/// Pages `ties` ordered by `score` (`page_size` rows per page) following a
+/// `startAfter(score, last doc ref)` cursor; returns all ids in page order.
+async fn page_through_ties(
+    client: &mut FirestoreClient<tonic::transport::Channel>,
+    env: &TestEnv,
+    direction: Direction,
+    page_size: i32,
+) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    loop {
+        let start_at = seen.last().map(|id| Cursor {
+            values: vec![val(ValueType::IntegerValue(score_of(id))), doc_ref(env, "ties", id)],
+            before: false,
+        });
+        let sq = StructuredQuery {
+            from: from("ties"),
+            order_by: vec![order("score", direction)],
+            start_at,
+            limit: Some(page_size),
+            ..Default::default()
+        };
+        let page = run_ids(client, env, sq).await;
+        if page.is_empty() {
+            return seen;
+        }
+        seen.extend(page);
+        assert!(seen.len() <= 20, "paging does not terminate: {seen:?}");
+    }
+}
+
+/// Documents tied on the ordered field come back in document-name order, and
+/// a limit + `startAfter(score, ref)` walk visits every row exactly once.
+#[tokio::test]
+async fn tied_rows_page_deterministically_across_limit_boundaries_with_cursors() {
+    let env = setup("test-sk-g001-tie-01", "g001-tie-project-01").await;
+    let mut client = client_for(&env).await;
+    seed_ties(&mut client, &env).await;
+    let expected = strs(&["lo_a", "lo_b", "lo_c", "mid_a", "mid_b", "mid_c", "mid_d", "hi_a", "hi_b", "hi_c"]);
+
+    let sq = StructuredQuery {
+        from: from("ties"),
+        order_by: vec![order("score", Direction::Ascending)],
+        ..Default::default()
+    };
+    assert_eq!(run_ids(&mut client, &env, sq).await, expected);
+
+    for page_size in [1, 2, 3, 4] {
+        assert_eq!(
+            page_through_ties(&mut client, &env, Direction::Ascending, page_size).await,
+            expected,
+            "page_size={page_size}"
+        );
+    }
+
+    // A prefix cursor without a name keeps its meaning: startAfter(2) skips ALL score-2 rows.
+    let sq = StructuredQuery {
+        from: from("ties"),
+        order_by: vec![order("score", Direction::Ascending)],
+        start_at: Some(Cursor { values: vec![val(ValueType::IntegerValue(2))], before: false }),
+        ..Default::default()
+    };
+    assert_eq!(run_ids(&mut client, &env, sq).await, strs(&["hi_a", "hi_b", "hi_c"]));
+    // ... and startAt(2) begins at the first of them.
+    let sq = StructuredQuery {
+        from: from("ties"),
+        order_by: vec![order("score", Direction::Ascending)],
+        start_at: Some(Cursor { values: vec![val(ValueType::IntegerValue(2))], before: true }),
+        limit: Some(2),
+        ..Default::default()
+    };
+    assert_eq!(run_ids(&mut client, &env, sq).await, strs(&["mid_a", "mid_b"]));
+    // endBefore(score, ref) cuts inside a run of ties.
+    let sq = StructuredQuery {
+        from: from("ties"),
+        order_by: vec![order("score", Direction::Ascending)],
+        end_at: Some(Cursor {
+            values: vec![val(ValueType::IntegerValue(2)), doc_ref(&env, "ties", "mid_c")],
+            before: true,
+        }),
+        ..Default::default()
+    };
+    assert_eq!(run_ids(&mut client, &env, sq).await, strs(&["lo_a", "lo_b", "lo_c", "mid_a", "mid_b"]));
+}
+
+/// The implicit name order follows the LAST explicit direction: descending
+/// score gives descending names within a tie, and DESC paging with a name
+/// cursor is gap- and duplicate-free; a query with no order is name-ordered.
+#[tokio::test]
+async fn implicit_name_order_follows_the_last_order_direction() {
+    let env = setup("test-sk-g001-tie-02", "g001-tie-project-02").await;
+    let mut client = client_for(&env).await;
+    seed_ties(&mut client, &env).await;
+    let expected = strs(&["hi_c", "hi_b", "hi_a", "mid_d", "mid_c", "mid_b", "mid_a", "lo_c", "lo_b", "lo_a"]);
+
+    let sq = StructuredQuery {
+        from: from("ties"),
+        order_by: vec![order("score", Direction::Descending)],
+        ..Default::default()
+    };
+    assert_eq!(run_ids(&mut client, &env, sq).await, expected);
+
+    for page_size in [1, 3, 4] {
+        assert_eq!(
+            page_through_ties(&mut client, &env, Direction::Descending, page_size).await,
+            expected,
+            "page_size={page_size}"
+        );
+    }
+
+    let sq = StructuredQuery { from: from("ties"), limit: Some(4), ..Default::default() };
+    assert_eq!(run_ids(&mut client, &env, sq).await, strs(&["hi_a", "hi_b", "hi_c", "lo_a"]));
+
+    // Explicit mixed directions (score DESC, then name ASC) need a composite
+    // index, exactly as in Firestore: the gate sees two explicit orders and
+    // refuses without one. (The implicit name order above never trips it.)
+    let sq = StructuredQuery {
+        from: from("ties"),
+        order_by: vec![order("score", Direction::Descending), order("__name__", Direction::Ascending)],
+        limit: Some(5),
+        ..Default::default()
+    };
+    let req = authed(
+        RunQueryRequest {
+            parent: format!("projects/{}/databases/(default)/documents", env.project_id),
+            query_type: Some(QueryType::StructuredQuery(sq)),
+            ..Default::default()
+        },
+        &env.api_key,
+    );
+    let status = client.run_query(req).await.expect_err("mixed-direction orders need an index");
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+}

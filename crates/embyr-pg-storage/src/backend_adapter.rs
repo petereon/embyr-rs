@@ -13,7 +13,7 @@ use embyr_core::{
         field_value::FieldValue,
         project::ProjectId,
         query::{
-            validate_field_path, AggregateValue, AggregationKind, AggregationQuery, OrderDirection,
+            AggregateValue, AggregationKind, AggregationQuery,
             StructuredQuery,
         },
         schema_readiness::SchemaReadiness,
@@ -888,8 +888,8 @@ impl BackendAdapter for PostgresBackendAdapter {
     ) -> Result<Vec<FirestoreDocument>, CoreError> {
         use sqlx::QueryBuilder;
         use crate::encoding::query::{
-            append_filter, order_by_expr, order_by_presence_predicate,
-            push_all_descendants_predicate,
+            append_filter, effective_order_by, order_by_clause, order_by_presence_predicate,
+            push_all_descendants_predicate, push_cursor_predicate,
         };
 
         let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
@@ -935,55 +935,22 @@ impl BackendAdapter for PostgresBackendAdapter {
             }
         }
 
-        // startAt/startAfter cursor — single-field orderBy only (step 04-01)
-        if let (Some(cursor), false) = (&query.start_at, query.order_by.is_empty()) {
-            if !cursor.values.is_empty() {
-                let ob = &query.order_by[0];
-                // field-path-defense-in-depth (finding #26): see
-                // `append_field_filter`'s own identical guard comment.
-                if let Err(e) = validate_field_path(&ob.field_path) {
-                    panic!("invalid field path reached SQL builder: {e}");
-                }
-                let op = cursor_operator(false, cursor.before, &ob.direction);
-                // finding #44 (timestamp-cursor-pagination): reuse the SAME
-                // type-aware comparison `append_field_filter`'s range
-                // operators already use — covers Integer/String/Double/
-                // Boolean/Timestamp/Bytes/Reference. Array/Map/Null are
-                // rejected upstream in handler.rs before reaching here.
+        // Cursors position the effective order (explicit orders + implicit
+        // `__name__`, G-001); a cursor may carry fewer values than orders
+        // (prefix) or end with a document reference to break ties.
+        // Array/Map/Null cursor values are rejected upstream in handler.rs.
+        let orders = effective_order_by(&query.order_by);
+        for (cursor, is_end) in [(&query.start_at, false), (&query.end_at, true)] {
+            if let Some(cursor) = cursor.as_ref().filter(|c| !c.values.is_empty()) {
                 qb.push(" AND ");
-                push_cursor_bound(&mut qb, &ob.field_path, op, &cursor.values[0])?;
+                push_cursor_predicate(&mut qb, &orders, &cursor.values, is_end, cursor.before)
+                    .map_err(CoreError::InvalidArgument)?;
             }
         }
 
-        // endAt/endBefore cursor (firestore-end-cursor-support) — mirrors the
-        // startAt/startAfter block immediately above exactly, single-field
-        // orderBy only, same value-type scope.
-        if let (Some(cursor), false) = (&query.end_at, query.order_by.is_empty()) {
-            if !cursor.values.is_empty() {
-                let ob = &query.order_by[0];
-                // field-path-defense-in-depth (finding #26): see
-                // `append_field_filter`'s own identical guard comment.
-                if let Err(e) = validate_field_path(&ob.field_path) {
-                    panic!("invalid field path reached SQL builder: {e}");
-                }
-                let op = cursor_operator(true, cursor.before, &ob.direction);
-                // finding #44 (timestamp-cursor-pagination): see the
-                // startAt/startAfter block above — identical reasoning.
-                qb.push(" AND ");
-                push_cursor_bound(&mut qb, &ob.field_path, op, &cursor.values[0])?;
-            }
-        }
-
-        // ORDER BY
-        if !query.order_by.is_empty() {
-            qb.push(" ORDER BY ");
-            for (i, ob) in query.order_by.iter().enumerate() {
-                if i > 0 {
-                    qb.push(", ");
-                }
-                qb.push(order_by_expr(ob));
-            }
-        }
+        // ORDER BY: explicit orders, then the implicit `__name__` tiebreak.
+        qb.push(" ORDER BY ");
+        qb.push(order_by_clause(&query.order_by));
 
         // LIMIT / OFFSET — must emit LIMIT before OFFSET (SQL requirement)
         if let Some(limit) = query.limit {
@@ -1591,56 +1558,6 @@ impl BackendAdapter for PostgresBackendAdapter {
     }
 }
 
-/// Push one cursor bound: `__name__` compares the document name
-/// (partition-query), every other field its typed value.
-fn push_cursor_bound(
-    qb: &mut sqlx::QueryBuilder<sqlx::Postgres>,
-    field_path: &str,
-    op: &str,
-    value: &FieldValue,
-) -> Result<(), CoreError> {
-    use crate::encoding::query::{push_name_comparison, push_scalar_comparison};
-    if field_path == "__name__" {
-        return match value {
-            FieldValue::Reference(r) => push_name_comparison(qb, op, r),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            CoreError::InvalidArgument("a __name__ cursor must be a document reference".into())
-        });
-    }
-    push_scalar_comparison(qb, field_path, op, value);
-    Ok(())
-}
-
-/// Resolve the SQL comparison operator for a cursor bound
-/// (firestore-end-cursor-support).
-///
-/// `is_end`: `false` for `start_at` (`startAt`/`startAfter`), `true` for
-/// `end_at` (`endAt`/`endBefore`).
-/// `before`: the cursor's own `before` flag (SPEC.md §Cursors: `startAt`/
-/// `endBefore` = true, `startAfter`/`endAt` = false).
-/// `direction`: the first `orderBy` field's own sort direction — cursors are
-/// single-field-only, so only `order_by[0]`'s direction matters.
-fn cursor_operator(is_end: bool, before: bool, direction: &OrderDirection) -> &'static str {
-    // ASC table (SPEC.md §Cursors): startAt=">=", startAfter=">", endAt="<=", endBefore="<".
-    let asc_op = match (is_end, before) {
-        (false, true) => ">=",  // startAt
-        (false, false) => ">", // startAfter
-        (true, false) => "<=", // endAt
-        (true, true) => "<",   // endBefore
-    };
-    // DESC flips every operator (SPEC.md §Cursors' own DESC column).
-    match (direction, asc_op) {
-        (OrderDirection::Ascending, op) => op,
-        (OrderDirection::Descending, ">=") => "<=",
-        (OrderDirection::Descending, ">") => "<",
-        (OrderDirection::Descending, "<=") => ">=",
-        (OrderDirection::Descending, "<") => ">",
-        (OrderDirection::Descending, _) => unreachable!("asc_op is always one of the 4 above"),
-    }
-}
-
 /// Parse a 16-byte slice as a UUID.
 pub(crate) fn uuid_from_bytes(bytes: &[u8]) -> Result<uuid::Uuid, CoreError> {
     if bytes.len() != 16 {
@@ -1810,43 +1727,6 @@ mod index_build_succeeded_tests {
         assert!(!index_build_succeeded(true, false));
         assert!(!index_build_succeeded(false, true));
         assert!(!index_build_succeeded(false, false));
-    }
-}
-
-#[cfg(test)]
-mod cursor_operator_tests {
-    //! finding #37: `cursor_operator` is the pure ASC/DESC-flip decision
-    //! behind startAt/startAfter/endAt/endBefore SQL predicates. This exact
-    //! class of logic already produced a real bug once (a pre-existing
-    //! startAt DESC-direction defect found while delivering
-    //! firestore-end-cursor-support) — worth a direct table-driven test
-    //! rather than relying solely on Docker-backed acceptance coverage.
-    use super::cursor_operator;
-    use embyr_core::domain::query::OrderDirection;
-
-    #[test]
-    fn resolves_sql_operator_per_spec_cursors_table() {
-        // (is_end, before, direction, expected) — mirrors SPEC.md §Cursors:
-        // ASC: startAt=">=", startAfter=">", endAt="<=", endBefore="<".
-        // DESC flips every operator.
-        let cases = [
-            (false, true, OrderDirection::Ascending, ">="),   // startAt
-            (false, false, OrderDirection::Ascending, ">"),   // startAfter
-            (true, false, OrderDirection::Ascending, "<="),   // endAt
-            (true, true, OrderDirection::Ascending, "<"),     // endBefore
-            (false, true, OrderDirection::Descending, "<="),  // startAt, DESC
-            (false, false, OrderDirection::Descending, "<"),  // startAfter, DESC
-            (true, false, OrderDirection::Descending, ">="),  // endAt, DESC
-            (true, true, OrderDirection::Descending, ">"),    // endBefore, DESC
-        ];
-
-        for (is_end, before, direction, expected) in cases {
-            assert_eq!(
-                cursor_operator(is_end, before, &direction),
-                expected,
-                "is_end={is_end} before={before} direction={direction:?}"
-            );
-        }
     }
 }
 

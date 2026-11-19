@@ -5251,6 +5251,24 @@ mod composite_index_requirement_tests {
         assert!(!FirestoreService::requires_composite_index(&q));
     }
 
+    /// G-001: the gate reads only the EXPLICIT orderBy the client sent. The
+    /// implicit trailing `__name__` (appended in the storage adapter, in the
+    /// direction of the last order) never makes a query need a composite
+    /// index: a lone `orderBy x DESC`, with or without a filter on `x`, stays
+    /// index-free. Only an explicit second order (e.g. score DESC then
+    /// `__name__` ASC, mixed directions) trips the 2+ orders rule.
+    #[test]
+    fn implicit_name_order_never_requires_a_composite_index() {
+        let desc = |f: &str| OrderBy { field_path: f.to_string(), direction: OrderDirection::Descending };
+        let mut q = base_query();
+        q.order_by = vec![desc("score")];
+        assert!(!FirestoreService::requires_composite_index(&q), "orderBy x DESC alone");
+        q.filter = Some(equal_filter("score"));
+        assert!(!FirestoreService::requires_composite_index(&q), "orderBy x DESC + filter on x");
+        q.order_by = vec![desc("score"), order_by("__name__")];
+        assert!(FirestoreService::requires_composite_index(&q), "explicit mixed-direction __name__");
+    }
+
     /// No orderBy at all, any filter shape: never requires composite via
     /// this rule family (the filter-only IN+range rule is Slice 02's own
     /// concern, not exercised here).
